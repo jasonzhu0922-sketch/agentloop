@@ -8,6 +8,50 @@ function events(...items: Array<[string, Record<string, unknown>]>): RecoveryEve
   return items.map(([type, data], index) => ({ seq: index + 1, type, data }));
 }
 
+test("repair ancestry replays disjoint Step exchanges with the exact committed Result identity", () => {
+  const resultRef = { schema: "agentloop.resultRef/v1", resultId: "rr_11111111-1111-4111-8111-111111111111" };
+  const history = events(
+    ["plan.step.started", { stepId: "original" }],
+    ["assistant.committed", { content: "", toolCalls: [{ id: "fetch", name: "webfetch", arguments: { url: "https://example.test" } }] }],
+    ["tool.result_committed", { toolCallId: "fetch", resultRef }],
+    ["tool.completed", { toolCallId: "fetch", result: '{"content":"actual source"}' }],
+    ["assistant.committed", { content: "REJECTED_NAME", toolCalls: [] }],
+    ["plan.step.started", { stepId: "repair" }],
+    ["assistant.committed", { content: "", toolCalls: [{ id: "read", name: "read_result", arguments: { resultId: resultRef.resultId } }] }],
+    ["tool.completed", { toolCallId: "read", result: '{"content":"continued source"}' }],
+    ["plan.step.started", { stepId: "original", recovered: true }],
+    ["assistant.committed", { content: "", toolCalls: [{ id: "resumed-read", name: "read_result", arguments: {} }] }],
+    ["tool.completed", { toolCallId: "resumed-read", result: '{"content":"resumed original"}' }],
+  );
+  const original = reconstructRecoveryTranscript({ userInput: "verify", stepId: "original", events: history });
+  const repair = reconstructRecoveryTranscript({ userInput: "verify", stepId: "repair", events: history });
+  assert.deepEqual(original.toolEvidence.map((item) => item.toolCallId), ["fetch", "resumed-read"]);
+  assert.deepEqual(repair.toolEvidence.map((item) => item.toolCallId), ["read"]);
+  assert.deepEqual(original.toolEvidence[0]?.resultRef, resultRef);
+  assert.deepEqual(JSON.parse(original.toolEvidence[0]!.result).resultRef, resultRef);
+  assert.doesNotMatch(JSON.stringify(original.messages), /REJECTED_NAME|continued source/);
+  assert.deepEqual(original.facts.candidateOutputs, ["REJECTED_NAME"]);
+});
+
+test("recovery preserves Step-scoped rejection decisions without replaying drafts as answers", () => {
+  const transcript = reconstructRecoveryTranscript({
+    userInput: "Answer the requested facts", stepId: "lookup",
+    events: events(
+      ["plan.step.started", { stepId: "lookup" }],
+      ["candidate.rejected", { output: "Raw source table", feedback: "Synthesize the requested answer." }],
+      ["plan.step.started", { stepId: "other" }],
+      ["candidate.rejected", { output: "Other draft", feedback: "Other gap" }],
+      ["plan.step.started", { stepId: "lookup", recovered: true }],
+      ["candidate.rejected", { output: "Second draft", feedback: "Keep exact fields." }],
+    ),
+  });
+  assert.deepEqual(transcript.facts.candidateRejections, [
+    { output: "Raw source table", feedback: "Synthesize the requested answer." },
+    { output: "Second draft", feedback: "Keep exact fields." },
+  ]);
+  assert.doesNotMatch(JSON.stringify(transcript.messages), /Raw source table|Second draft|Other draft/);
+});
+
 test("recovery reconstructs early-dispatched tool calls whose turn never committed", () => {
   const transcript = reconstructRecoveryTranscript({
     userInput: "do the thing",

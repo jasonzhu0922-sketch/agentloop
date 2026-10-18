@@ -2,10 +2,67 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { RuntimeResultRepository } from "../src/runtime/runtime-result-repository.ts";
-import { createRuntimeResult } from "../src/runtime/runtime-result.ts";
+import {
+  createRuntimeResult,
+  createRuntimeResultCard,
+  runtimeResultBindingsForConversationTurn,
+} from "../src/runtime/runtime-result.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { createResultTool } from "../src/tools/result-tool.ts";
+
+test("a pure continuation binds every published Step Result from its failed target Run", () => {
+  const source = createRuntimeResult({
+    kind: "step",
+    producer: { runId: "failed-run", planId: "failed-plan", stepId: "source-step" },
+    value: "accepted source evidence",
+    publication: { status: "published", assessmentRef: "source-assessment", decision: "approved" },
+    createdAt: 1,
+  });
+  const report = createRuntimeResult({
+    kind: "step",
+    producer: { runId: "failed-run", planId: "failed-plan", stepId: "report-step" },
+    value: "accepted report",
+    publication: { status: "published", assessmentRef: "report-assessment", decision: "approved" },
+    createdAt: 2,
+  });
+  const unrelated = createRuntimeResult({
+    kind: "step",
+    producer: { runId: "other-run", planId: "other-plan", stepId: "other-step" },
+    value: "unrelated result",
+    publication: { status: "published", assessmentRef: "other-assessment", decision: "approved" },
+    createdAt: 3,
+  });
+  const resultCards = [source, report, unrelated].map((result) => createRuntimeResultCard({
+    result,
+    goal: result.producer.stepId ?? "result",
+    summary: result.payload.content,
+    summaryTruncated: false,
+  }));
+
+  const bindings = runtimeResultBindingsForConversationTurn({
+    resolution: {
+      relation: "continue_prior",
+      inputMode: "none",
+      targetRunId: "failed-run",
+    },
+    resultCards,
+  });
+
+  assert.deepEqual(
+    bindings.map((binding) => binding.result.resultId),
+    [source.ref.resultId, report.ref.resultId],
+  );
+  assert.deepEqual(bindings.map((binding) => binding.relation), ["continue_prior", "continue_prior"]);
+  assert.deepEqual(runtimeResultBindingsForConversationTurn({
+    resolution: {
+      relation: "continue_prior",
+      inputMode: "refresh_sources",
+      targetRunId: "failed-run",
+    },
+    resultCards,
+  }), []);
+});
 
 test("read_result reads only an explicitly bound completed Outcome in the same conversation", async () => {
   const database = new AppDatabase(":memory:");

@@ -284,6 +284,7 @@ export function admitPlan(input: {
       reject(`Step ${step.id} requires unavailable ToolSource(s): ${unknownToolSources.join(", ")}`);
     }
     const executionBinding = createStepExecutionBinding({
+      availableSkills: input.availableSkills,
       step: { ...step, targetIds, sourceConstraint, requiredCapabilities: [...requiredCapabilities] },
       artifactTargets,
       availableToolNames: input.availableToolNames,
@@ -1020,7 +1021,11 @@ function containsCompoundDeliverable(value: string): boolean {
 function capabilitiesRequiredBySkill(skill: PrivateSkill): string[] {
   const profiles = skill.agentLoop?.executionProfiles ?? [];
   const capabilities = new Set<string>();
-  if (profiles.includes("local_script")) capabilities.add("workspace_artifact_write");
+  // A local script is a Skill-owned execution mechanism, not a statement
+  // that the user asked for a workspace artifact. Keeping those concepts
+  // separate lets a source provider execute a bounded query for a
+  // conversation-only delivery without manufacturing artifact semantics.
+  if (profiles.includes("local_script")) capabilities.add("skill_local_script_execution");
   if (skill.agentLoop?.roles.includes("source_provider") && (skill.agentLoop.producesEvidenceKinds?.length ?? 0) > 0) {
     for (const sourceKind of skill.agentLoop.sourceKinds) {
       capabilities.add(skillSourceProviderCapabilityId(skill.id, sourceKind));
@@ -1137,7 +1142,7 @@ function deliveryTargetSuccessCriteria(
     return {
       id: `delivery_target:${targetId}`,
       targetId,
-      description: `The delivered result fulfills canonical target ${targetId}: ${target.purpose}`,
+      description: `Directly fulfill canonical target ${targetId}: ${target.purpose}. Synthesize supporting evidence into the requested user-facing result; a source extract, field table, or raw evidence dump alone does not fulfill this target.`,
       source: "task" as const,
       verification: "model_judged" as const,
       blocking: true,

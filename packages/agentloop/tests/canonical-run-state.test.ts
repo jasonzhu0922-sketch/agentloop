@@ -365,16 +365,27 @@ test("canonical Plan revision retires the failed Step without discarding its evi
     ],
   };
 
-  const revised = reviseCanonicalPlan(rejected, revisedPlan, 5);
+  const gap = rejected.gaps.find((item) => item.stepId === "produce" && item.status === "open")!;
+  const retiredOnly = reviseCanonicalPlan(rejected, revisedPlan, 5);
+  assert.equal(retiredOnly.gaps.find((item) => item.id === gap.id)?.status, "open");
+  assert.throws(() => reviseCanonicalPlan(rejected, revisedPlan, 5, [{ gapId: "unknown", replacementStepId: "produce.repair.1" }]), /distinct existing gaps/);
+  assert.throws(() => reviseCanonicalPlan(rejected, revisedPlan, 5, [{ gapId: gap.id, replacementStepId: "unknown" }]), /admitted pending Step/);
+  const rejectedAgain = recordCanonicalAssessment(rejected, { ...assessment(false), id: "rejected-again" }, evidence(), 5);
+  assert.equal(rejectedAgain.gaps.filter((item) => item.stepId === "produce" && item.status === "open").length, 1);
+  assert.equal(rejectedAgain.gaps.find((item) => item.stepId === "produce")?.id, gap.id);
+  const revised = reviseCanonicalPlan(rejectedAgain, revisedPlan, 5, [{ gapId: gap.id, replacementStepId: "produce.repair.1" }]);
   assert.equal(revised.steps.produce?.status, "retired");
   assert.deepEqual(revised.steps.produce?.evidenceRefs, rejected.steps.produce?.evidenceRefs);
-  assert.equal(revised.gaps[0]?.status, "resolved");
+  assert.equal(revised.gaps.find((item) => item.id === gap.id)?.status, "open");
+  assert.equal(revised.gaps.find((item) => item.id === gap.id)?.openedAt, gap.openedAt);
+  assert.deepEqual(revised.gaps.find((item) => item.id === gap.id)?.repairStepIds, ["produce", "produce.repair.1"]);
   assert.equal(revised.steps["produce.repair.1"]?.status, "pending");
   assert.throws(() => markCanonicalReadyForTerminal(revised, 6), /before every Step is satisfied/);
 
   const repairRunning = startCanonicalStep(revised, "produce.repair.1", 6);
   const repairAssessment = { ...assessment(true), id: "repair-assessment", stepId: "produce.repair.1" };
   const repairApproved = recordCanonicalAssessment(repairRunning, repairAssessment, evidence(), 7);
+  assert.equal(repairApproved.gaps.find((item) => item.id === gap.id)?.status, "resolved");
   const repairPublished = recordCanonicalStepResult(repairApproved, "produce.repair.1", evidence(), 8);
   assert.equal(markCanonicalReadyForTerminal(repairPublished, 9).phase, "ready_for_terminal");
 });

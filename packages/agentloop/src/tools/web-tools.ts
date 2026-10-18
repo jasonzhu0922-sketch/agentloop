@@ -45,9 +45,17 @@ interface WebFetchResult {
   readonly bytes: number;
   readonly contentType?: string;
   readonly binary?: boolean;
+  readonly decoding?: WebTextDecoding;
   readonly sha256?: string;
   readonly truncated: boolean;
   readonly evidenceReceipt: WebToolEvidenceReceipt;
+}
+
+interface WebTextDecoding {
+  readonly encoding: string;
+  readonly source: "bom" | "http_header" | "document" | "default";
+  readonly replacementCharacters: number;
+  readonly lossy: boolean;
 }
 
 interface WebToolEvidenceReceipt {
@@ -227,6 +235,7 @@ async function fetchWebPage(
       bytes: fetched.bytes,
       ...(fetched.contentType === undefined ? {} : { contentType: fetched.contentType }),
       binary: false,
+      decoding: fetched.decoding,
       sha256: fetched.sha256,
       truncated: fetched.truncated,
     };
@@ -304,6 +313,7 @@ function webSearchReceipt(query: string, results: readonly SearchResult[]): WebT
 
 function webFetchReceipt(result: Omit<WebFetchResult, "evidenceReceipt">): WebToolEvidenceReceipt {
   const contentSha256 = result.sha256 ?? createHash("sha256").update(result.content).digest("hex");
+  const readable = result.binary !== true && result.decoding?.lossy !== true;
   return buildWebToolEvidenceReceipt({
     sourceType: "web_page",
     sourceRefs: [webSourceRef(result.url, {
@@ -314,6 +324,7 @@ function webFetchReceipt(result: Omit<WebFetchResult, "evidenceReceipt">): WebTo
       binary: result.binary,
       sha256: contentSha256,
       truncated: result.truncated,
+      decoding: result.decoding,
     })],
     facts: [{
       kind: "source_summary",
@@ -325,15 +336,17 @@ function webFetchReceipt(result: Omit<WebFetchResult, "evidenceReceipt">): WebTo
       binary: result.binary,
       sha256: contentSha256,
       truncated: result.truncated,
+      decoding: result.decoding,
       textPreview: result.content.slice(0, 800),
     }],
     caveats: [
       "Full Tool result remains in canonical events; model context may receive only this structured receipt.",
       ...(result.binary === true ? ["Fetched resource is binary or non-text; readable page content was not extracted."] : []),
+      ...(result.decoding?.lossy === true ? ["Text decoding encountered invalid byte sequences. The extracted text is incomplete evidence; do not infer facts from corrupted characters. Use another readable source."] : []),
       ...(result.truncated ? ["Web page read was truncated; fetch a narrower source before citing omitted text."] : []),
     ],
-    satisfied: result.binary === true ? ["source_urls"] : ["source_read", "source_summary", "source_urls"],
-    failed: result.binary === true ? ["source_summary"] : [],
+    satisfied: readable ? ["source_read", "source_summary", "source_urls"] : ["source_urls"],
+    failed: readable ? [] : ["source_summary"],
   });
 }
 
@@ -392,6 +405,7 @@ async function searchWeb(
   if (options.searchProvider !== "bing") {
     const baiduUrl = `https://www.baidu.com/s?ie=utf-8&rn=${numResults}&wd=${encodeURIComponent(query)}`;
     const baiduFetched = await httpGet(baiduUrl, options, timeoutMs);
+    assertReadableSearchResponse(baiduFetched);
     const baiduResults = parseBaiduResults(baiduFetched.html);
     if (!isBaiduVerification(baiduFetched.html) && baiduResults.length > 0) {
       return baiduResults.slice(0, numResults);
@@ -400,6 +414,7 @@ async function searchWeb(
   const bingUrl =
     `https://www.bing.com/search?format=rss&q=${encodeURIComponent(query)}&setlang=zh-CN&cc=CN&mkt=zh-CN`;
   const bingFetched = await httpGet(bingUrl, options, timeoutMs);
+  assertReadableSearchResponse(bingFetched);
   return parseRssItems(bingFetched.html)
     .filter((item) => item.link.length > 0)
     .slice(0, numResults)
@@ -435,7 +450,11 @@ async function searchViaEndpoint(
     if (!response.ok) {
       throw badRequest(`Search endpoint returned HTTP ${response.status}`);
     }
-    const payload: unknown = await response.json();
+    const { bytes, truncated } = await readBoundedBytes(response, MAX_FETCH_BYTES);
+    if (truncated) throw new AppError("TOOL_EXECUTION_ERROR", "Search response exceeded the readable byte limit", 422);
+    const decoded = decodeWebText(bytes, response.headers.get("content-type") ?? undefined);
+    assertReadableSearchResponse({ binary: false, decoding: decoded.decoding });
+    const payload: unknown = JSON.parse(decoded.text);
     return normalizeSearchPayload(payload, numResults);
   } catch (error) {
     if (error instanceof AppError) throw error;
@@ -446,6 +465,12 @@ async function searchViaEndpoint(
     );
   } finally {
     clearTimeout(timer);
+  }
+}
+
+function assertReadableSearchResponse(response: { binary: boolean; decoding?: WebTextDecoding }): void {
+  if (response.binary || response.decoding?.lossy === true) {
+    throw new AppError("TOOL_EXECUTION_ERROR", "Search response could not be decoded as readable text", 422);
   }
 }
 
@@ -533,6 +558,7 @@ async function httpGet(
   bytes: number;
   contentType?: string;
   binary: boolean;
+  decoding?: WebTextDecoding;
   sha256: string;
   truncated: boolean;
 }> {
@@ -553,8 +579,9 @@ async function httpGet(
     const { bytes, truncated } = await readBoundedBytes(response, MAX_FETCH_BYTES);
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const binary = isBinaryResponse(contentType, bytes);
-    const html = binary ? "" : new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-    return { html, url: response.url, bytes: bytes.byteLength, contentType, binary, sha256, truncated };
+    const decoded = binary ? undefined : decodeWebText(bytes, contentType);
+    return { html: decoded?.text ?? "", url: response.url, bytes: bytes.byteLength, contentType, binary, sha256, truncated,
+      ...(decoded === undefined ? {} : { decoding: decoded.decoding }) };
   } catch (error) {
     if (error instanceof AppError) throw error;
     if (error instanceof Error && error.name === "AbortError") {
@@ -568,6 +595,51 @@ async function httpGet(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Decode bytes before HTML extraction; never guess a second encoding after data loss. */
+function decodeWebText(bytes: Uint8Array, contentType: string | undefined): { text: string; decoding: WebTextDecoding } {
+  let encoding: string | undefined;
+  let source: WebTextDecoding["source"] = "default";
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) encoding = "utf-8";
+  else if (bytes[0] === 0xff && bytes[1] === 0xfe) encoding = "utf-16le";
+  else if (bytes[0] === 0xfe && bytes[1] === 0xff) encoding = "utf-16be";
+  if (encoding !== undefined) source = "bom";
+  else {
+    encoding = declaredCharset(contentType ?? "");
+    if (encoding !== undefined) source = "http_header";
+    else if (/\b(?:html|xml)\b/i.test(contentType ?? "")) {
+      // Encoding labels are ASCII even when the document body is not UTF-8.
+      const prefix = new TextDecoder("windows-1252").decode(bytes.slice(0, 1024));
+      for (const tag of prefix.match(/<meta\b[^>]*>/gi) ?? []) {
+        encoding = declaredCharset(tag);
+        if (encoding !== undefined) break;
+      }
+      encoding ??= /<\?xml\b[^>]*\bencoding\s*=\s*["']([^"']+)["']/i.exec(prefix)?.[1];
+      if (encoding !== undefined) source = "document";
+    }
+  }
+  encoding ??= "utf-8";
+  let decoder: TextDecoder;
+  try {
+    decoder = new TextDecoder(encoding, { fatal: true });
+  } catch {
+    throw new AppError("TOOL_EXECUTION_ERROR", `Unsupported web text encoding: ${encoding} (${source})`, 422);
+  }
+  let text: string;
+  let lossy = false;
+  try {
+    text = decoder.decode(bytes);
+  } catch {
+    lossy = true;
+    text = new TextDecoder(encoding).decode(bytes);
+  }
+  return { text, decoding: { encoding: decoder.encoding, source, lossy,
+    replacementCharacters: text.match(/\ufffd/gu)?.length ?? 0 } };
+}
+
+function declaredCharset(value: string): string | undefined {
+  return /\bcharset\s*=\s*["']?\s*([^\s;"'/>]+)/i.exec(value)?.[1];
 }
 
 async function readBoundedBytes(

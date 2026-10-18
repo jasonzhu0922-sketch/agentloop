@@ -121,6 +121,10 @@ export class ModelStepAssessor implements StepAssessor {
             "Assess every criterion exactly once.",
             "Skill entries are QA observations, not completion gates; use not_assessed when QA is not rerun.",
             "Never approve missing source facts as completed.",
+            "For a user-facing delivery target, approve only when the candidate directly fulfills that target's stated purpose. Source records, field tables, excerpts, and citations establish support but do not substitute for the requested answer, explanation, conclusion, or other user-facing result.",
+            "Preserve the user's exact requested fields, distinctions, scope, and freshness. A related field or differently titled role is not equivalent without readable source support. A retrieval timestamp alone does not establish the effective date or current validity of a fact. Do not repair missing facts yourself in assessment feedback.",
+            "Use the original user goal when checking whether the delivered facts match the request. A resolver/Plan paraphrase or provider scope cannot authorize substituting another field or narrowing the requested result. A caveat that a requested fact is unverified records a remaining gap; it does not prove that fact or satisfy a blocking criterion requiring it.",
+            "Distinguish a delivery revision from missing evidence. When canonical evidence is sufficient but the candidate fails to answer the goal, identify the required synthesis in feedback and leave failedBoundary.missingEvidenceKinds empty. Name missing evidence kinds only for facts, operations, or work-product state that actually need new evidence; a wording or answer-organization gap must not require repeating acquisition.",
           ],
           taskProfile,
         }),
@@ -1042,6 +1046,7 @@ function assessmentView(input: StepAssessmentInput): Record<string, unknown> {
     step: {
       id: input.step.id,
       objective: input.step.objective,
+      requiredFacts: input.step.requiredFacts,
       targetIds: input.step.executionBinding.targetIds,
       ...(input.step.evidenceContract === undefined ? {} : { evidenceContract: input.step.evidenceContract }),
       successCriteria: input.step.successCriteria,
@@ -1103,8 +1108,11 @@ function assessmentPolicy(input: StepAssessmentInput): Record<string, unknown> |
         "Do not reject process-only Skill gaps when criteria pass; record process_caveat or not_assessed.",
     };
   }
-  if (stepHasSourceKind(input.step, "web")) {
+  if (input.step.executionBinding.sourceKinds.some((kind) => kind !== "generated_artifact" && kind !== "conversation_workset")
+    || input.step.evidenceContract?.requiredKinds.includes("source_summary")) {
     policy.sourceCaveats = {
+      factualSupport:
+        "For exact or current factual claims, compare the candidate with the actual readable sourceContent or committed source reads. A successful fetch, source_summary receipt, URL, title, search snippet, or earlier rejected answer alone does not verify the requested facts. Reject unsupported or contradicted claims and identify the missing facts; never supply missing names or values from model memory. Decoding loss and incomplete source windows are explicit evidence limitations.",
       evidenceBoundary:
         "If authoritative external sources were attempted and remain unavailable, forbidden, paywalled, or missing full text: do not approve criteria that require those missing facts. In feedback, explicitly separate verified facts from unavailable or unverified facts so Runtime can decide whether a limited-evidence delivery is acceptable. Treat source evidence as blocking only when exact/current/official source facts are the user's required deliverable; otherwise it is auxiliary grounding for the core artifact.",
     };

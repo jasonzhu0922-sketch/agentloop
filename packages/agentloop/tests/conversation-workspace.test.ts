@@ -301,10 +301,13 @@ test("a question about a prior artifact remains a direct reply despite an over-e
       allowDangerousTools: true,
       conversationId: prior.conversationId,
     });
-    assert.equal(mutation.status, "completed");
+    // This model only returns prose: the explicit artifact mutation is
+    // executable, but cannot complete without producing the bound artifact.
+    assert.equal(mutation.status, "failed");
     assert.deepEqual(planner.responseOnlyFlags, [false, true, true, false]);
     const mutationResolution = (await runs.events(owner.user.id, mutation.id)).find((event) => event.type === "conversation.turn.resolved");
     assert.equal(mutationResolution?.data.mode, "execute");
+    assert.equal((await runs.events(owner.user.id, mutation.id)).some((event) => event.type === "terminal.delivery_committed"), false);
   } finally {
     await database.close();
   }

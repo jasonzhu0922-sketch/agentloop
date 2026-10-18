@@ -130,6 +130,30 @@ test("websearch rejects degenerate queries and caches repeated identical searche
   }
 });
 
+test("search API responses share charset decoding and reject corrupt text instead of caching it", async () => {
+  let hits = 0;
+  const server = createServer((_req, res) => {
+    hits += 1;
+    res.writeHead(200, { "content-type": "application/json; charset=gb18030" });
+    res.end(Buffer.concat([
+      Buffer.from('{"results":[{"title":"'),
+      hits === 1 ? Buffer.from([0xff]) : Buffer.from("d6d0cec4b9abb8e6", "hex"),
+      Buffer.from('","url":"https://example.test/announcement","content":"verified discovery"}]}'),
+    ]));
+  });
+  await listen(server);
+  try {
+    const port = (server.address() as AddressInfo).port;
+    const allowed = new ToolRegistry(createWebTools({ searchEndpoint: `http://127.0.0.1:${port}/encoded` })).materialize(grant(["websearch"]));
+    const prepared = allowed.prepare({ id: "encoded-search", name: "websearch", arguments: { query: "encoding regression" } });
+    const execute = () => prepared.tool.execute(grantContext(["websearch"]), prepared.input);
+    await assert.rejects(execute(), /could not be decoded/);
+    const result = await execute() as { results: Array<{ title: string }> };
+    assert.equal(result.results[0]?.title, "中文公告");
+    assert.equal(hits, 2);
+  } finally { await close(server); }
+});
+
 test("extractRedirectTarget detects JavaScript and meta-refresh redirects", () => {
   assert.equal(
     extractRedirectTarget(`<script>window.location.replace("https://www.cehome.com/news/1.shtml")</script>`),
@@ -270,6 +294,86 @@ test("webfetch follows a meta-refresh redirect and extracts readable content end
   } finally {
     await close(server);
   }
+});
+
+test("webfetch decodes declared encodings before conversion and persists the same readable text", async () => {
+  const cases = [
+    { label: "gb2312 header", type: 'text/html; charset="gb2312"', meta: "", hex: "d6d0cec4b9abb8e6", expected: "中文公告", encoding: "gbk", source: "http_header" },
+    { label: "gb18030 meta", type: "text/html", meta: '<meta charset="gb18030">', hex: "d6d0cec4b9abb8e6", expected: "中文公告", encoding: "gb18030", source: "document" },
+    { label: "gb18030 four-byte character", type: "text/html; charset=gb18030", meta: "", hex: "95328236", expected: "𠀀", encoding: "gb18030", source: "http_header" },
+    { label: "legacy meta", type: "text/html", meta: '<meta content="text/html; charset=gbk" http-equiv="Content-Type">', hex: "d6d0cec4b9abb8e6", expected: "中文公告", encoding: "gbk", source: "document" },
+    { label: "big5 header", type: "text/html; charset=big5", meta: "", hex: "c163c5e9a4bda769", expected: "繁體公告", encoding: "big5", source: "http_header" },
+    { label: "shift-jis header", type: "text/html; charset=shift_jis", meta: "", hex: "93fa967b8cea", expected: "日本語", encoding: "shift_jis", source: "http_header" },
+    { label: "header precedes meta", type: "text/html; charset=gb2312", meta: '<meta charset="utf-8">', hex: "d6d0cec4b9abb8e6", expected: "中文公告", encoding: "gbk", source: "http_header" },
+  ];
+  const server = createServer((req, res) => {
+    const item = cases[Number(req.url!.slice(1))]!;
+    res.writeHead(200, { "content-type": item.type });
+    res.end(Buffer.concat([Buffer.from(`<html><head>${item.meta}</head><body><p>`), Buffer.from(item.hex, "hex"), Buffer.from("</p></body></html>")]));
+  });
+  await listen(server);
+  try {
+    const port = (server.address() as AddressInfo).port;
+    const allowed = new ToolRegistry(createWebTools({ allowPrivateTargets: true })).materialize(grant(["webfetch"]));
+    for (const [index, item] of cases.entries()) {
+      const prepared = allowed.prepare({ id: `encoding-${index}`, name: "webfetch", arguments: { url: `http://127.0.0.1:${port}/${index}` } });
+      const result = await prepared.tool.execute(grantContext(["webfetch"]), prepared.input) as {
+        content: string; contentLocation: { path: string; sha256: string };
+        decoding: { encoding: string; source: string; lossy: boolean; replacementCharacters: number };
+      };
+      assert.equal(result.content, item.expected, item.label);
+      assert.deepEqual(result.decoding, { encoding: item.encoding, source: item.source, lossy: false, replacementCharacters: 0 });
+      assert.equal(result.contentLocation.sha256, createHash("sha256").update(item.expected).digest("hex"));
+    }
+  } finally { await close(server); }
+});
+
+test("webfetch honors BOMs, defaults to UTF-8, and reports lossy or unsupported decoding explicitly", async () => {
+  const server = createServer((req, res) => {
+    if (req.url === "/bom") {
+      res.writeHead(200, { "content-type": "text/html; charset=gbk" });
+      res.end(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("<p>中文公告</p>", "utf16le")]));
+    } else if (req.url === "/bom-be") {
+      res.writeHead(200, { "content-type": "text/html; charset=gbk" });
+      res.end(Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from("<p>中文公告</p>", "utf16le").swap16()]));
+    } else if (req.url === "/xml") {
+      res.writeHead(200, { "content-type": "application/xml" });
+      res.end(Buffer.concat([Buffer.from('<?xml version="1.0" encoding="gbk"?><item>'), Buffer.from("d6d0cec4b9abb8e6", "hex"), Buffer.from("</item>")]));
+    } else if (req.url === "/invalid") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(Buffer.from([0x3c, 0x70, 0x3e, 0xff, 0x3c, 0x2f, 0x70, 0x3e]));
+    } else if (req.url === "/unsupported") {
+      res.writeHead(200, { "content-type": "text/html; charset=unknown-encoding" }); res.end("<p>text</p>");
+    } else {
+      res.writeHead(200, { "content-type": "text/html" }); res.end("<p>中文公告</p>");
+    }
+  });
+  await listen(server);
+  try {
+    const port = (server.address() as AddressInfo).port;
+    const allowed = new ToolRegistry(createWebTools({ allowPrivateTargets: true })).materialize(grant(["webfetch"]));
+    const read = async (path: string) => {
+      const prepared = allowed.prepare({ id: path, name: "webfetch", arguments: { url: `http://127.0.0.1:${port}${path}` } });
+      return await prepared.tool.execute(grantContext(["webfetch"]), prepared.input) as {
+        content: string; decoding: { encoding: string; source: string; lossy: boolean };
+        evidenceReceipt: { evidenceKinds: { satisfied: string[]; failed: string[] }; caveats: string[] };
+      };
+    };
+    const bom = await read("/bom");
+    assert.equal(bom.content, "中文公告"); assert.equal(bom.decoding.source, "bom"); assert.equal(bom.decoding.encoding, "utf-16le");
+    const bomBE = await read("/bom-be");
+    assert.equal(bomBE.content, "中文公告"); assert.equal(bomBE.decoding.encoding, "utf-16be");
+    const xml = await read("/xml");
+    assert.match(xml.content, /<item>中文公告<\/item>/); assert.equal(xml.decoding.source, "document");
+    const utf8 = await read("/default");
+    assert.equal(utf8.content, "中文公告"); assert.equal(utf8.decoding.source, "default");
+    const invalid = await read("/invalid");
+    assert.equal(invalid.decoding.lossy, true);
+    assert.equal(invalid.evidenceReceipt.evidenceKinds.satisfied.includes("source_summary"), false);
+    assert.deepEqual(invalid.evidenceReceipt.evidenceKinds.failed, ["source_summary"]);
+    assert.match(invalid.evidenceReceipt.caveats.join(" "), /invalid byte sequences/);
+    await assert.rejects(read("/unsupported"), /Unsupported web text encoding/);
+  } finally { await close(server); }
 });
 
 test("webfetch omits binary resources from readable output and records compact evidence", async () => {

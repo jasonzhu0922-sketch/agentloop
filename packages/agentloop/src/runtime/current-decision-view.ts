@@ -7,6 +7,7 @@ import type { RuntimeStepEvidenceState } from "./tool-progress-policy.ts";
 import type { WorkProductObservationState } from "./work-product-observations.ts";
 import type { WorkProductSemantics } from "./work-product-semantics.ts";
 import type { WorkProductDeliveryTarget } from "./work-product-semantics.ts";
+import { parseJsonRecord } from "./tool-result-evidence.ts";
 
 /**
  * The immutable context needed to identify one admitted Step. It deliberately
@@ -330,13 +331,22 @@ function decisionToolFacts(evidence: readonly AgentLoopToolEvidence[] | undefine
     isError: item.isError,
     ...(item.exitCode === undefined ? {} : { exitCode: item.exitCode }),
     ...(item.failurePhase === undefined ? {} : { failurePhase: item.failurePhase }),
-    resultSha256: digest(item.result),
-    ...(item.resultRef === undefined ? {} : { resultRef: item.resultRef }),
+    resultSha256: digest(decisionResultContent(item.result)),
   }));
   const unique = new Map(facts.map((fact) => [JSON.stringify(fact), fact]));
   return [...unique.entries()]
     .sort(([left], [right]) => left.localeCompare(right, "en"))
     .map(([, fact]) => fact);
+}
+
+function decisionResultContent(result: string): unknown {
+  const value = parseJsonRecord(result);
+  if (value === undefined) return result;
+  // The result envelope gets a fresh publication id on replay. That id is
+  // audit identity, not new source content. sourceResultRef stays intact:
+  // consuming a different immutable dependency is a real decision change.
+  const { resultRef: _publicationIdentity, ...content } = value;
+  return content;
 }
 
 function digest(value: unknown): string {

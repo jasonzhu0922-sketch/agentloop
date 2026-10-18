@@ -615,14 +615,21 @@ function applyAdmittedEvidenceProducerBindings(
     evidenceKinds.satisfied.delete(kind);
     evidenceKinds.caveated.delete(kind);
     evidenceKinds.failed.delete(kind);
-    const allowedTools = new Set(policy.evidenceProducers
-      .filter((producer) => producer.evidenceKind === kind)
-      .flatMap((producer) => producer.resolvedToolNames));
-    if (allowedTools.size === 0) continue;
+    const producers = policy.evidenceProducers.filter((producer) => producer.evidenceKind === kind);
     for (const item of evidence) {
-      if (item.isError || !allowedTools.has(item.toolName)) continue;
+      if (item.isError) continue;
+      const eligible = producers.filter((producer) => producer.resolvedToolNames.includes(item.toolName));
+      if (eligible.length === 0) continue;
       for (const record of runtimeEvidenceRecordsFromToolResult(item.result)) {
         if (!trustedWorkflowEvidenceRecord(item, record)) continue;
+        if (!eligible.some((producer) => producer.skillId === undefined)) {
+          const workflow = record.schema === "agentloop.skillWorkflowEvidenceReceipt/v1" ? record : asRecord(record.workflowEvidenceReceipt);
+          const skill = asRecord(workflow?.skill);
+          if (workflow?.schema !== "agentloop.skillWorkflowEvidenceReceipt/v1"
+            || !eligible.some((producer) => producer.skillId === skill?.skillId)) continue;
+          collectOneEvidenceKindFromRecord(workflow, kind, evidenceKinds);
+          continue;
+        }
         collectOneEvidenceKindFromRecord(record, kind, evidenceKinds);
         collectOneEvidenceKindFromRecord(asRecord(record.artifactReceipt), kind, evidenceKinds);
         collectOneEvidenceKindFromRecord(asRecord(record.evidenceReceipt), kind, evidenceKinds);

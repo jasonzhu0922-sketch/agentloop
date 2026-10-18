@@ -556,6 +556,93 @@ test("externally grounded data analysis cannot collapse acquisition and delivery
   );
 });
 
+test("source-grounded conversation lookup receives a single delivery boundary in its planning schema", async () => {
+  const objective = "宝信软件的董事长是谁，总裁又是谁？需给出可核验的来源。";
+  const targetId = "company-leadership";
+  const tools = [
+    { name: "websearch", description: "Search public sources." },
+    { name: "webfetch", description: "Read a public source." },
+  ];
+  const understanding = understandTask({
+    objective,
+    toolNames: tools.map((tool) => tool.name),
+    resolvedTaskIntent: {
+      schema: "agentloop.conversationTaskIntent/v1",
+      operation: "lookup",
+      requiresExecution: true,
+      deliverables: [{
+        targetId,
+        purpose: "Answer who currently chairs the company and serves as president.",
+        expectedArtifactCount: 1,
+        action: "none",
+        kind: "none",
+        surface: "conversation",
+      }],
+    },
+  });
+  const runId = "run-source-grounded-single-delivery";
+  const task: TaskSpec = {
+    runId,
+    canonicalState: createCanonicalRunState({ runId, userInput: objective, understanding, now: 1 }),
+    availableSkills: [],
+    availableToolNames: tools.map((tool) => tool.name),
+    availableTools: tools,
+  };
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
+    complete: async (request): Promise<ModelResponse> => {
+      const schema = request.tools.find((tool) => tool.name === "submit_outcome_plan")?.inputSchema;
+      const properties = schema?.properties as Record<string, unknown>;
+      const shape = properties?.shape as Record<string, unknown>;
+      const leaves = properties?.leaves as Record<string, unknown>;
+      const leaf = leaves?.items as Record<string, unknown>;
+      const leafProperties = leaf?.properties as Record<string, unknown>;
+      assert.deepEqual(shape?.enum, ["single_leaf"]);
+      assert.equal(leaves?.minItems, 1);
+      assert.equal(leaves?.maxItems, 1);
+      assert.deepEqual((leafProperties?.role as Record<string, unknown>)?.enum, ["deliver"]);
+      assert.equal((leafProperties?.dependsOn as Record<string, unknown>)?.maxItems, 0);
+      assert.equal((leafProperties?.targetIds as Record<string, unknown>)?.minItems, 1);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "single-delivery-plan",
+          name: "submit_outcome_plan",
+          arguments: {
+            schema: "agentloop.outcomePlan/v2",
+            goal: objective,
+            shape: "single_leaf",
+            selectedSkillRoles: [],
+            leaves: [{
+              id: "answer-with-sources",
+              objective: "Research current company leadership and answer the user with source-backed caveats.",
+              dependsOn: [],
+              role: "deliver",
+              skillIds: [],
+              requiredCapabilities: ["web_research", "conversation_delivery"],
+              sourceConstraint: null,
+              evidenceContract: { requiredKinds: ["source_summary", "source_urls", "explicit_caveats"], caveatPolicy: "mark_unverified_facts" },
+              targetIds: [targetId],
+            }],
+          },
+        }],
+      };
+    },
+  };
+
+  const proposal = await new ModelPlanner(model, { maxPlanningTurns: 2 }).plan(task);
+
+  assert.equal(proposal.shape, "single_leaf");
+  assert.deepEqual(proposal.steps.map((step) => ({ id: step.id, role: step.role, targetIds: step.targetIds })), [{
+    id: "answer-with-sources", role: "deliver", targetIds: [targetId],
+  }]);
+  const coreCriterion = proposal.steps[0]?.successCriteria.find((criterion) => criterion.id === "answer-with-sources-core-result");
+  assert.ok(coreCriterion);
+  assert.match(coreCriterion.description, /Directly fulfill the user-facing delivery target/i);
+  assert.match(coreCriterion.description, /Source extracts, field tables, and raw evidence alone/i);
+});
+
 test("Planner repair uses a bound prior Result instead of recreating its fact-acquisition leaf", async () => {
   let calls = 0;
   const priorResult = { schema: "agentloop.resultRef/v1" as const, resultId: "rr_00000000-0000-4000-8000-000000000123" };

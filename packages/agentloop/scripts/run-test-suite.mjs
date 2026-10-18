@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 const suites = Object.freeze({
   unit: [
     "tests/canonical-run-state.test.ts",
+    "tests/current-decision-view.test.ts",
     "tests/decision-binding.test.ts",
     "tests/decision-ledger.test.ts",
     "tests/evidence-gate-causality.test.ts",
@@ -33,8 +34,10 @@ const suites = Object.freeze({
     "tests/multi-agent.test.ts",
     "tests/planning-extension.test.ts",
     "tests/planner-capability-recovery.test.ts",
+    "tests/planner-enumeration-contract.test.ts",
     "tests/planner-source-constraints.test.ts",
     "tests/recovery-transcript.test.ts",
+    "tests/source-evidence-recovery.test.ts",
     "tests/run-cancel.test.ts",
     "tests/run-service-language.test.ts",
     "tests/runtime-actions.test.ts",

@@ -38,8 +38,7 @@ import type {
   TaskSpec,
   ToolEvidence,
 } from "../planning/contracts.ts";
-import type { RuntimeResultBinding } from "./runtime-result.ts";
-import { parseRuntimeResultRef } from "./runtime-result.ts";
+import { parseRuntimeResultRef, runtimeResultBindingsForConversationTurn } from "./runtime-result.ts";
 import type {
   PlanAdmissionObservation,
   PlanningExtension,
@@ -54,7 +53,7 @@ import { DependencyScheduler } from "../planning/scheduler.ts";
 import {
   planningCapabilitiesFromTools,
   planningCapabilitiesFromSkills,
-  requiredToolSourceIdsFromInput,
+  requiredToolSourceIdsForConversationTurn,
   stepHasSourceKind,
   stepHasTool,
   stepResolvedToolNames,
@@ -196,6 +195,8 @@ export const MAX_SUPPORTED_STEP_TURNS = 256;
 const MAX_UPLOADED_SOURCE_FULL_COVERAGE_CONVERGENCE_CHUNKS = 10;
 /** Covers result persistence after a Tool's own declared execution budget. */
 const TOOL_ACTION_COMMIT_GRACE_MS = 15_000;
+/** One unresolved canonical gap cannot acquire a fresh budget by changing Step ids. */
+const MAX_AUTOMATIC_REPAIRS_PER_GAP = 2;
 
 export interface RunRecord {
   readonly id: string;
@@ -1709,11 +1710,12 @@ export class RunService {
         ? allowedToolNames
         : allowedToolNames.filter((name) => !isVisibleDirectoryToolName(name));
       const allowedToolSummaries = toolSummaries(allTools, new Set(planningAllowedToolNames));
-      const requiredToolSourceIds = requiredToolSourceIdsForTurn({
+      const requiredToolSourceIds = requiredToolSourceIdsForConversationTurn({
         input,
         effectiveGoal,
         allowedTools: allowedToolSummaries,
-        turnResolution,
+        resolution: turnResolution,
+        workset: conversationWorkingSet,
       });
       let canonicalState = await this.canonicalStates.create(createCanonicalRunState({
         runId,
@@ -1850,7 +1852,10 @@ export class RunService {
       });
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       let plan: ExecutionPlan;
-      const resultBindings = runtimeResultBindingsForTurn(turnResolution);
+      const resultBindings = runtimeResultBindingsForConversationTurn({
+        resolution: turnResolution,
+        resultCards: conversationWorkingSet?.resultCards,
+      });
       try {
         plan = admitPlan({
           runId,
@@ -2016,8 +2021,10 @@ export class RunService {
           && failedBoundary.stepId === runningStepId
         ) {
           await this.plans.failStep(planId, runningStepId, appError.message);
-          if (assessmentRepairIsExhausted(appError.details, failedBoundary) || failedBoundaryHasNoAcquisitionPath(
-            await this.plans.getByRun(runId),
+          const failedPlan = await this.plans.get(planId);
+          const failedStep = failedPlan.steps.find((step) => step.id === runningStepId);
+          if (assessmentRepairIsExhausted(appError.details, failedBoundary, failedStep) || failedBoundaryHasNoAcquisitionPath(
+            failedPlan,
             runningStepId,
             failedBoundary,
             observedReceiptShapes(
@@ -2051,7 +2058,7 @@ export class RunService {
           await this.applyAssessmentRepair({
             actorUserId,
             run: await this.get(actorUserId, runId),
-            currentPlan: await this.plans.get(planId),
+            currentPlan: failedPlan,
             stepId: runningStepId,
             failedBoundary,
             feedback: stringField(appError.details, "feedback"),
@@ -2227,7 +2234,10 @@ export class RunService {
       stepId: string;
       messages: readonly ModelMessage[];
       toolEvidence: readonly AgentLoopToolEvidence[];
-      facts: unknown;
+      facts: Readonly<{
+        candidateRejections?: readonly { readonly output: string; readonly feedback: string }[];
+        [key: string]: unknown;
+      }>;
     }>;
     decisionLedger?: readonly RuntimeDecisionCommit[];
     onStepChanged: (stepId: string | undefined) => void;
@@ -2352,9 +2362,7 @@ export class RunService {
       let assessmentAttempt = (await this.plans.assessments(plan.id))
         .filter((assessment) => assessment.stepId === activeStep.id).length;
       const assessedCandidates = new Map<string, SkillComplianceAssessment>();
-      const fileOutputStep = (stepAllowsSkillFileOutput(activeStep)
-        && stepSkills.some((skill) => skillRequiresFileOutput(skill)))
-        || stepRequiresFileOutput(activeStep);
+      const fileOutputStep = stepRequiresFileOutput(activeStep);
       const lookupEvidenceStep = !fileOutputStep && (
         stepCanConvergeFromLookupEvidence(activeStep)
         || stepAllowsSourceSummaryCandidateConvergence(activeStep)
@@ -2416,6 +2424,13 @@ export class RunService {
       const discoveredSourceKinds = new Set<string>(canonicalState.intent.understanding.evidence.sourceKinds);
       const selectedPracticeProfileIds = new Set<string>((stepTaskProfile.practices ?? []).map((profile) => profile.id));
       const persistedDeliveryBindingKeys = new Set<string>();
+      // A source provider's projection is evidence, not the final response,
+      // for a source-backed conversation delivery. This also applies when
+      // the source is an API/database and no web research was requested.
+      const requiresSourceBackedConversationSynthesis = activeStep.requiredCapabilities.includes("conversation_delivery")
+        && !fileOutputStep
+        && (stepNeedsReusableSourceEvidence(activeStep)
+          || stepSkills.some((skill) => skill.agentLoop?.roles.includes("source_provider") === true));
       const result = await runAgentLoop({
         runId: input.runId,
         currentDecisionContext: {
@@ -2487,6 +2502,7 @@ export class RunService {
           turnResolution?.mode === "clarify",
         ),
         stepSemanticFrame,
+        ...(requiresSourceBackedConversationSynthesis ? { requireStructuredCandidateSynthesis: true } : {}),
         ...(stepTaskProfile.artifactAction === "modify"
           ? { artifactWritePolicy: "overwrite_observed_existing" as const }
           : {}),
@@ -2522,6 +2538,7 @@ export class RunService {
         ...(input.conversationHistory === undefined ? {} : { conversationHistory: input.conversationHistory }),
         ...(recovery === undefined ? {} : {
           initialMessages: recovery.messages,
+          initialCandidateRejections: recovery.facts.candidateRejections,
         }),
         ...(initialToolEvidence.length === 0 ? {} : { initialToolEvidence }),
         ...(this.practiceProfileCatalog === undefined ? {} : {
@@ -2588,6 +2605,7 @@ export class RunService {
               MAX_WEB_SEARCHES_PER_PLAN_STEP,
               Math.max(0, stepTaskProfile.researchPolicy?.maxSearches ?? MAX_WEB_SEARCHES_PER_PLAN_STEP),
             ),
+            webfetch: Math.max(0, stepTaskProfile.researchPolicy?.maxFetches ?? 5),
           },
         } : {}),
         candidateRepairGraceSteps: CANDIDATE_REPAIR_GRACE_STEPS,
@@ -2595,7 +2613,9 @@ export class RunService {
         ...(fileOutputStep
           ? { convergenceGraceSteps: DEFAULT_FILE_OUTPUT_CONVERGENCE_GRACE_STEPS }
           : {}),
-        ...(lookupEvidenceStep && stepAllowsSourceSummaryCandidateConvergence(activeStep) ? {
+        ...(requiresSourceBackedConversationSynthesis ? {
+          convergencePrompt: SOURCE_EVIDENCE_DELIVERY_CONVERGENCE_PROMPT,
+        } : lookupEvidenceStep && stepAllowsSourceSummaryCandidateConvergence(activeStep) ? {
           convergencePrompt: SOURCE_SUMMARY_CONVERGENCE_PROMPT,
           convergenceMaxOutputTokens: SOURCE_SUMMARY_CONVERGENCE_MAX_OUTPUT_TOKENS,
         } : {}),
@@ -2606,7 +2626,7 @@ export class RunService {
           } : {}),
         ...(fileOutputStep ? {
           shouldUseFinalConvergence: (context) => shouldUseFinalFileConvergence(activeStep, context),
-        } : lookupEvidenceStep ? {
+        } : lookupEvidenceStep && !requiresSourceBackedConversationSynthesis ? {
           shouldConvergeAfterToolStep: (context) => shouldConvergeAfterLookupEvidence(activeStep, context, input.sources),
         } : {}),
         emit: input.emit,
@@ -2660,6 +2680,13 @@ export class RunService {
               `Call read_result with only resultId (no pointer, offset, or limit) for each bound dependency before writing the completion: ${unreadDependencyResultIds.join(", ")}.`,
               "Do not infer or restate dependency facts from metadata, a prior draft, or the original request.",
             ].join(" ");
+            const failedBoundary: FailedBoundary = {
+              stepId: activeStep.id,
+              missingEvidenceKinds: [],
+              violatedSkillRequirements: [],
+              reusableEvidenceRefs: unreadDependencyResultIds,
+              suggestedRepairShape: "repair_leaf",
+            };
             await input.emit({
               type: "candidate.dependency_results_unread",
               data: {
@@ -2667,9 +2694,10 @@ export class RunService {
                 stepId: activeStep.id,
                 attempt: assessmentAttempt,
                 resultIds: unreadDependencyResultIds,
+                failedBoundary,
               },
             });
-            return { approved: false, feedback, requiresEvidenceProgress: true };
+            return { approved: false, feedback, requiresEvidenceProgress: true, failedBoundary };
           }
           const activatedStepSkills = activatedSkillsForAssessment(stepSkills, candidate.activatedSkillNames);
           const evidence: StepEvidence = {
@@ -3008,16 +3036,20 @@ export class RunService {
       reason: input.decision.rationale,
       actionId: input.action.id,
     });
-    const revisedCanonicalState = await this.canonicalStates.commit({
-      expectedRevision: canonicalState.revision,
-      state: reviseCanonicalPlan(canonicalState, revised),
-      reason: "plan_revised",
-    });
     const repairLeaves = revised.steps.filter((step) =>
       step.retiredAt === undefined
       && step.role === "repair"
       && !input.currentPlan!.steps.some((existing) => existing.id === step.id)
     );
+    const gapId = stringField(input.action.metadata, "canonicalGapId");
+    const repairGap = canonicalState.gaps.find((gap) => gap.id === gapId && gap.status === "open");
+    const replacement = repairGap !== undefined && repairLeaves.length === 1 ? repairLeaves[0] : undefined;
+    const revisedCanonicalState = await this.canonicalStates.commit({
+      expectedRevision: canonicalState.revision,
+      state: reviseCanonicalPlan(canonicalState, revised, Date.now(), replacement === undefined ? []
+        : [{ gapId: repairGap!.id, replacementStepId: replacement.id }]),
+      reason: "plan_revised",
+    });
     for (const step of repairLeaves) {
       await this.appendRunEvent(input.run.id, {
         type: "recovery.repair_leaf_created",
@@ -3027,6 +3059,7 @@ export class RunService {
           dependencies: step.dependencies,
           evidenceContract: step.evidenceContract,
           sourceActionId: input.action.id,
+          ...(replacement?.id === step.id ? { canonicalGapId: repairGap!.id } : {}),
         },
       });
     }
@@ -3063,6 +3096,23 @@ export class RunService {
       allowedSkillIds: privateSkills.map((skill) => skill.id),
     });
     const assessor = this.assessorFactory(input.model);
+    // Continue from committed exchanges, not rejected prose. Keep the source
+    // Results, Skill activation, and retrieval counts across the repair chain.
+    const recoveryEvents = replacement === undefined ? [] : await this.runtimeEvents(input.run.id);
+    const transcripts = replacement === undefined ? [] : (repairGap!.repairStepIds ?? [repairGap!.stepId!]).map((stepId) =>
+      reconstructRecoveryTranscript({ userInput: input.run.input, stepId, events: recoveryEvents }));
+    const repairToolEvidence = [...new Map(transcripts.flatMap((transcript) => transcript.toolEvidence)
+      .map((item) => [item.toolCallId, item])).values()];
+    const repairMessages: ModelMessage[] = [
+      { role: "user", content: input.run.input },
+      ...transcripts.flatMap((transcript) => transcript.messages.slice(1)),
+      { role: "user", content: [
+        "Continue the same unresolved canonical GoalGap using the committed source Results above. Do not repeat completed retrievals or load an already activated Skill merely because the Step id changed.",
+        `Remaining boundary: ${repairGap?.missingEvidenceKinds.join(", ") ?? ""}.`,
+        `Assessment feedback: ${stringField(input.action.metadata, "feedback") ?? ""}`,
+        "Prior rejected drafts are unverified and must not supply facts or names for a new search. Read existing content references for omitted evidence; change source only when the recorded source cannot support the requested facts.",
+      ].join("\n") },
+    ];
     let runningStepId: string | undefined;
     try {
       const completed = await this.executePlanSteps({
@@ -3072,6 +3122,16 @@ export class RunService {
         rootGrant,
         plan: revised,
         canonicalState: revisedCanonicalState,
+        ...(replacement === undefined ? {} : { initialRecovery: {
+          stepId: replacement.id,
+          messages: repairMessages,
+          toolEvidence: repairToolEvidence,
+          facts: {
+            canonicalGapId: repairGap!.id,
+            missingEvidenceKinds: repairGap!.missingEvidenceKinds,
+            candidateRejections: transcripts.flatMap((transcript) => transcript.facts.candidateRejections),
+          },
+        } }),
         model: input.model,
         assessor,
         defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
@@ -3107,7 +3167,7 @@ export class RunService {
         && failedBoundary.stepId === runningStepId
       ) {
         await this.plans.failStep(revised.id, runningStepId, appError.message);
-        if (assessmentRepairIsExhausted(appError.details, failedBoundary) || failedBoundaryHasNoAcquisitionPath(
+        if (assessmentRepairIsExhausted(appError.details, failedBoundary, revised.steps.find((step) => step.id === runningStepId)) || failedBoundaryHasNoAcquisitionPath(
           revised,
           runningStepId,
           failedBoundary,
@@ -3193,20 +3253,28 @@ export class RunService {
       () => actionScope,
     );
     const events = await this.events(input.actorUserId, input.run.id);
-    const proposedDecision = failedBoundaryRecoveryDecision(
-      action,
-      input.currentPlan,
-      failedBoundary,
-      observedReceiptShapes(events, failedBoundary.reusableEvidenceRefs),
-    ) ?? await this.recoveryPlannerFactory(model).decide({
-      runId: input.run.id,
-      userInput: input.run.input,
-      action,
-      plan: input.currentPlan,
-      failedBoundary,
-      events,
-      userResponses: [],
-    });
+    const proposedDecision = (canonicalGap.repairStepIds?.length ?? 1) > MAX_AUTOMATIC_REPAIRS_PER_GAP
+      ? {
+        actionId: action.id,
+        expectedActionRevision: action.revision,
+        decision: "fail" as const,
+        rationale: "The same canonical GoalGap exhausted its automatic repair budget; replacing a Step cannot restart that budget.",
+        evidenceRefs: canonicalGap.evidenceRefs,
+      }
+      : failedBoundaryRecoveryDecision(
+        action,
+        input.currentPlan,
+        failedBoundary,
+        observedReceiptShapes(events, failedBoundary.reusableEvidenceRefs),
+      ) ?? await this.recoveryPlannerFactory(model).decide({
+        runId: input.run.id,
+        userInput: input.run.input,
+        action,
+        plan: input.currentPlan,
+        failedBoundary,
+        events,
+        userResponses: [],
+      });
     const proposal = await this.guardRecoveryPlanRetirement({
       runId: input.run.id,
       action,
@@ -4459,9 +4527,12 @@ function failedBoundaryHasNoAcquisitionPath(
  * would only ask a later planner to replay already rejected work.  This is a
  * Runtime convergence fact, independent of the Skill or source domain.
  */
-function assessmentRepairIsExhausted(details: unknown, failedBoundary: FailedBoundary): boolean {
+function assessmentRepairIsExhausted(details: unknown, failedBoundary: FailedBoundary, step?: ExecutionPlan["steps"][number]): boolean {
+  if (failedBoundary.suggestedRepairShape === "ask_user") return false;
+  const sourceStep = (step?.evidenceContract?.requiredKinds ?? []).includes("source_summary");
   return asRecord(details)?.repairExhausted === true
-    && failedBoundaryHasMissingSourceEvidence(failedBoundary);
+    && (failedBoundaryHasMissingSourceEvidence(failedBoundary)
+      || sourceStep && asRecord(details)?.decisionBasisUnchanged === true);
 }
 
 function failedBoundaryHasMissingSourceEvidence(failedBoundary: FailedBoundary): boolean {
@@ -4772,6 +4843,10 @@ export function selectPlanningSkillRoles(
     planningArtifactSignal(understanding.task),
     understanding.format,
   ].filter((value): value is string => value !== undefined && value.length > 0).join("\n"));
+  const semanticSignal = normalizePlanningSignal([
+    understanding.subject.text,
+    understanding.task,
+  ].join("\n"));
   // Skill relevance must use the same semantic intent classifier as planning.
   // A current-news request is source work even when it does not literally say
   // "source", "research", or "lookup".
@@ -4783,6 +4858,7 @@ export function selectPlanningSkillRoles(
   const roleEligibleSkills = skills.filter((skill) => {
     const selection = selectFirstRoundSkillRole(
       skill,
+      semanticSignal,
       artifactSignal,
       exactSkillMention(artifactSignal, skill) || bound.has(skill.id),
       sourceKinds,
@@ -4993,7 +5069,8 @@ const STRONG_WINNER_GAP = 2;
 
 function selectFirstRoundSkillRole(
   skill: PrivateSkill,
-  signal: string,
+  semanticSignal: string,
+  artifactSignal: string,
   explicitlyRequested: boolean,
   sourceKinds: ReadonlySet<string>,
   sourceWorkRequested: boolean,
@@ -5006,13 +5083,21 @@ function selectFirstRoundSkillRole(
     roles.has("primary_builder")
     && (
       explicitlyRequested
-      || matchesRequestedArtifactKind(signal, artifactKinds)
+      // `artifactKinds: ["none"]` only says that the Skill does not write a
+      // file. For source-grounded work it does not mean the Skill owns every
+      // ordinary conversation answer; a non-source workflow can still use a
+      // no-artifact primary builder as its direct owner.
+      || (!artifactKinds.has("none") && matchesRequestedArtifactKind(artifactSignal, artifactKinds))
+      || (artifactKinds.has("none") && !sourceWorkRequested)
       // A format-specific native transformation can select its input owner
       // even when the prompt does not repeat the output format.
-      || (isNativeArtifactTransformation(signal) && skillSourceKindsCompatible(metadata.sourceKinds, sourceKinds))
+      || (isNativeArtifactTransformation(artifactSignal) && skillSourceKindsCompatible(metadata.sourceKinds, sourceKinds))
       // A non-artifact primary builder can own source-grounded domain work
-      // that feeds a separately selected artifact builder.
-      || (artifactKinds.has("none") && sourceWorkRequested)
+      // that feeds a separately selected artifact builder. `none` is only a
+      // delivery declaration, not broad relevance: require concrete task
+      // affinity so every no-artifact Skill does not become a candidate for
+      // every external lookup.
+      || (artifactKinds.has("none") && sourceWorkRequested && hasMeaningfulPlanningSkillAffinity(skill, semanticSignal))
     )
   ) {
     return {
@@ -5034,14 +5119,14 @@ function selectFirstRoundSkillRole(
         : "Prior completed-plan binding keeps this source_provider available as a multi-turn continuation candidate; the Planner decides whether the latest turn continues it.",
     };
   }
-  if (roles.has("support") && explicitSupportSkillRequested(signal)) {
+  if (roles.has("support") && explicitSupportSkillRequested(semanticSignal)) {
     return {
       skillId: skill.id,
       role: "support",
       reason: "The user explicitly requested a support capability declared by Skill metadata.",
     };
   }
-  if (roles.has("qa") && explicitQaSkillRequested(signal)) {
+  if (roles.has("qa") && explicitQaSkillRequested(semanticSignal)) {
     return {
       skillId: skill.id,
       role: "qa",
@@ -5050,6 +5135,40 @@ function selectFirstRoundSkillRole(
   }
   return undefined;
 }
+
+function hasMeaningfulPlanningSkillAffinity(skill: PrivateSkill, signal: string): boolean {
+  // A single generic token such as "company" or "report" is not enough to
+  // turn a no-artifact primary builder into a domain owner. The normal
+  // scoring path remains intentionally permissive for recall; this gate only
+  // prevents metadata compatibility from manufacturing a role candidate.
+  if (exactSkillMention(signal, skill)) return true;
+  // A primary builder that declares representative task phrasings has made
+  // its operation boundary explicit. Use that boundary here: a subject word
+  // (for example, an industry mentioned only to provide context) must not
+  // select a specialized analysis workflow unless the requested operation
+  // also resembles one of the workflow's declared intents. Intent examples
+  // remain Planner context for the final choice; this is only the narrow
+  // guard that prevents a no-artifact primary builder from becoming eligible
+  // for every source-grounded conversation lookup.
+  const intentExamples = skill.agentLoop?.intentExamples ?? [];
+  if (intentExamples.length > 0) {
+    const signalTokens = new Set(tokenizePlanningSignal(signal));
+    const exampleTokens = new Set(intentExamples.flatMap(tokenizePlanningSignal));
+    return [...signalTokens].some((token) =>
+      !GENERIC_PRIMARY_BUILDER_AFFINITY_TOKENS.has(token)
+      && exampleTokens.has(token)
+    );
+  }
+  const skillTokens = new Set(tokenizePlanningSignal(planningSkillSemanticText(skill)));
+  return tokenizePlanningSignal(signal).some((token) =>
+    !GENERIC_PRIMARY_BUILDER_AFFINITY_TOKENS.has(token) && skillTokens.has(token)
+  );
+}
+
+const GENERIC_PRIMARY_BUILDER_AFFINITY_TOKENS = new Set([
+  "company", "companies", "enterprise", "organization", "business", "report", "analysis", "information", "data",
+  "公司", "企业", "组织", "业务", "报告", "分析", "信息", "数据", "查询", "解释", "说明", "什么",
+]);
 
 function planningArtifactSignal(taskInput: string): string {
   return taskInput.trim();
@@ -5271,6 +5390,7 @@ function planningSkillSemanticText(skill: PrivateSkill): string {
     skill.name,
     skill.description,
     ...(skill.agentLoop?.semanticTags ?? []),
+    ...(skill.agentLoop?.intentExamples ?? []),
   ].join("\n"));
 }
 
@@ -5523,27 +5643,6 @@ function actionKindForPhase(phase: RuntimeContextSnapshot["phase"]): Exclude<Run
   if (phase === "assessment") return "assessment";
   if (phase === "compaction") return "compaction";
   return "model_turn";
-}
-
-/**
- * A prior Runtime Result is a formal input, not an instruction to repeat the
- * acquisition that originally produced it.  In that continuation state,
- * effectiveGoal may retain the historical provider name for provenance, but
- * it cannot create a current-Run ToolSource obligation.  Fresh-source modes
- * continue to derive the explicit source binding from the user goal.
- */
-function requiredToolSourceIdsForTurn(input: {
-  readonly input: string;
-  readonly effectiveGoal: string;
-  readonly allowedTools: readonly PlanningToolSummary[];
-  readonly turnResolution: ConversationTurnResolution | undefined;
-}): string[] {
-  const resolution = input.turnResolution;
-  const reusesBoundPriorResult = resolution?.targetResult !== undefined
-    && resolution.inputMode === "prior_result"
-    && resolution.evidenceDemand === "none";
-  if (reusesBoundPriorResult) return [];
-  return requiredToolSourceIdsFromInput(`${input.input}\n${input.effectiveGoal}`, input.allowedTools);
 }
 
 function toolSummaries(
@@ -5799,7 +5898,7 @@ const SOURCE_SUMMARY_CONVERGENCE_PROMPT = [
   "facts must contain at most 6 objects with claim, sourceRefs, and confidence.",
   "Each claim must be at most 160 Chinese characters or 80 English words.",
   "Use sourceRefs/toolCallIds instead of raw excerpts. Put unknown or weakly supported items in missingOrUnverified.",
-  "The model context may show structured evidence projections instead of raw file bodies; that means the Runtime has preserved the full canonical tool evidence, not that the read failed.",
+  "Structured projections preserve source windows and content references. Preserved evidence does not mean omitted facts were read or verified. Never infer absent or contradicted facts from memory, search snippets, or a rejected draft.",
   "Do not wrap the JSON in markdown fences.",
   "Do not write the final user-facing report here; produce a bounded source summary for the next Plan leaf.",
   "Do not request or emit tool calls.",
@@ -5808,28 +5907,21 @@ const SOURCE_SUMMARY_CONVERGENCE_PROMPT = [
 const SOURCE_EVIDENCE_DELIVERY_CONVERGENCE_PROMPT = [
   "<runtime_source_evidence_convergence>",
   "No execution tools are available on this turn.",
-  "The Runtime has determined that the current source evidence is sufficient for a completion candidate.",
+  "The retrieval phase has ended. Its receipts establish acquisition, not factual correctness or complete coverage.",
   "Use only the canonical tool evidence already present in the conversation.",
+  "Use actual readable source text for exact or current facts. Do not invent absent names, dates, or values, and do not treat search snippets or rejected drafts as verification. State any missing or conflicting facts explicitly.",
   "Produce the requested user-facing answer for the current Plan step, with explicit caveats for any missing or unverified facts.",
   "Do not call read_source again for chunks already covered.",
   "This response is only a candidate: the independent assessor and Terminal Committer remain authoritative.",
   "</runtime_source_evidence_convergence>",
 ].join("\n");
-function skillRequiresFileOutput(skill: Pick<PrivateSkill, "agentLoop">): boolean {
-  return skill.agentLoop?.executionProfiles?.includes("local_script") === true
-    || skill.agentLoop?.artifactKinds.some((kind) => kind !== "none") === true;
-}
-
 function stepRequiresFileOutput(step: ExecutionPlan["steps"][number]): boolean {
   if (step.role === "fact_acquisition") return false;
-  return artifactExtensionsRequiredByStep(step).size > 0
-    || stepUsesTool(step, (name) =>
-      name === "computer_write_file" || name === "computer_patch_file" || name === "computer_run_command"
-    );
-}
-
-function stepAllowsSkillFileOutput(step: ExecutionPlan["steps"][number]): boolean {
-  if (step.role === "fact_acquisition") return false;
+  // Tools describe how work can execute, not what the user must receive.
+  // A source Skill may run a script, and a file may only be a process artifact.
+  // Every consumer (loop policy, semantic frame, recovery and assessment) must
+  // use the same admitted artifact targets/evidence boundary.
+  if ((step.executionBinding.artifactTargets?.length ?? 0) > 0) return true;
   const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
   return requiredKinds.some((kind) =>
     kind === "artifact_path"
@@ -5972,14 +6064,6 @@ const ARTIFACT_EXTENSIONS = new Set([
   "pptx", "svg", "txt", "wav", "webp", "xlsx",
 ]);
 const ARTIFACT_EXTENSION_PATTERN = /\.([a-z0-9]+)(?=$|[\s'"),.:;])/gi;
-
-function artifactExtensionsRequiredByStep(step: ExecutionPlan["steps"][number]): Set<string> {
-  return artifactExtensionsFromText([
-    step.id,
-    step.objective,
-    ...step.successCriteria.flatMap((criterion) => [criterion.id, criterion.description]),
-  ].join("\n"));
-}
 
 function artifactExtensionsProducedByEvidence(evidence: readonly AgentLoopToolEvidence[]): Set<string> {
   const extensions = new Set<string>();
@@ -6345,16 +6429,6 @@ function numberValue(value: unknown): number | undefined {
   return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : undefined;
 }
 
-function artifactExtensionsFromText(text: string): Set<string> {
-  const extensions = new Set<string>();
-  for (const extension of ARTIFACT_EXTENSIONS) {
-    const pattern = new RegExp(`(?:^|[^a-z0-9])${escapeRegex(extension)}(?:$|[^a-z0-9])`, "i");
-    if (pattern.test(text)) extensions.add(normalizeArtifactExtension(extension));
-  }
-  addArtifactExtensions(extensions, text);
-  return extensions;
-}
-
 function addArtifactExtensions(target: Set<string>, text: string): void {
   for (const match of text.matchAll(ARTIFACT_EXTENSION_PATTERN)) {
     const extension = typeof match[1] === "string" ? match[1].toLowerCase() : undefined;
@@ -6574,15 +6648,17 @@ function selectAssessmentProfile(
   if (artifactDeliveryEvidenceGate) return "evidence_gate";
   if (holisticSourceContractMismatch) return "source_grounded";
   if (step.successCriteria.some((criterion) => criterion.verification === "model_judged")) return "source_grounded";
+  // A non-empty answer and acquisition receipts cannot establish that its
+  // factual claims match the source. Keep that judgment with the assessor.
+  if (stepHasSourceKind(step, "web") || (step.evidenceContract?.requiredKinds ?? []).includes("source_summary")) {
+    return "source_grounded";
+  }
   // Runtime-owned delivery evidence is a prerequisite for artifacts, not a
   // judgment about how an answer was executed or sourced.
   if (stepUsesRuntimeEvidenceGate(step)) return "evidence_gate";
   if (stepEvidenceSupportsRuntimeEvidenceGate(step, evidence)) return "evidence_gate";
   if (matchesRiskSensitiveAssessment(text)) return "risk_sensitive";
   if (stepUsesOnlyDirectDelivery(step)) return "deterministic";
-  if (stepHasSourceKind(step, "web")) {
-    return "lookup_lite";
-  }
   if (matchesSourceGroundedAssessment(text)) return "source_grounded";
   const resolvedToolNames = stepResolvedToolNames(step);
   if (resolvedToolNames.length === 0) return "deterministic";
@@ -6975,6 +7051,7 @@ function buildStepSystemPrompt(
       "Before any next action, assess its expected marginal benefit to an unmet current-step success criterion. Take an authorized action only when it materially improves the available evidence or acceptance state; otherwise directly submit a concise completion candidate with explicit caveats rather than continuing for its own sake.",
       "Your response without tool calls is only a completion candidate and may be rejected with repair feedback.",
       "A completion candidate must be non-empty: summarize the completed work in 2-4 short sentences and cite the concrete evidence or tool results used.",
+      "For every user-facing delivery target owned by this step, directly fulfill its stated purpose. Source records, field tables, excerpts, and citations are supporting evidence; synthesize them into the requested answer, explanation, conclusion, or other result instead of presenting the source material itself as completion.",
       "Use only currently exposed tools. Tool success alone does not prove the step is complete.",
       ...(clarificationOnly ? [
         "This is an intentionally tool-free clarification step because required user input is unresolved. Do not claim that MCP servers, Skills, or Tools are unavailable, disconnected, or misconfigured merely because this step exposes none.",
@@ -7070,6 +7147,27 @@ function buildRecoveredStepRuntimeContext(
   decisionLedger: readonly RuntimeDecisionCommit[] = [],
   resolvedOperationBindings: readonly import("./decision-binding.ts").ResolvedOperationBinding[] = [],
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
+  // Draft bodies are persisted for Runtime identity/rejection decisions,
+  // not evidence for the resumed model. Keep only their neutral identities
+  // in the prompt so unsupported values cannot become recovered facts.
+  const candidateIdentity = (output: string): Record<string, unknown> => ({
+    sha256: createHash("sha256").update(output).digest("hex"),
+    characters: output.length,
+    status: "unverified_draft",
+  });
+  const promptRecoveryFacts = !isRecord(recoveryFacts) ? recoveryFacts : {
+    ...recoveryFacts,
+    ...(Array.isArray(recoveryFacts.candidateOutputs) ? {
+      candidateOutputs: recoveryFacts.candidateOutputs.filter((value): value is string => typeof value === "string")
+        .map(candidateIdentity),
+    } : {}),
+    ...(Array.isArray(recoveryFacts.candidateRejections) ? {
+      candidateRejections: recoveryFacts.candidateRejections.filter(isRecord).map((rejection) => ({
+        ...(typeof rejection.output === "string" ? candidateIdentity(rejection.output) : {}),
+        feedback: rejection.feedback,
+      })),
+    } : {}),
+  };
   const base = buildStepRuntimeContext(
     step,
     plan,
@@ -7090,7 +7188,7 @@ function buildRecoveredStepRuntimeContext(
       "<recovery_context source=\"server\">",
       JSON.stringify({
         contract: "Only complete persisted exchanges were restored into the transcript. Unfinished calls are facts, not results.",
-        recoveryFacts,
+        recoveryFacts: promptRecoveryFacts,
       }),
       "</recovery_context>",
     ].join("\n"),
@@ -7438,7 +7536,7 @@ async function resolveConversationTurn(
       runtimeContext: {
         id: runtimeContextId,
         phase: "planning",
-        content: formatConversationTurnContext(context),
+        content: formatConversationTurnContext(context, input),
       },
       messages: [
         ...(conversationHistory ?? []),
@@ -7781,17 +7879,6 @@ function referencesPriorConversationResult(input: string): boolean {
   return /(?:\b(?:this|that|the\s+above|above|previous|prior|earlier|last|latest)\s+(?:analysis|result|answer|summary|report|content|findings?)\b|\b(?:analysis|result|answer|summary|findings?)\s+from\s+(?:the\s+)?(?:previous|prior|last|earlier)\b|(?:这个|该|上述|前述|之前的|先前的|刚才的|上一轮的?|上轮的?)(?:分析(?:结果)?|结果|结论|回答|总结|报告|内容|材料)|(?:分析结果|上述结论|前述结论).{0,12}(?:生成|制作|导出|转换|转成|保存))/iu.test(input);
 }
 
-function runtimeResultBindingsForTurn(
-  resolution: ConversationTurnResolution | undefined,
-): readonly RuntimeResultBinding[] {
-  if (resolution?.targetResult === undefined || resolution.relation === "new_goal") return [];
-  return [{
-    schema: "agentloop.resultBinding/v1",
-    result: resolution.targetResult,
-    relation: resolution.relation,
-  }];
-}
-
 function applyConversationTurnEvidenceFloor(
   resolution: ConversationTurnResolution,
   input: string,
@@ -7999,6 +8086,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "Do not interpret an elliptical follow-up in isolation. Rebind corrections, challenges, refinements, and continuations to the concrete prior goal they modify.",
       "An acknowledgement, thanks, or statement that the user will handle the next action is reply-only: naming prior work does not by itself authorize Runtime to execute that work again.",
       "effectiveGoal must be a self-contained description of the outcome Runtime should now deliver; preserve the latest user constraints without requiring imperative wording.",
+      "Preserve the exact requested facts, roles, measures, scope and time in effectiveGoal and every deliverable purpose. Available Skills or source fields describe acquisition options, not permission to narrow the user goal to a provider's scope or replace a requested concept with a related field. A source-specific qualification may be added only when the user requested it or established conversation context requires it.",
       "Resolve effectiveGoal, evidenceStrategy, and sourceBinding as one decision. Do not make evidence strategy independent from the task input you selected.",
       "Also return taskIntent as a semantic frame: operation, requiresExecution, and every terminal output family the user requested with stable targetId, user-visible purpose, exact expectedArtifactCount, action, semantic kind, optional concrete format, and delivery surface. targetId/purpose are the immutable identity and acceptance intent of each output family, never a filename. expectedArtifactCount is required, must be a positive integer, and must preserve an explicit requested cardinality; use 1 only when exactly one output is requested. Derive these fields from the full transcript and prior work context, not from isolated action words.",
       "taskIntent.deliverables is an acceptance contract, not an implementation plan. Never promote a helper script, temporary file, manifest, intermediate representation, source summary, or verification output into deliverables merely because execution may create or use it. Include code plus a rendered artifact only when the user explicitly requests both as terminal outputs.",
@@ -8572,7 +8660,7 @@ interface ConversationIntentExternalContext {
   readonly conversationWorkingSet?: ConversationWorkingSet;
 }
 
-function formatConversationTurnContext(context: ConversationIntentExternalContext): string {
+function formatConversationTurnContext(context: ConversationIntentExternalContext, input: string): string {
   const workset = context.conversationWorkingSet;
   const goalRunIds = [...conversationTurnTargetRunIds(workset)];
   const goalCandidateIdByRunId = new Map(goalRunIds.map((runId, index) => [runId, `goal_candidate_${index + 1}`]));
@@ -8597,17 +8685,14 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
       chunkCount: source.chunkCount,
       truncated: source.truncated,
     })),
-    availableSkills: (context.availableSkills ?? []).map((skill) => ({
+    // Intent resolution recognizes explicit capability names; source scope,
+    // workflow templates and catalog examples belong to the Planner. Exposing
+    // them here lets an available source redefine the question before planning.
+    availableSkills: (context.availableSkills ?? [])
+      .filter((skill) => exactSkillMention(input.toLowerCase(), skill))
+      .map((skill) => ({
       id: skill.id,
       name: skill.name,
-      description: skill.description,
-      ...(skill.agentLoop === undefined ? {} : {
-        roles: skill.agentLoop.roles,
-        sourceKinds: skill.agentLoop.sourceKinds,
-        artifactKinds: skill.agentLoop.artifactKinds,
-        semanticTags: skill.agentLoop.semanticTags,
-        intentExamples: skill.agentLoop.intentExamples,
-      }),
     })),
     conversationWorkingSet: {
       priorGoalCandidates: goalRunIds.map((runId, index) => {

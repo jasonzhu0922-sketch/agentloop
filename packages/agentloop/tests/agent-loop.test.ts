@@ -1988,6 +1988,130 @@ test("structured tool candidates go directly to assessment without a final model
   assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
 });
 
+test("source-backed conversation delivery synthesizes a structured source candidate", async () => {
+  const tool: RuntimeTool<unknown> = {
+    name: "lookup_api",
+    description: "Return a structured source projection",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => ({
+      schema: "source_result/v1",
+      deliveryCandidate: { output: "| 企业类型 | 股份有限公司 |\n| 经营范围 | 工业品销售 |" },
+      evidenceReceipt: {
+        schema: "agentloop.toolEvidenceReceipt/v1",
+        sourceType: "company_registry",
+        receiptId: "company-source",
+        facts: [{ kind: "source_summary", subject: "company" }],
+        evidenceKinds: { satisfied: ["source_summary"], caveated: [], failed: [] },
+      },
+    }),
+  };
+  let calls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "lookup-company", name: "lookup_api", arguments: {} }],
+      };
+      assert.ok(request.tools.some((tool) => tool.name === "lookup_api"), "source observations must allow complementary acquisition before synthesis");
+      return { content: "这是一家面向工业品供应链的股份制企业；登记经营范围覆盖工业品销售。", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["lookup_api"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Synthesize the requested explanation.",
+    input: "Explain what this company does.",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 3,
+    requireStructuredCandidateSynthesis: true,
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async (candidate) => {
+      assert.match(candidate.output, /供应链/);
+      assert.doesNotMatch(candidate.output, /^\| 企业类型/m);
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.match(result.output, /供应链/);
+  assert.equal(calls, 2);
+  assert.equal(events.filter((event) => event.type === "candidate.structured_tool_detected").length, 0);
+  assert.equal(events.filter((event) => event.type === "candidate.structured_tool_synthesis_required").length, 1);
+});
+
+for (const recovered of [false, true]) {
+  test(`rejected source rendering returns to model synthesis after a source read (recovered=${recovered})`, async () => {
+    const raw = "| 姓名 | 登记职务 |\n| 张甲 | 董事长 |\n| 李乙 | 董事兼总经理 |";
+    const feedback = "Answer the requested roles directly; 总裁 is not verified by a 总经理 field.";
+    const answer = "登记董事长为张甲，登记总经理为李乙；总裁及其现任状态尚未核实。来源核准日期为2026-10-08。";
+    const source = JSON.stringify({ deliveryCandidate: { output: raw }, assessmentProjection: { registeredTitlesOnly: true } });
+    let turns = 0;
+    let assessments = 0;
+    let sourceReads = 0;
+    const events: RuntimeEvent[] = [];
+    const grant = makeGrant(["lookup_api", "read_full_source"]);
+    const result = await runAgentLoop({
+      runId: grant.runId, grant, systemPrompt: "Use source evidence to answer the user goal.",
+      input: "董事长和总裁分别是谁？", maxSteps: 4,
+      ...(recovered ? {
+        initialMessages: [
+          { role: "user" as const, content: "董事长和总裁分别是谁？" },
+          { role: "assistant" as const, content: "", toolCalls: [{ id: "lookup-1", name: "lookup_api", arguments: {} }] },
+          { role: "tool" as const, name: "lookup_api", toolCallId: "lookup-1", content: source, isError: false },
+        ],
+        initialToolEvidence: [{ toolCallId: "lookup-1", toolName: "lookup_api", result: source, isError: false }],
+        initialCandidateRejections: [{ output: raw, feedback }],
+      } : {}),
+      tools: new ToolRegistry(["lookup_api", "read_full_source"].map((name) => ({
+        name, description: "Read supported facts", inputSchema: { type: "object" },
+        executionMode: "parallel" as const, replaySafe: true, parse: (value: unknown) => value,
+        execute: async () => {
+          if (name === "lookup_api") return JSON.parse(source);
+          sourceReads += 1;
+          return { checkDate: "2026-10-08", titleScope: "registered titles only" };
+        },
+      }))),
+      model: { limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        turns += 1;
+        if (!recovered && turns === 1) return {
+          content: "", finishReason: "tool_calls", toolCalls: [{ id: "lookup-1", name: "lookup_api", arguments: {} }],
+        };
+        if (sourceReads === 0) {
+          assert.match(request.runtimeContext?.content ?? "", /总裁 is not verified/);
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "read-1", name: "read_full_source", arguments: {} }] };
+        }
+        assert.match(request.runtimeContext?.content ?? "", /总裁 is not verified/);
+        return { content: answer, finishReason: "stop", toolCalls: [] };
+      } },
+      evaluateCandidate: async (candidate) => {
+        assessments += 1;
+        if (candidate.output === raw) {
+          assert.equal(recovered, false, "recovery must not reassess the rejected source rendering");
+          return { approved: false, feedback };
+        }
+        assert.equal(candidate.output, answer);
+        assert.equal(candidate.toolEvidence.some((item) => item.toolCallId === "lookup-1"), true);
+        return { approved: true, feedback: "" };
+      },
+      emit: (event) => { events.push(event); },
+    });
+    assert.equal(result.output, answer);
+    assert.equal(sourceReads, 1);
+    assert.equal(turns, recovered ? 2 : 3);
+    assert.equal(assessments, recovered ? 1 : 2);
+    assert.equal(events.filter((event) => event.type === "candidate.structured_tool_detected").length, recovered ? 0 : 1);
+    assert.equal(events.filter((event) => event.type === "candidate.structured_tool_synthesis_required").length, 1);
+  });
+}
+
 test("structured source candidates wait for required artifact acceptance evidence", async () => {
   let modelCalls = 0;
   let assessmentCalls = 0;
@@ -3098,6 +3222,7 @@ test("a rejected assessed candidate grants bounded tool repair grace", async () 
 
 test("a holistic assessment rejection cannot be repaired by rewriting without new evidence", async () => {
   let calls = 0;
+  let repairRuntimeContext = "";
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["read_evidence"]);
   await assert.rejects(
@@ -3107,8 +3232,9 @@ test("a holistic assessment rejection cannot be repaired by rewriting without ne
       input: "query catalog",
       model: {
         limits: TEST_MODEL_LIMITS,
-        complete: async () => {
+        complete: async (request) => {
           calls += 1;
+          if (calls === 2) repairRuntimeContext = request.runtimeContext?.content ?? "";
           return {
             content: calls === 1 ? "目录已整理，但仍缺少请求参数。" : "目录已经整理完成，仍缺少请求参数。",
             finishReason: "stop",
@@ -3142,15 +3268,25 @@ test("a holistic assessment rejection cannot be repaired by rewriting without ne
         },
       }),
     }),
-    (error: unknown) => error instanceof AppError && error.code === "STEP_NOT_COMPLETED",
+    (error: unknown) =>
+      error instanceof AppError
+      && error.code === "STEP_NOT_COMPLETED"
+      && error.details?.feedback === "The catalog detail needed for the requested parameters is still missing.",
   );
 
   assert.equal(calls, 2);
+  assert.match(repairRuntimeContext, /emit the Tool call structurally/u);
+  assert.match(repairRuntimeContext, /Naming the Tool, path, or ResultRef in prose does not execute it/u);
   assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 2);
-  assert.equal(events.some((event) =>
+  const blocked = events.find((event) =>
     event.type === "candidate.repair_limit_blocked"
     && (event.data as { reason?: string }).reason === "assessment_requires_decision_basis_transition"
-  ), true);
+  );
+  assert.ok(blocked);
+  assert.equal(
+    (blocked.data as { feedback?: string }).feedback,
+    "The catalog detail needed for the requested parameters is still missing.",
+  );
 });
 
 test("rejected completion candidates are not projected as prior assistant answers during repair", async () => {

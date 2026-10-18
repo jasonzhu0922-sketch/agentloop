@@ -103,6 +103,10 @@ export interface AgentLoopOptions {
   readonly maxParallelToolCalls?: number;
   readonly contextPolicy?: ContextPolicy;
   readonly stepSemanticFrame?: Pick<StepSemanticFrame, "completionBoundary" | "evidenceMode" | "phaseRole">;
+  /** Source-backed conversation delivery requires an answer to the user goal. */
+  readonly requireStructuredCandidateSynthesis?: boolean;
+  /** Durable rejection decisions for this same Step, restored on recovery. */
+  readonly initialCandidateRejections?: readonly { readonly output: string; readonly feedback: string }[];
   readonly convergencePrompt?: string;
   readonly convergenceMaxOutputTokens?: number;
   readonly shouldConvergeAfterToolStep?: (
@@ -536,10 +540,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let rejectedUnassessableCandidates = 0;
   let evidenceProgressBaseline: string | undefined;
   let evidenceProgressBoundary: CandidateCompletionEvaluation["failedBoundary"];
+  let evidenceProgressFeedback: string | undefined;
   let completionFencePending = false;
   let executionCatalogRequiredAfterConvergence = false;
   let pendingCandidateRepairDirective: string | undefined;
   let pendingStructuredObservationSynthesisDirective: string | undefined;
+  const rejectedStructuredCandidateOutputs = new Set(
+    (options.initialCandidateRejections ?? []).map((rejection) => rejection.output),
+  );
+  let latestCandidateRejectionFeedback = options.initialCandidateRejections?.at(-1)?.feedback;
   const messages: ModelMessage[] = [
     ...(options.conversationHistory ?? []),
     ...(options.initialMessages === undefined
@@ -622,6 +631,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     pendingCandidateRepairDirective = directive;
     contextAssembler.setRuntimeDirective(directive);
   };
+  const recoveredRejection = options.initialCandidateRejections?.at(-1);
+  if (recoveredRejection !== undefined) {
+    setCandidateRepairDirective(candidateRepairDirective(
+      { approved: false, feedback: recoveredRejection.feedback },
+      "Resume repair of the rejected candidate using the restored canonical evidence. Do not redeliver the rejected source projection.",
+    ));
+  }
   const evaluateCandidate = async (
     step: number,
     context: CandidateCompletionContext,
@@ -640,9 +656,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       decisionBasisDigest: currentDecisionView.identity.decisionBasisDigest,
     };
     if (evidenceProgressBaseline !== undefined && assessmentContext.decisionBasisDigest === evidenceProgressBaseline) {
+      const feedback = evidenceProgressFeedback
+        ?? "Assessment identified a substantive current-step gap. The decision basis has not changed, so another rewritten completion candidate cannot resolve it.";
       return {
         approved: false,
-        feedback: "Assessment identified a substantive current-step gap. The decision basis has not changed, so another rewritten completion candidate cannot resolve it.",
+        feedback,
         requiresEvidenceProgress: true,
         evidenceProgressBlocked: true,
         ...(evidenceProgressBoundary === undefined ? {} : { failedBoundary: evidenceProgressBoundary }),
@@ -650,6 +668,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
     if (options.evaluateCandidate === undefined) return { approved: true, feedback: "" };
     const evaluation = await options.evaluateCandidate(assessmentContext);
+    if (!evaluation.approved) latestCandidateRejectionFeedback = evaluation.feedback;
     if (evaluation.assessmentReused === true) {
       await emit({
         type: "candidate.assessment_reused",
@@ -664,9 +683,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     if (!evaluation.approved && evaluation.requiresEvidenceProgress === true) {
       evidenceProgressBaseline = assessmentContext.decisionBasisDigest;
       evidenceProgressBoundary = evaluation.failedBoundary;
+      evidenceProgressFeedback = evaluation.feedback;
     } else if (evaluation.approved || assessmentContext.decisionBasisDigest !== evidenceProgressBaseline) {
       evidenceProgressBaseline = undefined;
       evidenceProgressBoundary = undefined;
+      evidenceProgressFeedback = undefined;
     }
     if (!evaluation.approved) {
       // Assessment owns semantic acceptance. A rejection opens exactly the
@@ -773,6 +794,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       {
         feedback: input.evaluation.feedback,
         repairExhausted: true,
+        decisionBasisUnchanged: true,
         ...(input.evaluation.failedBoundary === undefined ? {} : { failedBoundary: input.evaluation.failedBoundary }),
       },
     ), input.step, input.output, input.evaluation);
@@ -960,7 +982,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     });
     const missingToolEvidenceKinds = stepEvidenceState?.missingToolEvidenceKinds ?? [];
     const canConvergeFromCurrentEvidence = missingToolEvidenceKinds.length === 0;
-    const completionFenceReady = completionFencePending
+    // A source receipt proves acquisition, not coverage of the user's facts.
+    // Conversation synthesis must retain complementary acquisition tools.
+    const completionFenceReady = options.requireStructuredCandidateSynthesis !== true
+      && completionFencePending
       && stepEvidenceState?.nextAction === "submit_completion_candidate"
       && hasSuccessfulStepEvidence(toolEvidence);
     const finalConvergenceAllowed = requestedConvergenceReason !== undefined
@@ -2245,8 +2270,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const structuredCandidates = options.evaluateCandidate === undefined
       || structuredCandidateIsBlockedByPendingArtifactEvidence(options.progressPolicy, toolEvidence)
       ? undefined
-      : selectStructuredToolCandidate(toolEvidence);
-    if (structuredCandidates?.directCandidate !== undefined) {
+      : selectStructuredToolCandidate(toolEvidence, options.requireStructuredCandidateSynthesis !== true);
+    if (structuredCandidates?.directCandidate !== undefined
+      && !rejectedStructuredCandidateOutputs.has(structuredCandidates.directCandidate.deliveryCandidate.output)) {
       const structuredCandidate = structuredCandidates.directCandidate;
       await emit({
         type: "candidate.structured_tool_detected",
@@ -2264,13 +2290,28 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         rejectionDirective: "Structured tool candidate was rejected. Repair this step using the available evidence.",
       });
       if (completion !== undefined) return completion;
+      // Source observations remain useful after rejection, but their fixed
+      // rendering cannot repair a delivery gap merely because a later read
+      // changed the evidence basis. Hand authorship back to the model.
+      rejectedStructuredCandidateOutputs.add(structuredCandidate.deliveryCandidate.output);
       continue;
     }
-    if (structuredCandidates !== undefined && structuredCandidates.observations.length > 1) {
+    if (structuredCandidates !== undefined && (
+      options.requireStructuredCandidateSynthesis === true
+      || structuredCandidates.observations.length > 1
+      || (structuredCandidates.directCandidate !== undefined
+        && rejectedStructuredCandidateOutputs.has(structuredCandidates.directCandidate.deliveryCandidate.output))
+    )) {
       pendingStructuredObservationSynthesisDirective = structuredObservationSynthesisDirective(
         structuredCandidates.observations,
+        latestCandidateRejectionFeedback,
+        options.requireStructuredCandidateSynthesis === true,
       );
-      requestedConvergenceReason = "structured_tool_observations_require_synthesis";
+      if (options.requireStructuredCandidateSynthesis === true && step < hardLimit) {
+        contextAssembler.setRuntimeDirective(pendingStructuredObservationSynthesisDirective);
+      } else {
+        requestedConvergenceReason = "structured_tool_observations_require_synthesis";
+      }
       await emit({
         type: "candidate.structured_tool_synthesis_required",
         data: {
@@ -2647,6 +2688,7 @@ async function evaluateToolStepConvergence(
 
 function selectStructuredToolCandidate(
   evidence: readonly AgentLoopToolEvidence[],
+  allowDirectCandidate = true,
 ): StructuredToolCandidateSelection | undefined {
   const observations: StructuredToolCandidate[] = [];
   for (const item of evidence) {
@@ -2664,8 +2706,8 @@ function selectStructuredToolCandidate(
   if (observations.length === 0) return undefined;
   const mergedCandidate = mergeAppendableStructuredCandidates(observations);
   return {
-    ...(observations.length === 1 ? { directCandidate: observations[0] }
-      : mergedCandidate === undefined ? {} : { directCandidate: mergedCandidate }),
+    ...(allowDirectCandidate && (observations.length === 1 ? { directCandidate: observations[0] }
+      : mergedCandidate === undefined ? {} : { directCandidate: mergedCandidate })),
     observations,
   };
 }
@@ -2833,15 +2875,22 @@ function mergeAppendableStructuredCandidates(
 
 function structuredObservationSynthesisDirective(
   observations: readonly StructuredToolCandidate[],
+  rejectionFeedback?: string,
+  allowComplementaryAcquisition = false,
 ): string {
   return [
     "<runtime_structured_observation_synthesis>",
-    "Multiple structured tool observations were produced for this same Plan step. They are evidence, not independent final answers.",
-    "Synthesize one answer for the original user goal using every observation. Do not select the last tool result merely because it completed last.",
+    "Structured tool observations were produced for this Plan step. They establish source evidence; their fixed rendering does not determine the requested answer.",
+    "Synthesize one standalone answer for the original user goal, preserving its requested fields, distinctions, scope, time, and output form. Use all relevant observations; do not select the last tool result merely because it completed last.",
+    "Do not substitute a source table for a requested explanation or conclusion. When the user requests records, a complete list, or a table, preserve that form and the requested coverage instead of reducing it to a short summary.",
+    "Lead with the supported answer to the requested question. Separate supported facts from missing or conflicting facts, cite their source and available data date, and never substitute a nearby field or an assumed equivalence for a requested fact. A retrieval date is not proof that the source facts are current.",
     "A zero-result observation applies only to its own query or scope. It cannot justify a global no-result conclusion while another observation has matching results.",
-    "State differing query scopes and any unresolved conflict explicitly. Use the canonical tool results for exact fields; when an exact value is omitted from the prompt projection, use only a bounded evidence-observation Tool exposed on this turn. Do not invent facts or call production/source-acquisition Tools.",
+    allowComplementaryAcquisition
+      ? "Check which requested facts the observations actually establish. For missing, stale or conflicting facts, use the available authorized sources to acquire complementary evidence before answering. Reuse already committed Results; do not repeat successful acquisition or substitute a caveat for a fact you can still verify."
+      : "State differing query scopes and any unresolved conflict explicitly. Use the canonical tool results for exact fields; when an exact value is omitted from the prompt projection, use only a bounded evidence-observation Tool exposed on this turn. Do not invent facts or call production/source-acquisition Tools.",
     "Observation summaries:",
     JSON.stringify(observations.map((candidate) => JSON.parse(candidate.observation))),
+    ...(rejectionFeedback === undefined ? [] : ["Repair the previously rejected delivery using this assessment feedback:", rejectionFeedback]),
     "</runtime_structured_observation_synthesis>",
   ].join("\n");
 }
@@ -3539,6 +3588,7 @@ function candidateRepairDirective(evaluation: CandidateCompletionEvaluation, fal
   if (evaluation.requiresEvidenceProgress === true) {
     lines.push(
       "Assessment found a substantive gap. Before submitting another candidate, take one current-step action that changes the Runtime-derived decision basis; rewriting the answer alone will be rejected.",
+      "If that action is a Tool call, emit the Tool call structurally. Naming the Tool, path, or ResultRef in prose does not execute it and does not change the Runtime decision basis.",
     );
   }
   if (evaluation.failedBoundary !== undefined) {

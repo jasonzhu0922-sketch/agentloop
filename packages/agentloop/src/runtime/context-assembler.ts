@@ -1360,6 +1360,16 @@ function structuredToolEvidenceProjection(content: string): string | undefined {
   const uploadedSource = sourceType === "uploaded_source" ? uploadedSourceProjection(value) : undefined;
   const analysisResultRef = tableAggregationResultRefProjection(value.resultRef);
   const contentLocation = commandOutputContentLocationProjection(value);
+  const sourceContent = sourceSchema === "agentloop.webFetch/v1" && value.binary !== true && typeof value.content === "string"
+    ? {
+      text: value.content.slice(0, CONTENT_REFERENCE_WINDOW_CHARACTERS),
+      characterOffset: 0,
+      returnedCharacters: Math.min(value.content.length, CONTENT_REFERENCE_WINDOW_CHARACTERS),
+      totalCharacters: value.content.length,
+      complete: value.content.length <= CONTENT_REFERENCE_WINDOW_CHARACTERS && value.truncated !== true,
+      decoding: recordValue(value.decoding),
+    }
+    : undefined;
   const projection = {
     schema: "agentloop.contextEvidenceProjection/v1",
     sourceSchema,
@@ -1370,6 +1380,7 @@ function structuredToolEvidenceProjection(content: string): string | undefined {
     uploadedSource,
     analysisResultRef,
     contentLocation,
+    sourceContent,
     contentSummary: recordValue(value.contentSummary),
     outputReferences: commandOutputReferences(value),
     evidenceReceipt: {
@@ -1384,7 +1395,9 @@ function structuredToolEvidenceProjection(content: string): string | undefined {
       caveats: compactArray(receipt.caveats, 20),
       evidenceKinds: recordValue(receipt.evidenceKinds),
     },
-    instruction: contentLocation !== undefined
+    instruction: sourceContent !== undefined
+      ? "sourceContent.text is the actual fetched source window, not a search snippet. Ground factual claims only in readable text in this window or a committed content-reference read; titles, URLs, navigation, and metadata alone do not establish the requested facts. Do not fill absent or contradictory facts from memory or a prior rejected draft. If complete is true, use this text directly without rereading it. Otherwise use computer_read_file with contentLocation.path, characterOffset (0-based), and characterLimit up to 12000 to read only the needed omitted range; computer_read_json supports JSON Pointer windows. The Runtime computes the content digest from the file it reads. read_result reads the Tool-result envelope rather than the raw file. Do not refetch merely to recover omitted text."
+      : contentLocation !== undefined
       ? CONTENT_REFERENCE_READ_INSTRUCTION
       : analysisResultRef !== undefined
       ? "This is a durable deterministic analysis result. Use its resultPointer or groupsPointer with computer_read_json and an offset/limit window whenever exact values are needed; do not infer omitted groups from the receipt."
@@ -2040,6 +2053,7 @@ function compactEvidenceSourceRef(value: unknown): unknown {
     sha256: stringValue(record.sha256),
     bytes: numberValue(record.bytes),
     characters: numberValue(record.characters),
+    decoding: recordValue(record.decoding),
     truncated: booleanValue(record.truncated),
     requestedPath: stringValue(record.requestedPath),
     resolvedPath: stringValue(record.resolvedPath),
@@ -2178,6 +2192,7 @@ function compactEvidenceFactForLedger(value: unknown): unknown {
     totalCells: numberValue(record.totalCells),
     bytes: numberValue(record.bytes),
     characters: numberValue(record.characters),
+    decoding: recordValue(record.decoding),
     indexRef: stringValue(record.indexRef),
     matchesRef: stringValue(record.matchesRef),
     sha256: stringValue(record.sha256),

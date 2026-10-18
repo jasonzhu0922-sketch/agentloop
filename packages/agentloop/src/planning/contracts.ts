@@ -128,6 +128,8 @@ export interface StepEvidenceProducerBinding {
   readonly evidenceKind: EvidenceKind;
   readonly capabilityId: string;
   readonly resolvedToolNames: readonly string[];
+  /** A command-backed provider must publish the declaring Skill's authenticated workflow receipt. */
+  readonly skillId?: string;
 }
 
 export interface TaskSpec {

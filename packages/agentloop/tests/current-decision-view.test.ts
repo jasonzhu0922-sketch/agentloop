@@ -77,3 +77,16 @@ test("a newly committed generic tool fact changes the decision basis without cou
   assert.notEqual(afterRead.identity.decisionBasisDigest, before.identity.decisionBasisDigest);
   assert.equal(afterDuplicateRead.identity.decisionBasisDigest, afterRead.identity.decisionBasisDigest);
 });
+
+test("new publication IDs cannot masquerade as new evidence, but source identity and content remain material", () => {
+  const originalRef = { schema: "agentloop.resultRef/v1", resultId: "rr_11111111-1111-4111-8111-111111111111" };
+  const freshRef = { ...originalRef, resultId: "rr_22222222-2222-4222-8222-222222222222" };
+  const digest = (resultRef: unknown, content: string, sourceResultRef = originalRef) => deriveCurrentDecisionView({
+    ...input(),
+    toolEvidence: [{ toolCallId: "read", toolName: "read_result", resultRef,
+      result: JSON.stringify({ resultRef, sourceResultRef, content }), isError: false }],
+  }).identity.decisionBasisDigest;
+  assert.equal(digest(originalRef, "observed"), digest(freshRef, "observed"));
+  assert.notEqual(digest(originalRef, "observed"), digest(freshRef, "changed"));
+  assert.notEqual(digest(originalRef, "observed"), digest(freshRef, "observed", freshRef));
+});

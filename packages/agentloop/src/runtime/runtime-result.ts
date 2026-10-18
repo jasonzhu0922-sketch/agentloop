@@ -85,6 +85,49 @@ export interface RuntimeResultCard {
   readonly evidenceRefs: readonly string[];
 }
 
+/**
+ * A failed Run can still publish several accepted Step Results before its
+ * terminal boundary. A pure continuation binds those Results as formal Plan
+ * inputs instead of forcing the resolver to choose one arbitrary work product.
+ */
+export function runtimeResultBindingsForConversationTurn(input: {
+  readonly resolution?: {
+    readonly relation: RuntimeResultBindingRelation | "new_goal";
+    readonly inputMode: string;
+    readonly targetRunId?: string;
+    readonly targetResult?: RuntimeResultRef;
+  };
+  readonly resultCards?: readonly RuntimeResultCard[];
+}): readonly RuntimeResultBinding[] {
+  const resolution = input.resolution;
+  if (resolution === undefined || resolution.relation === "new_goal") return [];
+  if (resolution.targetResult !== undefined) {
+    return [{
+      schema: "agentloop.resultBinding/v1",
+      result: resolution.targetResult,
+      relation: resolution.relation,
+    }];
+  }
+  if (
+    resolution.relation !== "continue_prior"
+    || resolution.inputMode === "refresh_sources"
+    || resolution.targetRunId === undefined
+  ) return [];
+  const seen = new Set<string>();
+  return (input.resultCards ?? [])
+    .filter((card) => card.producer.runId === resolution.targetRunId)
+    .filter((card) => {
+      if (seen.has(card.result.resultId)) return false;
+      seen.add(card.result.resultId);
+      return true;
+    })
+    .map((card) => ({
+      schema: "agentloop.resultBinding/v1" as const,
+      result: card.result,
+      relation: "continue_prior" as const,
+    }));
+}
+
 /** A compact execution-context entry that preserves the same Result identity. */
 export interface RuntimeResultContextEntry {
   readonly schema: "agentloop.resultContextEntry/v1";

@@ -26,7 +26,7 @@ import type {
 import { admitPlan, bindRequiredSkillCompanions, reusableSourceEvidenceKindsForTurn } from "./admission.ts";
 import { resolveCapabilityGaps, resolveSourceGroundingGap } from "./capability-resolution.ts";
 import { planningCapabilitiesFromToolNames, planningCapabilitiesFromTools, skillSourceProviderCapabilityId } from "./step-execution-binding.ts";
-import type { RuntimeResultBinding } from "../runtime/runtime-result.ts";
+import { runtimeResultBindingsForConversationTurn, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
 import { assertCanonicalDeliveryTargetInventory } from "../runtime/canonical-run-state.ts";
 
 const EVIDENCE_KIND_VALUES = [
@@ -93,6 +93,7 @@ const OUTCOME_LEAF_SCHEMA = {
   required: [
     "id",
     "objective",
+    "requiredFacts",
     "dependsOn",
     "role",
     "skillIds",
@@ -104,6 +105,18 @@ const OUTCOME_LEAF_SCHEMA = {
   properties: {
     id: { type: "string" },
     objective: { type: "string" },
+    requiredFacts: {
+      type: "array",
+      maxItems: 20,
+      items: {
+        type: "object", additionalProperties: false, required: ["id", "description", "evidenceKinds"],
+        properties: {
+          id: { type: "string" },
+          description: { type: "string" },
+          evidenceKinds: { type: "array", minItems: 1, maxItems: 20, items: { type: "string", enum: EVIDENCE_KIND_VALUES } },
+        },
+      },
+    },
     dependsOn: { type: "array", items: { type: "string" } },
     role: { type: "string", enum: ["fact_acquisition", "produce", "deliver", "repair"] },
     skillIds: { type: "array", items: { type: "string" } },
@@ -309,12 +322,16 @@ export class ModelPlanner implements Planner {
         "You are the Planner for a Plan-first Runtime.",
         "Return exactly one submit_outcome_plan tool call; do not execute work, call other tools, or declare completion.",
         "Use only supplied context facts, capability catalog entries, and Skill catalog entries.",
-        "Treat canonicalRunState.intent.understanding as the authoritative interpretation for operation, subject, evidence, deliverable, and workflow; do not re-infer those boundaries from attachment filenames, Step prose, or generic report wording.",
+        "The original canonicalRunState.intent.userInput owns the requested facts, concepts and scope. Use intent.understanding for resolved operation, evidence, deliverable and workflow boundaries, but never let resolver paraphrases, source-provider scope or Skill templates narrow or substitute the original request. Do not infer new boundaries from attachment filenames or generic report wording.",
       ],
       contractLines: [
         "Fill the smallest Outcome Plan using agentloop.outcomePlan/v2 so Runtime can start useful work.",
         "Use the supplied TaskProfile shape as the default shape; only choose a narrower valid shape when the user request is simpler.",
         "Use one leaf for ordinary answers/artifacts; split only for reusable source facts.",
+        "When a conversation TaskProfile has shape single_leaf, submit exactly one deliver leaf that owns every conversation target. Gather source evidence inside that leaf; do not create a fact_acquisition-to-deliver pair merely to rewrite the same findings.",
+        "Plan source work by coverage of each requested fact, not by the first available Tool or Skill. Before selecting capabilities, identify what must be answered and compare it with each source's declared scope and freshness. For lookups, identification, explanations and comparisons alike, bind complementary acquisition when the provider does not establish a requested fact; include that acquisition and the final synthesis in the leaf objective. Do not replace a missing requested fact with a related provider field or a caveat. Keep complementary acquisition in the same conversation deliver leaf, and omit redundant sources when one source covers the request.",
+        "In requiredFacts, enumerate the concrete factual answers explicitly required by the user, with their exact concepts, scope and time, before selecting source capabilities. These are answer obligations, not acquisition actions or receipt labels. Use [] when no concrete source-backed facts are requested. A source with narrower scope can provide leads, but cannot redefine a required fact. Choose capabilities that can obtain every required fact; do not plan to satisfy an answer obligation merely by reporting that the first provider lacks its field.",
+        "Preserve every fact, role, measure, scope and time requested by the user. Source-provider fields and related concepts are not substitutes for the requested concepts. If a provider does not cover one requested fact, plan the complementary acquisition needed for that fact instead of redefining the deliverable to fit the provider; mark genuinely unavailable facts as gaps without claiming they were answered.",
         "Leaves are durable evidence boundaries, not workflow scripts or internal tool checklists.",
         "selectedSkillRoles is an execution-selection list, not a candidate list: every listed Skill, regardless of role, must also appear in at least one concrete leaf.skillIds; otherwise omit it.",
         "Keep local receipt, export, and readback evidence inside the producing leaf.",
@@ -1343,41 +1360,53 @@ function planningRuntimeContext(
 }
 
 function submitOutcomePlanToolForTask(task: TaskSpec): ModelInvocation["tools"][number] {
+  const taskProfile = planningTaskProfile(task);
+  const singleConversationDelivery = taskProfile.planShape === "single_leaf"
+    && planningTaskIntent(task).deliverySurface === "conversation";
   const allowedCapabilityIds = planningCapabilitiesForTask(task).map((capability) => capability.id).sort();
   const allowedArtifactTargetIds = Object.keys(task.canonicalState.targets).sort();
+  const leafSchema = {
+    ...OUTCOME_LEAF_SCHEMA,
+    properties: {
+      ...OUTCOME_LEAF_SCHEMA.properties,
+      ...(singleConversationDelivery ? {
+        dependsOn: { type: "array", maxItems: 0, items: { type: "string" } },
+        role: { type: "string", enum: ["deliver"] },
+      } : {}),
+      requiredCapabilities: {
+        type: "array",
+        items: allowedCapabilityIds.length === 0
+          ? { type: "string", minLength: 1 }
+          : { type: "string", enum: allowedCapabilityIds },
+      },
+      sourceConstraint: sourceConstraintSchemaForTask(task),
+      targetIds: {
+        type: "array",
+        ...(allowedArtifactTargetIds.length === 0
+          ? { maxItems: 0, items: { type: "string" } }
+          : {
+              // Prerequisite/acquisition leaves do not own a user-visible
+              // delivery target; only producing or adopting leaves bind one.
+              minItems: singleConversationDelivery ? allowedArtifactTargetIds.length : 0,
+              maxItems: allowedArtifactTargetIds.length,
+              items: { type: "string", enum: allowedArtifactTargetIds },
+            }),
+      },
+    },
+  };
   return {
     ...SUBMIT_OUTCOME_PLAN_TOOL,
     inputSchema: {
       ...SUBMIT_OUTCOME_PLAN_TOOL.inputSchema,
       properties: {
         ...SUBMIT_OUTCOME_PLAN_TOOL.inputSchema.properties,
+        ...(singleConversationDelivery ? {
+          shape: { type: "string", enum: ["single_leaf"] },
+        } : {}),
         leaves: {
           ...SUBMIT_OUTCOME_PLAN_TOOL.inputSchema.properties.leaves,
-          items: {
-            ...OUTCOME_LEAF_SCHEMA,
-            properties: {
-              ...OUTCOME_LEAF_SCHEMA.properties,
-              requiredCapabilities: {
-                type: "array",
-                items: allowedCapabilityIds.length === 0
-                  ? { type: "string", minLength: 1 }
-                  : { type: "string", enum: allowedCapabilityIds },
-              },
-              sourceConstraint: sourceConstraintSchemaForTask(task),
-              targetIds: {
-                type: "array",
-                ...(allowedArtifactTargetIds.length === 0
-                  ? { maxItems: 0, items: { type: "string" } }
-                  : {
-                      // Prerequisite/acquisition leaves do not own a user-visible
-                      // delivery target; only producing or adopting leaves bind one.
-                      minItems: 0,
-                      maxItems: allowedArtifactTargetIds.length,
-                      items: { type: "string", enum: allowedArtifactTargetIds },
-                    }),
-              },
-            },
-          },
+          ...(singleConversationDelivery ? { minItems: 1, maxItems: 1 } : {}),
+          items: leafSchema,
         },
       },
     },
@@ -1628,13 +1657,10 @@ function conversationResultInput(task: TaskSpec): NonNullable<NonNullable<TaskSp
 }
 
 function runtimeResultBindingsForPlanningTask(task: TaskSpec): readonly RuntimeResultBinding[] {
-  const resolution = canonicalTurnResolution(task);
-  if (resolution?.targetResult === undefined || resolution.relation === "new_goal") return [];
-  return [{
-    schema: "agentloop.resultBinding/v1",
-    result: resolution.targetResult,
-    relation: resolution.relation,
-  }];
+  return runtimeResultBindingsForConversationTurn({
+    resolution: canonicalTurnResolution(task),
+    resultCards: task.conversationWorkingSet?.resultCards,
+  });
 }
 
 function artifactFollowupReason(
@@ -1877,14 +1903,42 @@ function normalizeResultSuccessCriteria(
 ): PlanStepProposal {
   const coreCriteria = step.successCriteria
     .filter((criterion) => !isExecutionEvidenceKind(criterion.id))
+    .filter((criterion) => criterion.id !== "requested_goal" && !criterion.id.startsWith("required_fact:"))
     .filter((criterion) => !isUnrequestedOptionalEnhancementCriterion(criterion.description, canonicalUserInput(task)));
   const successCriteria = coreCriteria.length > 0
     ? coreCriteria
     : [{
       id: `${step.id}-core-result`,
-      description: coreSuccessCriterionDescription(step),
+      description: coreSuccessCriterionDescription(step, task),
       source: "planner" as const,
     }];
+  for (const fact of step.requiredFacts ?? []) {
+    successCriteria.push({
+      id: `required_fact:${fact.id}`,
+      description: `Establish and deliver this requested fact using readable supporting evidence: ${fact.description}. A related field, a missing provider field, or a caveat that it remains unverified does not satisfy this fact.`,
+      source: "planner" as const,
+      verification: "model_judged" as const,
+      blocking: true,
+    });
+  }
+  if (step.role !== "fact_acquisition"
+    && (step.targetIds ?? []).some((targetId) => task.canonicalState.targets[targetId]?.surface === "conversation")) {
+    successCriteria.push({
+      id: "requested_goal",
+      description: `For this leaf's owned delivery targets, answer the original user request: ${JSON.stringify(canonicalUserInput(task))}. Preserve its requested facts, concepts, scope and time. Resolver/Plan paraphrases, source fields and Skill output templates cannot authorize substitution or narrowing. A caveat about an unanswered fact records a remaining gap and does not satisfy that fact.`,
+      source: "task" as const,
+    });
+  }
+  // List-style requests have a result contract beyond mere source grounding:
+  // representative samples, counts, and broad summaries cannot substitute for
+  // the requested members. This is intentionally domain-neutral.
+  if (requiresExplicitEnumeration(task) && step.role !== "fact_acquisition" && !successCriteria.some((criterion) => criterion.id === "requested_enumeration")) {
+    successCriteria.push({
+      id: "requested_enumeration",
+      description: "Explicitly enumerate the requested items with the requested identifying attributes. A count, a summary, or representative examples does not fulfill this requirement.",
+      source: "planner" as const,
+    });
+  }
   return {
     ...step,
     successCriteria: successCriteria.map((criterion) => ({
@@ -1892,6 +1946,14 @@ function normalizeResultSuccessCriteria(
       blocking: criterion.blocking ?? criterionBlockingByGoal(criterion.id, step, task, taskProfile),
     })),
   };
+}
+
+function requiresExplicitEnumeration(task: TaskSpec): boolean {
+  const request = canonicalUserInput(task).trim();
+  // These are user-intent forms, not domain keywords: the same completion
+  // contract applies to people, records, risks, fields, files, or any other
+  // requested collection.
+  return /(?:\b(?:which|who|what)\b[\s\S]{0,80}\b(?:are|is)\b|\b(?:list|enumerate|name|roster|directory)\b|谁|哪些|哪几|名单|列表|清单|列出|逐一|分别|全部)/iu.test(request);
 }
 
 function isExecutionEvidenceKind(kind: string): boolean {
@@ -2373,7 +2435,17 @@ function isArtifactDeliveryEvidenceKind(kind: string): kind is typeof ARTIFACT_D
   return (ARTIFACT_DELIVERY_EVIDENCE_KIND_VALUES as readonly string[]).includes(kind);
 }
 
-function coreSuccessCriterionDescription(step: PlanStepProposal): string {
+function coreSuccessCriterionDescription(step: PlanStepProposal, task: TaskSpec): string {
+  const ownsConversationTarget = (step.targetIds ?? []).some((targetId) =>
+    task.canonicalState.targets[targetId]?.surface === "conversation"
+  );
+  // A source-backed conversation delivery has two independent obligations:
+  // acquire trustworthy facts and answer the user's question with them.  The
+  // former must not silently replace the latter simply because a source
+  // provider returns a well-structured record.
+  if (ownsConversationTarget && step.role !== "fact_acquisition") {
+    return "Directly fulfill the user-facing delivery target by synthesizing the relevant evidence into the requested answer or explanation. Source extracts, field tables, and raw evidence alone are supporting material, not a substitute for the requested result.";
+  }
   const text = normalizePlannerText(`${step.id}\n${step.objective}`);
   if (/(?:html[-_ ]?ppt|html|网页|页面|浏览器)/iu.test(text)) {
     return "Deliver the requested HTML artifact with an observable workspace path and non-empty file evidence.";
@@ -2569,10 +2641,12 @@ function parseOutcomeLeaf(value: unknown, index: number, task: TaskSpec): PlanSt
     ? undefined
     : parseSourceConstraint(record.sourceConstraint, index, task);
   const targetIds = parseTargetIds(record.targetIds, index);
+  const requiredFacts = record.requiredFacts === undefined ? [] : parseRequiredFacts(record.requiredFacts, index);
   return {
     id: requireString(record.id, `leaves[${index}].id`, { max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }),
     kind: "leaf",
     objective: requireString(record.objective, `leaves[${index}].objective`, { max: 20_000 }),
+    requiredFacts,
     dependencies: requireStringArray(record.dependsOn, `leaves[${index}].dependsOn`, 100),
     role: parseOutcomeLeafRole(record.role, index),
     skillIds: requireStringArray(record.skillIds, `leaves[${index}].skillIds`, 100),
@@ -2594,6 +2668,20 @@ function parseOutcomeLeaf(value: unknown, index: number, task: TaskSpec): PlanSt
       })),
     }),
   };
+}
+
+function parseRequiredFacts(value: unknown, leafIndex: number): NonNullable<PlanStepProposal["requiredFacts"]> {
+  if (!Array.isArray(value) || value.length > 20) throw badRequest(`leaves[${leafIndex}].requiredFacts must be an array with at most 20 items`);
+  return value.map((entry, index) => {
+    const name = `leaves[${leafIndex}].requiredFacts[${index}]`;
+    const fact = requireRecord(entry, name);
+    const evidenceKinds = canonicalStringSet(fact.evidenceKinds, `${name}.evidenceKinds`, 20);
+    if (evidenceKinds.length === 0 || evidenceKinds.some((kind) => !(EVIDENCE_KIND_VALUES as readonly string[]).includes(kind))) {
+      throw badRequest(`${name}.evidenceKinds must name available evidence kinds`);
+    }
+    return { id: requireString(fact.id, `${name}.id`, { max: 128 }),
+      description: requireString(fact.description, `${name}.description`, { max: 2_000 }), evidenceKinds };
+  });
 }
 
 function parseTargetIds(value: unknown, index: number): readonly string[] {

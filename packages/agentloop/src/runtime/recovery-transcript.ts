@@ -21,6 +21,7 @@ export interface RecoveryTranscript {
     checkpointEventSeq?: number;
     unfinishedToolCalls: readonly Readonly<{ toolCallId: string; toolName: string }>[];
     candidateOutputs: readonly string[];
+    candidateRejections: readonly { readonly output: string; readonly feedback: string }[];
     decisionLedger: readonly RuntimeDecisionCommit[];
   }>;
 }
@@ -62,16 +63,38 @@ export function reconstructRecoveryTranscript(input: {
   stepId: string;
   events: readonly RecoveryEvent[];
 }): RecoveryTranscript {
-  const start = lastStepStart(input.events, input.stepId);
-  const scope = start === -1 ? [] : input.events.slice(start + 1);
+  // A resumed Step can have several execution segments. Retain all of its
+  // committed work without leaking exchanges from other Plan leaves.
+  let activeStepId: unknown;
+  const scope = input.events.filter((event) => {
+    if (event.type === "plan.step.started") {
+      activeStepId = event.data.stepId;
+      return false;
+    }
+    return activeStepId === input.stepId;
+  });
   const outcomes = new Map<string, ToolOutcome>();
   const assistants: AssistantCheckpoint[] = [];
   const candidateOutputs: string[] = [];
+  const candidateRejections: Array<{ output: string; feedback: string }> = [];
   const humanResponses: HumanLoopResponseEvent[] = [];
   const humanLoopRequests = new Map<string, HumanLoopRequestSnapshot>();
   const toolCallCommitted = new Map<string, { name: string; arguments: unknown; seq: number }>();
   const coveredToolCallIds = new Set<string>();
+  const committedResultRefs = new Map<string, RuntimeResultRef>();
   for (const event of scope) {
+    if (event.type !== "tool.result_committed" || typeof event.data.toolCallId !== "string") continue;
+    const ref = parseRuntimeResultRef(event.data.resultRef);
+    if (ref !== undefined) committedResultRefs.set(event.data.toolCallId, ref);
+  }
+  for (const event of scope) {
+    if (event.type === "candidate.rejected" && typeof event.data.output === "string") {
+      candidateRejections.push({
+        output: event.data.output,
+        feedback: typeof event.data.feedback === "string" ? event.data.feedback : "Completion was rejected.",
+      });
+      continue;
+    }
     if (event.type === "human_loop.answered") {
       humanResponses.push({
         ...(typeof event.data.requestId === "string" ? { requestId: event.data.requestId } : {}),
@@ -130,7 +153,7 @@ export function reconstructRecoveryTranscript(input: {
     const toolCallId = typeof event.data.toolCallId === "string" ? event.data.toolCallId : undefined;
     if (toolCallId === undefined) continue;
     if (event.type === "tool.completed" && typeof event.data.result === "string") {
-      const resultRef = parseRuntimeResultRef(event.data.resultRef);
+      const resultRef = committedResultRefs.get(toolCallId) ?? parseRuntimeResultRef(event.data.resultRef);
       const content = attachResultRef(event.data.result, resultRef);
       const classifiedOperation = classifyToolOperationOutcome(event.data.result);
       const operationStatus = operationStatusFromEvent(event.data.operationStatus)
@@ -278,6 +301,7 @@ export function reconstructRecoveryTranscript(input: {
       ...(checkpointEventSeq === undefined ? {} : { checkpointEventSeq }),
       unfinishedToolCalls,
       candidateOutputs,
+      candidateRejections,
       decisionLedger: decisionCommitsFromEvents(scope),
     },
   };
@@ -352,15 +376,6 @@ function humanLoopResolution(request: HumanLoopRequestSnapshot, value: unknown):
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function lastStepStart(events: readonly RecoveryEvent[], stepId: string): number {
-  let index = -1;
-  for (let current = 0; current < events.length; current += 1) {
-    const event = events[current];
-    if (event.type === "plan.step.started" && event.data.stepId === stepId) index = current;
-  }
-  return index;
 }
 
 function asToolCalls(value: unknown): ModelToolCall[] {

@@ -35,6 +35,8 @@ export interface CanonicalGoalGap {
   readonly suggestedAction: FailedBoundary["suggestedRepairShape"];
   readonly openedAt: number;
   readonly resolvedAt?: number;
+  /** Ordered owners of this same unresolved gap; Plan revisions do not reset it. */
+  readonly repairStepIds?: readonly string[];
 }
 
 export interface CanonicalStepProgress {
@@ -265,10 +267,15 @@ export function reviseCanonicalPlan(
   state: CanonicalRunState,
   plan: Pick<ExecutionPlan, "id" | "runId" | "version" | "steps">,
   now = Date.now(),
+  repairs: readonly { readonly gapId: string; readonly replacementStepId: string }[] = [],
 ): CanonicalRunState {
   assertMutable(state);
   if (plan.runId !== state.runId || state.plan?.id !== plan.id) {
     throw conflict("Canonical state cannot bind a revision from another Plan");
+  }
+  if (new Set(repairs.map((repair) => repair.gapId)).size !== repairs.length
+    || repairs.some((repair) => !state.gaps.some((gap) => gap.id === repair.gapId))) {
+    throw conflict("GoalGap repair mappings must identify distinct existing gaps");
   }
   const steps = { ...state.steps };
   for (const step of plan.steps) {
@@ -293,11 +300,16 @@ export function reviseCanonicalPlan(
     plan: Object.freeze({ id: plan.id, version: plan.version }),
     steps: Object.freeze(steps),
     targets: bindTargetOwners(state.targets, plan.steps.filter((step) => step.retiredAt === undefined)),
-    gaps: Object.freeze(state.gaps.map((gap) =>
-      gap.targetId === undefined && gap.stepId !== undefined && steps[gap.stepId]?.status === "retired" && gap.status === "open"
-        ? { ...gap, status: "resolved" as const, resolvedAt: now }
-        : gap
-    )),
+    gaps: Object.freeze(state.gaps.map((gap) => {
+      const repair = repairs.find((item) => item.gapId === gap.id);
+      if (repair === undefined) return gap;
+      if (gap.status !== "open" || gap.stepId === undefined || steps[gap.stepId]?.status !== "retired"
+        || steps[repair.replacementStepId]?.status !== "pending") {
+        throw conflict("GoalGap repair must transfer an open retired-step gap to an admitted pending Step");
+      }
+      return Object.freeze({ ...gap, stepId: repair.replacementStepId,
+        repairStepIds: Object.freeze([...(gap.repairStepIds ?? [gap.stepId]), repair.replacementStepId]) });
+    })),
   }, now);
 }
 
@@ -322,10 +334,7 @@ export function recordCanonicalAssessment(
   assertMutable(state);
   const step = requiredStep(state, assessment.stepId);
   const evidenceRefs = canonicalEvidenceRefs(evidence);
-  const otherGaps = state.gaps.map((gap) =>
-    gap.targetId === undefined && gap.stepId === assessment.stepId && gap.status === "open"
-      ? { ...gap, status: "resolved" as const, resolvedAt: now }
-      : gap);
+  const currentGap = state.gaps.find((gap) => gap.targetId === undefined && gap.stepId === assessment.stepId && gap.status === "open");
   const acceptedTargetIds = new Set(assessment.criteria
     .filter((criterion) => criterion.satisfied && criterion.targetId !== undefined)
     .map((criterion) => criterion.targetId!)
@@ -349,7 +358,7 @@ export function recordCanonicalAssessment(
       }]),
     })];
   }));
-  const progressedGaps = otherGaps.map((gap) =>
+  const progressedGaps = state.gaps.map((gap) =>
     gap.status === "open" && gap.targetId !== undefined && acceptedTargetIds.has(gap.targetId)
       ? { ...gap, status: "resolved" as const, resolvedAt: now }
       : gap);
@@ -375,14 +384,15 @@ export function recordCanonicalAssessment(
     ? "blocked" as const
     : "repairable" as const;
   const gap = boundary === undefined ? undefined : Object.freeze({
-    id: randomUUID(),
+    id: currentGap?.id ?? randomUUID(),
     stepId: assessment.stepId,
     status: "open" as const,
     missingEvidenceKinds: Object.freeze([...boundary.missingEvidenceKinds]),
     violatedSkillRequirements: Object.freeze([...boundary.violatedSkillRequirements]),
-    evidenceRefs: Object.freeze([...new Set([...boundary.reusableEvidenceRefs, ...evidenceRefs])]),
+    evidenceRefs: Object.freeze([...new Set([...(currentGap?.evidenceRefs ?? []), ...boundary.reusableEvidenceRefs, ...evidenceRefs])]),
     suggestedAction: boundary.suggestedRepairShape,
-    openedAt: now,
+    openedAt: currentGap?.openedAt ?? now,
+    repairStepIds: currentGap?.repairStepIds ?? Object.freeze([assessment.stepId]),
   });
   return next(state, {
     phase: status === "blocked" ? "blocked" : "executing",
@@ -394,7 +404,9 @@ export function recordCanonicalAssessment(
       updatedAt: now,
     }),
     targets: Object.freeze(targets),
-    gaps: Object.freeze(gap === undefined ? progressedGaps : [...progressedGaps, gap]),
+    gaps: Object.freeze(gap === undefined ? progressedGaps
+      : currentGap === undefined ? [...progressedGaps, gap]
+      : progressedGaps.map((existing) => existing.id === gap.id ? gap : existing)),
   }, now);
 }
 

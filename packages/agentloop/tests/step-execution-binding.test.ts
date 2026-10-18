@@ -2,13 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { admitPlan } from "../src/planning/admission.ts";
 import {
+  planningCapabilitiesFromSkills,
   planningCapabilitiesFromTools,
+  requiredToolSourceIdsForConversationTurn,
   resolveToolNamesForCapabilities,
+  reusableToolSourceIdsForContinuation,
   unsatisfiedToolCapabilities,
 } from "../src/planning/step-execution-binding.ts";
-import type { PlanningToolSummary } from "../src/planning/contracts.ts";
+import type { ConversationTurnResolution, ConversationWorkingSet, PlanningToolSummary } from "../src/planning/contracts.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
 import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
+import { createRuntimeResult, createRuntimeResultCard } from "../src/runtime/runtime-result.ts";
+import type { PrivateSkill } from "../src/skills/skill-service.ts";
 
 const tools: readonly PlanningToolSummary[] = [
   {
@@ -29,6 +34,188 @@ const tools: readonly PlanningToolSummary[] = [
   { name: "computer_write_file", description: "Write an artifact" },
   { name: "materialize_result_json", description: "Materialize an authorized JSON Runtime Result" },
 ];
+
+test("a local-script source provider executes in a conversation leaf without requiring artifact writing", () => {
+  const runId = "run-local-script-source-answer";
+  const skill = {
+    id: "discovered:company-registry",
+    name: "company-registry",
+    description: "Read company registration facts from a bounded API script.",
+    agentLoop: {
+      roles: ["source_provider"],
+      artifactKinds: ["none"],
+      sourceKinds: ["api"],
+      qaKinds: [],
+      executionProfiles: ["local_script"],
+      producesEvidenceKinds: ["source_summary", "explicit_caveats"],
+    },
+  } as PrivateSkill;
+  const capabilityId = `skill_source_provider.api.${skill.id}`;
+  const localTools = [
+    { name: "load_skill", description: "Load the selected Skill" },
+    { name: "computer_run_command", description: "Run a selected Skill script" },
+  ];
+  const understanding = understandTask({
+    objective: "What kind of company is Example Industrial Supply?",
+    resolvedTaskIntent: {
+      schema: "agentloop.conversationTaskIntent/v1",
+      operation: "lookup",
+      requiresExecution: true,
+      deliverables: [{
+        targetId: "company-explanation",
+        purpose: "Explain the company's nature, main business, and market role.",
+        expectedArtifactCount: 1,
+        action: "none",
+        kind: "none",
+        surface: "conversation",
+      }],
+    },
+  });
+
+  const plan = admitPlan({
+    runId,
+    canonicalState: createCanonicalRunState({ runId, userInput: "What kind of company is Example Industrial Supply?", understanding, now: 1 }),
+    proposal: {
+      goal: "Explain the company using the selected registry source.",
+      selectedSkillIds: [skill.id],
+      steps: [{
+        id: "explain-company",
+        objective: "Use registration evidence to answer the user's company question.",
+        dependencies: [],
+        skillIds: [skill.id],
+        targetIds: ["company-explanation"],
+        role: "deliver",
+        requiredCapabilities: [capabilityId, "conversation_delivery"],
+        evidenceContract: { requiredKinds: ["source_summary", "explicit_caveats"], caveatPolicy: "mark_unverified_facts" },
+        successCriteria: [{ id: "explained", description: "Explain the company directly.", source: "planner" }],
+      }],
+    },
+    availableSkills: [skill],
+    availableToolNames: new Set(localTools.map((tool) => tool.name)),
+    availableTools: localTools,
+    availableCapabilities: [
+      ...planningCapabilitiesFromTools(localTools),
+      ...planningCapabilitiesFromSkills([skill]),
+    ],
+  });
+
+  assert.deepEqual(plan.steps[0]?.requiredCapabilities.sort(), [
+    "conversation_delivery",
+    "skill_instruction_load",
+    "skill_local_script_execution",
+    capabilityId,
+  ].sort());
+  assert.equal(plan.steps[0]?.requiredCapabilities.includes("workspace_artifact_write"), false);
+  assert.equal(plan.steps[0]?.executionBinding.resolvedToolNames.includes("computer_run_command"), true);
+  assert.equal(plan.steps[0]?.executionBinding.sideEffect, "external_read");
+  assert.deepEqual(plan.steps[0]?.executionBinding.evidenceProducers.filter((producer) => producer.evidenceKind === "source_summary"), [{
+    evidenceKind: "source_summary", capabilityId, resolvedToolNames: ["computer_run_command"], skillId: skill.id,
+  }]);
+});
+
+test("continued Runs reuse only ToolSources backed by published completed Step Results", () => {
+  const sourceResult = createRuntimeResult({
+    kind: "step",
+    producer: { runId: "failed-run", planId: "failed-plan", stepId: "source-step" },
+    value: "accepted source evidence",
+    publication: { status: "published", assessmentRef: "source-assessment", decision: "approved" },
+    createdAt: 1,
+  });
+  const resolution = {
+    schema: "agentloop.conversationTurnResolution/v1",
+    mode: "execute",
+    relation: "continue_prior",
+    inputMode: "none",
+    targetRunId: "failed-run",
+    effectiveGoal: "Continue the failed goal.",
+    taskIntent: {
+      schema: "agentloop.conversationTaskIntent/v1",
+      operation: "composite",
+      requiresExecution: true,
+      deliverables: [],
+    },
+    evidenceStrategy: "source_grounded",
+    sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+    evidenceDemand: "source_grounded",
+    userConstraints: [],
+    source: "model_guarded",
+  } as const satisfies ConversationTurnResolution;
+  const sourceBinding = {
+    schema: "agentloop.stepExecutionBinding/v1",
+    requiredCapabilities: ["data_asset.ods_read"],
+    resolvedToolNames: ["mcp_ontoflow_jtbc_call_rdb_sql_api_query"],
+    evidenceProducers: [],
+    sourceKinds: ["database"],
+    sideEffect: "external_read",
+    evidenceKinds: ["source_summary"],
+    targetIds: [],
+    requiredToolSourceIds: ["ontoflow-jtbc"],
+  } as const;
+  const workset: ConversationWorkingSet = {
+    schema: "conversation.workset/v1",
+    conversationId: "conversation",
+    runCount: 1,
+    planCursors: [{
+      runId: "failed-run",
+      planId: "failed-plan",
+      goal: "Acquire ODS evidence and deliver reports.",
+      status: "failed",
+      selectedSkillIds: [],
+      steps: [{
+        id: "source-step",
+        position: 0,
+        status: "completed",
+        objective: "Acquire ODS evidence.",
+        dependencies: [],
+        skillIds: [],
+        requiredCapabilities: ["data_asset.ods_read"],
+        executionBinding: sourceBinding,
+      }, {
+        id: "failed-step",
+        position: 1,
+        status: "failed",
+        objective: "Produce the remaining report.",
+        dependencies: ["source-step"],
+        skillIds: [],
+        requiredCapabilities: [],
+        executionBinding: { ...sourceBinding, requiredToolSourceIds: ["unpublished-source"] },
+      }],
+    }],
+    resultCards: [createRuntimeResultCard({
+      result: sourceResult,
+      goal: "Acquire ODS evidence.",
+      summary: "accepted source evidence",
+      summaryTruncated: false,
+    })],
+    reusableArtifacts: [],
+    failedBoundaries: [],
+    recommendedCapabilities: { skillIds: [], capabilityIds: [] },
+  };
+
+  assert.deepEqual(reusableToolSourceIdsForContinuation({ resolution, workset }), ["ontoflow-jtbc"]);
+  assert.deepEqual(requiredToolSourceIdsForConversationTurn({
+    input: "继续",
+    effectiveGoal: "Continue the ODS task using ontoflow-jtbc evidence.",
+    allowedTools: tools,
+    resolution,
+    workset,
+  }), []);
+  assert.deepEqual(reusableToolSourceIdsForContinuation({
+    resolution: { ...resolution, inputMode: "refresh_sources" },
+    workset,
+  }), []);
+  assert.deepEqual(requiredToolSourceIdsForConversationTurn({
+    input: "Refresh source data with ontoflow-jtbc.",
+    effectiveGoal: "Refresh the ODS evidence.",
+    allowedTools: tools,
+    resolution: { ...resolution, inputMode: "refresh_sources" },
+    workset,
+  }), ["ontoflow-jtbc"]);
+  assert.deepEqual(reusableToolSourceIdsForContinuation({
+    resolution,
+    workset: { ...workset, resultCards: [] },
+  }), []);
+});
 
 test("ToolSource constraints retain Runtime-owned capabilities beside the bound MCP Tool", () => {
   const available = new Set(tools.map((tool) => tool.name));

@@ -21,6 +21,22 @@ function producerBindings(
   return kinds.map((evidenceKind) => ({ evidenceKind, capabilityId, resolvedToolNames: [toolName] }));
 }
 
+test("a command-backed source requires the bound Skill's authenticated workflow receipt", () => {
+  const policy = runtimeStepToolProgressPolicy(["source_summary"], {
+    evidenceProducers: [{ evidenceKind: "source_summary", capabilityId: "skill_source_provider.api.records", skillId: "records",
+      resolvedToolNames: ["computer_run_command"] }],
+  });
+  const kinds = { satisfied: ["source_summary"], caveated: [], failed: [] };
+  for (const skillId of [undefined, "unrelated", "records"]) {
+    const state = deriveRuntimeStepEvidenceState({ policy, evidence: [{ toolCallId: "query", toolName: "computer_run_command", isError: false,
+      result: JSON.stringify({ exitCode: 0, evidenceReceipt: { schema: "agentloop.toolEvidenceReceipt/v1", evidenceKinds: kinds },
+        ...(skillId === undefined ? {} : { workflowEvidenceReceipt: { schema: "agentloop.skillWorkflowEvidenceReceipt/v1",
+          skill: { skillId, skillName: skillId, executorId: "query", actionId: "read" }, evidenceKinds: kinds } }) }),
+    }] });
+    assert.equal(state?.satisfiedEvidenceKinds.includes("source_summary"), skillId === "records");
+  }
+});
+
 function fixture(schema: boolean, caveats: boolean): StepAssessmentInput {
   const requiredKinds = ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const;
   return {

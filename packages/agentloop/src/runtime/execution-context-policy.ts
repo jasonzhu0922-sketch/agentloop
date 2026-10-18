@@ -80,6 +80,7 @@ export function buildStepRuntimeContextSnapshot(input: {
           id: input.step.id,
           objective: input.step.objective,
           role: input.step.role,
+          requiredFacts: input.step.requiredFacts,
           requiredCapabilities: input.step.requiredCapabilities,
           executionBinding: input.step.executionBinding,
           resolvedToolNames,
@@ -110,6 +111,7 @@ export function buildStepRuntimeContextSnapshot(input: {
           .map((item) => ({
             id: item.id,
             objective: item.objective,
+            requiredFacts: item.requiredFacts,
             status: item.status,
             requiredCapabilities: item.requiredCapabilities,
             executionBinding: item.executionBinding,
@@ -467,6 +469,8 @@ function buildEvidenceAcquisitionDiscipline(input: {
     "When several facts can be discovered from the same source family, fetch them in the same turn and prefer batch-capable or windowed reads over serial one-fact-at-a-time loops.",
     "Use visible_read_files batches for multiple visible file reads, read_source chunk windows for consecutive uploaded source chunks, and multiple web queries only when they are genuinely independent.",
     "Do not wait for Assessment to ask for the next obvious fact if the same source family can provide it now.",
+    "Before stating an exact or current fact, identify the readable committed source text that supports it and check its date and scope. Search titles, snippets, URLs, successful-fetch receipts, and previous drafts are discovery or process evidence; they do not establish missing facts.",
+    "If source text is absent, corrupted, truncated before the relevant passage, or contradictory, read the needed existing content window or obtain a readable source. Never fill missing names, dates, roles, or values from memory or an earlier rejected answer; report unresolved facts explicitly.",
   ];
   return lines.join(" ");
 }

@@ -1,6 +1,8 @@
 import type {
   ArtifactTarget,
   CapabilitySideEffect,
+  ConversationTurnResolution,
+  ConversationWorkingSet,
   EvidenceContract,
   EvidenceKind,
   PlanStep,
@@ -37,6 +39,7 @@ export function createStepExecutionBinding(input: {
   readonly artifactTargets?: readonly ArtifactTarget[];
   readonly availableToolNames: ReadonlySet<string>;
   readonly availableTools?: readonly PlanningToolSummary[];
+  readonly availableSkills?: readonly PrivateSkill[];
   readonly availableCapabilities: readonly PlanningCapability[];
   readonly evidenceContract?: EvidenceContract;
 }): StepExecutionBinding {
@@ -55,11 +58,18 @@ export function createStepExecutionBinding(input: {
   const evidenceProducers = evidenceKinds.flatMap((evidenceKind) => requiredCapabilities.flatMap((capabilityId) => {
     const capability = capabilityById.get(capabilityId);
     if (capability?.produces.includes(evidenceKind) !== true) return [];
+    const scriptProvider = (input.availableSkills ?? []).find((skill) =>
+      input.step.skillIds.includes(skill.id)
+      && skill.agentLoop?.roles.includes("source_provider")
+      && skill.agentLoop.executionProfiles?.includes("local_script")
+      && skill.agentLoop.sourceKinds.some((kind) => skillSourceProviderCapabilityId(skill.id, kind) === capabilityId)
+    );
     return [{
       evidenceKind,
       capabilityId,
+      ...(scriptProvider === undefined ? {} : { skillId: scriptProvider.id }),
       resolvedToolNames: resolveToolNamesForCapabilities(
-        [capabilityId],
+        scriptProvider === undefined ? [capabilityId] : ["skill_local_script_execution"],
         input.availableToolNames,
         input.availableTools,
         requiredToolSourceIds,
@@ -254,6 +264,53 @@ export function requiredToolSourceIdsFromInput(input: string, tools: readonly Pl
     .map((source) => source.id);
 }
 
+/**
+ * Returns ToolSources already represented by accepted Step Results from the
+ * exact failed Run being continued. This is provenance-preserving reuse, not
+ * a projection from prior prose or an artifact path.
+ */
+export function reusableToolSourceIdsForContinuation(input: {
+  readonly resolution: ConversationTurnResolution | undefined;
+  readonly workset: ConversationWorkingSet | undefined;
+}): string[] {
+  const { resolution, workset } = input;
+  if (
+    resolution?.relation !== "continue_prior"
+    || resolution.inputMode === "refresh_sources"
+    || resolution.targetRunId === undefined
+  ) return [];
+  const publishedStepIds = new Set((workset?.resultCards ?? [])
+    .filter((card) => card.kind === "step" && card.producer.runId === resolution.targetRunId)
+    .flatMap((card) => card.producer.stepId === undefined ? [] : [card.producer.stepId]));
+  if (publishedStepIds.size === 0) return [];
+  const cursor = workset?.planCursors.find((item) => item.runId === resolution.targetRunId);
+  if (cursor === undefined) return [];
+  return uniqueStrings(cursor.steps.flatMap((step) =>
+    step.status === "completed" && publishedStepIds.has(step.id)
+      ? step.executionBinding.requiredToolSourceIds ?? []
+      : []
+  ));
+}
+
+export function requiredToolSourceIdsForConversationTurn(input: {
+  readonly input: string;
+  readonly effectiveGoal: string;
+  readonly allowedTools: readonly PlanningToolSummary[];
+  readonly resolution: ConversationTurnResolution | undefined;
+  readonly workset: ConversationWorkingSet | undefined;
+}): string[] {
+  const reusesBoundPriorResult = input.resolution?.targetResult !== undefined
+    && input.resolution.inputMode === "prior_result"
+    && input.resolution.evidenceDemand === "none";
+  if (reusesBoundPriorResult) return [];
+  const required = requiredToolSourceIdsFromInput(`${input.input}\n${input.effectiveGoal}`, input.allowedTools);
+  const reusable = new Set(reusableToolSourceIdsForContinuation({
+    resolution: input.resolution,
+    workset: input.workset,
+  }));
+  return required.filter((sourceId) => !reusable.has(sourceId));
+}
+
 export function unknownToolSourceIds(
   sourceIds: readonly string[],
   availableTools: readonly PlanningToolSummary[],
@@ -417,6 +474,7 @@ function inferSideEffect(capabilities: readonly string[]): CapabilitySideEffect 
   ) return "workspace_write";
   if (capabilities.includes("web_research")) return "external_read";
   if (capabilities.includes("external_api_call")) return "external_read";
+  if (capabilities.includes("skill_local_script_execution")) return "external_read";
   if (capabilities.includes("custom_tool_call")) return "workspace_write";
   if (
     capabilities.includes("uploaded_source_read")
@@ -513,6 +571,7 @@ const CAPABILITY_TOOL_BINDINGS: Record<string, readonly string[]> = {
     "computer_aggregate_table_artifact",
   ],
   workspace_command_computation: ["computer_run_command"],
+  skill_local_script_execution: ["computer_run_command"],
   workspace_artifact_write: [
     "computer_write_file",
     "computer_patch_file",
@@ -640,6 +699,17 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
     sideEffect: "workspace_write",
     risk: "medium",
     constraints: ["requires computer_run_command and immutable workspace input references"],
+  },
+  {
+    id: "skill_local_script_execution",
+    category: "skill_execution",
+    label: "Execute selected Skill local script",
+    description: "Run a selected Skill's bounded local query or analysis script without asserting that it creates a user-visible workspace artifact.",
+    produces: ["explicit_caveats"],
+    sourceKinds: [],
+    sideEffect: "none",
+    risk: "medium",
+    constraints: ["requires computer_run_command and a selected Skill declaring executionProfiles: local_script"],
   },
   {
     id: "external_api_call",

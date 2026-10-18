@@ -72,6 +72,8 @@ test("web snapshot -> projected ref -> exact read -> consumed summary -> restore
   assert.deepEqual(initial.contentLocation, web.contentLocation);
   assert.equal(initial.contentSummary.properties.items.count, 10);
   assert.equal(initial.content, undefined);
+  assert.equal(initial.sourceContent.text, source);
+  assert.equal(initial.sourceContent.complete, true);
   assert.match(initial.instruction, /Runtime computes the content digest/);
 
   const args = { path: initial.contentLocation.path, characterOffset: 0, characterLimit: 12000 };

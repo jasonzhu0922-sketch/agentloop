@@ -272,6 +272,8 @@ test("ContextAssembler preserves the existing file Result navigation after compa
     content: "window",
   });
   const messages: ModelMessage[] = [
+    { role: "user", content: "Inspect the existing source file." },
+    { role: "assistant", content: "Prior inspection established the source location. ".repeat(100) },
     { role: "assistant", content: "", toolCalls: [{ id: "read-source", name: "computer_read_file", arguments: { path: "src/song.py", characterOffset: 6_000, characterLimit: 6_000 } }] },
     { role: "tool", toolCallId: "read-source", name: "computer_read_file", content: readResult, isError: false },
   ];
@@ -316,6 +318,7 @@ test("ContextAssembler preserves the existing file Result navigation after compa
     emit: async (event) => { events.push(event); },
   });
 
+  assert.equal(await assembler.forceCompactForCompletionRepair(messages, []), true);
   const firstAssembly = await assembler.assemble(messages, []);
   assert.ok(events.some((event) => event.type === "context.compacted"));
   assert.ok(firstAssembly.contextEpoch > 0);
@@ -487,6 +490,47 @@ test("ContextAssembler preserves a bounded web-page preview in structured eviden
   assert.match(fact?.textPreview ?? "", /measurable process controls/);
   assert.ok((fact?.textPreview?.length ?? 0) <= 1_500);
 });
+
+for (const length of [2_000, 15_000]) {
+  test(`web source text beyond navigation reaches execution and assessment with truthful completeness (${length})`, async () => {
+    const text = ("网站导航 ".repeat(250) + "董事会决议：董事长为甲，总裁为乙。" + "补充正文 ".repeat(4_000)).slice(0, length);
+    const decoding = { encoding: "gbk", source: "http_header", lossy: false, replacementCharacters: 0 };
+    const result = JSON.stringify({
+      schema: "agentloop.webFetch/v1", url: "https://example.test/announcement", content: text,
+      truncated: false, decoding,
+      evidenceReceipt: { schema: "agentloop.toolEvidenceReceipt/v1", sourceType: "web_page",
+        sourceRefs: [{ url: "https://example.test/announcement", decoding }],
+        facts: [{ textPreview: text.slice(0, 800) }], evidenceKinds: { satisfied: ["source_read", "source_summary"], caveated: [], failed: [] } },
+    });
+    const projected: string[] = [];
+    await runAgentLoop({
+      runId: `web-source-${length}`, systemPrompt: "依据来源回答", input: "查询公告中的人事信息", maxSteps: 3,
+      grant: createCapabilityGrant({ runId: `web-source-${length}`, actorUserId: "user", depth: 0, allowedToolNames: ["webfetch"], allowedSkillIds: [] }),
+      tools: new ToolRegistry([{ name: "webfetch", description: "Fetch", inputSchema: { type: "object" }, executionMode: "parallel", replaySafe: true,
+        parse: (value) => value, execute: async () => JSON.parse(result) }]),
+      model: { limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 }, complete: async (request) => {
+        const source = request.messages.find((message) => message.role === "tool");
+        if (!source) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "fetch", name: "webfetch", arguments: {} }] };
+        projected.push(source.content);
+        return { content: "董事长为甲，总裁为乙。", finishReason: "stop", toolCalls: [] };
+      } },
+      evaluateCandidate: async (candidate) => {
+        projected.push(candidate.projectedToolEvidence[0]!.result);
+        return { approved: true, feedback: "" };
+      },
+    });
+    assert.equal(projected.length, 2);
+    for (const value of projected) {
+      const projection = JSON.parse(value.split("\n\n")[0]);
+      assert.match(projection.sourceContent.text, /董事长为甲，总裁为乙/);
+      assert.equal(projection.sourceContent.text, text.slice(0, 12_000));
+      assert.equal(projection.sourceContent.complete, length <= 12_000);
+      assert.equal(projection.sourceContent.totalCharacters, length);
+      assert.deepEqual(projection.sourceContent.decoding, decoding);
+      assert.deepEqual(projection.evidenceReceipt.sourceRefs[0].decoding, decoding);
+    }
+  });
+}
 
 test("ContextAssembler preserves structured MCP route facts in projected evidence", async () => {
   const routeFacts = [
