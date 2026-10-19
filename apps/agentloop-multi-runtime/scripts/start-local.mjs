@@ -21,6 +21,7 @@ const publicRouterUrl = process.env.ROUTER_URL ?? `http://${publicRouterHost}:${
 const dispatchToken = process.env.RUNTIME_DISPATCH_TOKEN ?? "development-dispatch-token-123";
 const attachmentToken = process.env.RUNTIME_ATTACHMENT_TOKEN ?? "development-attachment-token-123";
 const runtimeDataRoot = resolve(appRoot, process.env.RUNTIME_DATA_ROOT ?? "./data/local");
+const localAgentDatabasePath = resolve(appRoot, process.env.LOCAL_AGENT_DATABASE_PATH ?? join(runtimeDataRoot, "local-agent", "agentloop.db"));
 const sharedStateDatabasePath = resolve(appRoot, process.env.AGENTLOOP_STATE_SQLITE_PATH ?? join(runtimeDataRoot, "agentloop.db"));
 const sharedWorkspaceRoot = resolve(appRoot, process.env.RUNTIME_WORKSPACE_ROOT ?? join(runtimeDataRoot, "workspace"));
 const providerConfigPath = resolve(
@@ -51,6 +52,7 @@ if (providerEnvFileSetting !== undefined && !existsSync(providerEnvFile)) {
 }
 const providerEnvFiles = existsSync(providerEnvFile) ? [providerEnvFile] : [];
 const localEnvFiles = existsSync(join(appRoot, ".env")) ? [join(appRoot, ".env")] : [];
+await mkdir(dirname(localAgentDatabasePath), { recursive: true });
 // Local development has no container image to own execution dependencies.
 // Provision them before launching Hosts, then make the venv the first PATH entry.
 const runtimeToolsBin = await ensureLocalRuntimeTools({ appRoot });
@@ -132,7 +134,7 @@ children.push(start("local-agent", "local-agent-runtime/src/main.ts", {
   ROUTER_URL: publicRouterUrl,
   WEB_ORIGIN: defaultWebOrigins,
   LOCAL_AGENT_STATE_PATH: process.env.LOCAL_AGENT_STATE_PATH ?? "./data/local-agent/device-identity.json",
-  LOCAL_AGENT_DATABASE_PATH: process.env.LOCAL_AGENT_DATABASE_PATH ?? join(runtimeDataRoot, "local-agent", "agentloop.db"),
+  LOCAL_AGENT_DATABASE_PATH: localAgentDatabasePath,
   LOCAL_AGENT_WORKSPACE_ROOT: process.env.LOCAL_AGENT_WORKSPACE_ROOT ?? join(runtimeDataRoot, "local-agent", "workspace"),
   LOCAL_AGENT_SKILL_PACKAGE_STORE_ROOT: process.env.LOCAL_AGENT_SKILL_PACKAGE_STORE_ROOT ?? join(runtimeDataRoot, "local-agent", "skill-packages"),
   LOCAL_AGENT_RUNTIME_DATA_ROOT: process.env.LOCAL_AGENT_RUNTIME_DATA_ROOT ?? join(runtimeDataRoot, "local-agent", "runtimes"),

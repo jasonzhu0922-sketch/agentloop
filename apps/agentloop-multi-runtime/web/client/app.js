@@ -16,6 +16,8 @@ import { createRunState, releaseTerminalRun } from "./state/run-state.js";
 import { isNearBottom, nextScrollTop } from "./ui/scroll-follow.js";
 import { autoResizeComposerInput, resetComposerInput, shouldSubmitComposerOnKeydown } from "./ui/composer-input.js";
 import { hasSelectedTextWithin } from "./ui/message-selection.js";
+import { createClientId } from "./ui/client-id.js";
+import { modelSelectionStatus } from "./ui/model-selection-status.js";
 import { observeAssignment } from "./api/assignment-stream.js";
 import { createRouterClient, routerProxyPath } from "./api/router-client.js";
 import { createLocalAgentClient } from "./local-runtime/local-agent-client.js";
@@ -59,6 +61,7 @@ let artifactPanelWidth = loadArtifactPanelWidth();
 let resizeState;
 let localSkillPackages = [];
 let mcpJsonImportTarget;
+let availableModels = [];
 const liveUpdates = createCoalescedUpdater({ render: renderPendingLiveAssistantMessages, persist: saveSessions });
 
 const nativeFetch = window.fetch.bind(window);
@@ -92,6 +95,7 @@ $("theme-toggle")?.addEventListener("click", () => { document.documentElement.da
 $("new-chat").addEventListener("click", () => { conversationState.activeId = newConversation().id; resetArtifactWorkspace(); updateLocalControls(); render(); $("input").focus(); });
 $("composer").addEventListener("submit", (event) => { event.preventDefault(); void runComposerAction(); });
 $("submit").addEventListener("click", () => void runComposerAction());
+$("model-select").addEventListener("change", () => setStatus(modelSelectionStatus(availableModels, $("model-select").value), "ok"));
 $("messages").addEventListener("click", (event) => {
   const button = event.target instanceof Element ? event.target.closest("[data-copy-message]") : null;
   if (!(button instanceof HTMLButtonElement)) return;
@@ -208,7 +212,7 @@ function reconcileRunsAfterPageReturn() {
 }
 
 function newConversation() {
-  const conversation = { id: crypto.randomUUID(), title: "新对话", createdAt: Date.now(), updatedAt: Date.now(), messages: [], pendingAttachments: [] };
+  const conversation = { id: createClientId(), title: "新对话", createdAt: Date.now(), updatedAt: Date.now(), messages: [], pendingAttachments: [] };
   conversationState.sessions.unshift(conversation);
   saveSessions();
   return conversation;
@@ -1608,9 +1612,12 @@ async function loadModels() {
     const response = await fetch(`${api}/v1/models`);
     if (!response.ok) throw new Error(`router_unavailable:${response.status}`);
     const body = await response.json();
-    const models = Array.isArray(body.models) ? body.models : [];
-    $("model-select").innerHTML = `<option value="">使用 Runtime 默认模型</option>` + models.map((model) => `<option value="${escapeHtml(model.key)}">${escapeHtml(model.displayName || model.key)}</option>`).join("");
-    if (models[0]) setStatus(models[0].displayName || models[0].key, "ok");
+    availableModels = Array.isArray(body.models) ? body.models : [];
+    const select = $("model-select");
+    const previousSelection = select.value;
+    select.innerHTML = `<option value="">使用 Runtime 默认模型</option>` + availableModels.map((model) => `<option value="${escapeHtml(model.key)}">${escapeHtml(model.displayName || model.key)}</option>`).join("");
+    select.value = availableModels.some((model) => model?.key === previousSelection) ? previousSelection : "";
+    setStatus(modelSelectionStatus(availableModels, select.value), "ok");
   } catch (error) { setStatus(`Router 暂不可达：${error instanceof Error ? error.message : String(error)}`, "error"); }
 }
 
@@ -1661,9 +1668,9 @@ async function submit() {
   runState.activeByConversation.set(conversation.id, activeRun);
   conversation.pendingAttachments = [];
   const submittedAt = Date.now();
-  const userMessage = { id: crypto.randomUUID(), role: "user", text: input, attachments, createdAt: submittedAt };
+  const userMessage = { id: createClientId(), role: "user", text: input, attachments, createdAt: submittedAt };
   const assistantMessage = {
-    id: crypto.randomUUID(), role: "assistant", text: "", reasoning: "", status: "running", events: [], plan: [], createdAt: submittedAt,
+    id: createClientId(), role: "assistant", text: "", reasoning: "", status: "running", events: [], plan: [], createdAt: submittedAt,
     executionLocation: executionTarget,
   };
   setVolatile(assistantMessage, "detailEvents", []);

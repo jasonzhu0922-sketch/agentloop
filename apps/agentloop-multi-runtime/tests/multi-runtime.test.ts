@@ -819,6 +819,8 @@ test("local launcher gives Router and Runtime Hosts the same shared workspace mo
     /LOCAL_AGENT_RUNTIME_ENV_FILE:\s*process\.env\.LOCAL_AGENT_RUNTIME_ENV_FILE \?\? "\.env"/,
     "the local launcher must preserve the Local Agent environment boundary by default",
   );
+  assert.match(source, /await mkdir\(dirname\(localAgentDatabasePath\), \{ recursive: true \}\)/,
+    "a custom local data root must initialize the Local Agent SQLite parent directory before launch");
 });
 
 test("Web runtime config keeps browser API traffic same-origin while the server owns the Router URL", () => {
