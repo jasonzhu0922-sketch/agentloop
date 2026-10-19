@@ -203,6 +203,7 @@ function taskProfileSystemSection(taskProfile: TaskProfile | undefined): string 
       ? {}
       : {
         research: {
+          appliesTo: "web_research_only_after_source_selection",
           depth: taskProfile.researchPolicy.depth,
           maxSearches: taskProfile.researchPolicy.maxSearches,
           maxFetches: taskProfile.researchPolicy.maxFetches,

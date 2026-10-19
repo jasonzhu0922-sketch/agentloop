@@ -2,6 +2,7 @@ import type { PrivateSkill } from "./skill-service.ts";
 import type { SkillExecutionEntrypoint } from "./skill-execution-manifest.ts";
 
 export interface SkillContextOptions {
+  readonly phase?: "planning" | "execution";
   readonly packageRoot?: (skill: PrivateSkill) => string;
   readonly executionCwd?: (skill: PrivateSkill) => string | undefined;
   readonly executionRootEnvName?: (skill: PrivateSkill) => string | undefined;
@@ -22,8 +23,11 @@ export function formatAvailableSkills(
   if (skills.length === 0) return "";
   return [
     "Skills provide specialized instructions and workflows for matching tasks.",
-    "Use load_skill to load the exact body of a Skill before applying that Skill; do not load unrelated catalog entries.",
+    ...(options.phase === "planning"
+      ? ["Use this catalog to compose leaf responsibilities and Skill bindings. Planning cannot call load_skill; the bound execution leaf loads the exact body before applying the Skill."]
+      : ["Use load_skill to load the exact body of a Skill before applying that Skill; do not load unrelated catalog entries."]),
     "The content returned by load_skill is authoritative; do not reconstruct or expand it from the catalog.",
+    "Skill roles, source kinds, and artifact kinds describe separate responsibilities. artifact_kinds=none means the Skill does not own file production; it can still own analysis or source work used by a report in any format. Compose that work with a format producer instead of replacing it because a file was requested.",
     "AgentLoop executionProfiles are stable Runtime capability profiles; local_script means a Skill-bound leaf needs computer_run_command plus load_skill.",
     "<available_skills>",
     ...skills.flatMap((skill) => [
@@ -141,6 +145,9 @@ function formatAgentLoopCatalog(skill: PrivateSkill): string[] {
   ];
   return [
     `    <agentloop ${attributes.join(" ")} />`,
+    ...((metadata.requiredSkillNames?.length ?? 0) === 0
+      ? []
+      : [`    <required_skill_names>${escapeXml(metadata.requiredSkillNames!.join(","))}</required_skill_names>`]),
     ...(metadata.semanticTags === undefined || metadata.semanticTags.length === 0
       ? []
       : [`    <semantic_tags>${escapeXml(metadata.semanticTags.join(","))}</semantic_tags>`]),

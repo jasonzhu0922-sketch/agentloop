@@ -1075,7 +1075,7 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
     artifactKind,
     artifactAction: taskIntent.artifactAction,
     sourceNeed,
-    researchPolicy: taskIntent.researchPolicy,
+    researchPolicy: operationProfileIds.has("web_research") ? taskIntent.researchPolicy : undefined,
     deliverySurface: taskIntent.deliverySurface,
     skillBound: task.availableSkills.length > 0,
     responseOnly: task.responseOnly === true,
@@ -1295,6 +1295,12 @@ function planningRuntimeContext(
         operationProfiles: taskProfile.operations,
         taskProfile,
         candidateSkillRoles: selectedSkillRoles,
+        capabilitySelectionPolicy: [
+          "Choose the workflow from the requested facts and methods, then the source with matching coverage, then the requested delivery format. These responsibilities may be composed in one leaf or through dependency Results.",
+          "A domain analysis Skill is a method/workflow capability; a source_provider supplies observations within its declared scope. Do not treat every Skill as merely a lookup source or assume every source supplies the complete answer.",
+          "Changing a conversational answer to a file adds production and acceptance work; it does not by itself change the subject, metrics, analysis method, or suitable data source. A primary_builder with artifactKinds=[none] may own analysis content while another capability writes the file.",
+          "Compare relevant Skill descriptions and declared source coverage with generic tools. Use web_research when it fits the required evidence, not merely because tools or a search budget are available. Capability availability alone does not prove source access or fact coverage.",
+        ],
         candidateSkillRolePolicy: "These are relevance candidates, not selected Plan dependencies. Include a Skill in submit_outcome_plan.selectedSkillRoles only when a concrete leaf binds and executes that Skill; otherwise omit it.",
         ...(task.continuationSkillIds === undefined || task.continuationSkillIds.length === 0
           ? {}
@@ -1308,7 +1314,7 @@ function planningRuntimeContext(
             researchPlanningPolicy: {
               schema: taskProfile.researchPolicy.schema,
               instruction:
-                "Use this policy only to shape source/research leaves and their evidence contracts; do not add research work to unrelated artifact or direct-answer leaves.",
+                "Conditional web policy: apply these search/fetch budgets only after choosing web_research as an appropriate source capability. This policy does not choose a source channel, require URLs from database/API Skills, or replace a matching domain workflow. Do not add web work merely because source evidence or a file is required.",
               authorityRule: taskProfile.researchPolicy.authorityNeed === "official_required"
                 ? "The user explicitly requires official or exact-source verification. Missing required official evidence may block claims that depend on it."
                 : "Rank sources by relevance, traceability, and reliability. Official or first-party sources are useful when accessible, but are not a completion gate. After bounded attempts, use credible independent or industry sources and deliver the supported summary with explicit caveats.",
@@ -1349,7 +1355,7 @@ function planningRuntimeContext(
       }),
       "</planning_context>",
       formatDynamicPromptContext(taskProfile),
-      formatAvailableSkills(task.availableSkills),
+      formatAvailableSkills(task.availableSkills, { phase: "planning" }),
       ...(runtimeDirective === undefined ? [] : [
         "<runtime_directive>",
         runtimeDirective,

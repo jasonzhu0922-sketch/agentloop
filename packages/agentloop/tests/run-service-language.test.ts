@@ -5,13 +5,33 @@ import { DEFAULT_MAX_STEPS, DEFAULT_RUNNER_SYSTEM_PROMPT, MAX_SUPPORTED_STEP_TUR
 import { SkillService } from "../src/skills/skill-service.ts";
 import type { PrivateSkill } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
-import { understandTask } from "../src/runtime/task-intent.ts";
+import { classifyTaskIntent, understandTask } from "../src/runtime/task-intent.ts";
 import {
   approvingTestAssessor,
   singleStepTestPlanner,
   TEST_MODEL_LIMITS,
   testOwner,
 } from "./runtime-test-helpers.ts";
+
+test("Evidence strength, output format and available web tools do not select the source channel", () => {
+  for (const evidenceDemand of ["lookup_lite", "source_grounded", "strict_user_source"] as const) {
+    for (const suffix of ["", "，最终结果用 html 格式文件展示"]) {
+      const intent = classifyTaskIntent({ objective: `查询分析某公司的员工画像、人数和性别学历分布${suffix}`,
+        evidenceDemand, toolNames: ["websearch", "webfetch", "computer_run_command"] });
+      assert.equal(intent.sourceNeed, evidenceDemand);
+      assert.equal(intent.researchPolicy, undefined);
+    }
+  }
+  const explicit = classifyTaskIntent({ objective: "从网上查询该公司的员工人数", evidenceDemand: "source_grounded" });
+  assert.ok(explicit.researchPolicy);
+  const selectedWeb = classifyTaskIntent({ objective: "取得该公司的员工人数", evidenceDemand: "source_grounded", selectedSourceKinds: ["web"] });
+  assert.ok(selectedWeb.researchPolicy);
+  const selectedDatabase = classifyTaskIntent({ objective: "取得该公司的员工人数", evidenceDemand: "source_grounded", selectedSourceKinds: ["database"] });
+  assert.equal(selectedDatabase.researchPolicy, undefined);
+  assert.equal(selectedDatabase.sourceNeed, "source_grounded");
+  const mixed = classifyTaskIntent({ objective: "核实报告中的人员任职", evidenceDemand: "source_grounded", selectedSourceKinds: ["api", "web"] });
+  assert.ok(mixed.researchPolicy);
+});
 
 for (const explicitlyNamed of [false, true]) {
   test(`intent resolution does not inherit source scope while Planner retains the catalog (explicit=${explicitlyNamed})`, async () => {

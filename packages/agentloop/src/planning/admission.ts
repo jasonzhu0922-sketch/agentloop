@@ -1066,8 +1066,8 @@ function requiresFileProduction(
  * TaskIntent is a Run-level projection.  A multi-target Run can contain both
  * workspace and conversation delivery, so Admission must project that intent
  * through the leaf's exact target ownership before it derives capabilities or
- * evidence gates.  Targetless prerequisite leaves retain the legacy Run-level
- * fallback because they do not themselves claim a terminal delivery target.
+ * evidence gates. Targetless prerequisites own no terminal delivery surface;
+ * they can still require intermediate file capabilities/evidence explicitly.
  */
 function deliveryIntentForStep(
   targetIds: readonly string[],
@@ -1082,7 +1082,9 @@ function deliveryIntentForStep(
   readonly artifactKind?: string;
   readonly sourceNeed?: "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
 } | undefined {
-  if (targetIds.length === 0) return fallback;
+  if (targetIds.length === 0) return fallback?.sourceNeed === undefined
+    ? undefined
+    : { sourceNeed: fallback.sourceNeed };
   const targets = new Map(canonicalTargets.map((target) => [target.targetId, target]));
   const owned = targetIds
     .map((targetId) => targets.get(targetId))

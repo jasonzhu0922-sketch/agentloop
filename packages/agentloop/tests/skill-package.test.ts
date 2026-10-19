@@ -185,6 +185,7 @@ test("AgentLoop execution profiles are exposed in the available Skill catalog", 
       executionProfiles: ["local_script"],
       semanticTags: ["api-catalog"],
       intentExamples: ["查询某个接口的用途、入参和出参"],
+      requiredSkillNames: ["raw-data"],
     },
     package: {
       root: "/skills/api-query",
@@ -201,6 +202,12 @@ test("AgentLoop execution profiles are exposed in the available Skill catalog", 
   assert.match(context, /<semantic_tags>api-catalog<\/semantic_tags>/);
   assert.match(context, /<intent_examples>/);
   assert.match(context, /查询某个接口的用途、入参和出参/);
+  assert.match(context, /<required_skill_names>raw-data<\/required_skill_names>/);
+  assert.match(context, /artifact_kinds=none means the Skill does not own file production/);
+  const planningContext = formatAvailableSkills([skill], { phase: "planning" });
+  assert.match(planningContext, /Planning cannot call load_skill/);
+  assert.doesNotMatch(planningContext, /Use load_skill to load/);
+  assert.doesNotMatch(planningContext, /SECRET BODY/);
   assert.doesNotMatch(context, /SECRET BODY/);
 });
 

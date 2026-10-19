@@ -6,6 +6,8 @@ import type { TaskSpec } from "../src/planning/contracts.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
 import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
+import type { PrivateSkill } from "../src/skills/skill-service.ts";
+import { planningCapabilitiesFromSkills, planningCapabilitiesFromToolNames, skillSourceProviderCapabilityId } from "../src/planning/step-execution-binding.ts";
 
 class RedundantSourceConstraintPlannerModel implements ModelAdapter {
   readonly limits = { contextWindowTokens: 40_000, maxOutputTokens: 2_048 } as const;
@@ -1002,3 +1004,87 @@ test("Planner rejects a ToolSource ID masquerading as a visible directory", asyn
     /sourceConstraint namespaces do not match canonical Runtime inputs; invalid visible_directory IDs: ontoflow-jtbc/,
   );
 });
+
+for (const useDomainWorkflow of [true, false]) {
+  test(`File delivery composes domain work and preserves optional source selection (${useDomainWorkflow ? "database workflow" : "web alternative"})`, async () => {
+    const skills: PrivateSkill[] = [
+      {
+        id: "domain-analysis", ownerUserId: "owner", name: "domain-analysis",
+        description: "Analyze workforce distributions using the reporting source; owns metric definitions and numerical conclusions independently of report format.",
+        instructions: "PRIVATE ANALYSIS METHOD", sourceKind: "package", version: 1, contentHash: "analysis", updatedAt: 1,
+        agentLoop: {
+          roles: ["primary_builder"], artifactKinds: ["none"], sourceKinds: ["database"], qaKinds: [],
+          executionProfiles: ["local_script"], requiredSkillNames: ["report-data"],
+        },
+      },
+      {
+        id: "report-data", ownerUserId: "owner", name: "report-data",
+        description: "Read raw workforce reporting rows and source identity.",
+        instructions: "PRIVATE SOURCE PROTOCOL", sourceKind: "package", version: 1, contentHash: "data", updatedAt: 1,
+        agentLoop: {
+          roles: ["source_provider"], artifactKinds: ["none"], sourceKinds: ["database"], qaKinds: [],
+          executionProfiles: ["local_script"], producesEvidenceKinds: ["source_summary", "structured_extraction_artifact"],
+        },
+      },
+    ];
+    const names = ["load_skill", "computer_run_command", "websearch", "webfetch", "computer_write_file", "verify_artifact_acceptance"];
+    const objective = "Analyze workforce distributions and deliver the result as an HTML file.";
+    const runId = `workflow-format-${useDomainWorkflow}`;
+    const canonicalState = createCanonicalRunState({
+      runId, userInput: objective, now: 1,
+      understanding: understandTask({ objective, toolNames: names, evidenceDemand: "source_grounded", resolvedTaskIntent: {
+        schema: "agentloop.conversationTaskIntent/v1", operation: "composite", requiresExecution: true,
+        deliverables: [{ targetId: "report", purpose: objective, expectedArtifactCount: 1, action: "create", kind: "html", format: "html", surface: "workspace_artifact" }],
+      } }),
+    });
+    const selectedSkillRoles = useDomainWorkflow
+      ? [{ skillId: "domain-analysis", role: "primary_builder" as const, reason: "Owns analysis method." },
+        { skillId: "report-data", role: "source_provider" as const, reason: "Supplies reporting rows." }]
+      : [];
+    const model: ModelAdapter = {
+      limits: { contextWindowTokens: 40_000, maxOutputTokens: 4_096 },
+      async complete(request) {
+        const context = request.runtimeContext?.content ?? "";
+        assert.match(context, /Changing a conversational answer to a file adds production/);
+        assert.doesNotMatch(context, /"researchPlanningPolicy"|"maxSearches"|"source_summary_and_source_urls_are_recorded"/);
+        assert.match(context, /<required_skill_names>report-data<\/required_skill_names>/);
+        assert.match(context, /Planning cannot call load_skill/);
+        assert.doesNotMatch(context, /PRIVATE ANALYSIS METHOD|PRIVATE SOURCE PROTOCOL/);
+        return {
+          content: "", finishReason: "tool_calls", toolCalls: [{ id: "plan", name: "submit_outcome_plan", arguments: {
+            schema: "agentloop.outcomePlan/v2", goal: objective, shape: "fact_then_produce", selectedSkillRoles,
+            leaves: [
+              { id: "facts", objective: "Acquire workforce rows and analyze the requested distributions.", dependsOn: [], role: "fact_acquisition",
+                skillIds: useDomainWorkflow ? ["domain-analysis", "report-data"] : [],
+                requiredCapabilities: useDomainWorkflow
+                  ? ["skill_instruction_load", "skill_local_script_execution", skillSourceProviderCapabilityId(skills[1]!.id, "database")]
+                  : ["web_research"],
+                targetIds: [], evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "mark_unverified_facts" } },
+              { id: "html", objective: "Render the dependency analysis as an HTML report.", dependsOn: ["facts"], role: "produce",
+                skillIds: [], requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"], targetIds: ["report"],
+                evidenceContract: { requiredKinds: ["artifact_path", "artifact_non_empty"], caveatPolicy: "none" } },
+            ],
+          } }],
+        };
+      },
+    };
+    const task: TaskSpec = { runId, canonicalState, availableSkills: skills, availableToolNames: names,
+      selectedSkillRoles: [{ skillId: "domain-analysis", role: "primary_builder", reason: "Candidate for analysis." },
+        { skillId: "report-data", role: "source_provider", reason: "Companion source." }],
+      availableCapabilities: [...planningCapabilitiesFromToolNames(names), ...planningCapabilitiesFromSkills(skills)],
+    };
+    const proposal = await new ModelPlanner(model).plan(task);
+    const admitted = admitPlan({ runId, canonicalState, proposal, availableSkills: skills,
+      availableToolNames: new Set(names), availableCapabilities: task.availableCapabilities! });
+    const facts = admitted.steps.find((step) => step.id === "facts")!;
+    const html = admitted.steps.find((step) => step.id === "html")!;
+    assert.deepEqual(new Set(facts.skillIds), new Set(useDomainWorkflow ? ["domain-analysis", "report-data"] : []));
+    assert.deepEqual(facts.evidenceContract?.requiredKinds, ["source_summary"]);
+    assert.equal(facts.requiredCapabilities.includes("artifact_acceptance"), false);
+    assert.equal(facts.successCriteria.some((c) => c.id.startsWith("artifact_")), false);
+    assert.deepEqual(facts.executionBinding.targetIds, []);
+    assert.equal(html.evidenceContract?.requiredKinds.includes("artifact_acceptance"), true);
+    assert.equal(html.evidenceContract?.requiredKinds.includes("artifact_openable"), true);
+    assert.deepEqual(html.executionBinding.targetIds, ["report"]);
+  });
+}

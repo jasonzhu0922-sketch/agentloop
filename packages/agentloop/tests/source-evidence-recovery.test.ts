@@ -92,6 +92,9 @@ test(`${transport} ${scenario.name} delivers the user goal after exact Result co
         } }],
       modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
         turns += 1;
+        assert.doesNotMatch(request.systemPrompt, /"research"\s*:|"maxSearches"/,
+          "an admitted API/local-script source must not inherit web policy from evidence demand");
+        assert.doesNotMatch(request.runtimeContext?.content ?? "", /"researchPolicy"\s*:|"maxSearches"/);
         if (turns === 1 && sourceSkill) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "load-source", name: "load_skill", arguments: { name: sourceSkill.name } }] };
         if (turns === (sourceSkill ? 2 : 1)) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "records", name: sourceToolName,
           arguments: transport === "api" ? {} : { command: "fixture-node", args: ["scripts/query.mjs", "query"], cwd: "@skills/records-source" } }] };

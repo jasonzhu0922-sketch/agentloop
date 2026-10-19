@@ -6927,7 +6927,7 @@ function executionTaskProfile(
     readonly successCriteria: readonly { readonly id: string; readonly description: string }[];
     readonly toolNames: readonly string[];
     readonly skillNames?: readonly string[];
-    readonly allowResearchPolicy?: boolean;
+    readonly selectedSourceKinds: ExecutionPlan["steps"][number]["executionBinding"]["sourceKinds"];
     readonly practiceProfiles?: readonly import("./practice-profiles.ts").PracticeProfileSelection[];
   },
 ): TaskProfile {
@@ -6938,6 +6938,7 @@ function executionTaskProfile(
       successCriteria: input.successCriteria,
       toolNames: input.toolNames,
       skillNames: input.skillNames,
+      selectedSourceKinds: input.selectedSourceKinds,
     });
   return buildTaskProfile({
     phase: "execution",
@@ -6945,8 +6946,8 @@ function executionTaskProfile(
     operations: [operationProfile],
     practices: input?.practiceProfiles,
     ...(intent?.artifactKind === undefined ? {} : { artifactKind: intent.artifactKind }),
-    ...(intent?.sourceNeed === undefined || input?.allowResearchPolicy !== true ? {} : { sourceNeed: intent.sourceNeed }),
-    ...(intent?.researchPolicy === undefined || input?.allowResearchPolicy !== true ? {} : { researchPolicy: intent.researchPolicy }),
+    ...(intent?.sourceNeed === undefined ? {} : { sourceNeed: intent.sourceNeed }),
+    ...(intent?.researchPolicy === undefined ? {} : { researchPolicy: intent.researchPolicy }),
     ...(intent?.deliverySurface === undefined ? {} : { deliverySurface: intent.deliverySurface }),
     skillBound,
   });
@@ -6971,7 +6972,7 @@ function executionTaskProfileForStep(
     successCriteria: step.successCriteria,
     toolNames: stepResolvedToolNames(step),
     skillNames: skills.map((skill) => skill.name),
-    allowResearchPolicy: stepAllowsResearchPolicy(step),
+    selectedSourceKinds: step.executionBinding.sourceKinds,
     practiceProfiles: taskSemantics?.practiceProfiles,
     ...(ownsArtifactTarget && artifactKind !== undefined ? { artifactKind } : {}),
     ...(ownsArtifactTarget && deliveryTarget !== undefined ? { artifactAction: deliveryTarget.action } : {}),
@@ -7020,17 +7021,6 @@ function executionArtifactFormatForStep(
       : undefined;
   }
   return undefined;
-}
-
-function stepAllowsResearchPolicy(step: ExecutionPlan["steps"][number]): boolean {
-  const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
-  return step.role === "fact_acquisition"
-    || stepHasSourceKind(step, "web")
-    || requiredKinds.includes("source_summary")
-    || requiredKinds.includes("source_urls")
-    || requiredKinds.includes("schema_summary")
-    || requiredKinds.includes("record_counts")
-    || requiredKinds.includes("structured_extraction_artifact");
 }
 
 function buildStepSystemPrompt(
@@ -8087,6 +8077,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "An acknowledgement, thanks, or statement that the user will handle the next action is reply-only: naming prior work does not by itself authorize Runtime to execute that work again.",
       "effectiveGoal must be a self-contained description of the outcome Runtime should now deliver; preserve the latest user constraints without requiring imperative wording.",
       "Preserve the exact requested facts, roles, measures, scope and time in effectiveGoal and every deliverable purpose. Available Skills or source fields describe acquisition options, not permission to narrow the user goal to a provider's scope or replace a requested concept with a related field. A source-specific qualification may be added only when the user requested it or established conversation context requires it.",
+      "Evidence demand is channel-neutral. Do not add public-web, external-source-only, official-site, or database-only restrictions to effectiveGoal unless the user or established context requires them. A requested output format changes delivery, not the domain analysis or data source; capability and workflow selection belong to Planner.",
       "Resolve effectiveGoal, evidenceStrategy, and sourceBinding as one decision. Do not make evidence strategy independent from the task input you selected.",
       "Also return taskIntent as a semantic frame: operation, requiresExecution, and every terminal output family the user requested with stable targetId, user-visible purpose, exact expectedArtifactCount, action, semantic kind, optional concrete format, and delivery surface. targetId/purpose are the immutable identity and acceptance intent of each output family, never a filename. expectedArtifactCount is required, must be a positive integer, and must preserve an explicit requested cardinality; use 1 only when exactly one output is requested. Derive these fields from the full transcript and prior work context, not from isolated action words.",
       "taskIntent.deliverables is an acceptance contract, not an implementation plan. Never promote a helper script, temporary file, manifest, intermediate representation, source summary, or verification output into deliverables merely because execution may create or use it. Include code plus a rendered artifact only when the user explicitly requests both as terminal outputs.",

@@ -2,6 +2,7 @@ import type { ArtifactAction, ArtifactKind, ResearchPolicy, SourceNeed } from ".
 import type { PracticeProfileSelection } from "./practice-profiles.ts";
 import type { UploadedSourceSummary } from "./contracts.ts";
 import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
+import type { SourceKind } from "../planning/contracts.ts";
 
 export type DeliverySurface = "conversation" | "workspace_artifact";
 
@@ -63,6 +64,8 @@ export interface TaskIntentInput {
   readonly userConstraints?: readonly string[];
   readonly successCriteria?: readonly { readonly id: string; readonly description: string }[];
   readonly toolNames?: readonly string[];
+  /** Source channels from the admitted leaf binding, never the available tool catalog. */
+  readonly selectedSourceKinds?: readonly SourceKind[];
   /**
    * Informative only. Skill availability or names must not change user-owned
    * delivery intent: a catalog can contain both artifact builders and
@@ -274,7 +277,7 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
   const artifactAction = inferArtifactAction(text, signals.action);
   const artifactKind = detectRequestedArtifactKind(text, artifactAction);
   const sourceNeed = input.evidenceDemand ?? inferSourceNeedFromIntent(text);
-  const researchPolicy = researchPolicyForIntentText(text, sourceNeed, input.toolNames ?? []);
+  const researchPolicy = researchPolicyForIntentText(text, sourceNeed, input.selectedSourceKinds);
   // `artifactAction` is the canonical action interpretation. It includes
   // explicit native mutations (for example, "修改上一轮 PPT"), which need not
   // also appear in the narrower creation/repair signal list. Requiring both
@@ -671,7 +674,7 @@ export function researchPolicyForIntent(input: TaskIntentInput): ResearchPolicy 
     ...(input.skillNames ?? []),
   ].join("\n"));
   const sourceNeed = input.evidenceDemand ?? inferSourceNeedFromIntent(text);
-  return researchPolicyForIntentText(text, sourceNeed, input.toolNames ?? []);
+  return researchPolicyForIntentText(text, sourceNeed, input.selectedSourceKinds);
 }
 
 export function requestedArtifactKindsFromIntent(input: string): Set<Exclude<ArtifactKind, "none">> {
@@ -862,9 +865,16 @@ function inferSourceNeedFromIntent(text: string): SourceNeed {
 function researchPolicyForIntentText(
   text: string,
   sourceNeed: SourceNeed,
-  _toolNames: readonly string[],
+  selectedSourceKinds: readonly SourceKind[] | undefined,
 ): ResearchPolicy | undefined {
   if (sourceNeed === "none") return undefined;
+  // Evidence strength cannot select a channel. Before admission only an
+  // explicit web request enables web policy; execution uses the exact source
+  // kinds already authorized by the leaf binding, including mixed sources.
+  const webSelected = selectedSourceKinds === undefined
+    ? explicitlyRequestsWebResearch(text)
+    : selectedSourceKinds.includes("web");
+  if (!webSelected) return undefined;
   const freshnessNeed = hasFreshExternalLookupNeed(text)
     ? "current"
     : "none";
