@@ -8,6 +8,7 @@ import type { ArtifactAcceptanceProvider } from "../acceptance/artifact-acceptan
 import { admitPlan, bindRequiredSkillCompanions, reusableSourceEvidenceKindsForTurn } from "../planning/admission.ts";
 import { enforceAdmittedAssessment, ModelStepAssessor, ProfiledRuleStepAssessor } from "../planning/assessor.ts";
 import { AssessmentEvidenceBundleVerifier } from "../planning/runtime-evidence-bundle.ts";
+import { parseRequiredCapabilityReferences, resolveCapabilityRequirements, unavailableCapabilityOutput } from "../planning/capability-requirements.ts";
 import type {
   AssessmentProfileId,
   ConversationStepContext,
@@ -1732,6 +1733,31 @@ export class RunService {
           revision: canonicalState.revision,
         },
       });
+      if (!responseOnly) {
+        const reusesPriorSource = turnResolution?.inputMode === "prior_result"
+          && turnResolution.targetResult !== undefined && turnResolution.evidenceDemand === "none";
+        const availability = resolveCapabilityRequirements(
+          (canonicalState.intent.turnResolution?.requiredCapabilityReferences ?? [])
+            .filter((item) => !reusesPriorSource || item.kind === "skill"),
+          privateSkills,
+          allowedToolSummaries,
+        );
+        if (availability.missing.length > 0) {
+          const output = unavailableCapabilityOutput(availability.missing, input);
+          await emit({
+            type: "planning.capability.unavailable",
+            data: { missingCapabilities: availability.missing },
+          });
+          await throwIfRunCancelled(this.runs, runId, runController.signal);
+          await this.terminal.commitStopped({ runId, status: "failed", reasonCode: "CAPABILITY_UNAVAILABLE", output });
+          await emit({
+            type: "run.failed",
+            data: { runId, code: "CAPABILITY_UNAVAILABLE", message: "Required capabilities are unavailable on this Runtime", output,
+              details: { missingCapabilities: availability.missing } },
+          });
+          return this.get(actorUserId, runId);
+        }
+      }
       const rootGrant = createCapabilityGrant({
         actorUserId,
         runId,
@@ -7423,8 +7449,20 @@ function conversationTurnTool(context: ConversationIntentExternalContext): Model
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["mode", "relation", "inputMode", "effectiveGoal", "taskIntent", "evidenceStrategy", "sourceBinding", "userConstraints"],
+      required: ["mode", "relation", "inputMode", "effectiveGoal", "taskIntent", "evidenceStrategy", "sourceBinding", "userConstraints", "requiredCapabilityReferences"],
       properties: {
+        requiredCapabilityReferences: {
+          type: "array", maxItems: 32,
+          description: "Explicitly required Skill, MCP/tool source, or tool names from the user request. Extract even when unavailable; use [] when none are explicitly required. Do not list mere mentions or infer requirements from output formats.",
+          items: {
+            type: "object", additionalProperties: false, required: ["kind", "reference"],
+            properties: {
+              kind: { type: "string", enum: ["skill", "tool_source", "tool"] },
+              reference: { type: "string", minLength: 1, maxLength: 200,
+                description: "Copy the exact name from the user request, even if absent from the available catalog." },
+            },
+          },
+        },
         mode: { type: "string", enum: ["reply", "execute", "clarify"] },
         relation: {
           type: "string",
@@ -7640,12 +7678,17 @@ function inheritContinuedConversationIntent(
     ...target.userConstraints,
     ...resolution.userConstraints,
   ]);
+  const requiredCapabilityReferences = [...new Map([
+    ...(target.requiredCapabilityReferences ?? []),
+    ...(resolution.requiredCapabilityReferences ?? []),
+  ].map((item) => [`${item.kind}:${item.reference}`, item])).values()];
   const sourceBinding = target.sourceBinding;
   const evidenceDemand = sourceBinding.mode === "primary_data"
     ? "source_grounded"
     : strongerConversationEvidenceDemand(target.evidenceDemand, resolution.evidenceDemand);
   const evidenceStrategy = conversationEvidenceStrategyForDemand(evidenceDemand, sourceBinding);
   const changed = resolution.effectiveGoal !== target.effectiveGoal
+    || JSON.stringify(requiredCapabilityReferences) !== JSON.stringify(resolution.requiredCapabilityReferences ?? [])
     || evidenceDemand !== resolution.evidenceDemand
     || evidenceStrategy !== resolution.evidenceStrategy
     || sourceBinding.mode !== resolution.sourceBinding.mode
@@ -7662,6 +7705,7 @@ function inheritContinuedConversationIntent(
     sourceBinding,
     evidenceDemand,
     userConstraints,
+    requiredCapabilityReferences,
     source: "model_guarded",
   };
 }
@@ -8104,6 +8148,8 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "Use runtimeContext as server-authored context and identity metadata, not as unverified source content.",
       "You cannot load or execute Skills or Tools in this resolver phase. Use availableSkills metadata only to decide whether the turn asks Runtime to execute a named capability.",
       "When the latest turn explicitly asks to use an available Skill, return execute; do not return clarify merely because no visible directory or uploaded source is bound.",
+      "Preserve all explicitly mandatory Skill, MCP/tool source, and tool names in requiredCapabilityReferences independently of catalog availability. Unavailable does not mean unrequested. For an actionable request with unavailable requirements, return execute with those references; Runtime will explain and end the task before planning or execution. Do not silently substitute another provider or Skill.",
+      "For a method on a named MCP provider, record the provider as tool_source. Do not reconstruct a Runtime-prefixed tool name from a method name; method selection remains part of the exact requested goal for planning.",
       "Return exactly one resolve_conversation_turn tool call and no prose.",
       ...(repairFeedback === undefined
         ? []
@@ -8132,6 +8178,8 @@ function parseConversationTurnResolution(
   const evidenceStrategy = parseConversationEvidenceStrategy(argumentsRecord.evidenceStrategy);
   const taskIntent = parseConversationTaskIntent(argumentsRecord.taskIntent);
   const sourceBinding = parseConversationSourceBinding(argumentsRecord.sourceBinding, context.visibleDirectories);
+  const requiredCapabilityReferences = parseRequiredCapabilityReferences(argumentsRecord.requiredCapabilityReferences, input);
+  if (requiredCapabilityReferences === undefined) return undefined;
   const effectiveGoal = typeof argumentsRecord.effectiveGoal === "string"
     ? argumentsRecord.effectiveGoal.trim()
     : "";
@@ -8216,6 +8264,7 @@ function parseConversationTurnResolution(
     sourceBinding,
     evidenceDemand,
     userConstraints,
+    requiredCapabilityReferences,
     source: guardedPriorArtifact ? "model_guarded" : "model",
   };
 }
@@ -8463,6 +8512,8 @@ function conversationTurnResolutionFromEvents(
     const targetArtifact = conversationArtifactReference(data.targetArtifact);
     const targetResult = parseResultReference(data.targetResult);
     const userConstraints = stringArrayField(data.userConstraints).map((item) => item.trim());
+    const requiredCapabilityReferences = parseRequiredCapabilityReferences(data.requiredCapabilityReferences);
+    if (requiredCapabilityReferences === undefined) return undefined;
     if (data.schema !== "agentloop.conversationTurnResolution/v1") return undefined;
     if (!isConversationTurnMode(mode) || !isConversationTurnRelation(relation)) return undefined;
     if (!isConversationTurnInputMode(inputMode)) return undefined;
@@ -8499,6 +8550,7 @@ function conversationTurnResolutionFromEvents(
       sourceBinding,
       evidenceDemand,
       userConstraints,
+      requiredCapabilityReferences,
       source,
     };
   }

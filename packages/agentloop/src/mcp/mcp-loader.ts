@@ -225,6 +225,7 @@ function createRuntimeTool(
     description: [tool.title, tool.description, `source=${server.key}`, `trust=${trust}`].filter(Boolean).join(" "),
     source: {
       id: server.key,
+      toolName: tool.name,
       ...(server.aliases === undefined ? {} : { aliases: server.aliases }),
       transport: "mcp",
       capabilities: server.capabilities ?? [],

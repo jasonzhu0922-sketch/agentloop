@@ -36,6 +36,8 @@ export interface ToolSourceCapability {
  */
 export interface ToolSourceDescriptor {
   readonly id: string;
+  /** Exact tool name advertised by this source, before Runtime namespacing. */
+  readonly toolName?: string;
   readonly aliases?: readonly string[];
   readonly transport?: string;
   readonly capabilities: readonly ToolSourceCapability[];

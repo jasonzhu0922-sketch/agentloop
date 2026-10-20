@@ -14,6 +14,7 @@ import type {
 } from "./contracts.ts";
 import type { UploadedSourceSummary } from "../runtime/contracts.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
+import { resolveCapabilityRequirements } from "./capability-requirements.ts";
 
 const ARTIFACT_EVIDENCE_KINDS = new Set<EvidenceKind>([
   "artifact_path",
@@ -304,11 +305,17 @@ export function requiredToolSourceIdsForConversationTurn(input: {
     && input.resolution.evidenceDemand === "none";
   if (reusesBoundPriorResult) return [];
   const required = requiredToolSourceIdsFromInput(`${input.input}\n${input.effectiveGoal}`, input.allowedTools);
+  const explicitSources = (input.resolution?.requiredCapabilityReferences ?? []).filter((item) => item.kind !== "skill");
+  const resolvedSources = resolveCapabilityRequirements(explicitSources, [], input.allowedTools);
   const reusable = new Set(reusableToolSourceIdsForContinuation({
     resolution: input.resolution,
     workset: input.workset,
   }));
-  return required.filter((sourceId) => !reusable.has(sourceId));
+  return uniqueStrings([
+    ...required,
+    ...resolvedSources.toolSourceIds,
+    ...resolvedSources.missing.filter((item) => item.kind === "tool_source").map((item) => item.reference),
+  ]).filter((sourceId) => !reusable.has(sourceId));
 }
 
 export function unknownToolSourceIds(
