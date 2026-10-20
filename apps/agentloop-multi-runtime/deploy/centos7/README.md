@@ -56,11 +56,11 @@ git -C /opt/agentloop/repo pull --ff-only
 /opt/agentloop/repo/apps/agentloop-multi-runtime/deploy/centos7/deploy.sh up
 ```
 
-若本版 `custom-skills.zip` 有更新，显式执行 `deploy.sh refresh-skills`。旧 Skills 会备份到 `/opt/agentloop/backups/`，然后重启 Runtime Host：`deploy.sh up`。
+若本版 `custom-skills.zip` 有更新，显式执行 `deploy.sh refresh-skills`。旧 Skills 会备份到 `/opt/agentloop/backups/`，然后使用当前 Compose 配置执行 `docker compose up -d --no-build --no-deps --force-recreate runtime-general-01 runtime-general-02`（带上对应的 `--project-directory`、`--env-file` 和 `-f` 参数，见生产手册）。普通 `up` 不保证 Runtime 重新加载 Skills。
 
 ## 可重复的离线增量发布
 
-推荐始终在构建机上从 `main` 的精确提交制作不可变镜像；脚本会用 Git archive 隔离未提交的本地改动，默认 tag 为 `agentloop-multi-runtime:<12 位提交 SHA>`。BuildKit 缓存保存在 `.docker-build-cache/`：业务源码更新仅重建应用层，Node 依赖和 Runtime 的 apt/Python/Chromium 工具层会被复用。只有 `package-lock.json` 或 `requirements.txt` 改变时，才需要重新下载对应依赖层。
+推荐始终在构建机上从 `main` 的精确提交制作不可变镜像；脚本会用 Git archive 隔离未提交的本地改动，默认 tag 为 `agentloop-multi-runtime:<12 位提交 SHA>`。BuildKit 缓存保存在 `.docker-build-cache/`：业务源码更新通常只重建应用及后续层；依赖 manifest、Dockerfile、基础镜像、构建参数或输入文件权限变化也可能使依赖/工具层失效。以构建日志中的 `CACHED` 为准。当前生产服务器的旧 Git 不支持脚本里的 `git -C`，在该主机上请采用生产手册的“本机导出，服务器缓存构建”流程。
 
 ```bash
 cd /path/to/agentloop
@@ -105,11 +105,11 @@ deploy/centos7/deploy.sh load-image /tmp/agentloop-centos7.tar.gz
 deploy/centos7/deploy.sh up
 ```
 
-镜像标签必须和 `/opt/agentloop/.env` 的 `MULTI_RUNTIME_IMAGE` 相同；默认都是 `agentloop-multi-runtime:centos7`。
+镜像标签必须和 `/opt/agentloop/.env` 的 `MULTI_RUNTIME_IMAGE` 相同。`init` 的初始占位标签是 `agentloop-multi-runtime:centos7`，而 `build-image.sh` 默认生成提交 SHA 标签；推荐用 `deploy.sh release IMAGE_ARCHIVE RELEASE_MANIFEST` 从 manifest 选择正确标签，或在 `up` 前显式修改 `.env`。
 
 ## 运维边界
 
 - 不要执行 `docker compose down -v`：它会删除数据库/附件等命名卷。`deploy.sh` 故意没有提供该命令。
 - `router-data` 保存 Router 附件与控制面数据，`runtime-state` 保存 Runtime 状态；升级前应由运维按卷进行备份。SQLite 方式的恢复是整组卷的一致性恢复。
-- 当前 Web 的租户/用户头映射是演示身份适配，不能把裸露的 `3001`/`5001` 当作已有生产认证。正式公网开放前应在 TLS 反代或应用层接入真实认证、访问控制和审计。
+- 当前 Router 已通过 Bearer 会话认证识别用户；浏览器登录后提交认证请求。公网入口仍应使用 TLS 保护凭据，并按实际需要配置访问控制和审计。
 - `PUBLIC_WEB_ORIGIN` 与 `PUBLIC_ROUTER_URL` 若改成 HTTPS 域名，就填精确的 `https://domain`，不要保留 `SERVER_IP` 占位值。发布 macOS/Windows Local Agent 安装包时，将相同的 HTTPS Router 地址写入 `AGENTLOOP_ROUTER_URL_PRODUCTION`。
