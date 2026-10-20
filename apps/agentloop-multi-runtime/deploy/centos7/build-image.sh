@@ -58,6 +58,7 @@ mkdir -p "$bundle_root/agentloop-centos7-release/config"
 # ignored.  Archive the tracked template so every exact Git release can build
 # without accidentally reading a developer's local configuration or secrets.
 cp "$release_app_root/config/llm-providers.example.json" "$bundle_root/agentloop-centos7-release/config/"
+cp "$release_app_root/config/local-agent-releases.example.json" "$bundle_root/agentloop-centos7-release/config/"
 cp "$release_app_root/custom-skills.zip" "$bundle_root/agentloop-centos7-release/"
 cat > "$bundle_root/agentloop-centos7-release/release-manifest.env" <<EOF
 RELEASE_REVISION=$RELEASE_REVISION
