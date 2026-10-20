@@ -2,7 +2,7 @@ import { practiceGuidanceForPrompt, type PracticeProfileSelection } from "./prac
 
 export type DynamicPromptPhase = "planning" | "execution" | "assessment" | "compaction";
 export type TaskIntent = "reply" | "execute" | "continue" | "recover" | "clarify";
-export type EvidenceProfile = "deterministic" | "evidence_gate" | "lookup_lite" | "source_grounded" | "risk_sensitive";
+export type EvidenceProfile = "deterministic" | "evidence_gate" | "lookup_lite" | "source_grounded" | "result_judged" | "risk_sensitive";
 export type RiskProfile =
   | "no_tool"
   | "read_only"

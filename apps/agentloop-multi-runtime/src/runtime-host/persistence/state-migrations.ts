@@ -12,6 +12,10 @@ const MIGRATIONS: readonly SchemaMigration[] = [
   { id: "runtime/0004_run_event_sequences", definition: "per-run-event-sequence;concurrent-runtime-writers:v1", apply: installRunEventSequences },
   // 0005-0007 exist in deployed migration ledgers from configuration-snapshot releases.
   { id: "runtime/0008_canonical_run_state", definition: "canonical-run-state-tables;plan-state-reference:v1", apply: installCanonicalRunStateSchema },
+  { id: "runtime/0009_result_assessment_profile", definition: "result-judgment-without-source-demand;preserve-assessment-metadata:v1", apply: async (database) => {
+    if (!(database instanceof AppDatabase)) throw new SchemaMigrationError("Assessment profile migration requires an AppDatabase facade");
+    await database.installAssessmentProfileSchema();
+  } },
 ];
 
 export async function migrateRuntimeState(database: SqlConnection): Promise<void> {

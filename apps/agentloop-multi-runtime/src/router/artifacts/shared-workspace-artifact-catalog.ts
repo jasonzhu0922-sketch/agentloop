@@ -45,20 +45,21 @@ export class SharedWorkspaceArtifactCatalog {
       if (artifact.runId !== input.remoteRunId) continue;
       const content = await readCatalogArtifact(artifact, workspaceRoot);
       const sha256 = createHash("sha256").update(content).digest("hex");
+      if (artifact.sha256 !== undefined && artifact.sha256 !== sha256) throw new Error("artifact_integrity_mismatch");
       await this.database.prepare(upsertSql({
         dialect: this.database.dialect,
-        insert: "INSERT INTO mr_artifacts(id, assignment_id, tenant_id, owner_user_id, conversation_id, remote_run_id, path, name, byte_size, mime_type, role, source_tool, previewable, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        insert: "INSERT INTO mr_artifacts(id, assignment_id, tenant_id, owner_user_id, conversation_id, remote_run_id, path, name, byte_size, mime_type, role, source_tool, previewable, sha256, verification_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         conflictTarget: "assignment_id, id",
-        sqliteAndPostgresUpdate: "byte_size = excluded.byte_size, mime_type = excluded.mime_type, role = excluded.role, source_tool = excluded.source_tool, previewable = excluded.previewable, sha256 = excluded.sha256",
-        tidbUpdate: "byte_size = VALUES(byte_size), mime_type = VALUES(mime_type), role = VALUES(role), source_tool = VALUES(source_tool), previewable = VALUES(previewable), sha256 = VALUES(sha256)",
-      })).run(artifact.id, input.assignmentId, input.tenantId, input.ownerUserId, input.conversationId, input.remoteRunId, artifact.path, artifact.name, artifact.bytes, artifact.mimeType, artifact.role, artifact.sourceTool, artifact.previewable ? 1 : 0, sha256, Date.now());
+        sqliteAndPostgresUpdate: "byte_size = excluded.byte_size, mime_type = excluded.mime_type, role = excluded.role, source_tool = excluded.source_tool, previewable = excluded.previewable, sha256 = excluded.sha256, verification_json = excluded.verification_json",
+        tidbUpdate: "byte_size = VALUES(byte_size), mime_type = VALUES(mime_type), role = VALUES(role), source_tool = VALUES(source_tool), previewable = VALUES(previewable), sha256 = VALUES(sha256), verification_json = VALUES(verification_json)",
+      })).run(artifact.id, input.assignmentId, input.tenantId, input.ownerUserId, input.conversationId, input.remoteRunId, artifact.path, artifact.name, artifact.bytes, artifact.mimeType, artifact.role, artifact.sourceTool, artifact.previewable ? 1 : 0, sha256, artifact.verification === undefined ? null : JSON.stringify(artifact.verification), Date.now());
       captured.push({ ...artifact, sha256 });
     }
     return captured;
   }
 
   async list(assignmentId: string): Promise<readonly CatalogArtifact[]> {
-    const rows = await this.database.prepare(`SELECT id, remote_run_id, path, name, byte_size, mime_type, role, source_tool, previewable, sha256 FROM mr_artifacts WHERE assignment_id = ? ORDER BY path`).all(assignmentId) as Array<Record<string, unknown>>;
+    const rows = await this.database.prepare(`SELECT id, remote_run_id, path, name, byte_size, mime_type, role, source_tool, previewable, sha256, verification_json FROM mr_artifacts WHERE assignment_id = ? ORDER BY path`).all(assignmentId) as Array<Record<string, unknown>>;
     return rows.map((row) => rowToArtifact(row));
   }
 
@@ -178,6 +179,7 @@ function tidbArtifactTableSql(ifNotExists: boolean): string {
 function rowToArtifact(row: Record<string, unknown>): CatalogArtifact {
   return {
     id: String(row.id), runId: String(row.remote_run_id), path: String(row.path), name: String(row.name), bytes: Number(row.byte_size), mimeType: String(row.mime_type),
+    ...(typeof row.verification_json === "string" ? { verification: JSON.parse(row.verification_json) } : {}),
     role: row.role === "final" ? "final" : "process", sourceTool: row.source_tool as CatalogArtifact["sourceTool"], previewable: Number(row.previewable) === 1, sha256: String(row.sha256),
   };
 }

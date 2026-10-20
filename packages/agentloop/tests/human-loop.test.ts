@@ -20,18 +20,6 @@ import { AppError } from "../src/shared/errors.ts";
 import { TEST_MODEL_LIMITS, approvingTestAssessor, singleStepTestPlanner } from "./runtime-test-helpers.ts";
 import type { ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import type { RuntimeEvent, RuntimeTool } from "../src/index.ts";
-import { latestRecoveryResponseAuthorizesRetirement } from "../src/runtime/run-service.ts";
-
-test("recovery confirmation is consumed as action-scoped retirement authorization", () => {
-  const now = Date.now();
-  assert.equal(latestRecoveryResponseAuthorizesRetirement([
-    { id: "old", runId: "run", actionId: "action", response: "false", createdAt: now - 1 },
-    { id: "new", runId: "run", actionId: "action", response: JSON.stringify({ accepted: true }), createdAt: now },
-  ], "action"), true);
-  assert.equal(latestRecoveryResponseAuthorizesRetirement([
-    { id: "other", runId: "run", actionId: "other-action", response: "true", createdAt: now },
-  ], "action"), false);
-});
 
 test("recovery proposals let Admission derive delivery-target criteria exactly once", () => {
   const targetId = "data-distribution-analysis";
@@ -99,239 +87,115 @@ test("recovery proposals let Admission derive delivery-target criteria exactly o
   assert.equal(admitted.steps[0]?.successCriteria.some((criterion) => criterion.id === "analysis_complete"), true);
 });
 
-test("recovery HIL projects oversized evidence while retaining the complete decision provenance", async () => {
+test("an assessment gap cannot become a Recovery approval even when it carries extensive evidence", async () => {
   const database = new AppDatabase(":memory:");
   try {
     const owner = { user: { id: "user-recovery-evidence-projection" } };
     const reusableEvidenceRefs = Array.from({ length: 90 }, (_, index) => `tool-call-${String(index + 1).padStart(2, "0")}`);
     const runs = new RunService({
-      database,
-      skills: new SkillService(database),
-      tools: [],
-      plannerFactory: singleStepTestPlanner,
-      modelFactory: () => ({
-        limits: TEST_MODEL_LIMITS,
-        complete: async () => ({ content: "candidate requiring user direction", finishReason: "stop" as const, toolCalls: [] }),
-      }),
-      assessorFactory: () => ({
-        assess: async (input) => ({
-          ...await approvingTestAssessor().assess(input),
-          approved: false,
-          criteria: input.step.successCriteria.map((criterion) => ({
-            criterionId: criterion.id,
-            satisfied: false,
-            rationale: "The assessment needs a user decision.",
-            evidenceRefs: reusableEvidenceRefs,
-          })),
-          feedback: "Need user direction.",
-          failedBoundary: {
-            stepId: input.step.id,
-            missingEvidenceKinds: [],
-            violatedSkillRequirements: [],
-            reusableEvidenceRefs,
-            suggestedRepairShape: "ask_user" as const,
-          },
-        }),
-      }),
+      database, skills: new SkillService(database), tools: [], plannerFactory: singleStepTestPlanner,
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS,
+        complete: async () => ({ content: "candidate requiring user direction", finishReason: "stop" as const, toolCalls: [] }) }),
+      assessorFactory: () => ({ assess: async (input) => ({
+        ...await approvingTestAssessor().assess(input), approved: false,
+        criteria: input.step.successCriteria.map((criterion) => ({ criterionId: criterion.id, satisfied: false,
+          rationale: "The assessment needs a user decision.", evidenceRefs: reusableEvidenceRefs })),
+        feedback: "Need user direction.",
+        failedBoundary: { stepId: input.step.id, missingEvidenceKinds: [], violatedSkillRequirements: [], reusableEvidenceRefs,
+          suggestedRepairShape: "ask_user" as const,
+          unmetCriteria: [{ criterionId: "result", status: "unverified" as const,
+            rationale: "The candidate has not been verified.", evidenceRefs: reusableEvidenceRefs }] },
+      }) }),
     });
-
     const started = await runs.execute(owner.user.id, "ask me how to proceed");
-    const request = await waitForHumanLoop(runs, owner.user.id, started.id, "test-step");
-    const decision = await database.prepare("SELECT evidence_refs_json FROM recovery_decisions WHERE run_id = ?")
-      .get(started.id) as { evidence_refs_json: string } | undefined;
-    const run = await runs.get(owner.user.id, started.id);
-
-    assert.equal(request.origin, "recovery");
-    assert.deepEqual(request.evidenceRefs, reusableEvidenceRefs.slice(-50));
+    const stopped = await waitForRunCompletion(runs, owner.user.id, started.id);
+    const decision = await database.prepare("SELECT decision, evidence_refs_json FROM recovery_decisions WHERE run_id = ?")
+      .get(started.id) as { decision: string; evidence_refs_json: string } | undefined;
+    assert.equal(stopped.status, "failed");
+    assert.equal(await runs.currentHumanLoop(owner.user.id, started.id), undefined);
+    assert.equal(decision?.decision, "fail");
     assert.deepEqual(JSON.parse(decision?.evidence_refs_json ?? "[]"), reusableEvidenceRefs);
-    assert.equal(run.status, "running");
   } finally { database.close(); }
 });
 
-test("a positive Recovery HIL confirmation revises and executes the repair Step to a terminal Outcome", async () => {
+test("an unknown unsafe Action does not create a Recovery approval", async () => {
   const database = new AppDatabase(":memory:");
   try {
-    const owner = { user: { id: "user-recovery-confirmation" } };
-    let modelCalls = 0;
+    const owner = { user: { id: "user-recovery-unknown-effect" } };
     const unsafeProbe: RuntimeTool<Record<string, never>> = {
-      name: "unsafe_probe",
-      description: "Probe an external effect whose completion is unknown.",
-      inputSchema: { type: "object", additionalProperties: false },
-      executionMode: "exclusive",
-      replaySafe: false,
-      parse: () => ({}),
+      name: "unsafe_probe", description: "Probe an external effect whose completion is unknown.", inputSchema: { type: "object" },
+      executionMode: "exclusive", replaySafe: false, parse: () => ({}),
       execute: async () => { throw new AppError("TOOL_EXECUTION_ERROR", "Probe outcome is unknown", 500); },
     };
-    const basePlanner = singleStepTestPlanner();
+    let calls = 0;
     const runs = new RunService({
-      database,
-      skills: new SkillService(database),
-      tools: [unsafeProbe],
-      plannerFactory: () => basePlanner,
-      modelFactory: () => ({
-        limits: TEST_MODEL_LIMITS,
-        complete: async () => {
-          modelCalls += 1;
-          if (modelCalls === 1) {
-            return { content: "", finishReason: "tool_calls" as const, toolCalls: [{ id: "unsafe", name: "unsafe_probe", arguments: {} }] };
-          }
-          return { content: modelCalls === 2 ? "initial candidate" : "repair candidate", finishReason: "stop" as const, toolCalls: [] };
-        },
-      }),
-      assessorFactory: () => ({
-        assess: async (input) => input.step.role === "repair"
-          ? await approvingTestAssessor().assess(input)
-          : {
-            ...await approvingTestAssessor().assess(input),
-            approved: false,
-            criteria: input.step.successCriteria.map((criterion) => ({
-              criterionId: criterion.id,
-              satisfied: false,
-              rationale: "A repair Step must be admitted after the unsafe probe.",
-              evidenceRefs: [],
-            })),
-            feedback: "Repair the rejected boundary.",
-            failedBoundary: {
-              stepId: input.step.id,
-              missingEvidenceKinds: ["artifact_acceptance"],
-              violatedSkillRequirements: [],
-              reusableEvidenceRefs: [],
-              suggestedRepairShape: "repair_leaf" as const,
-            },
+      database, skills: new SkillService(database), tools: [unsafeProbe], plannerFactory: singleStepTestPlanner,
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        if (request.phase === "planning") {
+          assert.match(request.runtimeContext?.content ?? "", /unresolvedActionEffects/);
+          return { content: "", finishReason: "tool_calls" as const, toolCalls: [{
+          id: "stop-recovery", name: "submit_recovery_decision", arguments: {
+            actionId: JSON.parse(request.runtimeContext!.content).recoveryAction.id,
+            expectedActionRevision: JSON.parse(request.runtimeContext!.content).recoveryAction.revision,
+            decision: "fail", rationale: "No continuation can safely resolve the recorded unknown effect.", evidenceRefs: [],
           },
-      }),
-      planRevisionAssessorFactory: () => ({
-        assess: async (input) => {
-          const original = input.currentPlan.steps.find((step) => step.id === "test-step");
-          const repair = input.proposal.steps.find((step) => step.id.includes(".repair."));
-          assert.ok(original !== undefined);
-          assert.ok(repair !== undefined);
-          assert.match(repair.objective, /Complete the original Step test-step deliverable/);
-          assert.match(repair.objective, /produce a recoverable result/);
-          assert.deepEqual(repair.targetIds, original.executionBinding.targetIds.length === 0
-            ? undefined
-            : original.executionBinding.targetIds);
-          const requiredToolSourceIds = original.executionBinding.requiredToolSourceIds ?? [];
-          const requiredUploadedSourceIds = original.executionBinding.requiredUploadedSourceIds ?? [];
-          const requiredVisibleDirectoryIds = original.executionBinding.requiredVisibleDirectoryIds ?? [];
-          assert.deepEqual(repair.sourceConstraint, requiredToolSourceIds.length === 0
-            && requiredUploadedSourceIds.length === 0
-            && requiredVisibleDirectoryIds.length === 0
-            ? undefined
-            : {
-              ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
-              ...(requiredUploadedSourceIds.length === 0 ? {} : { requiredUploadedSourceIds }),
-              ...(requiredVisibleDirectoryIds.length === 0 ? {} : { requiredVisibleDirectoryIds }),
-            });
-          return { approved: true, feedback: "Approved recovery revision", evidenceRefs: [] };
-        },
-      }),
+        }] };
+        }
+        calls += 1;
+        return calls === 1
+          ? { content: "", finishReason: "tool_calls" as const, toolCalls: [{ id: "unsafe", name: "unsafe_probe", arguments: {} }] }
+          : { content: "candidate", finishReason: "stop" as const, toolCalls: [] };
+      } }),
+      assessorFactory: () => ({ assess: async (input) => ({
+        ...await approvingTestAssessor().assess(input), approved: false,
+        criteria: input.step.successCriteria.map((criterion) => ({ criterionId: criterion.id, satisfied: false,
+          rationale: "A recovery decision is needed.", evidenceRefs: [] })),
+        feedback: "Recovery required.",
+        failedBoundary: { stepId: input.step.id, missingEvidenceKinds: [], violatedSkillRequirements: [], reusableEvidenceRefs: [],
+          suggestedRepairShape: "revise_plan" as const },
+      }) }),
     });
-
     const started = await runs.execute(owner.user.id, "produce a recoverable result");
-    const request = await waitForHumanLoop(runs, owner.user.id, started.id, "test-step");
-    assert.equal(request.origin, "recovery");
-    const repairAction = (await runs.actionsForRun(owner.user.id, started.id)).find((action) =>
-      action.metadata.reason === "assessment_failed_boundary"
-    );
-    assert.equal(typeof repairAction?.metadata.canonicalGapId, "string");
-    assert.equal(repairAction?.metadata.failedBoundary, undefined);
-
-    await runs.respondHumanLoop(owner.user.id, started.id, request.id, true, request.revision);
-    const completed = await waitForRunCompletion(runs, owner.user.id, started.id);
-    const events = await runs.events(owner.user.id, started.id);
-    const repairedPlan = await new PlanRepository(database).getByRun(started.id);
-    const outcome = await database.prepare("SELECT status, output FROM run_outcomes WHERE run_id = ?")
-      .get(started.id) as { status: string; output: string | null };
-
-    assert.equal(completed.status, "completed");
-    assert.equal(outcome.status, "completed");
-    assert.match(outcome.output ?? "", /repair candidate/);
-    assert.equal(events.some((event) => event.type === "recovery.user_responded"), true);
-    assert.equal(events.some((event) => event.type === "recovery.repair_leaf_created"), true);
-    assert.equal(events.some((event) =>
-      event.type === "plan.step.completed" && typeof event.data.stepId === "string" && event.data.stepId.includes(".repair."),
-    ), true);
-    assert.equal(events.some((event) => event.type === "terminal.delivery_committed"), true);
-    assert.equal(events.some((event) => event.type === "human_loop.resume_failed"), false);
-    assert.equal(events.filter((event) => event.type === "tool.planned" && event.data.toolName === "unsafe_probe").length, 1);
-    assert.deepEqual(
-      repairedPlan.steps.find((step) => step.id.includes(".repair."))?.executionBinding.targetIds,
-      [],
-    );
-    assert.ok(modelCalls >= 3);
-  } finally { database.close(); }
-});
-
-test("a rejected Recovery HIL confirmation stops the Run instead of asking the same question again", async () => {
-  const database = new AppDatabase(":memory:");
-  try {
-    const owner = { user: { id: "user-recovery-reject" } };
-    const unsafeProbe: RuntimeTool<Record<string, never>> = {
-      name: "unsafe_probe",
-      description: "Probe an external effect whose completion is unknown.",
-      inputSchema: { type: "object", additionalProperties: false },
-      executionMode: "exclusive",
-      replaySafe: false,
-      parse: () => ({}),
-      execute: async () => { throw new AppError("TOOL_EXECUTION_ERROR", "Probe outcome is unknown", 500); },
-    };
-    let modelCalls = 0;
-    const runs = new RunService({
-      database,
-      skills: new SkillService(database),
-      tools: [unsafeProbe],
-      plannerFactory: singleStepTestPlanner,
-      modelFactory: () => ({
-        limits: TEST_MODEL_LIMITS,
-        complete: async () => {
-          modelCalls += 1;
-          return modelCalls === 1
-            ? { content: "", finishReason: "tool_calls" as const, toolCalls: [{ id: "unsafe", name: "unsafe_probe", arguments: {} }] }
-            : { content: "must not resume", finishReason: "stop" as const, toolCalls: [] };
-        },
-      }),
-      assessorFactory: () => ({
-        assess: async (input) => ({
-          ...await approvingTestAssessor().assess(input),
-          approved: false,
-          criteria: input.step.successCriteria.map((criterion) => ({
-            criterionId: criterion.id,
-            satisfied: false,
-            rationale: "The unsafe effect requires a recovery decision.",
-            evidenceRefs: [],
-          })),
-          feedback: "Recovery review required.",
-          failedBoundary: {
-            stepId: input.step.id,
-            missingEvidenceKinds: ["artifact_acceptance"],
-            violatedSkillRequirements: [],
-            reusableEvidenceRefs: [],
-            suggestedRepairShape: "repair_leaf" as const,
-          },
-        }),
-      }),
-      planRevisionAssessorFactory: () => ({
-        assess: async () => ({ approved: true, feedback: "Approved recovery revision", evidenceRefs: [] }),
-      }),
-    });
-
-    const started = await runs.execute(owner.user.id, "produce a recoverable result");
-    const request = await waitForHumanLoop(runs, owner.user.id, started.id, "test-step");
-    const modelCallsBeforeRejection = modelCalls;
-    await runs.respondHumanLoop(owner.user.id, started.id, request.id, { accepted: false }, request.revision);
     const stopped = await waitForRunCompletion(runs, owner.user.id, started.id);
     const events = await runs.events(owner.user.id, started.id);
-    const outcome = await database.prepare("SELECT status, reason_code FROM run_outcomes WHERE run_id = ?")
-      .get(started.id) as { status: string; reason_code: string } | undefined;
-
-    assert.equal(stopped.status, "cancelled");
-    assert.equal(outcome?.status, "cancelled");
-    assert.equal(outcome?.reason_code, "user_cancelled");
+    assert.equal(stopped.status, "failed");
     assert.equal(await runs.currentHumanLoop(owner.user.id, started.id), undefined);
-    assert.equal(events.filter((event) => event.type === "human_loop.requested").length, 1);
-    assert.equal(events.some((event) => event.type === "run.cancelled"), true);
-    assert.equal(modelCalls, modelCallsBeforeRejection);
+    assert.equal(events.some((event) => event.type === "recovery.unresolved_retired_effects"), false);
+    assert.equal(events.some((event) => event.type === "human_loop.requested"), false);
+  } finally { database.close(); }
+});
+
+test("a Recovery Planner cannot turn an unverified result into a user approval", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = { user: { id: "user-recovery-quality-gate" } };
+    const runs = new RunService({
+      database, skills: new SkillService(database), tools: [], plannerFactory: singleStepTestPlanner,
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS,
+        complete: async () => ({ content: "unverified candidate", finishReason: "stop" as const, toolCalls: [] }) }),
+      assessorFactory: () => ({ assess: async (input) => ({
+        ...await approvingTestAssessor().assess(input), approved: false,
+        criteria: input.step.successCriteria.map((criterion) => ({ criterionId: criterion.id, satisfied: false,
+          rationale: "The requested result remains unverified.", evidenceRefs: [] })),
+        feedback: "A visual observation capability is required.",
+        failedBoundary: { stepId: input.step.id, missingEvidenceKinds: [], violatedSkillRequirements: [], reusableEvidenceRefs: [],
+          suggestedRepairShape: "revise_plan" as const,
+          unmetCriteria: [{ criterionId: "requested-result", status: "unverified" as const,
+            rationale: "No available capability can observe the requested result.", evidenceRefs: [] }] },
+      }) }),
+      recoveryPlannerFactory: () => ({ decide: async (input) => ({
+        actionId: input.action.id, expectedActionRevision: input.action.revision, decision: "ask_user" as const,
+        rationale: "Ask whether the user accepts the current candidate.", evidenceRefs: [], question: "Is the quality acceptable?",
+      }) }),
+    });
+    const started = await runs.execute(owner.user.id, "produce a result that must be visually verified");
+    const stopped = await waitForRunCompletion(runs, owner.user.id, started.id);
+    const decision = await database.prepare("SELECT decision, rationale FROM recovery_decisions WHERE run_id = ?")
+      .get(started.id) as { decision: string; rationale: string } | undefined;
+    assert.equal(stopped.status, "failed");
+    assert.equal(await runs.currentHumanLoop(owner.user.id, started.id), undefined);
+    assert.equal(decision?.decision, "fail");
+    assert.match(decision?.rationale ?? "", /cannot supply the missing observation/);
   } finally { database.close(); }
 });
 

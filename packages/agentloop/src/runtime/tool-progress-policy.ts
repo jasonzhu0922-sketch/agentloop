@@ -86,8 +86,8 @@ export function candidateRejectionProgressHint(input: {
     ...(input.policy === undefined || input.policy.requiredEvidenceKinds.length === 0
       ? []
       : [`Current observable evidence obligations: ${input.policy.requiredEvidenceKinds.join(", ")}.`]),
-    "If no remaining authorized action has that benefit, directly return a concise summary from canonical evidence and explicitly caveat what remains unverified.",
-    "A convergence turn has no execution tools; return the summary now rather than describing a future retrieval.",
+    "Use the current canonical gaps to distinguish missing observations from a delivery revision. A caveat records an unresolved requirement; it does not fulfill it. If no authorized action can address the gap, report that limitation so Runtime can choose recovery or stopping.",
+    "When execution tools are available, emit a needed action structurally rather than describing a future retrieval. A tool-free convergence turn can only submit a candidate from existing evidence.",
     "</runtime_progress_hint>",
   ].join("\n");
 }

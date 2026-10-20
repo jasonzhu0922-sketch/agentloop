@@ -2682,7 +2682,7 @@ test("two empty completion candidates compact context before one bounded deliver
       if (request.phase === "compaction") {
         compactionCalls += 1;
         return {
-          content: "## Goal\nDeliver the collected evidence.\n\n## Progress\n### Done\n- Evidence collected.\n\n## Next Steps\n1. Return the user-visible conclusion.",
+          content: "## Goal\nDeliver the collected evidence.\n\n## Constraints & Preferences\n- Use canonical Tool evidence.\n\n## Progress\n### Done\n- Evidence collected.\n\n## Evidence\n- collect Tool result.\n\n## Next Steps\n1. Return the user-visible conclusion.\n\n## Critical Context\n- A non-empty conclusion is still required.",
           finishReason: "stop",
           toolCalls: [],
         };
@@ -2731,7 +2731,7 @@ test("repeated empty completion candidates fail explicitly after the compacted r
     complete: async (request) => {
       if (request.phase === "compaction") {
         compactionCalls += 1;
-        return { content: "## Goal\nAnswer the user.\n\n## Next Steps\n1. Return a non-empty answer.", finishReason: "stop", toolCalls: [] };
+        return { content: "## Goal\nAnswer the user.\n\n## Constraints & Preferences\n- Use the established evidence.\n\n## Progress\n- Evidence collected.\n\n## Evidence\n- Canonical transcript.\n\n## Next Steps\n1. Return a non-empty answer.\n\n## Critical Context\n- The user still needs an answer.", finishReason: "stop", toolCalls: [] };
       }
       return { content: "", finishReason: "stop", toolCalls: [] };
     },
@@ -2741,7 +2741,7 @@ test("repeated empty completion candidates fail explicitly after the compacted r
     () => runAgentLoop({
       runId: "repeated-empty-completion-fails",
       systemPrompt: "Return a user-visible answer.",
-      input: "Answer directly.",
+      input: "Answer directly using the established evidence:\n" + "verified evidence ".repeat(2_000),
       model,
       tools: new ToolRegistry([]),
       grant: makeGrant([]),
@@ -3220,7 +3220,7 @@ test("a rejected assessed candidate grants bounded tool repair grace", async () 
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
 });
 
-test("a holistic assessment rejection cannot be repaired by rewriting without new evidence", async () => {
+test("paraphrasing an unresolved result remains bounded after changed candidates are reassessed", async () => {
   let calls = 0;
   let repairRuntimeContext = "";
   const events: RuntimeEvent[] = [];
@@ -3274,10 +3274,10 @@ test("a holistic assessment rejection cannot be repaired by rewriting without ne
       && error.details?.feedback === "The catalog detail needed for the requested parameters is still missing.",
   );
 
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
   assert.match(repairRuntimeContext, /emit the Tool call structurally/u);
   assert.match(repairRuntimeContext, /Naming the Tool, path, or ResultRef in prose does not execute it/u);
-  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 2);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 3);
   const blocked = events.find((event) =>
     event.type === "candidate.repair_limit_blocked"
     && (event.data as { reason?: string }).reason === "assessment_requires_decision_basis_transition"
@@ -7345,7 +7345,7 @@ function runtimeStepSemanticState(content: string): {
           readonly deliverableArtifacts: readonly Array<{ readonly path: string }>;
           readonly processArtifacts: readonly Array<{ readonly path: string }>;
         };
-        readonly nextAction: string;
+        readonly receiptNextAction: string;
         readonly evidenceProducingToolNames?: readonly string[];
         readonly exploratoryToolNames?: readonly string[];
         readonly requiredWorkflowAction?: { readonly actionId: string };
@@ -7375,7 +7375,7 @@ function runtimeStepSemanticState(content: string): {
       workProduct: { status: decisionEvidence.workProduct.status },
       knownArtifacts: decisionEvidence.workProduct.deliverableArtifacts,
       processArtifacts: decisionEvidence.workProduct.processArtifacts,
-      nextAction: decisionEvidence.nextAction,
+      nextAction: decisionEvidence.receiptNextAction,
       evidenceProducingToolNames: decisionEvidence.evidenceProducingToolNames ?? [],
       exploratoryToolNames: decisionEvidence.exploratoryToolNames ?? [],
       ...(decisionEvidence.requiredWorkflowAction === undefined

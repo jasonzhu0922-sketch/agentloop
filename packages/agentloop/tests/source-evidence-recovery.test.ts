@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AppDatabase } from "../src/storage/database.ts";
-import { RunService } from "../src/runtime/run-service.ts";
+import { RunService, repairLeafForFailedBoundary } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { removeSkillPackage } from "../src/skills/skill-package.ts";
 import { singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
@@ -188,6 +188,7 @@ test("source receipts and non-empty fabricated claims cannot bypass semantic ass
   const database = new AppDatabase(":memory:");
   let assessments = 0;
   let fetches = 0;
+  let recoveryCalls = 0;
   try {
     const base = singleStepTestPlanner();
     const runs = new RunService({
@@ -199,6 +200,14 @@ test("source receipts and non-empty fabricated claims cannot bypass semantic ass
           evidenceContract: { requiredKinds: ["source_summary", "source_urls"], caveatPolicy: "none" as const },
           successCriteria: [{ id: "verified-answer", description: "Answer using the current readable source facts.", source: "task" as const }],
         })) };
+      } }),
+      recoveryPlannerFactory: () => ({ decide: async (input) => {
+        recoveryCalls += 1;
+        assert.ok(input.canonicalGap);
+        assert.equal(input.action.metadata.localRepairExhausted, true);
+        assert.ok(input.availableCapabilities?.some((capability) => capability.id === "web_research"));
+        return { actionId: input.action.id, expectedActionRevision: input.action.revision, decision: "fail" as const,
+          rationale: "The only available source has no requested name; stop without inventing facts.", evidenceRefs: ["fetch-source"] };
       } }),
       tools: [{ name: "webfetch", description: "Read a source", inputSchema: { type: "object" }, executionMode: "parallel", replaySafe: true,
         parse: (value) => value, execute: async () => {
@@ -222,7 +231,7 @@ test("source receipts and non-empty fabricated claims cannot bypass semantic ass
             criteria: view.step.successCriteria.map((criterion: { id: string }) => ({ criterionId: criterion.id, satisfied: false,
               rationale: "The readable source does not name the requested person.", evidenceRefs: ["fetch-source"] })),
             skills: [], feedback: "负责人姓名缺少原文支持。",
-            failedBoundary: { stepId: view.step.id, missingEvidenceKinds: ["负责人姓名缺少原文支持"], violatedSkillRequirements: [],
+            failedBoundary: { stepId: view.step.id, missingEvidenceKinds: ["source_summary"], violatedSkillRequirements: [],
               reusableEvidenceRefs: ["fetch-source"], suggestedRepairShape: "repair_leaf" },
           } }] };
         }
@@ -239,6 +248,7 @@ test("source receipts and non-empty fabricated claims cannot bypass semantic ass
     assert.equal(run.status, "failed");
     assert.ok(assessments >= 1);
     assert.equal(fetches, 1);
+    assert.equal(recoveryCalls, 1);
     const events = await runs.events("owner", run.id);
     assert.equal(events.some((event) => event.type === "recovery.repair_leaf_created" || event.type === "terminal.delivery_committed"), false);
     const outcome = await database.prepare("SELECT status, delivery_receipt_json FROM run_outcomes WHERE run_id = ?").get(run.id) as Record<string, unknown>;
@@ -257,6 +267,16 @@ for (const approveRepair of [true, false]) {
     try {
       const runs = new RunService({
         database, skills: new SkillService(database), plannerFactory: singleStepTestPlanner,
+        recoveryPlannerFactory: () => ({ decide: async (input) => {
+          assert.ok(input.canonicalGap);
+          assert.equal(input.action.metadata.localRepairExhausted, true);
+          const target = input.plan!.steps.find((step) => step.id === input.failedBoundary!.stepId)!;
+          const repair = repairLeafForFailedBoundary(target, input.failedBoundary!, input.plan!.version);
+          return { actionId: input.action.id, expectedActionRevision: input.action.revision, decision: "revise_plan" as const,
+            rationale: "Reconcile the result against already committed evidence.", evidenceRefs: ["read-1"],
+            planRevision: { schema: "agentloop.outcomePlan/v2" as const, shape: "recovery_patch" as const, goal: input.plan!.goal, selectedSkillIds: input.plan!.selectedSkillIds,
+              steps: [repair] } };
+        } }),
         tools: [{ name: "read_probe", description: "Read immutable evidence", inputSchema: { type: "object" }, executionMode: "parallel", replaySafe: true,
           parse: (value) => value, execute: async () => { reads += 1; return { observedValue: "SOURCE_VALUE" }; } }],
         planRevisionAssessorFactory: () => ({ assess: async () => ({ approved: true, feedback: "", evidenceRefs: [] }) }),
@@ -290,9 +310,9 @@ for (const approveRepair of [true, false]) {
         } }),
       });
       const run = await runs.execute("owner", "Produce a recoverable result");
-      assert.equal(run.status, approveRepair ? "completed" : "failed");
+      assert.equal(run.status, approveRepair ? "completed" : "failed", JSON.stringify((await runs.events("owner", run.id)).filter((event) => /failed|recovery/.test(event.type))));
       assert.equal(reads, 1);
-      assert.ok(repairTurns > 0);
+      assert.ok(repairTurns > 0, JSON.stringify((await runs.events("owner", run.id)).filter((event) => /failed|recovery/.test(event.type))));
       const state = await new CanonicalRunStateRepository(database).get(run.id);
       const gaps = state.gaps.filter((gap) => gap.targetId === undefined);
       assert.equal(gaps.length, 1);

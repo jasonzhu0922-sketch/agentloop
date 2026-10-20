@@ -67,6 +67,21 @@ const MIGRATIONS: readonly SchemaMigration[] = [{
       PRIMARY KEY(tenant_id, owner_user_id, conversation_id)
     )`);
   },
+}, {
+  id: "router/0005_artifact_verification_projection",
+  definition: "mr_artifacts.verification_json:canonical-read-projection:v1",
+  apply: async (database) => {
+    if (database.dialect === "sqlite") {
+      const columns = await database.prepare("PRAGMA table_info(mr_artifacts)").all<{ name: string }>();
+      if (!columns.some((column) => column.name === "verification_json")) {
+        await database.exec("ALTER TABLE mr_artifacts ADD COLUMN verification_json TEXT");
+      }
+      return;
+    }
+    await database.exec(database.dialect === "tidb"
+      ? "ALTER TABLE mr_artifacts ADD COLUMN IF NOT EXISTS verification_json LONGTEXT"
+      : "ALTER TABLE mr_artifacts ADD COLUMN IF NOT EXISTS verification_json TEXT");
+  },
 }];
 
 export async function migrateRouterState(database: SqlConnection): Promise<void> {

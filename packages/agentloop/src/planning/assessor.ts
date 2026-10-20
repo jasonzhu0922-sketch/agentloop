@@ -26,7 +26,9 @@ import type {
   StepEvidence,
   SuggestedRepairShape,
 } from "./contracts.ts";
+import { EVIDENCE_KINDS } from "./contracts.ts";
 import { stepHasSourceKind } from "./step-execution-binding.ts";
+import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 
 const SUBMIT_ASSESSMENT_TOOL = {
   name: "submit_assessment",
@@ -47,6 +49,7 @@ const SUBMIT_ASSESSMENT_TOOL = {
             satisfied: { type: "boolean" },
             rationale: { type: "string" },
             evidenceRefs: { type: "array", items: { type: "string" } },
+            contractIssue: { type: "string", description: "Only when the admitted condition adds an unsupported requirement or is not necessary for the original goal. Explain why; Runtime must revise the Plan rather than waive it." },
           },
         },
       },
@@ -78,7 +81,7 @@ const SUBMIT_ASSESSMENT_TOOL = {
         ],
         properties: {
           stepId: { type: "string" },
-          missingEvidenceKinds: { type: "array", items: { type: "string" } },
+          missingEvidenceKinds: { type: "array", items: { type: "string", enum: EVIDENCE_KINDS } },
           violatedSkillRequirements: { type: "array", items: { type: "string" } },
           reusableEvidenceRefs: { type: "array", items: { type: "string" } },
           suggestedRepairShape: { type: "string", enum: ["repair_leaf", "revise_plan", "ask_user", "fail"] },
@@ -87,6 +90,49 @@ const SUBMIT_ASSESSMENT_TOOL = {
     },
   },
 } as const;
+
+function submitAssessmentTool(input: StepAssessmentInput): ModelInvocation["tools"][number] {
+  const properties = SUBMIT_ASSESSMENT_TOOL.inputSchema.properties;
+  const criterionIds = input.step.successCriteria.map((criterion) => criterion.id);
+  const skillIds = input.skills.map((skill) => skill.id);
+  return {
+    ...SUBMIT_ASSESSMENT_TOOL,
+    inputSchema: {
+      ...SUBMIT_ASSESSMENT_TOOL.inputSchema,
+      properties: {
+        ...properties,
+        criteria: {
+          ...properties.criteria,
+          minItems: criterionIds.length,
+          maxItems: criterionIds.length,
+          items: {
+            ...properties.criteria.items,
+            properties: {
+              ...properties.criteria.items.properties,
+              criterionId: { type: "string", ...(criterionIds.length === 0 ? {} : { enum: criterionIds }) },
+            },
+          },
+        },
+        skills: {
+          ...properties.skills,
+          minItems: skillIds.length,
+          maxItems: skillIds.length,
+          items: {
+            ...properties.skills.items,
+            properties: {
+              ...properties.skills.items.properties,
+              skillId: {
+                type: "string",
+                description: "Copy the exact id from assessment_context.skills, including any prefix. The name is not the ID.",
+                ...(skillIds.length === 0 ? {} : { enum: skillIds }),
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+}
 
 const MAX_ASSESSMENT_ATTEMPTS = 3;
 // Assessment responses are compact, but reasoning-mode providers may consume
@@ -106,6 +152,7 @@ export class ModelStepAssessor implements StepAssessor {
     let lastError = new AppError("ASSESSMENT_ERROR", "Assessor did not produce a valid assessment", 422);
     let runtimeDirective: string | undefined;
     const taskProfile = assessmentTaskProfile(input);
+    const tool = submitAssessmentTool(input);
     for (let attempt = 1; attempt <= MAX_ASSESSMENT_ATTEMPTS; attempt += 1) {
       const invocation: ModelInvocation = {
         runId: input.runId,
@@ -119,8 +166,12 @@ export class ModelStepAssessor implements StepAssessor {
           contractLines: [
             "A tool result, artifact, trace, or model claim is not completion by itself.",
             "Assess every criterion exactly once.",
+            "Validate each criterion's basis against canonicalIntent.userInput and its owned targets. A quoted requirement and rationale establish traceability, not semantic correctness. If an inferred condition is unrelated, overstates the request, or merely prescribes one implementation, set contractIssue and reject that criterion so Recovery can revise the Plan. Never silently waive an admitted condition or weaken an explicit user constraint.",
+            "Judge each result property from observations appropriate to that property. model_judged selects the assessment method; it does not require web research or written citations. EvidenceContract describes execution observations and cannot add user obligations. Distinguish observed results, unavailable observations, and demonstrated contradictions.",
+            "An observation proves only properties it actually inspects. File existence, decoding, dimensions, successful generation or the producer's description cannot establish unobserved content quality. Keep the requested property unverified when the supplied evidence cannot support that judgment; report the exact missing observation and preserve usable work.",
+            "Assess every supplied Skill exactly once. Copy its exact id into skillId, including prefixes; never substitute its name or a Skill mentioned only in evidence.",
             "Skill entries are QA observations, not completion gates; use not_assessed when QA is not rerun.",
-            "Never approve missing source facts as completed.",
+            "Never approve a requested factual answer that lacks the support required by the original user goal.",
             "For a user-facing delivery target, approve only when the candidate directly fulfills that target's stated purpose. Source records, field tables, excerpts, and citations establish support but do not substitute for the requested answer, explanation, conclusion, or other user-facing result.",
             "Preserve the user's exact requested fields, distinctions, scope, and freshness. A related field or differently titled role is not equivalent without readable source support. A retrieval timestamp alone does not establish the effective date or current validity of a fact. Do not repair missing facts yourself in assessment feedback.",
             "Use the original user goal when checking whether the delivered facts match the request. A resolver/Plan paraphrase or provider scope cannot authorize substituting another field or narrowing the requested result. A caveat that a requested fact is unverified records a remaining gap; it does not prove that fact or satisfy a blocking criterion requiring it.",
@@ -131,7 +182,7 @@ export class ModelStepAssessor implements StepAssessor {
         phase: "assessment",
         runtimeContext: assessmentRuntimeContext(input, attempt, runtimeDirective, taskProfile),
         messages,
-        tools: [SUBMIT_ASSESSMENT_TOOL],
+        tools: [tool],
         toolChoice: { name: SUBMIT_ASSESSMENT_TOOL.name },
         maxOutputTokens: Math.min(ASSESSMENT_MAX_OUTPUT_TOKENS, this.model.limits.maxOutputTokens),
       };
@@ -179,16 +230,37 @@ export class ModelStepAssessor implements StepAssessor {
             },
           );
         }
-        return parseAssessment(input, response.toolCalls[0].arguments);
+        const assessment = parseAssessment(input, response.toolCalls[0].arguments);
+        const resolutions = assessment.skills.flatMap((skill) => skill.submittedSkillReference === undefined
+          ? []
+          : [{ submittedReference: skill.submittedSkillReference, skillId: skill.skillId }]);
+        if (resolutions.length > 0) {
+          await emit?.({
+            type: "assessment.skill_identity.resolved",
+            data: { planId: input.planId, stepId: input.step.id, attempt, resolutions },
+          });
+        }
+        return assessment;
       } catch (error) {
         lastError = error instanceof AppError && error.code === "ASSESSMENT_ERROR"
           ? error
           : new AppError("ASSESSMENT_ERROR", error instanceof Error ? error.message : "Invalid assessment", 422);
+        await emit?.({
+          type: "assessment.validation.rejected",
+          data: {
+            planId: input.planId,
+            stepId: input.step.id,
+            attempt,
+            validationError: lastError.message,
+            ...(lastError.details === undefined ? {} : { validationDetails: lastError.details }),
+          },
+        });
         if (attempt === MAX_ASSESSMENT_ATTEMPTS) break;
         runtimeDirective = JSON.stringify({
           assessmentRepair: {
             attempt: attempt + 1,
             validationError: lastError.message,
+            ...(lastError.details === undefined ? {} : { validationDetails: lastError.details }),
             instruction: "Resubmit the entire assessment as exactly one valid submit_assessment tool call. Never emit any execution tool such as computer_run_command. Do not continue or complete any unexecuted tool invocation found in the evidence.",
           },
         });
@@ -769,8 +841,16 @@ function parseAssessment(input: StepAssessmentInput, value: unknown): SkillCompl
         satisfied: row.satisfied,
         rationale: requireString(row.rationale, `criteria[${index}].rationale`, { max: 4_000 }),
         evidenceRefs: parseEvidenceRefs(row.evidenceRefs, `criteria[${index}].evidenceRefs`, 100),
+        ...(row.contractIssue === undefined ? {} : {
+          contractIssue: requireString(row.contractIssue, `criteria[${index}].contractIssue`, { max: 4_000 }),
+          satisfied: false,
+        }),
       };
     });
+    // Resolve only against this assessment's activated Skills, using the same
+    // identity contract as admission and load_skill. Never infer a prefix or
+    // search the global catalog. Exact coverage is checked after resolution.
+    const skillsByReference = buildSkillReferenceMap(input.skills);
     const skills = record.skills.map((item, index): SkillAssessment => {
       const row = requireRecord(item, `skills[${index}]`);
       if (typeof row.followed !== "boolean") throw new TypeError(`skills[${index}].followed must be boolean`);
@@ -778,8 +858,11 @@ function parseAssessment(input: StepAssessmentInput, value: unknown): SkillCompl
       if (status !== undefined && !["followed", "skipped_unavailable", "process_caveat", "not_followed", "not_assessed"].includes(status as string)) {
         throw new TypeError(`skills[${index}].status must be followed, skipped_unavailable, process_caveat, not_followed, or not_assessed`);
       }
+      const submittedReference = requireString(row.skillId, `skills[${index}].skillId`, { max: 128 });
+      const skillId = skillsByReference.get(submittedReference)?.id ?? submittedReference;
       return {
-        skillId: requireString(row.skillId, `skills[${index}].skillId`, { max: 128 }),
+        skillId,
+        ...(skillId === submittedReference ? {} : { submittedSkillReference: submittedReference }),
         ...(status === undefined ? {} : { status: status as SkillAssessment["status"] }),
         followed: row.followed,
         rationale: requireString(row.rationale, `skills[${index}].rationale`, { max: 4_000 }),
@@ -794,7 +877,7 @@ function parseAssessment(input: StepAssessmentInput, value: unknown): SkillCompl
     assertExactIds(skills.map((item) => item.skillId), input.skills.map((item) => item.id), "Skill");
     const feedback = typeof record.feedback === "string" ? record.feedback.trim().slice(0, 8_000) : "";
     const failedBoundary = parseFailedBoundary(input, record.failedBoundary);
-    return buildAssessment(input, criteria, skills, feedback, input.assessmentProfile ?? "source_grounded", "model", failedBoundary);
+    return buildAssessment(input, criteria, skills, feedback, input.assessmentProfile ?? "result_judged", "model", failedBoundary);
   } catch (error) {
     if (error instanceof AppError && error.code === "ASSESSMENT_ERROR") throw error;
     throw new AppError(
@@ -810,7 +893,7 @@ function buildAssessment(
   criteria: readonly CriterionAssessment[],
   skills: readonly SkillAssessment[],
   feedback: string,
-  assessmentProfile: AssessmentProfileId = "source_grounded",
+  assessmentProfile: AssessmentProfileId = "result_judged",
   assessmentMethod: AssessmentMethod = "model",
   failedBoundary?: FailedBoundary,
 ): SkillComplianceAssessment {
@@ -822,9 +905,7 @@ function buildAssessment(
     || hasArtifactDeliveryEvidence(input);
   const approved = hasUserVisibleDelivery
     && classifiedCriteria.every((item) => item.satisfied || item.blocking !== true);
-  const derivedFailedBoundary = approved
-    ? undefined
-    : failedBoundary ?? deriveFailedBoundary(input, classifiedCriteria, skills);
+  const derivedFailedBoundary = approved ? undefined : resultFailedBoundary(input, classifiedCriteria, skills, failedBoundary);
   return {
     id: randomUUID(),
     planId: input.planId,
@@ -875,12 +956,12 @@ export function enforceAdmittedAssessment(
   const approved = !modelRejectedBlockingJudgment
     && hasUserVisibleDelivery
     && criteria.every((criterion) => criterion.satisfied || criterion.blocking !== true);
-  const failedBoundary = approved
-    ? undefined
-    : assessment.failedBoundary ?? deriveFailedBoundary(input, criteria, assessment.skills);
+  const failedBoundary = approved ? undefined : resultFailedBoundary(input, criteria, assessment.skills, assessment.failedBoundary);
   const { failedBoundary: _untrustedBoundary, ...base } = assessment;
   return {
     ...base,
+    assessmentProfile: assessment.assessmentProfile ?? input.assessmentProfile ?? "result_judged",
+    assessmentMethod: assessment.assessmentMethod ?? "model",
     approved,
     criteria,
     feedback: approved
@@ -935,6 +1016,10 @@ function classifyCriterion(input: StepAssessmentInput, criterion: CriterionAsses
     : undefined;
   const targetClaimMissing = admitted?.targetId !== undefined
     && input.evidence.deliveryCandidate?.deliveryClaims.some((claim) => claim.targetId === admitted.targetId) !== true;
+  if (criterion.contractIssue !== undefined) {
+    return { ...criterion, satisfied: false, blocking, status: "conflict",
+      ...(admitted?.targetId === undefined ? {} : { targetId: admitted.targetId }) };
+  }
   return {
     ...criterion,
     ...(admitted?.targetId === undefined ? {} : { targetId: admitted.targetId }),
@@ -966,11 +1051,15 @@ function parseFailedBoundary(input: StepAssessmentInput, value: unknown): Failed
   if (stepId !== input.step.id) {
     throw new TypeError("failedBoundary.stepId must match the assessed step");
   }
+  const missingEvidenceKinds = uniqueStrings(requireStringArray(record.missingEvidenceKinds, "failedBoundary.missingEvidenceKinds", 50));
+  if (missingEvidenceKinds.some((kind) => !(EVIDENCE_KINDS as readonly string[]).includes(kind))) {
+    throw new TypeError("failedBoundary.missingEvidenceKinds must name execution evidence kinds; put result problems in criterion rationale");
+  }
   requireStringArray(record.violatedSkillRequirements, "failedBoundary.violatedSkillRequirements", 50);
   const suggestedRepairShape = parseSuggestedRepairShape(record.suggestedRepairShape);
   return {
     stepId,
-    missingEvidenceKinds: uniqueStrings(requireStringArray(record.missingEvidenceKinds, "failedBoundary.missingEvidenceKinds", 50)),
+    missingEvidenceKinds,
     violatedSkillRequirements: [],
     reusableEvidenceRefs: parseEvidenceRefs(record.reusableEvidenceRefs, "failedBoundary.reusableEvidenceRefs", 100),
     suggestedRepairShape,
@@ -1016,9 +1105,8 @@ function deriveFailedBoundary(
   const failedCriteria = criteria.filter((item) => !item.satisfied && item.blocking === true);
   const evidenceKinds = new Set<string>(input.step.evidenceContract?.requiredKinds ?? []);
   const missingEvidenceKinds = failedCriteria.flatMap((criterion) => {
-    if (criterion.targetId !== undefined) return [criterion.criterionId];
     if (evidenceKinds.has(criterion.criterionId)) return [criterion.criterionId];
-    return input.step.evidenceContract === undefined ? [criterion.criterionId] : [];
+    return [];
   });
   const reusableEvidenceRefs = [
     ...failedCriteria.flatMap((criterion) => criterion.evidenceRefs),
@@ -1036,6 +1124,24 @@ function deriveFailedBoundary(
   };
 }
 
+function resultFailedBoundary(
+  input: StepAssessmentInput, criteria: readonly CriterionAssessment[], skills: readonly SkillAssessment[],
+  proposed?: FailedBoundary,
+): FailedBoundary {
+  const boundary = proposed ?? deriveFailedBoundary(input, criteria, skills);
+  const unmetCriteria = criteria.filter((criterion) => criterion.blocking === true && !criterion.satisfied)
+    .map((criterion) => ({ criterionId: criterion.criterionId,
+      ...(criterion.targetId === undefined ? {} : { targetId: criterion.targetId }),
+      status: criterion.status === "conflict" ? "conflict" as const : "unverified" as const,
+      rationale: criterion.rationale, evidenceRefs: criterion.evidenceRefs,
+      ...(criterion.contractIssue === undefined ? {} : { contractIssue: criterion.contractIssue }),
+    }));
+  return { ...boundary, unmetCriteria,
+    ...(unmetCriteria.some((criterion) => criterion.contractIssue !== undefined)
+      ? { suggestedRepairShape: "revise_plan" as const, missingEvidenceKinds: [] } : {}),
+  };
+}
+
 function uniqueStrings(values: readonly string[]): string[] {
   return Array.from(new Set(values.map((value) => value.trim()).filter((value) => value.length > 0)));
 }
@@ -1043,6 +1149,7 @@ function uniqueStrings(values: readonly string[]): string[] {
 function assessmentView(input: StepAssessmentInput): Record<string, unknown> {
   const policy = assessmentPolicy(input);
   return {
+    canonicalIntent: input.canonicalState.intent,
     step: {
       id: input.step.id,
       objective: input.step.objective,
@@ -1195,7 +1302,7 @@ function assessmentTaskProfile(input: StepAssessmentInput): TaskProfile {
     phase: "assessment",
     intent: "execute",
     practices: input.practiceProfiles,
-    evidenceProfile: input.assessmentProfile ?? "source_grounded",
+    evidenceProfile: input.assessmentProfile ?? "result_judged",
     ...(allowsResearchPolicy ? { sourceNeed: intent.sourceNeed } : {}),
     ...(allowsResearchPolicy && intent.researchPolicy !== undefined ? { researchPolicy: intent.researchPolicy } : {}),
     skillBound: input.skills.length > 0,
@@ -1226,12 +1333,21 @@ function summarizeSkillInstructions(instructions: string): string {
 }
 
 function assertExactIds(actual: readonly string[], expected: readonly string[], label: string): void {
-  if (actual.length !== expected.length || new Set(actual).size !== actual.length) {
-    throw new AppError("ASSESSMENT_ERROR", `Assessment must cover every ${label} exactly once`, 422);
-  }
+  const actualSet = new Set(actual);
   const expectedSet = new Set(expected);
+  const details = {
+    identityKind: label,
+    expectedIds: expected,
+    receivedIds: actual,
+    unknownIds: [...actualSet].filter((id) => !expectedSet.has(id)),
+    missingIds: expected.filter((id) => !actualSet.has(id)),
+    duplicateIds: [...actualSet].filter((id) => actual.filter((value) => value === id).length > 1),
+  };
+  if (actual.length !== expected.length || actualSet.size !== actual.length) {
+    throw new AppError("ASSESSMENT_ERROR", `Assessment must cover every ${label} exactly once`, 422, details);
+  }
   if (actual.some((id) => !expectedSet.has(id))) {
-    throw new AppError("ASSESSMENT_ERROR", `Assessment contains an unknown ${label} ID`, 422);
+    throw new AppError("ASSESSMENT_ERROR", `Assessment contains an unknown ${label} ID`, 422, details);
   }
 }
 

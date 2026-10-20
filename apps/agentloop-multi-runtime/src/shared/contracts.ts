@@ -101,6 +101,14 @@ export interface RuntimeArtifact {
   readonly role: "final" | "process";
   readonly sourceTool: "computer_write_file" | "computer_patch_file" | "computer_run_command" | "convert_artifact" | "verify_artifact_acceptance";
   readonly previewable: boolean;
+  readonly sha256?: string;
+  readonly verification?: {
+    readonly file: "verified" | "unverified";
+    readonly result: "accepted" | "unverified";
+    readonly delivery: "committed" | "uncommitted";
+    readonly targetIds: readonly string[];
+    readonly limitations: readonly string[];
+  };
 }
 
 /** Preview bodies are rendered by the browser artifact component; Router does not interpret their format-specific structure. */

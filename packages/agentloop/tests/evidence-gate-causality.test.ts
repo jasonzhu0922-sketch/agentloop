@@ -188,7 +188,9 @@ test("admitted target criteria cannot be approved without a matching delivery cl
   assert.equal(enforced.criteria[0]?.targetId, "data-distribution-analysis");
   assert.equal(enforced.criteria[0]?.satisfied, false);
   assert.equal(enforced.criteria[0]?.status, "unverified");
-  assert.deepEqual(enforced.failedBoundary?.missingEvidenceKinds, ["delivery_target:data-distribution-analysis"]);
+  assert.deepEqual(enforced.failedBoundary?.missingEvidenceKinds, []);
+  assert.equal(enforced.failedBoundary?.unmetCriteria?.[0]?.criterionId, "delivery_target:data-distribution-analysis");
+  assert.equal(enforced.failedBoundary?.unmetCriteria?.[0]?.targetId, "data-distribution-analysis");
 });
 
 test("Assessment consumes a committed source fact rather than rechecking the producing Tool name", async () => {

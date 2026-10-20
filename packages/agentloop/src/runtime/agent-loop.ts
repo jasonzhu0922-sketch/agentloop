@@ -127,8 +127,8 @@ export interface AgentLoopOptions {
   readonly workProductContext?: WorkProductContextOptions;
   /** Persist Runtime-validated current target/version bindings through the canonical writer. */
   readonly onWorkProductDeliveryTargets?: (bindings: NonNullable<CurrentDecisionWorkProductFacts["semantics"]["deliveryTargets"]>) => Promise<void> | void;
-  /** Canonical control-plane identity for the read-only current decision view. */
-  readonly currentDecisionContext?: CurrentDecisionContext;
+  /** Read the latest committed Run at every model and assessment boundary. */
+  readonly currentDecisionContext?: () => CurrentDecisionContext;
   readonly signal?: AbortSignal;
   readonly emit?: RuntimeEventSink;
   readonly actionTracker?: {
@@ -538,7 +538,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let completionObservationContinuationGranted = false;
   let rejectedCandidateAssessments = 0;
   let rejectedUnassessableCandidates = 0;
-  let evidenceProgressBaseline: string | undefined;
+  let rejectedCandidateIdentity: string | undefined;
   let evidenceProgressBoundary: CandidateCompletionEvaluation["failedBoundary"];
   let evidenceProgressFeedback: string | undefined;
   let completionFencePending = false;
@@ -643,9 +643,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     context: CandidateCompletionContext,
   ): Promise<CandidateCompletionEvaluation> => {
     const workProductFacts = await workProducts?.deriveForDecision();
+    const decisionContext = options.currentDecisionContext?.();
     const currentDecisionView = projectCurrentDecisionView(deriveCurrentDecisionView({
       runId: options.runId,
-      ...(options.currentDecisionContext === undefined ? {} : { context: options.currentDecisionContext }),
+      ...(decisionContext === undefined ? {} : { context: decisionContext }),
       stepSemanticFrame: options.stepSemanticFrame,
       evidence: deriveRuntimeStepEvidenceState({ policy: options.progressPolicy, evidence: context.toolEvidence }),
       toolEvidence: context.toolEvidence,
@@ -655,9 +656,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       ...context,
       decisionBasisDigest: currentDecisionView.identity.decisionBasisDigest,
     };
-    if (evidenceProgressBaseline !== undefined && assessmentContext.decisionBasisDigest === evidenceProgressBaseline) {
+    const candidateIdentity = createHash("sha256").update(JSON.stringify({
+      decisionBasisDigest: assessmentContext.decisionBasisDigest,
+      output: assessmentContext.output.trim(),
+      deliveryCandidate: assessmentContext.deliveryCandidate,
+    })).digest("hex");
+    if (rejectedCandidateIdentity !== undefined && candidateIdentity === rejectedCandidateIdentity) {
       const feedback = evidenceProgressFeedback
-        ?? "Assessment identified a substantive current-step gap. The decision basis has not changed, so another rewritten completion candidate cannot resolve it.";
+        ?? "This exact candidate was rejected against the same observations and contract. A repeated submission cannot resolve that gap.";
       return {
         approved: false,
         feedback,
@@ -669,6 +675,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     if (options.evaluateCandidate === undefined) return { approved: true, feedback: "" };
     const evaluation = await options.evaluateCandidate(assessmentContext);
     if (!evaluation.approved) latestCandidateRejectionFeedback = evaluation.feedback;
+    const repairShape = evaluation.failedBoundary?.suggestedRepairShape;
+    if (!evaluation.approved && (repairShape === "fail" || repairShape === "revise_plan" || repairShape === "ask_user")) {
+      await emit({ type: "candidate.rejected", data: { step, output: context.output, feedback: evaluation.feedback } });
+      await emit({
+        type: "candidate.repair_stopped",
+        data: { step, reason: `assessment_requires_${repairShape}`, failedBoundary: evaluation.failedBoundary },
+      });
+      throw await completionFailure(new AppError(
+        "STEP_NOT_COMPLETED", "Assessment requires a Recovery decision outside the current candidate loop", 422,
+        { feedback: evaluation.feedback, failedBoundary: evaluation.failedBoundary, repairExhausted: repairShape === "fail" },
+      ), step, context.output, evaluation);
+    }
     if (evaluation.assessmentReused === true) {
       await emit({
         type: "candidate.assessment_reused",
@@ -681,11 +699,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       });
     }
     if (!evaluation.approved && evaluation.requiresEvidenceProgress === true) {
-      evidenceProgressBaseline = assessmentContext.decisionBasisDigest;
+      rejectedCandidateIdentity = candidateIdentity;
       evidenceProgressBoundary = evaluation.failedBoundary;
       evidenceProgressFeedback = evaluation.feedback;
-    } else if (evaluation.approved || assessmentContext.decisionBasisDigest !== evidenceProgressBaseline) {
-      evidenceProgressBaseline = undefined;
+    } else if (evaluation.approved || candidateIdentity !== rejectedCandidateIdentity) {
+      rejectedCandidateIdentity = undefined;
       evidenceProgressBoundary = undefined;
       evidenceProgressFeedback = undefined;
     }
@@ -980,8 +998,20 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       policy: options.progressPolicy,
       evidence: toolEvidence,
     });
+    const workProductFacts = await workProducts?.deriveForDecision();
+    const decisionContext = options.currentDecisionContext?.();
+    const currentDecisionView = deriveCurrentDecisionView({
+      runId: options.runId,
+      ...(decisionContext === undefined ? {} : { context: decisionContext }),
+      stepSemanticFrame: options.stepSemanticFrame,
+      evidence: stepEvidenceState,
+      toolEvidence,
+      ...(workProductFacts === undefined ? {} : { workProducts: workProductFacts }),
+    });
     const missingToolEvidenceKinds = stepEvidenceState?.missingToolEvidenceKinds ?? [];
-    const canConvergeFromCurrentEvidence = missingToolEvidenceKinds.length === 0;
+    const canConvergeFromCurrentEvidence = missingToolEvidenceKinds.length === 0
+      && currentDecisionView.currentGap.assessmentGaps.every((gap) =>
+        gap.suggestedAction === "repair_leaf" && gap.missingEvidenceKinds.length === 0);
     // A source receipt proves acquisition, not coverage of the user's facts.
     // Conversation synthesis must retain complementary acquisition tools.
     const completionFenceReady = options.requireStructuredCandidateSynthesis !== true
@@ -1079,15 +1109,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       });
       return normalization.call;
     };
-    const workProductFacts = await workProducts?.deriveForDecision();
-    const currentDecisionView = deriveCurrentDecisionView({
-      runId: options.runId,
-      ...(options.currentDecisionContext === undefined ? {} : { context: options.currentDecisionContext }),
-      stepSemanticFrame: options.stepSemanticFrame,
-      evidence: stepEvidenceState,
-      toolEvidence,
-      ...(workProductFacts === undefined ? {} : { workProducts: workProductFacts }),
-    });
     const stepExecutionDecision = stepExecutionStrategy.prepareModelStep({
       modelStep: step,
       maxSteps: options.maxSteps,
@@ -1098,7 +1119,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       stepEvidenceState,
       stepSemanticFrame: options.stepSemanticFrame,
       ...(shouldProjectCurrentDecisionView({
-        context: options.currentDecisionContext,
+        context: decisionContext,
         stepSemanticFrame: options.stepSemanticFrame,
         evidence: stepEvidenceState,
         workProducts: workProductFacts,
@@ -1143,6 +1164,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         preferredToolCount: stepExecutionDecision.toolCatalog.preferredToolNames.length,
         deprioritizedToolGroupCount: stepExecutionDecision.toolCatalog.deprioritizedToolGroups.length,
         promptProjectionMode: stepExecutionDecision.promptProjection.mode,
+        currentDecision: {
+          ...currentDecisionView.identity,
+          nextAction: currentDecisionView.nextAction,
+          assessmentGapIds: currentDecisionView.currentGap.assessmentGaps.map((gap) => gap.id),
+        },
         trace: stepExecutionDecision.trace,
       },
     });
@@ -1441,6 +1467,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           data: {
             reason: "completion_repair_compaction_failed",
             error: error instanceof Error ? error.message : "Context compaction failed",
+            ...(error instanceof AppError ? { code: error.code, details: error.details } : {}),
           },
         });
         return false;
@@ -3574,7 +3601,7 @@ function candidateRepairDirective(evaluation: CandidateCompletionEvaluation, fal
     "<runtime_candidate_repair>",
     feedback,
     "Repair only the current admitted Plan step described in runtime context.",
-    "The rejected completion candidate was internal Runtime material, not a user-visible assistant answer. Return a complete standalone replacement now.",
+    "The rejected completion candidate was internal Runtime material, not a user-visible assistant answer. Choose the next action from the current canonical gaps. Submit a complete standalone replacement when the observations support it; otherwise inspect or acquire the missing evidence with an authorized action.",
     "Do not refer to an earlier answer, previous message, prior candidate, or already delivered result as the final answer.",
     "Do not start pending downstream Plan steps, load downstream Skills, or produce downstream artifacts unless the current step objective explicitly requires the same work.",
     "Use only the tools exposed on the current turn; if no tools are exposed, return a bounded candidate from existing canonical evidence and state any unmet evidence truthfully.",
@@ -3587,7 +3614,7 @@ function candidateRepairDirective(evaluation: CandidateCompletionEvaluation, fal
   }
   if (evaluation.requiresEvidenceProgress === true) {
     lines.push(
-      "Assessment found a substantive gap. Before submitting another candidate, take one current-step action that changes the Runtime-derived decision basis; rewriting the answer alone will be rejected.",
+      "Assessment found a substantive gap. If committed observations already support the requested result, correct the candidate from those observations. If observations are missing, acquire or inspect them with an authorized current-step action. A changed candidate is reassessed; identical rejected submissions are not useful progress.",
       "If that action is a Tool call, emit the Tool call structurally. Naming the Tool, path, or ResultRef in prose does not execute it and does not change the Runtime decision basis.",
     );
   }

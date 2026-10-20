@@ -210,7 +210,8 @@ test("reply deliverables initialize canonical targets and gaps from the same fro
   assert.deepEqual(Object.keys(initial.targets), ["greeting_reply"]);
   assert.equal(initial.targets.greeting_reply?.surface, "conversation");
   assert.equal(initial.gaps[0]?.targetId, "greeting_reply");
-  assert.deepEqual(initial.gaps[0]?.missingEvidenceKinds, ["delivery_target:greeting_reply"]);
+  assert.deepEqual(initial.gaps[0]?.missingEvidenceKinds, []);
+  assert.equal(initial.gaps[0]?.unmetCriteria?.[0]?.targetId, "greeting_reply");
 
   const base = planFor(initial);
   const planned = bindCanonicalPlan(initial, {
@@ -330,7 +331,9 @@ test("canonical delivery targets remain open until their own claims are accepted
     ],
     failedBoundary: {
       stepId: "produce",
-      missingEvidenceKinds: ["delivery_target:data-distribution-analysis"],
+      missingEvidenceKinds: [],
+      unmetCriteria: [{ criterionId: "delivery_target:data-distribution-analysis", targetId: "data-distribution-analysis",
+        status: "unverified", rationale: "只有总行数，没有字段分布", evidenceRefs: ["query-count"] }],
       violatedSkillRequirements: [],
       reusableEvidenceRefs: ["query-schema", "query-count"],
       suggestedRepairShape: "repair_leaf",
@@ -368,12 +371,12 @@ test("canonical Plan revision retires the failed Step without discarding its evi
   const gap = rejected.gaps.find((item) => item.stepId === "produce" && item.status === "open")!;
   const retiredOnly = reviseCanonicalPlan(rejected, revisedPlan, 5);
   assert.equal(retiredOnly.gaps.find((item) => item.id === gap.id)?.status, "open");
-  assert.throws(() => reviseCanonicalPlan(rejected, revisedPlan, 5, [{ gapId: "unknown", replacementStepId: "produce.repair.1" }]), /distinct existing gaps/);
-  assert.throws(() => reviseCanonicalPlan(rejected, revisedPlan, 5, [{ gapId: gap.id, replacementStepId: "unknown" }]), /admitted pending Step/);
+  assert.throws(() => reviseCanonicalPlan(rejected, revisedPlan, 5, [{ gapId: "unknown", replacementStepIds: ["produce.repair.1"] }]), /distinct existing gaps/);
+  assert.throws(() => reviseCanonicalPlan(rejected, revisedPlan, 5, [{ gapId: gap.id, replacementStepIds: ["unknown"] }]), /admitted pending Step/);
   const rejectedAgain = recordCanonicalAssessment(rejected, { ...assessment(false), id: "rejected-again" }, evidence(), 5);
   assert.equal(rejectedAgain.gaps.filter((item) => item.stepId === "produce" && item.status === "open").length, 1);
   assert.equal(rejectedAgain.gaps.find((item) => item.stepId === "produce")?.id, gap.id);
-  const revised = reviseCanonicalPlan(rejectedAgain, revisedPlan, 5, [{ gapId: gap.id, replacementStepId: "produce.repair.1" }]);
+  const revised = reviseCanonicalPlan(rejectedAgain, revisedPlan, 5, [{ gapId: gap.id, replacementStepIds: ["produce.repair.1"] }]);
   assert.equal(revised.steps.produce?.status, "retired");
   assert.deepEqual(revised.steps.produce?.evidenceRefs, rejected.steps.produce?.evidenceRefs);
   assert.equal(revised.gaps.find((item) => item.id === gap.id)?.status, "open");
@@ -456,4 +459,28 @@ test("terminal Outcome failure rolls back the canonical terminal mutation", asyn
   assert.equal(persistedPlan.status, "running");
   assert.equal(persistedRun?.status, "running");
   await database.close();
+});
+
+test("a recovery strategy with prerequisite and delivery leaves shares one Gap and one revision budget", () => {
+  const initial = createCanonicalRunState({ runId: "split-recovery", userInput: "Produce a verified result", understanding: understanding(), now: 1 });
+  const original = planFor(initial);
+  const rejected = recordCanonicalAssessment(startCanonicalStep(bindCanonicalPlan(initial, original, 2), "produce", 3), assessment(false), evidence(), 4);
+  const gap = rejected.gaps.find((item) => item.stepId === "produce")!;
+  const prerequisite = { ...original.steps[0]!, id: "inspect", role: "fact_acquisition" as const, position: 1 };
+  const delivery = { ...original.steps[0]!, id: "deliver", role: "produce" as const, position: 2, dependencies: ["inspect"] };
+  const revision = { ...original, version: 2, steps: [{ ...original.steps[0]!, retiredAt: 5 }, prerequisite, delivery] };
+  let state = reviseCanonicalPlan(rejected, revision, 5, [{ gapId: gap.id, replacementStepIds: ["inspect", "deliver"] }]);
+  assert.equal(state.gaps.find((item) => item.id === gap.id)?.repairAttempts, 1);
+  state = recordCanonicalAssessment(startCanonicalStep(state, "inspect", 6), { ...assessment(true), stepId: "inspect" }, evidence(), 7);
+  assert.equal(state.gaps.find((item) => item.id === gap.id)?.status, "open", "a prerequisite cannot close the result gap");
+  state = recordCanonicalAssessment(startCanonicalStep(state, "deliver", 8), { ...assessment(false), stepId: "deliver",
+    failedBoundary: { ...assessment(false).failedBoundary!, stepId: "deliver" } }, evidence(), 9);
+  assert.equal(state.gaps.filter((item) => item.targetId === undefined).length, 1);
+  assert.equal(state.gaps.find((item) => item.id === gap.id)?.stepId, "deliver");
+  const nextPlan = { ...revision, version: 3, steps: revision.steps.map((step) => step.id === "deliver" ? { ...step, retiredAt: 10 } : step)
+    .concat([{ ...delivery, id: "correct-delivery", position: 3 }]) };
+  state = reviseCanonicalPlan(state, nextPlan, 10, [{ gapId: gap.id, replacementStepIds: ["inspect", "correct-delivery"] }]);
+  assert.equal(state.gaps.find((item) => item.id === gap.id)?.repairAttempts, 2, "new leaf IDs cannot restart the Gap budget");
+  state = recordCanonicalAssessment(startCanonicalStep(state, "correct-delivery", 11), { ...assessment(true), stepId: "correct-delivery" }, evidence(), 12);
+  assert.equal(state.gaps.find((item) => item.id === gap.id)?.status, "resolved");
 });

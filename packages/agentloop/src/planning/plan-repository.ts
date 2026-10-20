@@ -195,7 +195,7 @@ export class PlanRepository {
       assessment.planId,
       assessment.stepId,
       assessment.attempt,
-      assessment.assessmentProfile ?? "source_grounded",
+      assessment.assessmentProfile ?? "result_judged",
       assessment.assessmentMethod ?? "model",
       assessment.approved ? 1 : 0,
       JSON.stringify(assessment.criteria),
@@ -419,6 +419,7 @@ function parseAssessmentProfile(value: string | undefined): AssessmentProfileId 
     || value === "evidence_gate"
     || value === "lookup_lite"
     || value === "source_grounded"
+    || value === "result_judged"
     || value === "risk_sensitive"
   ) {
     return value;

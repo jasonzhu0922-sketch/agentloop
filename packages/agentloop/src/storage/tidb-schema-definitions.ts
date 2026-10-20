@@ -273,7 +273,7 @@ CREATE TABLE IF NOT EXISTS skill_compliance_assessments (
         step_id VARCHAR(191) NOT NULL,
         attempt BIGINT NOT NULL,
         assessment_profile LONGTEXT NOT NULL
-          CHECK(assessment_profile IN ('deterministic', 'evidence_gate', 'lookup_lite', 'source_grounded', 'risk_sensitive')),
+          CHECK(assessment_profile IN ('deterministic', 'evidence_gate', 'lookup_lite', 'source_grounded', 'result_judged', 'risk_sensitive')),
         assessment_method LONGTEXT NOT NULL
           CHECK(assessment_method IN ('rule', 'model')),
         approved BIGINT NOT NULL CHECK(approved IN (0, 1)),

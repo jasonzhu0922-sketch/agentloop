@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { deriveCurrentDecisionView, projectCurrentDecisionView } from "../src/runtime/current-decision-view.ts";
+import { createCanonicalRunState, type CanonicalGoalGap } from "../src/runtime/canonical-run-state.ts";
+import { understandTask } from "../src/runtime/task-intent.ts";
 
 function evidence(nextAction: string): any {
   return {
@@ -22,7 +24,9 @@ function input(revision = 1): any {
   const v2 = { id: "v2", presence: "present", sha256: "b".repeat(64), observationIds: ["obs-v2"] };
   return {
     runId: "run-1",
-    context: { canonicalState: { stateId: "state", runId: "run-1", intentId: "intent", revision }, plan: { id: "plan", version: 1 }, stepId: "build" },
+    context: { canonicalState: { ...createCanonicalRunState({ runId: "run-1", userInput: "Build the requested result",
+      understanding: understandTask({ objective: "Build the requested result" }), now: 1 }),
+      stateId: "state", revision, plan: { id: "plan", version: 1 } }, stepId: "build" },
     stepSemanticFrame: { stepId: "build", phaseRole: "artifact_production", evidenceMode: "produce_without_external_evidence", completionBoundary: ["artifact_path", "artifact_acceptance"] },
     evidence: evidence("produce_artifact"),
     workProducts: {
@@ -89,4 +93,44 @@ test("new publication IDs cannot masquerade as new evidence, but source identity
   assert.equal(digest(originalRef, "observed"), digest(freshRef, "observed"));
   assert.notEqual(digest(originalRef, "observed"), digest(freshRef, "changed"));
   assert.notEqual(digest(originalRef, "observed"), digest(freshRef, "observed", freshRef));
+});
+
+function gap(overrides: Partial<CanonicalGoalGap> = {}): CanonicalGoalGap {
+  return { id: "gap", stepId: "build", status: "open", missingEvidenceKinds: ["source_summary"],
+    violatedSkillRequirements: [], evidenceRefs: ["source"], suggestedAction: "repair_leaf", openedAt: 2,
+    unmetCriteria: [{ criterionId: "requested_fact", status: "unverified", rationale: "The source does not establish the requested fact.", evidenceRefs: ["source"] }],
+    ...overrides };
+}
+
+test("canonical assessment gaps remain visible after receipt prerequisites are satisfied and after new observations", () => {
+  const data = input();
+  data.evidence = { ...data.evidence, missingRequiredEvidenceKinds: [], missingToolEvidenceKinds: [], nextAction: "submit_completion_candidate" };
+  data.context.canonicalState.gaps = [gap()];
+  const before = deriveCurrentDecisionView(data);
+  assert.deepEqual(before.currentGap.receipts.missingRequiredEvidenceKinds, []);
+  assert.equal(before.currentGap.assessmentGaps[0].unmetCriteria?.[0].criterionId, "requested_fact");
+  assert.equal(before.nextAction, "resolve_evidence_gap");
+  const after = deriveCurrentDecisionView({ ...data, toolEvidence: [{ toolCallId: "new-read", toolName: "read_source", result: "new observation", isError: false }] });
+  assert.equal(after.nextAction, "resolve_evidence_gap", "new observations require assessment before closing a goal gap");
+  const projection = projectCurrentDecisionView(after);
+  assert.equal(projection.evidence?.receiptNextAction, "submit_completion_candidate");
+  assert.equal(projection.nextAction, "resolve_evidence_gap");
+  data.context.canonicalState.gaps = [gap({ status: "resolved", resolvedAt: 3 })];
+  assert.equal(deriveCurrentDecisionView(data).nextAction, "submit_completion_candidate");
+});
+
+test("canonical gap direction distinguishes evidence, synthesis, plan revision and input without borrowing other steps' gaps", () => {
+  const data = input();
+  data.context.canonicalState.gaps = [gap({ stepId: "other-step" }), gap({ status: "resolved" })];
+  assert.equal(deriveCurrentDecisionView(data).nextAction, "produce_artifact");
+  for (const [overrides, expected] of [
+    [{ stepId: "retired-step", repairScopeStepIds: ["build"] }, "resolve_evidence_gap"],
+    [{ missingEvidenceKinds: [] }, "revise_completion_candidate"],
+    [{ suggestedAction: "revise_plan" }, "revise_plan"],
+    [{ suggestedAction: "ask_user" }, "request_input"],
+    [{ suggestedAction: "fail" }, "stop"],
+  ] as const) {
+    data.context.canonicalState.gaps = [gap(overrides)];
+    assert.equal(deriveCurrentDecisionView(data).nextAction, expected);
+  }
 });

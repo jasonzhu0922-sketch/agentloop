@@ -1,3 +1,4 @@
+import { artifactVerificationLabel, isFinalDeliveryArtifact } from "../web/client/presentation/artifact-display.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
@@ -45,4 +46,25 @@ test("browser reload restores a failed Run's persisted final report", () => {
   assert.equal(assistant.partialText, report);
   assert.equal(assistant.completedAt, 42);
   assert.match(source, /class="partial-result"[\s\S]*?执行总结[\s\S]*?renderMarkdown\(message\.partialText\)/);
+});
+
+
+test("artifact cards disclose observed verification scope and retain stage-file actions", () => {
+  const source = readFileSync(new URL("../web/client/app.js", import.meta.url), "utf8");
+  const start = source.indexOf("function renderArtifactCard(");
+  const end = source.indexOf("\nfunction renderExecutionTrace", start);
+  const render = runInNewContext(`(${source.slice(start, end).trim()})`, {
+    escapeHtml: (value: unknown) => String(value).replaceAll("<", "&lt;"), formatBytes: (value: unknown) => `${value} B`,
+    artifactVerificationLabel, isFinalDeliveryArtifact,
+  });
+  const stage = { id: "file", role: "process", name: "report.html", bytes: 20, previewable: true,
+    verification: { file: "verified", result: "unverified", delivery: "uncommitted", limitations: ["Requested comparison is unverified"] } as const };
+  const markup = render(stage, "assistant", "failed");
+  assert.match(markup, /阶段产物/);
+  assert.match(markup, /文件检查通过，结果尚未验收/);
+  assert.match(markup, /Requested comparison is unverified/);
+  assert.match(markup, /data-artifact-preview="file"/);
+  assert.match(markup, /data-artifact-download="file"/);
+  assert.equal(isFinalDeliveryArtifact({ ...stage, role: "final" }), false);
+  assert.equal(isFinalDeliveryArtifact({ ...stage, role: "final", verification: { delivery: "committed" } }), true);
 });

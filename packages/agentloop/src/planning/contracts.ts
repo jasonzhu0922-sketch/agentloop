@@ -24,21 +24,12 @@ export type OutcomePlanShape =
   | "recovery_patch";
 export type SkillRole = "primary_builder" | "source_provider" | "support" | "qa";
 export type OutcomeLeafRole = "fact_acquisition" | "produce" | "deliver" | "repair";
-export type EvidenceKind =
-  | "source_summary"
-  | "source_urls"
-  | "schema_summary"
-  | "record_counts"
-  | "table_coverage"
-  | "structured_extraction_artifact"
-  | "artifact_path"
-  | "artifact_non_empty"
-  | "artifact_acceptance"
-  | "artifact_openable"
-  | "format_matches_request"
-  | "basic_navigation"
-  | "delivery_receipt"
-  | "explicit_caveats";
+export const EVIDENCE_KINDS = [
+  "source_summary", "source_urls", "schema_summary", "record_counts", "table_coverage",
+  "structured_extraction_artifact", "artifact_path", "artifact_non_empty", "artifact_acceptance",
+  "artifact_openable", "format_matches_request", "basic_navigation", "delivery_receipt", "explicit_caveats",
+] as const;
+export type EvidenceKind = typeof EVIDENCE_KINDS[number];
 export type CaveatPolicy =
   | "none"
   | "mark_unverified_facts"
@@ -243,6 +234,8 @@ export interface ConversationTurnResolution {
    * Server-validated identity of a prior accepted work product that this turn
    * changes. A Run is provenance, not an executable file target: a follow-up
    * must bind the concrete artifact before planning a native transformation.
+   * Its producer may differ from targetRunId when continuing a failed goal
+   * that already consumed an earlier Run's artifact.
    */
   readonly targetArtifact?: ConversationArtifactReference;
   /**
@@ -456,15 +449,26 @@ export interface SourceConstraint {
   readonly requiredVisibleDirectoryIds?: readonly string[];
 }
 
+/** A condition's authority, bound to the existing canonical intent/targets. */
+export interface CriterionBasis {
+  readonly kind: "user_requirement" | "necessary_condition" | "execution_method";
+  readonly intentId: string;
+  readonly targetIds: readonly string[];
+  /** Exact user-authored text supporting the condition. */
+  readonly requirement: string;
+  readonly rationale: string;
+}
+
 export interface SuccessCriterion {
   readonly id: string;
   /** Canonical delivery target whose acceptance this criterion controls. */
   readonly targetId?: string;
   readonly description: string;
   readonly source: "task" | "planner";
+  readonly basis?: CriterionBasis;
   /**
-   * States what kind of observation can support this criterion.  The default
-   * remains deterministic/blocking for compatibility with existing Plans.
+   * Selects the assessment method, not a required source channel.
+   * ModelPlanner marks result properties model_judged and receipt checks deterministic.
    */
   readonly verification?: "deterministic" | "model_judged" | "decision_context";
   /** A non-blocking criterion is retained as an honest completion caveat. */
@@ -476,6 +480,7 @@ export interface RequiredFact {
   readonly description: string;
   readonly evidenceKinds: readonly string[];
   readonly satisfiedBy?: readonly string[];
+  readonly basis?: CriterionBasis;
 }
 
 export interface PlanStepProposal {
@@ -578,6 +583,8 @@ export interface CriterionAssessment {
   readonly blocking?: boolean;
   readonly rationale: string;
   readonly evidenceRefs: readonly string[];
+  /** A faulty inferred condition must be revised, never silently waived. */
+  readonly contractIssue?: string;
 }
 
 export interface DecisionBindingAssessment {
@@ -590,6 +597,8 @@ export interface DecisionBindingAssessment {
 
 export interface SkillAssessment {
   readonly skillId: string;
+  /** Original model reference when a unique bound Skill name was resolved to skillId. */
+  readonly submittedSkillReference?: string;
   readonly status?: "followed" | "skipped_unavailable" | "process_caveat" | "not_followed" | "not_assessed";
   readonly followed: boolean;
   readonly rationale: string;
@@ -604,6 +613,15 @@ export interface FailedBoundary {
   readonly violatedSkillRequirements: readonly string[];
   readonly reusableEvidenceRefs: readonly string[];
   readonly suggestedRepairShape: SuggestedRepairShape;
+  /** Exact unmet result conditions and explanations, not receipt labels. */
+  readonly unmetCriteria?: readonly {
+    readonly criterionId: string;
+    readonly targetId?: string;
+    readonly status: "unverified" | "conflict";
+    readonly rationale: string;
+    readonly evidenceRefs: readonly string[];
+    readonly contractIssue?: string;
+  }[];
 }
 
 export type AssessmentProfileId =
@@ -611,6 +629,7 @@ export type AssessmentProfileId =
   | "evidence_gate"
   | "lookup_lite"
   | "source_grounded"
+  | "result_judged"
   | "risk_sensitive";
 
 export type AssessmentMethod = "rule" | "model";
@@ -673,6 +692,7 @@ export interface StepAssessor {
 export interface PlanRevisionAssessmentInput {
   readonly runId: string;
   readonly userInput: string;
+  readonly canonicalState?: CanonicalRunState;
   readonly currentPlan: ExecutionPlan;
   readonly proposal: PlanProposal;
   readonly retiredStepIds: readonly string[];

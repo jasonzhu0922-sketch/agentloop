@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { CanonicalRunStateRef } from "./canonical-run-state.ts";
+import { canonicalRunStateRef, type CanonicalRunState, type CanonicalRunStateRef, type CanonicalGoalGap } from "./canonical-run-state.ts";
 import type { ContentReference } from "./content-reference.ts";
 import type { AgentLoopToolEvidence } from "./contracts.ts";
 import type { StepSemanticFrame } from "./step-semantic-frame.ts";
@@ -10,12 +10,11 @@ import type { WorkProductDeliveryTarget } from "./work-product-semantics.ts";
 import { parseJsonRecord } from "./tool-result-evidence.ts";
 
 /**
- * The immutable context needed to identify one admitted Step. It deliberately
- * references CanonicalRunState; it is not a second mutable Run state.
+ * A snapshot of the authoritative Run at a decision boundary. The caller
+ * supplies the latest committed state, including assessments and open gaps.
  */
 export interface CurrentDecisionContext {
-  readonly canonicalState: CanonicalRunStateRef;
-  readonly plan: { readonly id: string; readonly version: number };
+  readonly canonicalState: CanonicalRunState;
   readonly stepId: string;
 }
 
@@ -98,9 +97,13 @@ export interface CurrentDecisionView {
     readonly fullStateRef?: ContentReference;
   };
   readonly currentGap: {
-    readonly missingRequiredEvidenceKinds: readonly string[];
-    readonly missingToolEvidenceKinds: readonly string[];
-    readonly failedEvidenceKinds: readonly string[];
+    /** Open assessed gaps owned by this Step or its canonical repair scope. */
+    readonly assessmentGaps: readonly CanonicalGoalGap[];
+    readonly receipts: {
+      readonly missingRequiredEvidenceKinds: readonly string[];
+      readonly missingToolEvidenceKinds: readonly string[];
+      readonly failedEvidenceKinds: readonly string[];
+    };
   };
   /** Semantic direction only; it never narrows the Run capability grant. */
   readonly nextAction: string;
@@ -120,7 +123,8 @@ export interface CurrentDecisionViewProjection {
     readonly pendingCandidateEvidenceKinds: readonly string[];
     readonly missingToolEvidenceKinds: readonly string[];
     readonly workProduct: RuntimeStepEvidenceState["workProduct"];
-    readonly nextAction: RuntimeStepEvidenceState["nextAction"];
+    /** Receipt readiness is not a judgment that the requested facts are established. */
+    readonly receiptNextAction: RuntimeStepEvidenceState["nextAction"];
     readonly evidenceProducingToolNames: readonly string[];
     readonly exploratoryToolNames: readonly string[];
     readonly requiredWorkflowAction?: RuntimeStepEvidenceState["requiredWorkflowAction"];
@@ -174,7 +178,7 @@ export function deriveCurrentDecisionView(input: {
   const basis = {
     runId: input.runId,
     stepId: input.context?.stepId ?? "unknown",
-    plan: input.context?.plan,
+    plan: input.context?.canonicalState.plan,
     contract,
     evidence: evidenceBasis(input.evidence),
     toolFacts: decisionToolFacts(input.toolEvidence),
@@ -188,17 +192,27 @@ export function deriveCurrentDecisionView(input: {
   };
   const decisionBasisDigest = digest(basis);
   const eventWatermark = input.workProducts?.observations.throughSeq ?? null;
+  const state = input.context?.canonicalState;
+  const stateRef = state === undefined ? undefined : canonicalRunStateRef(state);
   const identity = {
     runId: input.runId,
     stepId: basis.stepId,
-    ...(input.context === undefined ? {} : { planId: input.context.plan.id, planVersion: input.context.plan.version,
-      canonicalState: input.context.canonicalState }),
+    ...(state?.plan === undefined ? {} : { planId: state.plan.id, planVersion: state.plan.version }),
+    ...(stateRef === undefined ? {} : { canonicalState: stateRef }),
     eventWatermark,
     reducerVersion: "v1" as const,
     decisionBasisDigest,
-    viewId: digest({ decisionBasisDigest, eventWatermark, canonicalState: input.context?.canonicalState }),
+    viewId: digest({ decisionBasisDigest, eventWatermark, canonicalState: stateRef }),
   };
   const evidence = input.evidence;
+  const assessmentGaps = state?.gaps.filter((gap) => gap.status === "open" && gap.stepId !== undefined
+    && (gap.stepId === input.context!.stepId || gap.repairScopeStepIds?.includes(input.context!.stepId))) ?? [];
+  const nextAction = assessmentGaps.some((gap) => gap.suggestedAction === "fail") ? "stop"
+    : assessmentGaps.some((gap) => gap.suggestedAction === "ask_user") ? "request_input"
+    : assessmentGaps.some((gap) => gap.suggestedAction === "revise_plan") ? "revise_plan"
+    : assessmentGaps.some((gap) => gap.missingEvidenceKinds.length > 0) ? "resolve_evidence_gap"
+    : assessmentGaps.length > 0 ? "revise_completion_candidate"
+    : evidence?.nextAction ?? input.stepSemanticFrame?.phaseRole ?? "inspect_current_state";
   return {
     schema: "agentloop.currentDecisionView/v1",
     identity,
@@ -215,11 +229,14 @@ export function deriveCurrentDecisionView(input: {
       ...(input.workProducts?.fullStateRef === undefined ? {} : { fullStateRef: input.workProducts.fullStateRef }),
     },
     currentGap: {
-      missingRequiredEvidenceKinds: evidence?.missingRequiredEvidenceKinds ?? [],
-      missingToolEvidenceKinds: evidence?.missingToolEvidenceKinds ?? [],
-      failedEvidenceKinds: evidence?.failedEvidenceKinds ?? [],
+      assessmentGaps,
+      receipts: {
+        missingRequiredEvidenceKinds: evidence?.missingRequiredEvidenceKinds ?? [],
+        missingToolEvidenceKinds: evidence?.missingToolEvidenceKinds ?? [],
+        failedEvidenceKinds: evidence?.failedEvidenceKinds ?? [],
+      },
     },
-    nextAction: evidence?.nextAction ?? input.stepSemanticFrame?.phaseRole ?? "inspect_current_state",
+    nextAction,
   };
 }
 
@@ -243,7 +260,7 @@ export function projectCurrentDecisionView(view: CurrentDecisionView): CurrentDe
       pendingCandidateEvidenceKinds: view.evidence.pendingCandidateEvidenceKinds,
       missingToolEvidenceKinds: view.evidence.missingToolEvidenceKinds,
       workProduct: view.evidence.workProduct,
-      nextAction: view.evidence.nextAction,
+      receiptNextAction: view.evidence.nextAction,
       evidenceProducingToolNames: view.evidence.evidenceProducingToolNames,
       exploratoryToolNames: view.evidence.exploratoryToolNames,
       ...(view.evidence.requiredWorkflowAction === undefined ? {} : { requiredWorkflowAction: view.evidence.requiredWorkflowAction }),
@@ -261,7 +278,7 @@ export function projectCurrentDecisionView(view: CurrentDecisionView): CurrentDe
     },
     currentGap: view.currentGap,
     nextAction: view.nextAction,
-    instruction: "Treat nextAction and currentGap as Runtime-derived state. Historical diagnostics are audit material, not current blockers; an unbound diagnostic is not proof that the current object version is faulty.",
+    instruction: "Use nextAction and currentGap from this committed canonical Run revision. Receipt readiness proves observed operations, not coverage of the requested facts. Open assessmentGaps remain unresolved until Assessment accepts the relevant result; a successful source receipt or a rewritten disclaimer cannot close them. Inspect existing observations or acquire missing evidence when needed; correct interpretation or delivery from existing evidence when sufficient. Tool choice remains within the Run grant. Historical diagnostics are audit material, not current blockers; an unbound diagnostic is not proof that the current object version is faulty.",
   };
 }
 

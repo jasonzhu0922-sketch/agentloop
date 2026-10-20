@@ -299,7 +299,8 @@ test("Router artifact catalog reads a verified shared-workspace artifact without
     const catalog = new SharedWorkspaceArtifactCatalog(database, root);
     await catalog.capture({
       assignmentId: "assignment-1", tenantId: "tenant-1", ownerUserId: "user-1", conversationId: "conversation-1", remoteRunId: "run-1",
-      artifacts: [{ id: "artifact-1", runId: "run-1", path: "report.md", name: "report.md", bytes: 17, mimeType: "text/markdown", role: "final", sourceTool: "computer_write_file", previewable: true }],
+      artifacts: [{ id: "artifact-1", runId: "run-1", path: "report.md", name: "report.md", bytes: 17, mimeType: "text/markdown", role: "final", sourceTool: "computer_write_file", previewable: true,
+        verification: { file: "verified", result: "unverified", delivery: "uncommitted", targetIds: ["report"], limitations: ["Content not yet inspected"] } }],
     });
     await catalog.capture({
       assignmentId: "assignment-2", tenantId: "tenant-2", ownerUserId: "user-2", conversationId: "conversation-2", remoteRunId: "run-2",
@@ -308,6 +309,10 @@ test("Router artifact catalog reads a verified shared-workspace artifact without
     const read = await catalog.read("assignment-1", "artifact-1");
     assert.equal(Buffer.from(read?.content ?? []).toString("utf8"), "# Durable report\n");
     assert.equal((await catalog.list("assignment-1"))[0]?.sha256.length, 64);
+    const reopened = new SharedWorkspaceArtifactCatalog(database, root);
+    assert.deepEqual((await reopened.list("assignment-1"))[0]?.verification, {
+      file: "verified", result: "unverified", delivery: "uncommitted", targetIds: ["report"], limitations: ["Content not yet inspected"],
+    });
     assert.equal(Buffer.from((await catalog.read("assignment-2", "artifact-1"))?.content ?? []).toString("utf8"), "# Separate report\n");
     await writeFile(join(conversationRoot, "report.md"), "tampered content\n");
     await assert.rejects(catalog.read("assignment-1", "artifact-1"), /artifact_(unavailable|integrity_mismatch)/);

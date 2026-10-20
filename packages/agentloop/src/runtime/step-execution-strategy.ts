@@ -342,7 +342,7 @@ export class DefaultToolExposurePolicy implements ToolExposurePolicy {
       deprioritizedToolGroups: deprioritizedToolGroups({
         deprioritizedToolNames,
         state: input.stepEvidenceState,
-        reason: `current nextAction is ${input.stepEvidenceState.nextAction}`,
+        reason: `current nextAction is ${input.currentDecisionView?.nextAction ?? input.stepEvidenceState.nextAction}`,
         preferWhen: unlockWhenForEvidenceState(input.stepEvidenceState),
       }),
     };
@@ -384,7 +384,7 @@ export class DefaultPromptProjectionPolicy implements PromptProjectionPolicy {
       adaptive: true,
       instruction: input.stepEvidenceState === undefined
         ? "Use the Runtime's default structured evidence and large-result projection rules."
-        : `Project prior results toward nextAction=${input.stepEvidenceState.nextAction}; preserve receipts, diagnostics, artifact refs, caveats, and missing evidence before raw content.`,
+        : `Project prior results toward nextAction=${input.currentDecisionView?.nextAction ?? input.stepEvidenceState.nextAction}; preserve canonical assessment gaps, receipts, diagnostics, artifact refs, caveats, and missing evidence before raw content.`,
       ...thresholds,
     };
   }

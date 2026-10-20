@@ -7,6 +7,7 @@ import type {
   ModelAdapter,
   ModelInvocation,
   ModelMessage,
+  ModelResponse,
   ModelToolCall,
   ModelToolDefinition,
   RuntimeContextSnapshot,
@@ -15,6 +16,7 @@ import type {
   RuntimePromptAugmentation,
 } from "./contracts.ts";
 import type { PromptProjectionDecision } from "./step-execution-strategy.ts";
+import { completeWithRequestTelemetry } from "./model-streaming.ts";
 import { isRuntimeResultId, type RuntimeResultContextEntry, type RuntimeResultRef } from "./runtime-result.ts";
 
 export interface ContextPolicy {
@@ -49,10 +51,15 @@ interface ResolvedContextPolicy {
   readonly preserveRecentTokens: number;
   readonly pruneProtectTokens: number;
   readonly summaryMaxOutputTokens: number;
-  readonly persistedSummaryMaxTokens: number;
+  readonly summaryTargetTokens: number;
   readonly summaryToolResultCharacters: number;
   readonly largeToolResultProjectionCharacters: number;
   readonly largeToolResultPreviewCharacters: number;
+}
+
+interface SummaryBudget {
+  readonly targetTokens: number;
+  readonly maxTokens: number;
 }
 
 interface PrunedToolResult {
@@ -122,7 +129,10 @@ const SUMMARY_FORMAT = `Use this exact structure:
 - [Exact identifiers, paths, error messages, and facts that must survive]
 
 Rules:
-- Preserve every fact already present in a previous summary unless later evidence supersedes it.
+- Preserve user constraints, evidence-backed conclusions, unresolved questions, failed attempts, and next actions from the previous summary unless later evidence supersedes them.
+- Replace repetitive raw rows and completed write bodies with their existing ToolCall/Result identities, paths, hashes, and coverage. Do not replace exact identifiers with paraphrases or create new identities.
+- Distinguish observations, inferences, and unverified claims. Tool success does not establish task completion; an artifact write does not establish acceptance.
+- The summary is a navigation and continuity aid, never authority for permissions, Plan state, evidence verification, or completion.
 - Update progress instead of duplicating it.
 - Never invent success, evidence, files, commands, or completion.
 - A Skill body omitted from the transcript is not summarized authority; it must be loaded again.
@@ -150,49 +160,6 @@ function isStructuredSummary(value: string): boolean {
   return normalized.length > 0 && REQUIRED_SUMMARY_HEADINGS.every((heading) => normalized.includes(heading));
 }
 
-function deterministicCompactionSummary(messages: readonly ModelMessage[], previousSummary?: string): string {
-  if (previousSummary !== undefined && isStructuredSummary(previousSummary)) return previousSummary;
-  const userGoal = (messages.find((message) => message.role === "user")?.content.trim() || "当前 Runtime 任务").slice(0, 1200);
-  const assistantProgress = messages
-    .filter((message): message is Extract<ModelMessage, { role: "assistant" }> => message.role === "assistant")
-    .map((message) => message.content.trim())
-    .filter((content) => content.length > 0)
-    .at(-1);
-  const toolEvidence = messages
-    .filter((message): message is Extract<ModelMessage, { role: "tool" }> => message.role === "tool")
-    .map((message) => `- ${message.name} (${message.toolCallId})`)
-    .slice(-12);
-  return [
-    "## Goal",
-    userGoal,
-    "",
-    "## Constraints & Preferences",
-    "- This deterministic fallback preserves only canonical transcript identities; reload exact tool results through their ResultRef when needed.",
-    "",
-    "## Progress",
-    "### Done",
-    toolEvidence.length === 0 ? "- No completed Tool result was available in the compacted window." : toolEvidence.join("\n"),
-    "",
-    "### In Progress",
-    assistantProgress === undefined ? "- Continue from the retained canonical transcript." : `- ${assistantProgress.slice(0, 1200)}`,
-    "",
-    "### Blocked",
-    "- No additional blocker was inferred by deterministic compaction.",
-    "",
-    "## Key Decisions",
-    "- Preserve Runtime evidence identities and do not infer omitted facts.",
-    "",
-    "## Evidence",
-    toolEvidence.length === 0 ? "- No Tool identities in the compacted window." : toolEvidence.join("\n"),
-    "",
-    "## Next Steps",
-    "1. Continue from the canonical transcript and inspect the referenced Result identities before taking another action.",
-    "",
-    "## Critical Context",
-    "- The previous model-produced compaction summary failed structural validation and was not accepted.",
-  ].join("\n");
-}
-
 export class ContextAssembler {
   private readonly runId: string;
   private readonly systemPrompt: string;
@@ -203,6 +170,7 @@ export class ContextAssembler {
   private readonly prunedToolResults = new Map<string, PrunedToolResult>();
   private firstKeptMessageIndex = 0;
   private contextEpoch = 0;
+  private compactionAttempt = 0;
   private contextRevision = 0;
   private runtimeDirective?: string;
   private readonly runtimePromptAugmentations = new Map<string, RuntimePromptAugmentation>();
@@ -337,68 +305,9 @@ export class ContextAssembler {
       });
     }
 
-    const newlyStructured = this.projectStructuredEvidenceToolResults(canonicalMessages);
-    if (newlyStructured.length > 0) {
-      await this.emitEvent({
-        type: "context.tool_outputs_projected",
-        data: {
-          contextEpoch: this.contextEpoch,
-          reason: "structured_evidence",
-          toolResults: newlyStructured,
-        },
-      });
-    }
-
-    const newlyStructuredResults = this.projectStructuredToolResults(canonicalMessages);
-    if (newlyStructuredResults.length > 0) {
-      await this.emitEvent({
-        type: "context.tool_outputs_projected",
-        data: {
-          contextEpoch: this.contextEpoch,
-          reason: "structured_tool_result",
-          toolResults: newlyStructuredResults,
-        },
-      });
-    }
-
-    const newlyProjected = this.projectLargeToolResults(canonicalMessages, tools, runtimeContext, usableInputTokens);
-    if (newlyProjected.length > 0) {
-      await this.emitEvent({
-        type: "context.tool_outputs_projected",
-        data: {
-          contextEpoch: this.contextEpoch,
-          thresholdCharacters: this.lastLargeToolResultProjectionThreshold ?? this.largeToolResultProjectionCharacters(),
-          previewCharacters: this.lastLargeToolResultPreviewThreshold ?? this.largeToolResultPreviewCharacters(),
-          adaptive: this.adaptiveProjectionEnabled(),
-          toolResults: newlyProjected,
-        },
-      });
-    }
-
-    let projection = this.buildProjection(canonicalMessages);
-    let estimatedInputTokens = this.estimateInvocationTokens(tools, runtimeContext, projection);
-    if (estimatedInputTokens > this.policy.proactiveCompactionTokens) {
-      const beforePrune = estimatedInputTokens;
-      const newlyPruned = this.pruneOldToolOutputs(
-        canonicalMessages,
-        tools,
-        runtimeContext,
-        Math.min(usableInputTokens, this.policy.proactiveCompactionTokens),
-      );
-      if (newlyPruned.length > 0) {
-        projection = this.buildProjection(canonicalMessages);
-        estimatedInputTokens = this.estimateInvocationTokens(tools, runtimeContext, projection);
-        await this.emitEvent({
-          type: "context.tool_outputs_pruned",
-          data: {
-            contextEpoch: this.contextEpoch,
-            estimatedTokensBefore: beforePrune,
-            estimatedTokensAfter: estimatedInputTokens,
-            toolResults: newlyPruned,
-          },
-        });
-      }
-    }
+    let { projection, estimatedInputTokens } = await this.prepareProjection(
+      canonicalMessages, tools, runtimeContext, usableInputTokens,
+    );
 
     let compactions = 0;
     const targetInputTokens = Math.min(usableInputTokens, this.policy.proactiveCompactionTokens);
@@ -505,8 +414,10 @@ export class ContextAssembler {
     assertClosedToolProtocol(canonicalMessages);
     this.refreshToolResultCatalog(canonicalMessages);
     const runtimeContext = this.currentRuntimeContext();
-    const projection = this.buildProjection(canonicalMessages);
-    const estimatedTokensBefore = this.estimateInvocationTokens(tools, runtimeContext, projection);
+    const { estimatedInputTokens: estimatedTokensBefore } = await this.prepareProjection(
+      canonicalMessages, tools, runtimeContext,
+      this.policy.contextWindowTokens - this.policy.outputReserveTokens - this.policy.safetyMarginTokens,
+    );
     const compacted = await this.compact(canonicalMessages, tools, runtimeContext, estimatedTokensBefore, signal);
     if (!compacted) {
       await this.emitEvent({
@@ -519,6 +430,79 @@ export class ContextAssembler {
       });
     }
     return compacted;
+  }
+
+  /** The ordinary and completion-repair paths share the same neutral projections. */
+  private async prepareProjection(
+    canonicalMessages: readonly ModelMessage[],
+    tools: readonly ModelToolDefinition[],
+    runtimeContext: RuntimeContextSnapshot,
+    usableInputTokens: number,
+  ): Promise<{ projection: ModelMessage[]; estimatedInputTokens: number }> {
+    const newlyStructured = this.projectStructuredEvidenceToolResults(canonicalMessages);
+    if (newlyStructured.length > 0) {
+      await this.emitEvent({
+        type: "context.tool_outputs_projected",
+        data: {
+          contextEpoch: this.contextEpoch,
+          reason: "structured_evidence",
+          toolResults: newlyStructured,
+        },
+      });
+    }
+
+    const newlyStructuredResults = this.projectStructuredToolResults(canonicalMessages);
+    if (newlyStructuredResults.length > 0) {
+      await this.emitEvent({
+        type: "context.tool_outputs_projected",
+        data: {
+          contextEpoch: this.contextEpoch,
+          reason: "structured_tool_result",
+          toolResults: newlyStructuredResults,
+        },
+      });
+    }
+
+    const newlyProjected = this.projectLargeToolResults(canonicalMessages, tools, runtimeContext, usableInputTokens);
+    if (newlyProjected.length > 0) {
+      await this.emitEvent({
+        type: "context.tool_outputs_projected",
+        data: {
+          contextEpoch: this.contextEpoch,
+          thresholdCharacters: this.lastLargeToolResultProjectionThreshold ?? this.largeToolResultProjectionCharacters(),
+          previewCharacters: this.lastLargeToolResultPreviewThreshold ?? this.largeToolResultPreviewCharacters(),
+          adaptive: this.adaptiveProjectionEnabled(),
+          toolResults: newlyProjected,
+        },
+      });
+    }
+
+    let projection = this.buildProjection(canonicalMessages);
+    let estimatedInputTokens = this.estimateInvocationTokens(tools, runtimeContext, projection);
+    if (estimatedInputTokens > this.policy.proactiveCompactionTokens) {
+      const beforePrune = estimatedInputTokens;
+      const newlyPruned = this.pruneOldToolOutputs(
+        canonicalMessages,
+        tools,
+        runtimeContext,
+        Math.min(usableInputTokens, this.policy.proactiveCompactionTokens),
+      );
+      if (newlyPruned.length > 0) {
+        projection = this.buildProjection(canonicalMessages);
+        estimatedInputTokens = this.estimateInvocationTokens(tools, runtimeContext, projection);
+        await this.emitEvent({
+          type: "context.tool_outputs_pruned",
+          data: {
+            contextEpoch: this.contextEpoch,
+            estimatedTokensBefore: beforePrune,
+            estimatedTokensAfter: estimatedInputTokens,
+            toolResults: newlyPruned,
+          },
+        });
+      }
+    }
+
+    return { projection, estimatedInputTokens };
   }
 
   projectToolEvidence(
@@ -841,9 +825,27 @@ export class ContextAssembler {
   ): Promise<boolean> {
     const tailStart = this.selectTailStart(canonicalMessages, tools, runtimeContext);
     if (tailStart === undefined || tailStart <= this.firstKeptMessageIndex) return false;
+    this.compactionAttempt += 1;
     const oldFirstKept = this.firstKeptMessageIndex;
     const activeBefore = this.activeSkillNames(canonicalMessages);
     const messagesToSummarize = canonicalMessages.slice(oldFirstKept, tailStart);
+    const usableInputTokens = this.policy.contextWindowTokens
+      - this.policy.outputReserveTokens - this.policy.safetyMarginTokens;
+    const retainedProjection = this.buildProjectionFrom(canonicalMessages, tailStart);
+    assertClosedToolProtocol(retainedProjection);
+    // The desired summary size is not an admission limit. Admission uses the
+    // actual fixed context and protected tail, with bounded summary headroom.
+    const retainedTokens = this.estimateInvocationTokens(tools, runtimeContext, retainedProjection);
+    const maxTokens = Math.floor(Math.min(
+      this.policy.summaryMaxOutputTokens,
+      usableInputTokens * 0.2,
+      usableInputTokens - retainedTokens - 256,
+    ));
+    if (maxTokens < 1) throw contextBudgetError("Protected context leaves no summary budget", { retainedTokens, usableInputTokens });
+    const budget: SummaryBudget = {
+      targetTokens: Math.min(this.policy.summaryTargetTokens, maxTokens),
+      maxTokens,
+    };
     await this.emitEvent({
       type: "context.compaction.started",
       data: {
@@ -852,9 +854,29 @@ export class ContextAssembler {
         summarizeFromMessageIndex: oldFirstKept,
         summarizeToMessageIndexExclusive: tailStart,
         firstKeptMessageIndex: tailStart,
+        summaryTargetTokens: budget.targetTokens,
+        summaryMaxTokens: budget.maxTokens,
+        retainedTokens,
+        sourceMessagesSha256: digest(JSON.stringify(messagesToSummarize)),
+        protectedContextSha256: digest(runtimeContext.content),
+        retainedMessagesSha256: digest(JSON.stringify(retainedProjection)),
       },
     });
-    const summaryResult = await this.generateSummary(messagesToSummarize, signal);
+    const summaryResult = await this.generateSummary(messagesToSummarize, budget, signal).catch(async (error) => {
+      await this.emitEvent({ type: "context.compaction.failed", data: {
+        contextEpoch: this.contextEpoch + 1, ...errorEventDetails(error),
+      } });
+      throw error;
+    });
+    const nextRuntimeContext = this.currentRuntimeContext({ summary: summaryResult.summary, epoch: this.contextEpoch + 1 });
+    const estimatedTokensAfter = this.estimateInvocationTokens(tools, nextRuntimeContext, retainedProjection);
+    if (estimatedTokensAfter > usableInputTokens || estimatedTokensAfter >= estimatedTokensBefore) {
+      const details = { estimatedTokensBefore, estimatedTokensAfter, usableInputTokens };
+      await this.emitEvent({ type: "context.compaction.rejected", data: { contextEpoch: this.contextEpoch + 1, ...details } });
+      throw contextBudgetError("Context compaction did not produce a smaller usable projection", details);
+    }
+    // Commit only after admission. Rejected attempts never advance the source
+    // boundary, replace the accepted summary, or expire active Skill bodies.
     this.firstKeptMessageIndex = tailStart;
     this.contextEpoch += 1;
     this.summary = summaryResult.summary;
@@ -870,8 +892,6 @@ export class ContextAssembler {
     const compactedToolCallIds = messagesToSummarize
       .filter((message): message is Extract<ModelMessage, { role: "tool" }> => message.role === "tool")
       .map((message) => message.toolCallId);
-    const projected = this.buildProjection(canonicalMessages);
-    const estimatedTokensAfter = this.estimateInvocationTokens(tools, this.currentRuntimeContext(), projected);
     await this.emitEvent({
       type: "context.compacted",
       data: {
@@ -881,6 +901,11 @@ export class ContextAssembler {
         firstKeptMessageIndex: this.firstKeptMessageIndex,
         summary: this.summary,
         summarySha256: digest(this.summary),
+        estimatedSummaryTokens: estimateTextTokens(this.summary),
+        summaryTargetTokens: budget.targetTokens,
+        summaryMaxTokens: budget.maxTokens,
+        summaryAdmission: estimateTextTokens(this.summary) <= budget.targetTokens ? "target" : "available_context_budget",
+        compactionAttempt: this.compactionAttempt,
         compactedToolCallIds,
         expiredSkillNames,
         usage: summaryResult.usage,
@@ -923,31 +948,35 @@ export class ContextAssembler {
     // assessment evidence retain the original candidate; this only selects an
     // empty provider-transcript tail after it has been summarized.
     if (firstCurrentRead < 0) candidates.push(canonicalMessages.length);
+    const originalTokens = this.estimateInvocationTokens(tools, runtimeContext, this.buildProjection(canonicalMessages)) - baseInputTokens;
     for (const index of candidates) {
       const tail = this.buildProjectionFrom(canonicalMessages, index);
       const tailTokens = this.estimateInvocationTokens(tools, runtimeContext, tail) - baseInputTokens;
-      if (tailTokens <= tailBudget) return index;
+      if (tailTokens <= tailBudget && tailTokens + this.policy.summaryTargetTokens + 256 < originalTokens) return index;
     }
     return candidates.at(-1);
   }
 
   private async generateSummary(
     messages: readonly ModelMessage[],
+    budget: SummaryBudget,
     signal?: AbortSignal,
   ): Promise<{
     summary: string;
     usage: Readonly<{ inputTokens?: number; outputTokens?: number }>;
   }> {
     const serializedGroups = serializeCompactionGroups(messages, this.policy.summaryToolResultCharacters);
-    const instructions = summaryInstructions(this.policy.persistedSummaryMaxTokens);
+    const instructions = summaryInstructions(budget.targetTokens);
+    const maxOutputTokens = Math.min(this.policy.summaryMaxOutputTokens, Math.ceil(budget.maxTokens * 1.25));
     const inputBudget = this.policy.contextWindowTokens
-      - this.policy.outputReserveTokens
       - this.policy.safetyMarginTokens
-      - this.policy.summaryMaxOutputTokens
+      - maxOutputTokens
       - estimateTextTokens(SUMMARY_SYSTEM_PROMPT)
       - estimateTextTokens(instructions)
+      - budget.maxTokens
       - 512;
-    const chunks = chunkSerializedGroups(serializedGroups, Math.max(2_000, inputBudget));
+    if (inputBudget < 1) throw contextBudgetError("Compaction instructions leave no conversation budget", { inputBudget });
+    const chunks = chunkSerializedGroups(serializedGroups, inputBudget);
     let summary = this.summary;
     let inputTokens = 0;
     let outputTokens = 0;
@@ -964,19 +993,19 @@ export class ContextAssembler {
           `<conversation>\n${chunks[index]}\n</conversation>`,
           instructions,
         ].filter(Boolean).join("\n\n");
-        const response = await this.model.complete({
-          runId: `${this.runId}:context-compaction:${this.contextEpoch + 1}:${index + 1}:${attempt + 1}`,
+        const response = await this.completeSummary({
+          runId: `${this.runId}:context-compaction:${this.contextEpoch + 1}:${this.compactionAttempt}:${index + 1}:${attempt + 1}`,
           systemPrompt: SUMMARY_SYSTEM_PROMPT,
           phase: "compaction",
           runtimeContext: {
-            id: `${this.runId}:compaction:${this.contextEpoch + 1}:${index + 1}:${attempt + 1}`,
+            id: `${this.runId}:compaction:${this.contextEpoch + 1}:${this.compactionAttempt}:${index + 1}:${attempt + 1}`,
             phase: "compaction",
             content: "Summarize only the supplied canonical conversation for the Runtime context projection.",
           },
           messages: [{ role: "user", content: prompt }],
           tools: [],
-          maxOutputTokens: this.policy.summaryMaxOutputTokens,
-        }, signal);
+          maxOutputTokens,
+        }, { stage: "generation", chunk: index + 1, chunkCount: chunks.length, attempt: attempt + 1, ...budget }, signal);
         inputTokens += response.usage?.inputTokens ?? 0;
         outputTokens += response.usage?.outputTokens ?? 0;
         if (response.finishReason === "stop" && response.toolCalls.length === 0 && isStructuredSummary(response.content)) {
@@ -984,11 +1013,11 @@ export class ContextAssembler {
           accepted = true;
           break;
         }
-        if (response.finishReason === "stop" && response.toolCalls.length === 0 && attempt === 1) {
-          summary = deterministicCompactionSummary(messages, summary);
-          accepted = true;
-          break;
-        }
+        await this.emitEvent({ type: "context.compaction.summary.rejected", data: {
+          requestId: `${this.runId}:context-compaction:${this.contextEpoch + 1}:${this.compactionAttempt}:${index + 1}:${attempt + 1}`,
+          reason: "incomplete_or_unstructured_summary", finishReason: response.finishReason,
+          toolCallCount: response.toolCalls.length,
+        } });
         const retryableSummaryResponse = response.finishReason === "length"
           || (response.finishReason === "stop" && response.toolCalls.length === 0);
         if (!retryableSummaryResponse || attempt === 1) {
@@ -1005,32 +1034,39 @@ export class ContextAssembler {
         chunk: index + 1,
         chunkCount: chunks.length,
       });
+      // Keep every intermediate replacement within the same bound reserved in
+      // the next chunk's input. Otherwise an oversized first summary can make
+      // later chunks exceed the model window before final admission runs.
+      const reduced = await this.reducePersistedSummary(summary!, budget, index + 1, signal);
+      summary = reduced.summary;
+      inputTokens += reduced.usage.inputTokens;
+      outputTokens += reduced.usage.outputTokens;
     }
     if (summary === undefined) throw contextBudgetError("Context compaction had no summarizable messages");
-    const compactedSummary = await this.reducePersistedSummary(summary, signal);
-    inputTokens += compactedSummary.usage.inputTokens;
-    outputTokens += compactedSummary.usage.outputTokens;
-    return { summary: compactedSummary.summary, usage: { inputTokens, outputTokens } };
+    return { summary, usage: { inputTokens, outputTokens } };
   }
 
   private async reducePersistedSummary(
     initialSummary: string,
+    budget: SummaryBudget,
+    chunk: number,
     signal?: AbortSignal,
   ): Promise<{
     summary: string;
     usage: Readonly<{ inputTokens: number; outputTokens: number }>;
   }> {
     let summary = initialSummary;
-    const instructions = summaryInstructions(this.policy.persistedSummaryMaxTokens);
+    const instructions = summaryInstructions(budget.targetTokens);
     let inputTokens = 0;
     let outputTokens = 0;
-    for (let attempt = 0; estimateTextTokens(summary) > this.policy.persistedSummaryMaxTokens && attempt < 2; attempt += 1) {
-      const response = await this.model.complete({
-        runId: `${this.runId}:context-summary-reduction:${this.contextEpoch + 1}:${attempt + 1}`,
+    for (let attempt = 0; estimateTextTokens(summary) > budget.targetTokens && attempt < 2; attempt += 1) {
+      const requestId = `${this.runId}:context-summary-reduction:${this.contextEpoch + 1}:${this.compactionAttempt}:${chunk}:${attempt + 1}`;
+      const response = await this.completeSummary({
+        runId: requestId,
         systemPrompt: SUMMARY_SYSTEM_PROMPT,
         phase: "compaction",
         runtimeContext: {
-          id: `${this.runId}:context-summary-reduction:${this.contextEpoch + 1}:${attempt + 1}`,
+          id: requestId,
           phase: "compaction",
           content: "Reduce only the supplied Runtime context summary without adding facts.",
         },
@@ -1038,36 +1074,72 @@ export class ContextAssembler {
           role: "user",
           content: [
             "Rewrite this existing structured summary without adding any facts.",
-            `The entire replacement must be at most ${this.policy.persistedSummaryMaxTokens} estimated tokens.`,
+            `The entire replacement must be at most ${budget.targetTokens} estimated tokens. The current summary is ${estimateTextTokens(summary)} estimated tokens.`,
             "Keep the exact structure, exact identifiers, paths, hashes, errors, constraints, and next action; remove repetition and explanatory prose first.",
             `<summary_to_reduce>\n${summary}\n</summary_to_reduce>`,
             instructions,
           ].join("\n\n"),
         }],
         tools: [],
-        maxOutputTokens: this.policy.summaryMaxOutputTokens,
-      }, signal);
-      if (response.finishReason !== "stop" || response.toolCalls.length > 0 || !isStructuredSummary(response.content)) {
-        // Never replace a structurally valid deterministic summary with an
-        // arbitrary non-empty reduction. Preserve the last accepted summary;
-        // its canonical transcript and Result identities remain available.
-        break;
-      }
-      summary = response.content.trim();
+        maxOutputTokens: Math.min(this.policy.summaryMaxOutputTokens, Math.ceil(budget.targetTokens * 1.25)),
+      }, { stage: "reduction", chunk, attempt: attempt + 1, ...budget }, signal);
       inputTokens += response.usage?.inputTokens ?? 0;
       outputTokens += response.usage?.outputTokens ?? 0;
+      if (response.finishReason !== "stop" || response.toolCalls.length > 0 || !isStructuredSummary(response.content)) {
+        await this.emitEvent({ type: "context.compaction.summary.rejected", data: {
+          requestId, reason: "incomplete_or_unstructured_reduction", finishReason: response.finishReason,
+          toolCallCount: response.toolCalls.length,
+        } });
+        continue;
+      }
+      const candidate = response.content.trim();
+      if (estimateTextTokens(candidate) >= estimateTextTokens(summary)) {
+        await this.emitEvent({ type: "context.compaction.summary.rejected", data: {
+          requestId, reason: "reduction_did_not_shrink", estimatedSummaryTokens: estimateTextTokens(summary),
+          estimatedCandidateTokens: estimateTextTokens(candidate),
+        } });
+        continue;
+      }
+      summary = candidate;
     }
-    if (estimateTextTokens(summary) > this.policy.persistedSummaryMaxTokens) {
+    if (estimateTextTokens(summary) > budget.maxTokens) {
       throw contextBudgetError("Context summary exceeds the persisted summary budget", {
         estimatedSummaryTokens: estimateTextTokens(summary),
-        persistedSummaryMaxTokens: this.policy.persistedSummaryMaxTokens,
+        summaryTargetTokens: budget.targetTokens,
+        summaryMaxTokens: budget.maxTokens,
       });
     }
     return { summary, usage: { inputTokens, outputTokens } };
   }
 
+  private async completeSummary(
+    invocation: ModelInvocation,
+    metadata: Readonly<Record<string, unknown>>,
+    signal?: AbortSignal,
+  ): Promise<ModelResponse> {
+    const base = { phase: "compaction", contextEpoch: this.contextEpoch + 1, requestId: invocation.runId, ...metadata };
+    // Persist the exact neutral invocation before dispatch and the complete
+    // returned candidate before validation. RunService externalizes these
+    // bodies as private content-addressed diagnostics, not Tool evidence.
+    await this.emitEvent({ type: "context.compaction.model.requested", data: { ...base, diagnostic: { invocation } } });
+    const response = await completeWithRequestTelemetry({
+      model: this.model, invocation, signal, base,
+      emit: (event) => this.emitEvent(event),
+    });
+    await this.emitEvent({ type: "context.compaction.model.completed", data: {
+      ...base, finishReason: response.finishReason, contentLength: response.content.length,
+      estimatedSummaryTokens: estimateTextTokens(response.content), summarySha256: digest(response.content),
+      toolCallCount: response.toolCalls.length,
+      ...(response.usage === undefined ? {} : { usage: response.usage }),
+      diagnostic: { response },
+    } });
+    return response;
+  }
+
   private async emitEvent(event: RuntimeEvent): Promise<void> {
-    await this.emit?.(event);
+    await this.emit?.(event.type.startsWith("context.compaction.")
+      ? { ...event, data: { ...event.data, compactionAttempt: this.compactionAttempt } }
+      : event);
   }
 
   private estimateInvocationTokens(
@@ -1096,14 +1168,15 @@ export class ContextAssembler {
       + estimateMessages(messages);
   }
 
-  private currentRuntimeContext(): RuntimeContextSnapshot {
-    if (this.snapshot !== undefined) return this.snapshot;
-    const id = `${this.runId}:${this.runtimeContextBase.phase}:context:${this.contextEpoch}:${this.contextRevision}`;
+  private currentRuntimeContext(proposal?: { summary: string; epoch: number }): RuntimeContextSnapshot {
+    if (proposal === undefined && this.snapshot !== undefined) return this.snapshot;
+    const summary = proposal?.summary ?? this.summary;
+    const id = `${this.runId}:${this.runtimeContextBase.phase}:context:${proposal?.epoch ?? this.contextEpoch}:${this.contextRevision}`;
     const content = [
       this.runtimeContextBase.content,
-      ...(this.summary === undefined ? [] : [
+      ...(summary === undefined ? [] : [
         "<structured_summary>",
-        this.summary,
+        summary,
         "</structured_summary>",
         "<skill_disclosure_rule>",
         "The summary never substitutes for exact Skill instructions. Reload any Skill you intend to continue applying when its load_skill result is absent from the recent transcript tail.",
@@ -1140,12 +1213,14 @@ export class ContextAssembler {
         "</runtime_prompt_augmentation>",
       ].join("\n")),
     ].join("\n");
-    this.snapshot = {
+    const snapshot: RuntimeContextSnapshot = {
       id,
       phase: this.runtimeContextBase.phase,
       content,
       ...(this.previousSnapshotId === undefined ? {} : { supersedesId: this.previousSnapshotId }),
     };
+    if (proposal !== undefined) return snapshot;
+    this.snapshot = snapshot;
     this.previousSnapshotId = id;
     return this.snapshot;
   }
@@ -1195,7 +1270,7 @@ function resolvePolicy(model: ModelAdapter, input: ContextPolicy | undefined): R
   const pruneProtectTokens = input?.pruneProtectTokens ?? preserveRecentTokens;
   const summaryMaxOutputTokens = input?.summaryMaxOutputTokens
     ?? Math.min(8_192, model.limits.maxOutputTokens);
-  const persistedSummaryMaxTokens = Math.max(1_000, Math.min(2_000, Math.floor(usable * 0.2)));
+  const summaryTargetTokens = Math.max(1_000, Math.min(2_000, Math.floor(usable * 0.2)));
   const summaryToolResultCharacters = input?.summaryToolResultCharacters ?? 2_000;
   const largeToolResultProjectionCharacters = input?.largeToolResultProjectionCharacters ?? 16_000;
   const largeToolResultPreviewCharacters = input?.largeToolResultPreviewCharacters ?? 2_000;
@@ -1206,7 +1281,7 @@ function resolvePolicy(model: ModelAdapter, input: ContextPolicy | undefined): R
     preserveRecentTokens,
     pruneProtectTokens,
     summaryMaxOutputTokens,
-    persistedSummaryMaxTokens,
+    summaryTargetTokens,
     summaryToolResultCharacters,
     largeToolResultProjectionCharacters,
     largeToolResultPreviewCharacters,
@@ -1225,7 +1300,7 @@ function resolvePolicy(model: ModelAdapter, input: ContextPolicy | undefined): R
     preserveRecentTokens,
     pruneProtectTokens,
     summaryMaxOutputTokens,
-    persistedSummaryMaxTokens,
+    summaryTargetTokens,
     summaryToolResultCharacters,
     largeToolResultProjectionCharacters,
     largeToolResultPreviewCharacters,
@@ -1303,23 +1378,50 @@ function serializeForSummary(message: ModelMessage, toolResultLimit: number): st
 function chunkSerializedGroups(groups: readonly string[], maxTokens: number): string[] {
   const chunks: string[] = [];
   let current: string[] = [];
-  let currentTokens = 0;
   for (const originalGroup of groups) {
     const originalTokens = estimateTextTokens(originalGroup);
-    const group = originalTokens <= maxTokens
-      ? originalGroup
-      : truncateForSummary(originalGroup, Math.max(1_000, maxTokens * 3));
-    const tokens = estimateTextTokens(group);
-    if (current.length > 0 && currentTokens + tokens > maxTokens) {
-      chunks.push(current.join("\n\n"));
-      current = [];
-      currentTokens = 0;
+    const pieces = originalTokens <= maxTokens ? [originalGroup] : splitSerializedGroup(originalGroup, maxTokens);
+    for (const group of pieces) {
+      if (current.length > 0 && estimateTextTokens([...current, group].join("\n\n")) > maxTokens) {
+        chunks.push(current.join("\n\n"));
+        current = [];
+      }
+      current.push(group);
     }
-    current.push(group);
-    currentTokens += tokens;
   }
   if (current.length > 0) chunks.push(current.join("\n\n"));
   return chunks.length === 0 ? ["[No conversation messages]"] : chunks;
+}
+
+/** Summarizer input is text, so a large closed exchange may span chunks without
+ * breaking provider ToolCall protocol. Preserve every serialized character and
+ * its group identity; never silently cut off the final receipts in an exchange.
+ */
+function splitSerializedGroup(value: string, maxTokens: number): string[] {
+  const payloadBudget = maxTokens - 128;
+  if (payloadBudget < 1) throw contextBudgetError("Compaction chunk leaves no continuation budget", { maxTokens });
+  const sha256 = digest(value);
+  const pieces: string[] = [];
+  let start = 0;
+  let content = "";
+  let ascii = 0;
+  let nonAscii = 0;
+  const flush = () => {
+    pieces.push(`[Serialized exchange sha256=${sha256}; characterOffset=${start}; returnedCharacters=${content.length}; totalCharacters=${value.length}]\n${content}`);
+    start += content.length;
+    content = "";
+    ascii = 0;
+    nonAscii = 0;
+  };
+  for (const character of value) {
+    const isAscii = character.codePointAt(0)! <= 0x7f;
+    if (content.length > 0 && Math.ceil((ascii + Number(isAscii)) / 4 + nonAscii + Number(!isAscii)) > payloadBudget) flush();
+    content += character;
+    if (isAscii) ascii += 1;
+    else nonAscii += 1;
+  }
+  if (content.length > 0) flush();
+  return pieces;
 }
 
 function truncateForSummary(value: string, maximum: number): string {
@@ -1443,8 +1545,18 @@ function isTrailingReferenceWindow(messages: readonly ModelMessage[], index: num
   const message = messages[index];
   if (message.role !== "tool" || message.isError) return false;
   const value = parseJsonRecord(message.content);
-  if (message.name === "computer_read_file" && value?.schema === "agentloop.contentReferenceRead/v1") {
-    return typeof value.content === "string" && value.content.length <= CONTENT_REFERENCE_WINDOW_CHARACTERS;
+  if (message.name === "computer_read_file") {
+    // A requested workspace line window is an observation just like a Result
+    // or content-reference window. Keep its body until the next model turn
+    // consumes it; metadata alone cannot support an edit or interpretation.
+    if (typeof value?.content === "string") {
+      return value.content.length <= CONTENT_REFERENCE_WINDOW_CHARACTERS;
+    }
+    if (Array.isArray(value?.ranges)) {
+      const contents = value.ranges.map((range) => recordValue(range)?.content);
+      return contents.length > 0 && contents.every((content) => typeof content === "string")
+        && contents.reduce<number>((total, content) => total + (content as string).length, 0) <= CONTENT_REFERENCE_WINDOW_CHARACTERS;
+    }
   }
   if (message.name === "read_result" && value?.schema === "agentloop.resultRead/v1") {
     if (typeof value.content === "string") return value.content.length <= CONTENT_REFERENCE_WINDOW_CHARACTERS;

@@ -1,5 +1,6 @@
 import { AppError, badRequest } from "../shared/errors.ts";
 import { requireRecord, requireString, requireStringArray } from "../shared/validation.ts";
+import { parseCriterionBasis } from "../planning/criterion-basis.ts";
 import type {
   EvidenceContract,
   FailedBoundary,
@@ -13,7 +14,10 @@ import type {
   RefinementState,
   SelectedSkillRole,
   SuccessCriterion,
+  PlanningCapability,
+  PlanningToolSummary,
 } from "../planning/contracts.ts";
+import type { CanonicalGoalGap, CanonicalRunState } from "./canonical-run-state.ts";
 import type { ModelAdapter, ModelToolCall, RuntimeContextSnapshot } from "./contracts.ts";
 import type { RuntimeActionRecord } from "./runtime-action-repository.ts";
 
@@ -37,6 +41,19 @@ export interface RecoveryPlannerInput {
   readonly failedBoundary?: FailedBoundary;
   readonly events: readonly Readonly<{ seq: number; type: string; data: Readonly<Record<string, unknown>> }>[];
   readonly userResponses: readonly Readonly<{ actionId: string; response: string; createdAt: number }>[];
+  readonly canonicalGap?: CanonicalGoalGap;
+  readonly canonicalState?: CanonicalRunState;
+  readonly availableTools?: readonly PlanningToolSummary[];
+  readonly availableSkills?: readonly { readonly id: string; readonly name: string; readonly description: string }[];
+  readonly availableCapabilities?: readonly PlanningCapability[];
+  /** Unsafe Actions whose effect remains unknown at this Recovery boundary. */
+  readonly unresolvedActionEffects?: readonly Readonly<{
+    readonly actionId: string;
+    readonly stepId?: string;
+    readonly kind: string;
+    readonly toolName?: string;
+    readonly effectState: "unknown";
+  }>[];
 }
 
 export interface RecoveryPlanner {
@@ -91,11 +108,12 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
       systemPrompt: [
         "You are the recovery planner in a plan-first runtime.",
         "You cannot execute tools, declare completion, or alter recovery facts.",
+        "For assessment_failed_boundary, choose revise_plan, ask_user or fail. resume_step is reserved for interrupted execution and cannot restart an exhausted candidate loop.",
         "Choose exactly one structured recovery decision. replayPolicy=unsafe never permits resume_step.",
-        "A revise_plan decision may retire only unfinished work with no unconfirmed external effect; it must include the complete revised Plan.",
-        "When userResponses contains a positive confirmation for the current Recovery Action, treat that response as the user's authorization at this boundary and do not ask the same recovery question again.",
+        "A Plan revision retires a Step from future scheduling only. It never erases, authorizes, compensates for, or replays an Action already recorded for that Step. If a retired Action has an unknown external effect, preserve that fact and choose a continuation that neither relies on nor repeats that effect, or fail when no such continuation exists.",
         "If the failed boundary shows the current Plan's evidence contract is wrong for the evidence that actually exists, prefer revise_plan and repair the Plan boundary rather than resubmitting the same step.",
-        "ask_user is required when an unknown external effect or user-only fact prevents a safe conclusion.",
+        "Use failedBoundary.unmetCriteria to identify the actual result gap and any contractIssue. Choose a continuation that can change that cause, considering previously attempted strategies, available capabilities and the remaining gap budget in runtimeContext. A locally stalled turn does not prove global exhaustion. Never repeat unchanged work or weaken an explicit user requirement to obtain approval.",
+        "Do not ask the user to authorize a Plan revision, confirm whether a recorded Action had an effect, or accept a candidate as evidence that it meets a result criterion. Those are Runtime recovery and assessment obligations. Use ask_user only for a concrete, missing input that only the user can supply and that an execution continuation will consume; a missing capability to observe or verify the requested result is not such an input. When the available capabilities cannot change or verify a remaining result gap, choose fail and retain the stage artifact and its evidence.",
       ].join("\n"),
       runtimeContext: recoveryRuntimeContext(input),
       messages: [{ role: "user", content: input.userInput }],
@@ -122,7 +140,8 @@ export class ModelPlanRevisionAssessor implements PlanRevisionAssessor {
       phase: "assessment",
       systemPrompt: [
         "You are the independent Plan Revision Assessor in a plan-first runtime.",
-        "Approve only when the revised Plan still covers the explicit user request and every retired step is unfinished and has no unsafe unconfirmed effect.",
+        "Approve only when the revised Plan still covers the explicit user request. Retiring a Step does not discard its recorded Actions: an unknown external effect remains a durable caveat and the revised Plan must neither claim it succeeded nor replay or depend on it without a new justified execution path.",
+        "Check criterion basis against the original userInput: a plan may replace execution methods and repair unjustified derived conditions, but cannot remove or weaken the original requested result, source constraints or explicit user requirements. A quote and rationale are provenance, not proof that a derived condition is necessary.",
         "Do not infer completion from an artifact, model prose, or an event alone.",
         "Return exactly one submit_plan_revision_assessment tool call.",
       ].join("\n"),
@@ -192,6 +211,12 @@ function recoveryRuntimeContext(input: RecoveryPlannerInput): RuntimeContextSnap
       },
       currentPlan: input.plan,
       failedBoundary: input.failedBoundary,
+      canonicalGap: input.canonicalGap,
+      canonicalState: input.canonicalState,
+      availableTools: input.availableTools,
+      availableSkills: input.availableSkills,
+      availableCapabilities: input.availableCapabilities,
+      unresolvedActionEffects: input.unresolvedActionEffects,
       userResponses: input.userResponses,
       events: input.events.slice(-100),
     }),
@@ -204,6 +229,7 @@ function planRevisionRuntimeContext(input: PlanRevisionAssessmentInput): Runtime
     phase: "assessment",
     content: JSON.stringify({
       currentPlan: input.currentPlan,
+      canonicalState: input.canonicalState,
       proposedPlan: input.proposal,
       retiredStepIds: input.retiredStepIds,
       recoveryAction: input.recoveryAction,
@@ -240,16 +266,53 @@ function parseStep(value: unknown, index: number): PlanStepProposal {
     ...(record.refinementState === undefined ? {} : { refinementState: parseRefinementState(record.refinementState, index) }),
     skillIds: requireStringArray(record.skillIds, `planRevision.steps[${index}].skillIds`, 100),
     requiredCapabilities: requireStringArray(record.requiredCapabilities, `planRevision.steps[${index}].requiredCapabilities`, 100),
+    ...(record.targetIds === undefined ? {} : { targetIds: requireStringArray(record.targetIds, "targetIds", 100) }),
+    ...(record.sourceConstraint === undefined ? {} : { sourceConstraint: parseRecoverySourceConstraint(record.sourceConstraint) }),
+    ...(record.requiredFacts === undefined ? {} : { requiredFacts: parseRecoveryRequiredFacts(record.requiredFacts) }),
     ...(record.evidenceContract === undefined ? {} : { evidenceContract: parseEvidenceContract(record.evidenceContract, index) }),
     successCriteria: record.successCriteria.map((criterion, criterionIndex): SuccessCriterion => {
       const row = requireRecord(criterion, `planRevision.steps[${index}].successCriteria[${criterionIndex}]`);
       return {
         id: requireString(row.id, "criterion id", { max: 128 }),
         description: requireString(row.description, "criterion description", { max: 2_000 }),
-        source: "planner",
+        source: row.source === "task" ? "task" : "planner",
+        ...(row.targetId === undefined ? {} : { targetId: requireString(row.targetId, "criterion targetId", { max: 128 }) }),
+        ...(row.basis === undefined ? {} : { basis: parseCriterionBasis(row.basis, "criterion basis") }),
+        ...(row.blocking === undefined ? {} : { blocking: parseBoolean(row.blocking, "criterion blocking") }),
+        ...(row.verification === undefined ? {} : { verification: parseCriterionVerification(row.verification) }),
       };
     }),
   };
+}
+
+function parseRecoveryRequiredFacts(value: unknown): NonNullable<PlanStepProposal["requiredFacts"]> {
+  if (!Array.isArray(value) || value.length > 20) throw badRequest("requiredFacts must be an array of at most 20 facts");
+  return value.map((item) => {
+    const row = requireRecord(item, "required fact");
+    return { id: requireString(row.id, "fact id", { max: 128 }),
+      description: requireString(row.description, "fact description", { max: 2_000 }),
+      evidenceKinds: requireStringArray(row.evidenceKinds, "fact evidenceKinds", 20),
+      basis: parseCriterionBasis(row.basis, "fact basis") };
+  });
+}
+
+function parseRecoverySourceConstraint(value: unknown): NonNullable<PlanStepProposal["sourceConstraint"]> {
+  const row = requireRecord(value, "sourceConstraint");
+  return {
+    ...(row.requiredToolSourceIds === undefined ? {} : { requiredToolSourceIds: requireStringArray(row.requiredToolSourceIds, "requiredToolSourceIds", 100) }),
+    ...(row.requiredUploadedSourceIds === undefined ? {} : { requiredUploadedSourceIds: requireStringArray(row.requiredUploadedSourceIds, "requiredUploadedSourceIds", 100) }),
+    ...(row.requiredVisibleDirectoryIds === undefined ? {} : { requiredVisibleDirectoryIds: requireStringArray(row.requiredVisibleDirectoryIds, "requiredVisibleDirectoryIds", 100) }),
+  };
+}
+
+function parseBoolean(value: unknown, name: string): boolean {
+  if (typeof value !== "boolean") throw badRequest(`${name} must be a boolean`);
+  return value;
+}
+
+function parseCriterionVerification(value: unknown): NonNullable<SuccessCriterion["verification"]> {
+  if (value === "deterministic" || value === "model_judged" || value === "decision_context") return value;
+  throw badRequest("criterion verification is invalid");
 }
 
 function planProposalSchema(): Record<string, unknown> {

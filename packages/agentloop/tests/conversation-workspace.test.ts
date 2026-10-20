@@ -444,6 +444,80 @@ test("a uniquely named reusable artifact repairs resolver lineage instead of fal
   }
 });
 
+test("an artifact edit can continue a failed goal while retaining the earlier artifact's producer", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-input-owner-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const initialModel = new ConversationWriteModel();
+    const objective = "在 daz 这个 sheet 顶部增加表头行，一共三列：姓名 工号 年龄";
+    let resolverCalls = 0;
+    let selectedArtifactPath = "workbook.xlsx";
+    const capturedTasks: TaskSpec[] = [];
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      async complete(request) {
+        if (!request.runId.startsWith("conversation-turn:")) return await initialModel.complete(request);
+        resolverCalls += 1;
+        return { content: "", finishReason: "tool_calls", toolCalls: [{
+          id: `edit-resolution-${resolverCalls}`, name: "resolve_conversation_turn", arguments: {
+            mode: "execute", relation: "continue_prior", inputMode: "prior_artifact",
+            targetGoalCandidateId: resolverCalls === 1 ? "goal_candidate_1" : "goal_candidate_2",
+            targetArtifact: { path: selectedArtifactPath }, effectiveGoal: objective,
+            taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "transform_artifact",
+              requiresExecution: true, deliverables: [{ targetId: "updated-workbook", purpose: objective,
+                expectedArtifactCount: 1, action: "modify", kind: "spreadsheet", format: "xlsx", surface: "workspace_artifact" }] },
+            evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+            userConstraints: [], requiredCapabilityReferences: [],
+          },
+        }] };
+      },
+    };
+    const runs = new RunService({ database, skills: new SkillService(database), workspaceRoot: workspace,
+      modelFactory: () => model,
+      plannerFactory: () => ({ async plan(task) {
+        if (task.canonicalState.intent.userInput.startsWith("write ")) return await singleStepTestPlanner().plan(task);
+        capturedTasks.push(task);
+        throw new AppError("PLANNING_ERROR", "stop after captured artifact binding", 422);
+      } }),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+    const producer = await runs.execute(owner.user.id, "write workbook.xlsx as initial", { allowDangerousTools: true });
+    assert.ok((await runs.processArtifacts(owner.user.id, producer.id)).some((artifact) => artifact.path === "workbook.xlsx"));
+    const failedRunIds: string[] = [];
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await assert.rejects(() => runs.executeConversation(owner.user.id, objective, {
+        allowDangerousTools: true, conversationId: producer.conversationId,
+      }), (error: unknown) => {
+        if (!(error instanceof AppError) || !/stop after captured artifact binding/.test(error.message)) return false;
+        failedRunIds.push(String(error.details?.runId));
+        return true;
+      });
+    }
+    assert.equal(resolverCalls, 3, "each valid resolution must reach Planner without contract retries");
+    assert.equal(capturedTasks.length, 3);
+    for (const [index, task] of capturedTasks.entries()) {
+      const resolution = task.canonicalState.intent.turnResolution!;
+      assert.equal(resolution.relation, "refine_prior");
+      assert.equal(resolution.targetRunId, index === 0 ? producer.id : failedRunIds[0]);
+      assert.deepEqual(resolution.targetArtifact, { runId: producer.id, path: "workbook.xlsx" });
+      assert.equal(resolution.effectiveGoal, objective);
+    }
+    const persisted = capturedTasks[2]!.conversationWorkingSet?.resolvedIntents?.find((item) => item.runId === failedRunIds[1]);
+    assert.equal(persisted?.resolution.targetRunId, failedRunIds[0]);
+    assert.deepEqual(persisted?.resolution.targetArtifact, { runId: producer.id, path: "workbook.xlsx" });
+    selectedArtifactPath = "unissued-workbook.xlsx";
+    await assert.rejects(() => runs.executeConversation(owner.user.id, objective, {
+      allowDangerousTools: true, conversationId: producer.conversationId,
+    }), /canonical contract after 3 attempts/);
+    assert.equal(capturedTasks.length, 3, "an unissued artifact must never reach Planner");
+    assert.equal(resolverCalls, 6, "invalid bindings retain the bounded three-attempt limit");
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("a malformed canonical turn resolution exhausts bounded repair and never falls back", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-turn-resolution-fail-closed-"));
   const database = new AppDatabase(":memory:");

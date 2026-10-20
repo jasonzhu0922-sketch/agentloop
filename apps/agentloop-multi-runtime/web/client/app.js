@@ -3,7 +3,7 @@ import { conversationMessagesFromTurns } from "./projections/conversation-histor
 import { commandToolCallIds, executionActivities } from "./projections/execution-detail-projection.js";
 import { executionProvenanceParts } from "./projections/execution-provenance.js";
 import { artifactPreviewMode, openArtifactPreview, renderBlobPreview, renderMarkdown, renderStructuredPreview, updateArtifactPreviewMarkup } from "/artifact-preview.js";
-import { isExecutionLogArtifact, isFinalDeliveryArtifact } from "./presentation/artifact-display.js";
+import { isExecutionLogArtifact, isFinalDeliveryArtifact, artifactVerificationLabel } from "./presentation/artifact-display.js";
 import { assistantMessagePresentation, completedArtifactSummary, terminalAwarePlanStepStatus } from "./presentation/assistant-message-presentation.js";
 import { humanLoopResponseText } from "./presentation/human-loop-response.js";
 import { submissionFailureMessage } from "./presentation/submission-failure-message.js";
@@ -2436,8 +2436,10 @@ function renderInlineArtifacts(assistant) {
 function renderArtifactCard(artifact, assistantId, assistantStatus = "completed") {
   const previewLabel = artifact.previewable === false ? "预览不可用" : "预览";
   const extension = String(artifact.name || artifact.path || "").split(".").pop()?.toUpperCase() || "FILE";
-  const label = artifact.role === "final" ? "最终" : assistantStatus !== "completed" ? "已生成" : "过程";
-  return `<article class="artifact-card" data-artifact-card="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}" data-artifact-previewable="${artifact.previewable === false ? "false" : "true"}"><div class="artifact-file-icon">${escapeHtml(extension.slice(0, 4))}</div><div class="artifact-card-main"><div class="artifact-head"><strong>${escapeHtml(artifact.name || artifact.path)}</strong><span class="artifact-role ${escapeHtml(artifact.role || "process")}">${label}</span></div><div class="artifact-meta">${escapeHtml(artifact.mimeType || "文件")} · ${formatBytes(artifact.bytes)}${artifact.previewable ? " · 可预览" : ""}</div></div><div class="artifact-actions"><button type="button" data-artifact-preview="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}" ${artifact.previewable === false ? "disabled" : ""}>${previewLabel}</button><button type="button" data-artifact-download="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}">下载</button></div></article>`;
+  const label = isFinalDeliveryArtifact(artifact) ? "已交付" : "阶段产物";
+  const verification = artifactVerificationLabel(artifact);
+  const limitations = Array.isArray(artifact.verification?.limitations) ? artifact.verification.limitations : [];
+  return `<article class="artifact-card" data-artifact-card="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}" data-artifact-previewable="${artifact.previewable === false ? "false" : "true"}"><div class="artifact-file-icon">${escapeHtml(extension.slice(0, 4))}</div><div class="artifact-card-main"><div class="artifact-head"><strong>${escapeHtml(artifact.name || artifact.path)}</strong><span class="artifact-role ${escapeHtml(artifact.role || "process")}">${label}</span></div><div class="artifact-meta">${escapeHtml(artifact.mimeType || "文件")} · ${formatBytes(artifact.bytes)}${artifact.previewable ? " · 可预览" : ""} · ${escapeHtml(verification)}</div>${limitations.length ? `<div class="artifact-limitations">${limitations.map(escapeHtml).join("；")}</div>` : ""}</div><div class="artifact-actions"><button type="button" data-artifact-preview="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}" ${artifact.previewable === false ? "disabled" : ""}>${previewLabel}</button><button type="button" data-artifact-download="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}">下载</button></div></article>`;
 }
 
 function renderExecutionTrace(message) {

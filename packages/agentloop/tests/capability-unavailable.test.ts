@@ -7,9 +7,12 @@ import type { RequiredCapabilityReference } from "../src/planning/contracts.ts";
 import { parseRequiredCapabilityReferences, resolveCapabilityRequirements } from "../src/planning/capability-requirements.ts";
 import { requiredToolSourceIdsForConversationTurn } from "../src/planning/step-execution-binding.ts";
 import { RunService } from "../src/runtime/run-service.ts";
-import type { ModelAdapter } from "../src/runtime/contracts.ts";
+import { runAgentLoop } from "../src/runtime/agent-loop.ts";
+import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
+import type { ModelAdapter, RuntimeEvent } from "../src/runtime/contracts.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
+import { ToolRegistry } from "../src/tools/tool-registry.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { loadMcpToolsFromConfigWithFactory } from "../src/mcp/mcp-loader.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
@@ -241,4 +244,30 @@ test("available providers and reuse of a bound Result reach planning; refreshing
     await database.close();
     await rm(workspace, { recursive: true, force: true });
   }
+});
+
+test("an Assessment with no repair path ends the loop without granting retry grace", async () => {
+  const events: RuntimeEvent[] = [];
+  let modelCalls = 0;
+  let assessments = 0;
+  const grant = createCapabilityGrant({ actorUserId: "owner", runId: "no-repair", depth: 0,
+    workspaceRoot: "/workspace", allowedToolNames: [], allowedSkillIds: [] });
+  await assert.rejects(runAgentLoop({ runId: grant.runId, systemPrompt: "Answer from evidence.", input: "Query records.",
+    model: { limits: TEST_MODEL_LIMITS, async complete() {
+      modelCalls += 1;
+      return { content: "The query identity lacks access; no count was obtained.", finishReason: "stop", toolCalls: [] };
+    } },
+    tools: new ToolRegistry([]), grant, maxSteps: 20, candidateRepairGraceSteps: 4, deferFailureReport: true,
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async () => {
+      assessments += 1;
+      return { approved: false, feedback: "No available path can obtain the required data.",
+        failedBoundary: { stepId: "acquire", missingEvidenceKinds: ["record_counts"], violatedSkillRequirements: [],
+          reusableEvidenceRefs: [], suggestedRepairShape: "fail" } };
+    },
+  }), (error: unknown) => error instanceof AppError && error.code === "STEP_NOT_COMPLETED" && error.details?.repairExhausted === true);
+  assert.equal(modelCalls, 1);
+  assert.equal(assessments, 1);
+  assert.equal(events.some((event) => event.type === "loop.candidate_repair_grace_granted"), false);
+  assert.equal(events.filter((event) => event.type === "candidate.repair_stopped").length, 1);
 });

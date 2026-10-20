@@ -13,5 +13,12 @@ export function isExecutionLogArtifact(artifact) {
 }
 
 export function isFinalDeliveryArtifact(artifact) {
-  return artifact?.role === "final" && !isExecutionLogArtifact(artifact);
+  return artifact?.verification?.delivery === "committed" && artifact?.role === "final" && !isExecutionLogArtifact(artifact);
+}
+
+export function artifactVerificationLabel(artifact) {
+  if (isFinalDeliveryArtifact(artifact)) return "已交付";
+  if (artifact?.verification?.result === "accepted") return "结果已验收，尚未交付";
+  if (artifact?.verification?.file === "verified") return "文件检查通过，结果尚未验收";
+  return "已生成，尚未验收";
 }

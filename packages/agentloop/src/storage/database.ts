@@ -1,5 +1,6 @@
 import type { SqlConnection, SqlDialect, SqlStatement } from "./connection.ts";
 import { SqliteConnection } from "./sqlite-connection.ts";
+import { installAssessmentProfileSchema } from "./assessment-profile-schema.ts";
 import { TIDB_KERNEL_SCHEMA_SQL } from "./tidb-schema-definitions.ts";
 
 /**
@@ -62,6 +63,12 @@ export class AppDatabase implements SqlConnection {
   async installKernelSchema(): Promise<void> {
     await this.migrated;
     await this.migrate();
+  }
+
+  /** Versioned Runtime migrations use this without rerunning unrelated kernel DDL. */
+  async installAssessmentProfileSchema(): Promise<void> {
+    await this.migrated;
+    await installAssessmentProfileSchema(this.connection);
   }
 
   exec(sql: string): Promise<void> {
@@ -387,7 +394,7 @@ export class AppDatabase implements SqlConnection {
         step_id TEXT NOT NULL,
         attempt INTEGER NOT NULL,
         assessment_profile TEXT NOT NULL DEFAULT 'source_grounded'
-          CHECK(assessment_profile IN ('deterministic', 'evidence_gate', 'lookup_lite', 'source_grounded', 'risk_sensitive')),
+          CHECK(assessment_profile IN ('deterministic', 'evidence_gate', 'lookup_lite', 'source_grounded', 'result_judged', 'risk_sensitive')),
         assessment_method TEXT NOT NULL DEFAULT 'model'
           CHECK(assessment_method IN ('rule', 'model')),
         approved INTEGER NOT NULL CHECK(approved IN (0, 1)),
@@ -580,8 +587,8 @@ export class AppDatabase implements SqlConnection {
       await this.ensureColumn("run_outcomes", "result_ref", "TEXT");
       await this.ensureColumn("run_outcomes", "result_json", "TEXT");
       await this.ensureColumn("run_outcomes", "delivery_receipt_json", "TEXT");
-      await this.ensureSkillAssessmentProfileConstraint();
     }
+    await this.ensureSkillAssessmentProfileConstraint();
     await this.connection.exec("CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_id, created_at)");
     await this.connection.exec(`
       -- SQLite, PostgreSQL, and TiDB all permit multiple NULL values in a
@@ -857,47 +864,9 @@ export class AppDatabase implements SqlConnection {
   }
 
   private async ensureSkillAssessmentProfileConstraint(): Promise<void> {
-    const row = await this.connection.prepare(`
-      SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'skill_compliance_assessments'
-    `).get() as { sql?: string } | undefined;
-    if (row?.sql?.includes("'evidence_gate'")) return;
-    await this.connection.transaction(async () => {
-      await this.connection.exec(`
-        ALTER TABLE skill_compliance_assessments RENAME TO skill_compliance_assessments_old;
-        CREATE TABLE skill_compliance_assessments (
-          id TEXT PRIMARY KEY,
-          plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
-          step_id TEXT NOT NULL,
-          attempt INTEGER NOT NULL,
-          assessment_profile TEXT NOT NULL DEFAULT 'source_grounded'
-            CHECK(assessment_profile IN ('deterministic', 'evidence_gate', 'lookup_lite', 'source_grounded', 'risk_sensitive')),
-          assessment_method TEXT NOT NULL DEFAULT 'model'
-            CHECK(assessment_method IN ('rule', 'model')),
-          approved INTEGER NOT NULL CHECK(approved IN (0, 1)),
-          criteria_json TEXT NOT NULL,
-          skills_json TEXT NOT NULL,
-          evidence_digest TEXT NOT NULL,
-          feedback TEXT NOT NULL,
-          failed_boundary_json TEXT,
-          decision_bindings_json TEXT NOT NULL DEFAULT '[]',
-          created_at INTEGER NOT NULL,
-          UNIQUE(plan_id, step_id, attempt),
-          FOREIGN KEY(plan_id, step_id) REFERENCES plan_steps(plan_id, step_id) ON DELETE CASCADE
-        );
-        INSERT INTO skill_compliance_assessments(
-          id, plan_id, step_id, attempt, assessment_profile, assessment_method,
-          approved, criteria_json, skills_json, evidence_digest, feedback, failed_boundary_json, decision_bindings_json, created_at
-        )
-        SELECT
-          id, plan_id, step_id, attempt, assessment_profile, assessment_method,
-          approved, criteria_json, skills_json, evidence_digest, feedback, failed_boundary_json, '[]', created_at
-        FROM skill_compliance_assessments_old;
-        DROP TABLE skill_compliance_assessments_old;
-        CREATE INDEX IF NOT EXISTS skill_assessment_step_idx
-          ON skill_compliance_assessments(plan_id, step_id, attempt DESC);
-      `);
-    });
+    await installAssessmentProfileSchema(this.connection);
   }
+
 }
 
 function parseLegacyStringArray(value: string | null, location: string, label: string): string[] {

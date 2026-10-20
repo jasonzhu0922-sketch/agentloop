@@ -295,6 +295,7 @@ test("ContextAssembler preserves the existing file Result navigation after compa
         return {
           content: [
             "## Goal\nContinue the admitted step.",
+            "## Constraints & Preferences\n- Preserve the source revision and continue without overlap.",
             "## Progress\n### Done\n- Source window read.",
             "## Evidence\n- Canonical ToolResult remains persisted.",
             "## Next Steps\n1. Continue from the next character offset.",
@@ -1331,10 +1332,160 @@ test("ContextAssembler reduces an overlong persisted summary before treating com
   ], []);
 
   assert.equal(requests.length, 2);
-  assert.equal(requests[0].maxOutputTokens, 8_192);
+  assert.equal(requests[0].maxOutputTokens, 2_000);
   assert.match(requests[0].messages[0]?.content ?? "", /at most 1600 estimated tokens/);
   assert.match(requests[1].messages[0]?.content ?? "", /at most 1600 estimated tokens/);
   assert.ok(estimateTextTokens(assembly.runtimeContext.content) < 1_600);
+});
+
+test("completion repair keeps the best valid summary above the target when the protected context has room", async () => {
+  const events: RuntimeEvent[] = [];
+  const requests: ModelInvocation[] = [];
+  const original = structuredSummary("verified fact ".repeat(750));
+  assert.ok(estimateTextTokens(original) > 2_000);
+  const assembler = new ContextAssembler({
+    runId: "summary-target-is-not-admission",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "EXACT_AUTHORITY: SELECT only; target=report; acceptance=pending" },
+    model: {
+      limits: { contextWindowTokens: 128_000, maxOutputTokens: 16_384 },
+      complete: async (request) => {
+        requests.push(request);
+        if (requests.length === 1) return { content: original, toolCalls: [], finishReason: "stop", usage: { outputTokens: 2_500 } };
+        if (requests.length === 2) return { content: structuredSummary("longer fact ".repeat(1_000)), toolCalls: [], finishReason: "stop", usage: { outputTokens: 3_000 } };
+        assert.match(request.messages[0].content, /verified fact/);
+        assert.doesNotMatch(request.messages[0].content, /longer fact/);
+        return { content: "", toolCalls: [], finishReason: "stop", usage: { outputTokens: 0 } };
+      },
+    },
+    emit: (event) => { events.push(event); },
+  });
+  const messages: ModelMessage[] = [{ role: "user", content: "canonical evidence ".repeat(6_000) }, { role: "assistant", content: "Continue." }];
+  assert.equal(await assembler.forceCompactForCompletionRepair(messages, []), true);
+  const assembly = await assembler.assemble(messages, []);
+  assert.equal(assembler.contextSummary, original);
+  assert.match(assembly.runtimeContext.content, /EXACT_AUTHORITY: SELECT only; target=report; acceptance=pending/);
+  assert.ok(assembly.estimatedInputTokens < assembly.usableInputTokens);
+  assert.equal(events.find((event) => event.type === "context.compacted")?.data.summaryAdmission, "available_context_budget");
+  assert.equal(events.filter((event) => event.type === "context.compaction.summary.rejected").length, 2);
+  assert.equal(events.filter((event) => event.type === "context.compaction.model.completed").length, 3);
+  assert.equal(events.find((event) => event.type === "context.compacted")?.data.usage.outputTokens, 5_500);
+});
+
+test("a malformed reduction is retried against the last valid summary", async () => {
+  let calls = 0;
+  const original = structuredSummary("证据事实 ".repeat(2_500));
+  const assembler = new ContextAssembler({
+    runId: "retry-invalid-reduction",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "authority" },
+    model: {
+      limits: { contextWindowTokens: 128_000, maxOutputTokens: 16_384 },
+      complete: async (request) => {
+        calls += 1;
+        if (calls === 1) return { content: original, toolCalls: [], finishReason: "stop" };
+        if (calls === 2) return { content: "invalid reduction", toolCalls: [], finishReason: "stop" };
+        assert.ok(request.messages[0].content.includes(original));
+        return { content: structuredSummary("Evidence remains in canonical Results. Continue verification."), toolCalls: [], finishReason: "stop" };
+      },
+    },
+  });
+  assert.equal(await assembler.forceCompactForCompletionRepair([{ role: "user", content: "source ".repeat(20_000) }], []), true);
+  assert.equal(calls, 3);
+  assert.doesNotMatch(assembler.contextSummary!, /invalid reduction/);
+});
+
+test("failed compaction preserves the accepted summary, epoch, and newly acquired transcript", async () => {
+  const events: RuntimeEvent[] = [];
+  let fail = false;
+  const assembler = new ContextAssembler({
+    runId: "compaction-rollback",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "READ_ONLY authority" },
+    model: {
+      limits: { contextWindowTokens: 128_000, maxOutputTokens: 16_384 },
+      complete: async () => ({ content: structuredSummary(fail ? "证据事实 ".repeat(2_500) : "accepted prior progress"), toolCalls: [], finishReason: "stop" }),
+    },
+    emit: (event) => { events.push(event); },
+  });
+  const messages: ModelMessage[] = [{ role: "user", content: "historical evidence ".repeat(3_000) }];
+  await assembler.forceCompactForCompletionRepair(messages, []);
+  const prior = assembler.contextSummary;
+  fail = true;
+  messages.push({ role: "assistant", content: "NEWLY_ACQUIRED_EVIDENCE ".repeat(2_000) });
+  await assert.rejects(() => assembler.forceCompactForCompletionRepair(messages, []), /exceeds the persisted summary budget/);
+  const assembly = await assembler.assemble(messages, []);
+  assert.equal(assembly.contextEpoch, 1);
+  assert.equal(assembler.contextSummary, prior);
+  assert.ok(assembly.messages.some((message) => message.content.includes("NEWLY_ACQUIRED_EVIDENCE")));
+  assert.equal(events.filter((event) => event.type === "context.compacted").length, 1);
+  assert.ok(events.some((event) => event.type === "context.compaction.failed" && event.data.details.summaryMaxTokens === 8_192));
+  const requestIds = events.filter((event) => event.type === "context.compaction.model.requested").map((event) => event.data.requestId);
+  assert.equal(new Set(requestIds).size, requestIds.length);
+});
+
+test("compaction rejects a summary whose actual projected invocation exceeds the budget without committing it", async () => {
+  const events: RuntimeEvent[] = [];
+  const assembler = new ContextAssembler({
+    runId: "projected-admission",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "authority" },
+    model: {
+      limits: { contextWindowTokens: 128_000, maxOutputTokens: 16_384 },
+      estimateInputTokens: (request) => request.runtimeContext?.content.includes("<structured_summary>")
+        ? 120_000 : 100 + request.messages.reduce((total, message) => total + estimateTextTokens(message.content), 0),
+      complete: async () => ({ content: structuredSummary("complete summary"), toolCalls: [], finishReason: "stop" }),
+    },
+    emit: (event) => { events.push(event); },
+  });
+  await assert.rejects(() => assembler.forceCompactForCompletionRepair([{ role: "user", content: "source ".repeat(3_000) }], []), /smaller usable projection/);
+  assert.equal(assembler.contextSummary, undefined);
+  assert.equal(events.some((event) => event.type === "context.compacted"), false);
+  assert.equal(events.some((event) => event.type === "context.compaction.rejected"), true);
+});
+
+test("a large closed exchange is split without losing trailing receipts and intermediate summaries stay bounded", async () => {
+  const conversations: string[] = [];
+  let generations = 0;
+  let reductions = 0;
+  const assembler = new ContextAssembler({
+    runId: "large-exchange-continuation",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "authority" },
+    model: {
+      limits: { contextWindowTokens: 20_000, maxOutputTokens: 16_384 },
+      complete: async (request) => {
+        const prompt = request.messages[0].content;
+        assert.ok(estimateTextTokens(request.systemPrompt) + estimateTextTokens(request.runtimeContext!.content)
+          + estimateTextTokens(prompt) + request.maxOutputTokens! + 2_000 <= 20_000);
+        if (prompt.includes("<summary_to_reduce>")) {
+          reductions += 1;
+          return { content: structuredSummary(`bounded-progress-${reductions}`), toolCalls: [], finishReason: "stop" };
+        }
+        generations += 1;
+        if (generations > 1) {
+          assert.match(prompt, new RegExp(`bounded-progress-${generations - 1}`));
+          assert.doesNotMatch(prompt.split("</previous_summary>")[0], /压缩中间证据/);
+        }
+        conversations.push(prompt.match(/<conversation>\n([\s\S]*?)\n<\/conversation>/)![1]);
+        return { content: structuredSummary("压缩中间证据".repeat(400)), toolCalls: [], finishReason: "stop" };
+      },
+    },
+  });
+  const messages: ModelMessage[] = [
+    { role: "user", content: "Continue from the canonical evidence." },
+    { role: "assistant", content: "", toolCalls: Array.from({ length: 20 }, (_, index) => ({ id: `evidence-${index}`, name: "inspect", arguments: {} })) },
+    ...Array.from({ length: 20 }, (_, index) => ({ role: "tool" as const, toolCallId: `evidence-${index}`, name: "inspect",
+      content: `工具证据${index}:\n` + "数据".repeat(800) + `:END_TOOL_INDEX_${index}:`, isError: false })),
+  ];
+  const original = JSON.stringify(messages);
+  assert.equal(await assembler.forceCompactForCompletionRepair(messages, []), true);
+  assert.ok(generations >= 2);
+  assert.equal(reductions, generations);
+  const input = conversations.join("\n");
+  assert.match(input, /Serialized exchange sha256=/);
+  for (let index = 0; index < 20; index += 1) assert.equal(input.split(`:END_TOOL_INDEX_${index}:`).length - 1, 1);
+  assert.equal(JSON.stringify(messages), original);
 });
 
 test("ContextAssembler retries a length-truncated summary without accepting partial content", async () => {
@@ -1377,7 +1528,7 @@ test("ContextAssembler retries a length-truncated summary without accepting part
   assert.doesNotMatch(assembly.runtimeContext.content, /partial content/);
 });
 
-test("ContextAssembler falls back deterministically when the summarizer returns an unstructured refusal", async () => {
+test("ContextAssembler rejects an unstructured refusal without synthesizing a replacement summary", async () => {
   const requests: ModelInvocation[] = [];
   const model: ModelAdapter = {
     limits: { contextWindowTokens: 20_000, maxOutputTokens: 16_384 },
@@ -1392,15 +1543,13 @@ test("ContextAssembler falls back deterministically when the summarizer returns 
     runtimeContext: { phase: "execution", content: "server runtime state" },
     model,
   });
-  const assembly = await assembler.assemble([
+  await assert.rejects(() => assembler.assemble([
     { role: "user", content: "统计绩效分布并返回前三名\n" + "source ".repeat(7_000) },
     { role: "assistant", content: "已读取表格，等待聚合" },
-  ], []);
+  ], []), /did not return a complete structured summary/);
 
-  assert.ok(requests.length >= 2);
-  assert.match(assembly.runtimeContext.content, /## Goal/);
-  assert.match(assembly.runtimeContext.content, /统计绩效分布并返回前三名/);
-  assert.doesNotMatch(assembly.runtimeContext.content, /I cannot summarize/);
+  assert.equal(requests.length, 2);
+  assert.equal(assembler.contextSummary, undefined);
 });
 
 test("ContextAssembler skips failed proactive compaction when context still fits the model", async () => {
@@ -1510,6 +1659,32 @@ test("ContextAssembler projects large ToolResults before they pollute the next m
   assert.match(projectedTool?.content ?? "", /canonical event retained/);
   assert.ok(canonical[1].content.length === largeProfile.length, "canonical ToolResult remains unchanged");
   assert.ok(events.some((event) => event.type === "context.tool_outputs_projected"));
+});
+
+test("ContextAssembler preserves requested workspace line bodies through execution and assessment projection", async () => {
+  for (const rangesOnly of [false, true]) {
+    const assembler = new ContextAssembler({
+      runId: "run-current-workspace-read", systemPrompt: "system",
+      runtimeContext: { phase: "execution", content: "Repair the failing expression using its actual source." },
+      model: { limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
+        complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }) },
+    });
+    assembler.setPromptProjectionPolicy({ schema: "agentloop.promptProjectionPolicy/v1", policyId: "small",
+      mode: "custom", instruction: "Project history", largeToolResultProjectionCharacters: 64, largeToolResultPreviewCharacters: 8 });
+    const body = "const total = records.reduce((sum, row) => sum + row.amount, 0);";
+    const result = JSON.stringify({ requestedPath: "calculation.ts", revisionId: "rev-current", bytes: 500,
+      offset: 130, limit: 2, truncated: true, totalLines: 200, nextOffset: 132,
+      ...(rangesOnly ? {} : { content: body }),
+      ranges: [{ offset: 130, limit: 2, startLine: 130, endLine: 131, content: body, nextOffset: 132 }] });
+    const messages: ModelMessage[] = [
+      { role: "assistant", content: "", toolCalls: [{ id: "read-source", name: "computer_read_file", arguments: { path: "calculation.ts", offset: 130, limit: 2 } }] },
+      { role: "tool", toolCallId: "read-source", name: "computer_read_file", content: result, isError: false },
+    ];
+    const assembly = await assembler.assemble(messages, []);
+    assert.equal(assembly.messages.find((message) => message.role === "tool")?.content, result);
+    assert.equal(assembler.projectToolEvidence(messages, [{ toolCallId: "read-source", toolName: "computer_read_file", result, isError: false }])[0]?.result, result);
+    assert.equal(messages[1]!.content, result, "canonical observation remains unchanged");
+  }
 });
 
 test("ContextAssembler retains an opaque workspace revision when a large file read is projected", async () => {
@@ -1690,7 +1865,7 @@ class CompactingSkillModel implements ModelAdapter {
     if (request.systemPrompt.includes("context summarization component")) {
       this.summaryCalls += 1;
       assert.deepEqual(request.tools, []);
-      assert.equal(request.maxOutputTokens, 8_192);
+      assert.ok(request.maxOutputTokens! <= 8_192);
       return {
         content: [
           "## Goal",

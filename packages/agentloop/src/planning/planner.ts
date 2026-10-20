@@ -28,6 +28,8 @@ import { resolveCapabilityGaps, resolveSourceGroundingGap } from "./capability-r
 import { planningCapabilitiesFromToolNames, planningCapabilitiesFromTools, skillSourceProviderCapabilityId } from "./step-execution-binding.ts";
 import { runtimeResultBindingsForConversationTurn, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
 import { assertCanonicalDeliveryTargetInventory } from "../runtime/canonical-run-state.ts";
+import { CRITERION_BASIS_SCHEMA, goalCriterionBasis, parseCriterionBasis } from "./criterion-basis.ts";
+import { EVIDENCE_KINDS } from "./contracts.ts";
 
 const EVIDENCE_KIND_VALUES = [
   "source_summary",
@@ -107,12 +109,14 @@ const OUTCOME_LEAF_SCHEMA = {
     objective: { type: "string" },
     requiredFacts: {
       type: "array",
+      description: "Source-backed factual answers requested by the user. Use [] for artifact edits that request no factual lookup; the original requested artifact properties remain covered by requested_goal acceptance.",
       maxItems: 20,
       items: {
-        type: "object", additionalProperties: false, required: ["id", "description", "evidenceKinds"],
+        type: "object", additionalProperties: false, required: ["id", "description", "evidenceKinds", "basis"],
         properties: {
           id: { type: "string" },
           description: { type: "string" },
+          basis: CRITERION_BASIS_SCHEMA,
           evidenceKinds: { type: "array", minItems: 1, maxItems: 20, items: { type: "string", enum: EVIDENCE_KIND_VALUES } },
         },
       },
@@ -330,7 +334,8 @@ export class ModelPlanner implements Planner {
         "Use one leaf for ordinary answers/artifacts; split only for reusable source facts.",
         "When a conversation TaskProfile has shape single_leaf, submit exactly one deliver leaf that owns every conversation target. Gather source evidence inside that leaf; do not create a fact_acquisition-to-deliver pair merely to rewrite the same findings.",
         "Plan source work by coverage of each requested fact, not by the first available Tool or Skill. Before selecting capabilities, identify what must be answered and compare it with each source's declared scope and freshness. For lookups, identification, explanations and comparisons alike, bind complementary acquisition when the provider does not establish a requested fact; include that acquisition and the final synthesis in the leaf objective. Do not replace a missing requested fact with a related provider field or a caveat. Keep complementary acquisition in the same conversation deliver leaf, and omit redundant sources when one source covers the request.",
-        "In requiredFacts, enumerate the concrete factual answers explicitly required by the user, with their exact concepts, scope and time, before selecting source capabilities. These are answer obligations, not acquisition actions or receipt labels. Use [] when no concrete source-backed facts are requested. A source with narrower scope can provide leads, but cannot redefine a required fact. Choose capabilities that can obtain every required fact; do not plan to satisfy an answer obligation merely by reporting that the first provider lacks its field.",
+        "In requiredFacts, enumerate the concrete factual answers explicitly required by the user, with their exact concepts, scope and time, before selecting source capabilities. These are answer obligations, not acquisition actions or receipt labels. Use [] when no concrete source-backed facts are requested. Artifact edit instructions and requested output properties are covered by requested_goal acceptance, not new source-backed facts. Every requiredFacts item must include all four fields: id, description, evidenceKinds (a non-empty array of allowed evidence kinds), and basis. A source with narrower scope can provide leads, but cannot redefine a required fact. Choose capabilities that can obtain every required fact; do not plan to satisfy an answer obligation merely by reporting that the first provider lacks its field.",
+        "Every requiredFact must carry basis referencing canonicalRunState.intent.id, owned targetIds, an exact quote from intent.userInput, and a rationale. Use user_requirement for explicitly requested answers; necessary_condition must explain why the requested result would be invalid without it. Research references, implementation preferences, Skill workflow steps, and receipt labels are execution methods, not new factual answer obligations. They must not expand the user's acceptance conditions.",
         "Preserve every fact, role, measure, scope and time requested by the user. Source-provider fields and related concepts are not substitutes for the requested concepts. If a provider does not cover one requested fact, plan the complementary acquisition needed for that fact instead of redefining the deliverable to fit the provider; mark genuinely unavailable facts as gaps without claiming they were answered.",
         "Leaves are durable evidence boundaries, not workflow scripts or internal tool checklists.",
         "selectedSkillRoles is an execution-selection list, not a candidate list: every listed Skill, regardless of role, must also appear in at least one concrete leaf.skillIds; otherwise omit it.",
@@ -585,9 +590,6 @@ function plannerContractRetryDirective(
   if (shouldRetryPlannerToolContract(response, outcomePlanCalls.length, task.availableToolNames)) {
     return { kind: "execution_tool", directive: plannerToolContractDirective(response) };
   }
-  if (shouldRetryOutcomePlanArgumentsContract(planningError, response, outcomePlanCalls)) {
-    return { kind: "arguments", directive: plannerOutcomePlanArgumentsDirective(outcomePlanCalls[0], planningError) };
-  }
   if (isSourceConstraintArgumentFailure(planningError)) {
     return {
       kind: "source_constraint_arguments",
@@ -605,6 +607,9 @@ function plannerContractRetryDirective(
       kind: "source_namespace",
       directive: plannerSourceConstraintNamespaceDirective(planningError, task),
     };
+  }
+  if (shouldRetryOutcomePlanArgumentsContract(planningError, response, outcomePlanCalls)) {
+    return { kind: "arguments", directive: plannerOutcomePlanArgumentsDirective(outcomePlanCalls[0], planningError) };
   }
   if (shouldRetryOutcomePlanAdmissionContract(response, outcomePlanCalls)) {
     return {
@@ -926,8 +931,7 @@ function shouldRetryOutcomePlanArgumentsContract(
 ): boolean {
   if (response.finishReason === "length") return false;
   if (response.toolCalls.length !== 1 || outcomePlanCalls.length !== 1) return false;
-  if (isJsonObject(outcomePlanCalls[0].arguments)) return false;
-  return planningError.message === "submit_outcome_plan arguments must be a JSON object";
+  return planningError.details?.validationBoundary === "outcome_plan_arguments";
 }
 
 function shouldRetryOutcomePlanAdmissionContract(
@@ -975,6 +979,7 @@ function plannerOutcomePlanAdmissionDirective(
     "planning_context.candidateSkillRoles are relevance suggestions, not preselected dependencies. Omit any candidate that is not bound to and executed by a concrete leaf.",
     "Every selected primary_builder Skill must be bound to at least one concrete leaf that uses it.",
     "Every dependsOn entry must name a leaf id present in the current submit_outcome_plan.leaves array. Do not reference leaf ids from earlier rejected attempts.",
+    "Every requiredFact must retain id, description, evidenceKinds, and basis when correcting the plan. basis.requirement must be an exact substring of canonicalRunState.intent.userInput; resolver userConstraints, Plan paraphrases, and Skill instructions are not user-authored quotes. For a necessary preservation condition, quote the original edit request and explain the necessity in basis.rationale using kind necessary_condition.",
     "A terminal leaf that only proposes options or waits for Human-in-the-Loop cannot satisfy a requested artifact. Keep the artifact-producing obligation in the same resumed leaf or add a dependent production leaf with observable artifact evidence.",
     "If a Skill is only a style/reference fallback and is not needed for execution, omit it from selectedSkillRoles instead of selecting it as support.",
     "Keep QA, verification, readback, and local acceptance inside the producing leaf unless TaskProfile.planShape is recovery_patch.",
@@ -982,6 +987,16 @@ function plannerOutcomePlanAdmissionDirective(
 }
 
 function plannerOutcomePlanArgumentsDirective(call: ModelToolCall, planningError: AppError): string {
+  if (isJsonObject(call.arguments)) {
+    return [
+      "Your previous submit_outcome_plan call violated the tool's argument schema before Runtime Admission.",
+      `Validation error: ${summarizePlanningError(planningError.message)}.`,
+      "Submit exactly one corrected submit_outcome_plan call for the same user goal, preserving all required fields in the tool schema.",
+      "Each requiredFacts item must include id, description, evidenceKinds (a non-empty array of allowed evidence kinds), and basis (kind, intentId, targetIds, requirement, rationale). Do not remove sibling fields when repairing basis.",
+      "Use requiredFacts: [] only when the request contains no concrete source-backed factual answers; requested artifact properties remain covered by requested_goal acceptance. Do not remove genuine requested facts to bypass validation.",
+      "Do not execute work, call execution tools, load Skills, or declare completion during planning.",
+    ].join("\n");
+  }
   return [
     "Your previous submit_outcome_plan tool call was rejected because its arguments were not a JSON object.",
     `Validation error: ${summarizePlanningError(planningError.message)}.`,
@@ -1921,17 +1936,18 @@ function normalizeResultSuccessCriteria(
   for (const fact of step.requiredFacts ?? []) {
     successCriteria.push({
       id: `required_fact:${fact.id}`,
-      description: `Establish and deliver this requested fact using readable supporting evidence: ${fact.description}. A related field, a missing provider field, or a caveat that it remains unverified does not satisfy this fact.`,
+      description: `Establish and deliver this requested fact using observations appropriate to the requirement: ${fact.description}. A related field, a missing provider field, or a caveat that it remains unverified does not satisfy this fact.`,
       source: "planner" as const,
       verification: "model_judged" as const,
       blocking: true,
+      basis: fact.basis,
     });
   }
   if (step.role !== "fact_acquisition"
-    && (step.targetIds ?? []).some((targetId) => task.canonicalState.targets[targetId]?.surface === "conversation")) {
+    && (step.targetIds ?? []).length > 0) {
     successCriteria.push({
       id: "requested_goal",
-      description: `For this leaf's owned delivery targets, answer the original user request: ${JSON.stringify(canonicalUserInput(task))}. Preserve its requested facts, concepts, scope and time. Resolver/Plan paraphrases, source fields and Skill output templates cannot authorize substitution or narrowing. A caveat about an unanswered fact records a remaining gap and does not satisfy that fact.`,
+      description: `For this leaf's owned delivery targets, fulfill the original user request: ${JSON.stringify(canonicalUserInput(task))}. Preserve its requested properties, facts, concepts, scope and time. Resolver/Plan paraphrases, source fields and Skill output templates cannot authorize substitution or narrowing. A caveat about an unfulfilled requirement records a remaining gap and does not satisfy that requirement.`,
       source: "task" as const,
     });
   }
@@ -1949,7 +1965,12 @@ function normalizeResultSuccessCriteria(
     ...step,
     successCriteria: successCriteria.map((criterion) => ({
       ...criterion,
+      basis: criterion.basis ?? goalCriterionBasis(task.canonicalState, step.targetIds ?? [],
+        criterion.source === "task" ? "user_requirement" : "necessary_condition",
+        `This leaf must produce a result that fulfills the original request: ${coreSuccessCriterionDescription(step, task)}`),
       blocking: criterion.blocking ?? criterionBlockingByGoal(criterion.id, step, task, taskProfile),
+      verification: criterion.verification ?? ((EVIDENCE_KINDS as readonly string[]).includes(criterion.id)
+        ? "deterministic" as const : "model_judged" as const),
     })),
   };
 }
@@ -2578,7 +2599,10 @@ function parseOutcomePlanProposal(call: ModelToolCall, task: TaskSpec): PlanProp
     };
   } catch (error) {
     if (error instanceof AppError && error.code === "BAD_REQUEST") {
-      throw new AppError("PLANNING_ERROR", error.message, 422);
+      throw new AppError("PLANNING_ERROR", error.message, 422, {
+        ...error.details,
+        validationBoundary: "outcome_plan_arguments",
+      });
     }
     throw error;
   }
@@ -2681,12 +2705,17 @@ function parseRequiredFacts(value: unknown, leafIndex: number): NonNullable<Plan
   return value.map((entry, index) => {
     const name = `leaves[${leafIndex}].requiredFacts[${index}]`;
     const fact = requireRecord(entry, name);
+    const missingFields = OUTCOME_LEAF_SCHEMA.properties.requiredFacts.items.required.filter((field) => fact[field] === undefined);
+    if (missingFields.length > 0) {
+      throw badRequest(`${name} is missing required fields: ${missingFields.join(", ")}`);
+    }
     const evidenceKinds = canonicalStringSet(fact.evidenceKinds, `${name}.evidenceKinds`, 20);
     if (evidenceKinds.length === 0 || evidenceKinds.some((kind) => !(EVIDENCE_KIND_VALUES as readonly string[]).includes(kind))) {
       throw badRequest(`${name}.evidenceKinds must name available evidence kinds`);
     }
     return { id: requireString(fact.id, `${name}.id`, { max: 128 }),
-      description: requireString(fact.description, `${name}.description`, { max: 2_000 }), evidenceKinds };
+      description: requireString(fact.description, `${name}.description`, { max: 2_000 }), evidenceKinds,
+      basis: parseCriterionBasis(fact.basis, `${name}.basis`) };
   });
 }
 

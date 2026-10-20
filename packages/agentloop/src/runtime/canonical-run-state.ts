@@ -37,6 +37,10 @@ export interface CanonicalGoalGap {
   readonly resolvedAt?: number;
   /** Ordered owners of this same unresolved gap; Plan revisions do not reset it. */
   readonly repairStepIds?: readonly string[];
+  /** Active leaves sharing this unresolved goal, including recovery prerequisites. */
+  readonly repairScopeStepIds?: readonly string[];
+  readonly repairAttempts?: number;
+  readonly unmetCriteria?: FailedBoundary["unmetCriteria"];
 }
 
 export interface CanonicalStepProgress {
@@ -136,7 +140,9 @@ export function createCanonicalRunState(input: {
     id: randomUUID(),
     targetId: target.targetId,
     status: "open" as const,
-    missingEvidenceKinds: Object.freeze([`delivery_target:${target.targetId}`]),
+    missingEvidenceKinds: Object.freeze([] as string[]),
+    unmetCriteria: Object.freeze([{ criterionId: `delivery_target:${target.targetId}`, targetId: target.targetId,
+      status: "unverified" as const, rationale: target.purpose, evidenceRefs: Object.freeze([] as string[]) }]),
     violatedSkillRequirements: Object.freeze([] as string[]),
     evidenceRefs: Object.freeze([] as string[]),
     suggestedAction: "revise_plan" as const,
@@ -267,7 +273,7 @@ export function reviseCanonicalPlan(
   state: CanonicalRunState,
   plan: Pick<ExecutionPlan, "id" | "runId" | "version" | "steps">,
   now = Date.now(),
-  repairs: readonly { readonly gapId: string; readonly replacementStepId: string }[] = [],
+  repairs: readonly { readonly gapId: string; readonly replacementStepIds: readonly string[] }[] = [],
 ): CanonicalRunState {
   assertMutable(state);
   if (plan.runId !== state.runId || state.plan?.id !== plan.id) {
@@ -304,13 +310,23 @@ export function reviseCanonicalPlan(
       const repair = repairs.find((item) => item.gapId === gap.id);
       if (repair === undefined) return gap;
       if (gap.status !== "open" || gap.stepId === undefined || steps[gap.stepId]?.status !== "retired"
-        || steps[repair.replacementStepId]?.status !== "pending") {
+        || repair.replacementStepIds.length === 0
+        || new Set(repair.replacementStepIds).size !== repair.replacementStepIds.length
+        || repair.replacementStepIds.some((id) => steps[id] === undefined
+          || steps[id].status !== "pending" && steps[id].status !== "running" && steps[id].status !== "satisfied")) {
         throw conflict("GoalGap repair must transfer an open retired-step gap to an admitted pending Step");
       }
-      return Object.freeze({ ...gap, stepId: repair.replacementStepId,
-        repairStepIds: Object.freeze([...(gap.repairStepIds ?? [gap.stepId]), repair.replacementStepId]) });
+      return Object.freeze({ ...gap, stepId: repair.replacementStepIds[0],
+        repairAttempts: canonicalGapRepairAttempts(gap) + 1,
+        repairScopeStepIds: Object.freeze([...repair.replacementStepIds]),
+        repairStepIds: Object.freeze([...new Set([...(gap.repairStepIds ?? [gap.stepId]), ...repair.replacementStepIds])]) });
     })),
   }, now);
+}
+
+/** Earlier single-leaf histories encode one repair per additional owner. */
+export function canonicalGapRepairAttempts(gap: CanonicalGoalGap): number {
+  return gap.repairAttempts ?? Math.max(0, (gap.repairStepIds?.length ?? 1) - 1);
 }
 
 export function startCanonicalStep(state: CanonicalRunState, stepId: string, now = Date.now()): CanonicalRunState {
@@ -334,7 +350,7 @@ export function recordCanonicalAssessment(
   assertMutable(state);
   const step = requiredStep(state, assessment.stepId);
   const evidenceRefs = canonicalEvidenceRefs(evidence);
-  const currentGap = state.gaps.find((gap) => gap.targetId === undefined && gap.stepId === assessment.stepId && gap.status === "open");
+  const currentGap = state.gaps.find((gap) => gap.targetId === undefined && (gap.stepId === assessment.stepId || gap.repairScopeStepIds?.includes(assessment.stepId)) && gap.status === "open");
   const acceptedTargetIds = new Set(assessment.criteria
     .filter((criterion) => criterion.satisfied && criterion.targetId !== undefined)
     .map((criterion) => criterion.targetId!)
@@ -364,7 +380,8 @@ export function recordCanonicalAssessment(
       : gap);
   if (assessment.approved) {
     const resolved = progressedGaps.map((gap) =>
-      gap.status === "open" && gap.targetId === undefined && gap.stepId === assessment.stepId
+      gap.id === currentGap?.id && (gap.repairScopeStepIds ?? [assessment.stepId]).every((id) =>
+        id === assessment.stepId || state.steps[id]?.status === "satisfied")
         ? { ...gap, status: "resolved" as const, resolvedAt: now }
         : gap);
     return next(state, {
@@ -391,8 +408,11 @@ export function recordCanonicalAssessment(
     violatedSkillRequirements: Object.freeze([...boundary.violatedSkillRequirements]),
     evidenceRefs: Object.freeze([...new Set([...(currentGap?.evidenceRefs ?? []), ...boundary.reusableEvidenceRefs, ...evidenceRefs])]),
     suggestedAction: boundary.suggestedRepairShape,
+    ...(boundary.unmetCriteria === undefined ? {} : { unmetCriteria: Object.freeze([...boundary.unmetCriteria]) }),
     openedAt: currentGap?.openedAt ?? now,
     repairStepIds: currentGap?.repairStepIds ?? Object.freeze([assessment.stepId]),
+    repairScopeStepIds: currentGap?.repairScopeStepIds ?? Object.freeze([assessment.stepId]),
+    repairAttempts: currentGap === undefined ? 0 : canonicalGapRepairAttempts(currentGap),
   });
   return next(state, {
     phase: status === "blocked" ? "blocked" : "executing",

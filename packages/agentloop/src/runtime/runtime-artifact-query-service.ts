@@ -1,3 +1,4 @@
+import type { CanonicalRunState } from "./canonical-run-state.ts";
 import { notFound } from "../shared/errors.ts";
 import {
   collectProcessArtifacts,
@@ -29,6 +30,7 @@ export class RuntimeArtifactQueryService {
   private readonly input: {
     readonly run: (actorUserId: string, runId: string) => Promise<ArtifactQueryRun>;
     readonly events: (actorUserId: string, runId: string) => Promise<readonly ArtifactQueryEvent[]>;
+    readonly canonicalState: (runId: string) => Promise<CanonicalRunState | undefined>;
     readonly workspaceRoot: (run: ArtifactQueryRun) => string;
   };
 
@@ -44,7 +46,7 @@ export class RuntimeArtifactQueryService {
       workspaceRoot: this.input.workspaceRoot(run),
       runCreatedAt: run.createdAt,
       events,
-      promoteProducedArtifacts: conversationCandidateApproved(events),
+      canonicalState: await this.input.canonicalState(runId),
     });
   }
 
@@ -69,8 +71,4 @@ export class RuntimeArtifactQueryService {
       throw notFound("Process artifact");
     }
   }
-}
-
-export function conversationCandidateApproved(events: readonly Pick<ArtifactQueryEvent, "type">[]): boolean {
-  return events.some((event) => event.type === "candidate.approved");
 }

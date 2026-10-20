@@ -11,6 +11,7 @@ import {
 } from "../runtime/canonical-run-state.ts";
 import type { ArtifactTarget, ConversationTurnResolution, ConversationWorkingSet, EvidenceContract, EvidenceKind, ExecutionPlan, PlanProposal, PlanStep, PlanningCapability, PlanningToolSummary, RefinementState, RequiredFact, StepExecutionBinding, SuccessCriterion } from "./contracts.ts";
 import { parseRuntimeResultBinding, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
+import { admitCriterionBasis, assertCriterionBasis } from "./criterion-basis.ts";
 import {
   createStepExecutionBinding,
   unknownUploadedSourceIds,
@@ -199,6 +200,14 @@ export function admitPlan(input: {
       );
     }
     const targetIds = normalizeTargetIdsForStep(step, canonicalTargets);
+    const relatedTargetIds = [...new Set([ ...targetIds, ...proposal.steps
+      .filter((candidate) => dependsOnStep(candidate.id, step.id, proposal.steps))
+      .flatMap((candidate) => normalizeTargetIdsForStep(candidate, canonicalTargets)) ])];
+    for (const fact of requiredFacts) {
+      if (fact.basis === undefined) reject(`Required fact ${fact.id} has no canonical requirement basis`);
+      assertCriterionBasis(fact.basis, input.canonicalState, relatedTargetIds);
+      if (fact.basis.kind === "execution_method") reject(`Required fact ${fact.id} is an execution method, not a result obligation`);
+    }
     // A Run may own both workspace artifacts and a final conversational
     // explanation.  The aggregate TaskIntent describes the Run, while a leaf
     // owns only the targets named here.  Do not make a conversation-only
@@ -248,10 +257,14 @@ export function admitPlan(input: {
     );
     const targetCriteria = deliveryTargetSuccessCriteria(targetIds, canonicalTargets);
     normalizeCompletionCapabilities(step.role, requiredCapabilities, stepTaskIntent);
-    const criteria: SuccessCriterion[] = [...completionCriteria, ...targetCriteria].map((criterion) => ({
-      ...criterion,
-      blocking: criterion.blocking ?? criterionBlocksCompletion(criterion.id, step, stepTaskIntent),
-    }));
+    const criteria: SuccessCriterion[] = [...completionCriteria, ...targetCriteria].map((criterion) => {
+      const runtimeCondition = criterion.targetId !== undefined
+        || ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(criterion.id) || criterion.id === "delivery_receipt"
+        || step.role === "fact_acquisition" && SOURCE_GROUNDING_EVIDENCE_KINDS.has(criterion.id as EvidenceKind);
+      const bound = admitCriterionBasis(criterion, input.canonicalState, relatedTargetIds, runtimeCondition);
+      return { ...bound, blocking: bound.basis?.kind === "execution_method" ? false
+        : criterion.blocking ?? criterionBlocksCompletion(criterion.id, step, stepTaskIntent) };
+    });
     for (const skillId of stepSkillIds) {
       if (!selectedSet.has(skillId)) reject(`Step ${step.id} binds unselected Skill ${skillId}`);
       const skill = availableSkills.get(skillId);
@@ -1120,6 +1133,13 @@ function normalizeArtifactTargetsForStep(input: {
       terminalRequired: true,
     };
   });
+}
+
+function dependsOnStep(stepId: string, ancestorId: string, steps: readonly PlanProposal["steps"][number][], visited = new Set<string>()): boolean {
+  if (visited.has(stepId)) return false;
+  visited.add(stepId);
+  const step = steps.find((candidate) => candidate.id === stepId);
+  return step?.dependencies.some((id) => id === ancestorId || dependsOnStep(id, ancestorId, steps, visited)) === true;
 }
 
 function normalizeTargetIdsForStep(

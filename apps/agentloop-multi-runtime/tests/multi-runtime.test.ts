@@ -997,7 +997,7 @@ test("Web preserves an active artifact player across conversation re-renders", a
 });
 
 test("Web excludes command stdout and stderr captures from artifact cards", () => {
-  const finalArtifact = { role: "final", name: "report.pdf", path: "deliveries/report.pdf" };
+  const finalArtifact = { role: "final", name: "report.pdf", path: "deliveries/report.pdf", verification: { delivery: "committed" as const } };
   const stdoutCapture = { role: "final", name: "run.stdout.txt", path: ".agentloop/tool-results/run.stdout.txt" };
   const stderrCapture = { role: "final", name: "run.stderr.txt", path: ".agentloop/tool-results/run.stderr.txt" };
 
