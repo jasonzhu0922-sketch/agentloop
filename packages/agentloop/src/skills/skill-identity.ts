@@ -17,10 +17,17 @@ export function buildSkillReferenceMap<T extends SkillIdentity>(
   skills: readonly T[],
 ): ReadonlyMap<string, T> {
   const byReference = new Map<string, T>();
+  // Canonical IDs always take precedence over another Skill's name.
+  for (const skill of skills) byReference.set(skill.id, skill);
+  const byName = new Map<string, T>();
+  const ambiguousNames = new Set<string>();
   for (const skill of skills) {
-    for (const key of skillReferenceKeys(skill)) {
-      if (!byReference.has(key)) byReference.set(key, skill);
-    }
+    const previous = byName.get(skill.name);
+    if (previous !== undefined && previous.id !== skill.id) ambiguousNames.add(skill.name);
+    byName.set(skill.name, skill);
+  }
+  for (const [name, skill] of byName) {
+    if (!byReference.has(name) && !ambiguousNames.has(name)) byReference.set(name, skill);
   }
   return byReference;
 }
