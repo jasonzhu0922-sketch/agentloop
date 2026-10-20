@@ -43,20 +43,26 @@ final class AgentLoopLocalRuntimeTray: NSObject, NSApplicationDelegate {
   }
 
   @objc private func startAgent() {
-    guard let plist = launchAgentPath() else { statusItem.button?.title = "AgentLoop !"; return }
-    let uid = getuid()
-    run("/bin/launchctl", ["bootstrap", "gui/\(uid)", plist.path], allowFailure: true)
-    run("/bin/launchctl", ["kickstart", "-k", "gui/\(uid)/\(label)"], allowFailure: true)
+    do {
+      guard FileManager.default.isExecutableFile(atPath: agentURL.path) else {
+        throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: agentURL.path])
+      }
+      let plist = try LocalRuntimeInstallation.launchAgentPath(resources: Bundle.main.resourceURL!, home: FileManager.default.homeDirectoryForCurrentUser, label: label)
+      try LocalRuntimeInstallation.restartAgent(plist: plist, label: label, uid: getuid())
+      statusItem.button?.title = "AgentLoop"
+    } catch {
+      statusItem.button?.title = "AgentLoop !"
+      let alert = NSAlert()
+      alert.messageText = "Local Runtime Agent 启动失败"
+      alert.informativeText = error.localizedDescription
+      alert.runModal()
+    }
   }
 
   private func configure(router: String, webOrigin: String?) {
     var arguments = ["--configure-server-url", router]
     if let webOrigin { arguments += ["--web-origin", webOrigin] }
     run(agentURL.path, arguments, allowFailure: false)
-  }
-
-  private func launchAgentPath() -> URL? {
-    try? LocalRuntimeInstallation.launchAgentPath(resources: Bundle.main.resourceURL!, home: FileManager.default.homeDirectoryForCurrentUser, label: label)
   }
 
   @objc private func openWeb() {

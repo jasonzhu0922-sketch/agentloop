@@ -16,11 +16,50 @@ enum LocalRuntimeInstallation {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
     guard var plist = try PropertyListSerialization.propertyList(from: Data(contentsOf: source), format: nil) as? [String: Any] else { throw CocoaError(.propertyListReadCorrupt) }
+    let executable = resources.appendingPathComponent("agentloop-local-runtime-agent").path
+    plist["ProgramArguments"] = [executable]
+    // A previous job definition may contain Program as well as ProgramArguments.
+    plist.removeValue(forKey: "Program")
+    var environment = plist["EnvironmentVariables"] as? [String: String] ?? [:]
+    environment["AGENTLOOP_AGENT_APP_ROOT"] = resources.path
+    environment["AGENTLOOP_BUNDLED_SKILL_DIRECTORIES"] = resources.appendingPathComponent("skills").path
+    plist["EnvironmentVariables"] = environment
     plist["StandardOutPath"] = logs.appendingPathComponent("agent.out.log").path
     plist["StandardErrorPath"] = logs.appendingPathComponent("agent.err.log").path
     let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
     try data.write(to: target, options: .atomic)
     return target
+  }
+
+  static func restartAgent(plist: URL, label: String, uid: UInt32, launchctl: URL = URL(fileURLWithPath: "/bin/launchctl")) throws {
+    let domain = "gui/\(uid)"
+    let service = "\(domain)/\(label)"
+    // bootstrap does not replace a loaded job, even after its plist changes.
+    if try command(launchctl, ["print", service]).status == 0 {
+      try checkedCommand(launchctl, ["bootout", service])
+    }
+    try checkedCommand(launchctl, ["bootstrap", domain, plist.path])
+    try checkedCommand(launchctl, ["kickstart", "-k", service])
+  }
+
+  private static func checkedCommand(_ executable: URL, _ arguments: [String]) throws {
+    let result = try command(executable, arguments)
+    guard result.status == 0 else {
+      throw NSError(domain: "AgentLoop.LocalRuntime.Startup", code: Int(result.status), userInfo: [NSLocalizedDescriptionKey: "\(executable.lastPathComponent) \(arguments.first ?? ""): \(result.error.trimmingCharacters(in: .whitespacesAndNewlines)) (exit \(result.status))"])
+    }
+  }
+
+  private static func command(_ executable: URL, _ arguments: [String]) throws -> (status: Int32, error: String) {
+    let process = Process()
+    let errors = Pipe()
+    process.executableURL = executable
+    process.arguments = arguments
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = errors
+    try process.run()
+    let data = errors.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    return (process.terminationStatus, String(decoding: data, as: UTF8.self))
   }
 
   private struct Release: Decodable {

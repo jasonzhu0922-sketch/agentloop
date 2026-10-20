@@ -32,7 +32,7 @@ for name in ["First Installer", "Other User & Device"] {
   precondition(plist["StandardOutPath"] as? String == logs.appendingPathComponent("agent.out.log").path)
   precondition(plist["StandardErrorPath"] as? String == logs.appendingPathComponent("agent.err.log").path)
   precondition(FileManager.default.fileExists(atPath: logs.path))
-  precondition((plist["ProgramArguments"] as! [String])[0].hasPrefix("/Applications/AgentLoop Local Runtime.app/"))
+  precondition((plist["ProgramArguments"] as! [String])[0] == root.appendingPathComponent("agentloop-local-runtime-agent").path)
   try Data("stale previous installation".utf8).write(to: target)
   _ = try LocalRuntimeInstallation.launchAgentPath(resources: root, home: home, label: "com.agentloop.local-runtime-agent")
   _ = try PropertyListSerialization.propertyList(from: Data(contentsOf: target), format: nil)

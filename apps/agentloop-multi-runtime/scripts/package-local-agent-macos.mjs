@@ -1,6 +1,7 @@
-import { chmod, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
@@ -9,16 +10,17 @@ const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(appRoot, "../..");
 const version = JSON.parse(await readFile(join(appRoot, "package.json"), "utf8")).version;
 const releaseRoot = resolve(appRoot, "release/local-agent/macos-arm64");
-const stagingRoot = join(releaseRoot, "staging");
+const buildRoot = await mkdtemp(join(tmpdir(), "agentloop-local-agent-macos-"));
+const stagingRoot = join(buildRoot, "staging");
 const application = join(stagingRoot, "Applications", "AgentLoop Local Runtime.app");
 const contents = join(application, "Contents");
 const macOS = join(contents, "MacOS");
 const resources = join(contents, "Resources");
 const swiftModuleCache = join(releaseRoot, "swift-module-cache");
-const bundle = join(releaseRoot, "agentloop-local-runtime-agent.mjs");
-const seaBundle = join(releaseRoot, "agentloop-local-runtime-agent-sea.cjs");
-const seaConfig = join(releaseRoot, "sea-config.json");
-const seaBlob = join(releaseRoot, "sea-prep.blob");
+const bundle = join(buildRoot, "agentloop-local-runtime-agent.mjs");
+const seaBundle = join(buildRoot, "agentloop-local-runtime-agent-sea.cjs");
+const seaConfig = join(buildRoot, "sea-config.json");
+const seaBlob = join(buildRoot, "sea-prep.blob");
 const executable = join(resources, "agentloop-local-runtime-agent");
 const pkg = join(releaseRoot, `AgentLoop-Local-Runtime-${version}-macos-arm64.pkg`);
 const releaseEnvironment = process.env.AGENTLOOP_RELEASE_ENV ?? "development";
@@ -35,7 +37,7 @@ const webOrigin = process.env.AGENTLOOP_WEB_ORIGIN ?? ({
 if (typeof routerUrl !== "string" || typeof webOrigin !== "string") throw new Error(`Missing fixed Router/Web URL for release environment: ${releaseEnvironment}`);
 
 if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error("package-local-agent-macos must run on an Apple Silicon Mac");
-await rm(releaseRoot, { recursive: true, force: true });
+await mkdir(releaseRoot, { recursive: true });
 await mkdir(resources, { recursive: true });
 await mkdir(swiftModuleCache, { recursive: true });
 
@@ -119,7 +121,8 @@ const info = (await readFile(join(appRoot, "distribution/macos/Info.plist"), "ut
 await writeFile(join(contents, "Info.plist"), info);
 await signNestedCode(resources, macOS);
 run("/usr/bin/codesign", ["--force", "--sign", process.env.APPLE_CODESIGN_IDENTITY ?? "-", "--options", "runtime", application]);
-run("/usr/bin/pkgbuild", ["--root", stagingRoot, "--identifier", "com.agentloop.local-runtime", "--version", version, "--install-location", "/", pkg]);
+run("/usr/bin/pkgbuild", ["--root", stagingRoot, "--component-plist", join(appRoot, "distribution/macos/components.plist"), "--identifier", "com.agentloop.local-runtime", "--version", version, "--install-location", "/", pkg]);
+await rm(buildRoot, { recursive: true, force: true });
 process.stdout.write(`Built ${pkg} (${seaInjected ? "Node SEA" : "bundled Node fallback"})\n`);
 
 function run(command, args, allowFailure = false) {

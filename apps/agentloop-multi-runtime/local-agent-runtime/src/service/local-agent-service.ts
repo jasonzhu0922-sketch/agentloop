@@ -13,7 +13,7 @@ import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local
 import { loadSkillDirectoriesConfig } from "../../../src/shared/config.ts";
 import { LocalSkillPackageInstaller } from "./local-skill-package-installer.ts";
 
-export const LOCAL_AGENT_VERSION = "0.1.0";
+export const LOCAL_AGENT_VERSION = "0.1.1";
 export const LOCAL_AGENT_PROTOCOL_VERSION = "1";
 
 export class LocalAgentApplicationError extends Error {
