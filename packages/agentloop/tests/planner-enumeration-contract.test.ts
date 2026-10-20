@@ -282,8 +282,9 @@ test("requested facts survive model planning, persisted admission, execution and
         assessed = true;
         return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "assess", name: "submit_assessment", arguments: {
           criteria: step.successCriteria.map((criterion) => ({ criterionId: criterion.id,
-            satisfied: criterion.id !== "required_fact:president", rationale: "登记总经理不能证明现任总裁", evidenceRefs: [] })),
-          skills: [], feedback: "补查总裁的现任任免信息，保留已有董事长证据。",
+            satisfied: criterion.id !== "required_fact:president", rationale: "登记总经理不能证明现任总裁", evidenceRefs: [],
+            contractCheck: { status: "valid", rationale: "用户要求区分董事长与现任总裁。" } })),
+          skills: [], feedback: "补查总裁的现任任免信息，保留已有董事长证据。", failedBoundary: null,
         } }] };
       },
     }).assess({ runId, planId: plan.id, canonicalState, step, skills: [], attempt: 1,

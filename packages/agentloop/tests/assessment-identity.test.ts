@@ -39,9 +39,10 @@ function response(input: StepAssessmentInput, skillIds = input.skills.map((skill
   return {
     content: "", finishReason: "tool_calls" as const,
     toolCalls: [{ id: "assessment-call", name: "submit_assessment", arguments: {
-      criteria: criterionIds.map((criterionId) => ({ criterionId, satisfied: true, rationale: "Supported.", evidenceRefs: [] })),
+      criteria: criterionIds.map((criterionId) => ({ criterionId, satisfied: true, rationale: "Supported.", evidenceRefs: [],
+        contractCheck: { status: "valid", rationale: "The criterion follows from the requested table analysis." } })),
       skills: skillIds.map((skillId) => ({ skillId, status: "not_assessed", followed: false, rationale: "QA not rerun.", evidenceRefs: [] })),
-      feedback: "",
+      feedback: "", failedBoundary: null,
     } }],
   };
 }

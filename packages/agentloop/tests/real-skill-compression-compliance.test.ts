@@ -310,16 +310,18 @@ class CompressionComplianceModel implements ModelAdapter {
         criteria: [{
           criterionId: "delivery_receipt",
           satisfied: false,
+          contractCheck: { status: "valid", rationale: "The request requires a delivered result." },
           rationale: "The first candidate is intentionally unverified and does not cite the controlled delivery.",
           evidenceRefs: [],
         }],
         skills: [{
           skillId: this.skillId,
+          status: "not_followed",
           followed: false,
           rationale: "The first candidate does not demonstrate the bound Skill's required design decisions.",
           evidenceRefs: [],
         }],
-        feedback: "Reload the exact Skill after compaction and submit a delivery-backed candidate.",
+        feedback: "Reload the exact Skill after compaction and submit a delivery-backed candidate.", failedBoundary: null,
       });
     }
     assert.equal(this.assessmentCalls, 2);
@@ -329,16 +331,18 @@ class CompressionComplianceModel implements ModelAdapter {
       criteria: [{
         criterionId: "delivery_receipt",
         satisfied: true,
+        contractCheck: { status: "valid", rationale: "The request requires a delivered result." },
         rationale: "The final candidate cites the controlled delivery and its Skill-specific design decisions.",
         evidenceRefs: ["candidateOutput", "test-record-delivery"],
       }],
       skills: [{
         skillId: this.skillId,
+        status: "followed",
         followed: true,
         rationale: "The final candidate directly addresses the bound Skill's loaded requirements after renewed activation.",
         evidenceRefs: ["candidateOutput", "load_skill"],
       }],
-      feedback: "",
+      feedback: "", failedBoundary: null,
     });
   }
 

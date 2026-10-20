@@ -229,7 +229,8 @@ test("source receipts and non-empty fabricated claims cannot bypass semantic ass
           const view = JSON.parse(match[1]);
           return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `assessment-${assessments}`, name: "submit_assessment", arguments: {
             criteria: view.step.successCriteria.map((criterion: { id: string }) => ({ criterionId: criterion.id, satisfied: false,
-              rationale: "The readable source does not name the requested person.", evidenceRefs: ["fetch-source"] })),
+              rationale: "The readable source does not name the requested person.", evidenceRefs: ["fetch-source"],
+              contractCheck: { status: "valid", rationale: "The user requested the person's name." } })),
             skills: [], feedback: "负责人姓名缺少原文支持。",
             failedBoundary: { stepId: view.step.id, missingEvidenceKinds: ["source_summary"], violatedSkillRequirements: [],
               reusableEvidenceRefs: ["fetch-source"], suggestedRepairShape: "repair_leaf" },

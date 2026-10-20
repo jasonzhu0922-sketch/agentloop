@@ -148,8 +148,9 @@ test("a non-blocking model-judged criterion is retained as unverified without re
           id: "assessment-call",
           name: "submit_assessment",
           arguments: {
-            criteria: [{ criterionId: "visual-quality", satisfied: false, rationale: "Cannot objectively verify aesthetic quality.", evidenceRefs: [] }],
-            skills: [], feedback: "Visual quality should be reviewed by the user.",
+            criteria: [{ criterionId: "visual-quality", satisfied: false, rationale: "Cannot objectively verify aesthetic quality.", evidenceRefs: [],
+              contractCheck: { status: "valid", rationale: "Visual quality is a requested result property." } }],
+            skills: [], feedback: "Visual quality should be reviewed by the user.", failedBoundary: null,
           },
         }],
       };

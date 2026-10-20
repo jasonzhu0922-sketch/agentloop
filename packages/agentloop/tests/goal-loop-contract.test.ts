@@ -203,8 +203,9 @@ test("an unjustified derived result obligation remains rejected and reaches the 
     assert.match(request.systemPrompt, /does not require web research or written citations/);
     return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "assess", name: "submit_assessment", arguments: {
       criteria: [{ criterionId: "difference", satisfied: true, rationale: "The result is correct but this proposed additional proof is not requested.",
-        contractIssue: "A separate proof document is an execution method, not a necessary result condition.", evidenceRefs: ["candidateOutput"] }],
-      skills: [], feedback: "Revise the unjustified derived condition, preserving the requested comparison.",
+        contractCheck: { status: "invalid", rationale: "A separate proof document is an execution method, not a necessary result condition." },
+        evidenceRefs: ["candidateOutput"] }],
+      skills: [], feedback: "Revise the unjustified derived condition, preserving the requested comparison.", failedBoundary: null,
     } }] };
   } }).assess({ runId: state.runId, planId: plan.id, step, canonicalState: running, skills: [], attempt: 1,
     assessmentProfile: "result_judged", evidence });
@@ -380,7 +381,8 @@ test("an accepted file receipt cannot route a requested content property through
           assert.match(JSON.stringify(context.evidence), /artifactAcceptance/);
           return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "content-assessment", name: "submit_assessment", arguments: {
             criteria: context.step.successCriteria.map((criterion: { id: string }) => ({ criterionId: criterion.id,
-              satisfied: criterion.id !== "correct-difference", rationale: "The file decodes; the requested difference is not verified.", evidenceRefs: ["write-report"] })),
+              satisfied: criterion.id !== "correct-difference", rationale: "The file decodes; the requested difference is not verified.", evidenceRefs: ["write-report"],
+              contractCheck: { status: "valid", rationale: "The condition follows from the requested report." } })),
             skills: [], feedback: "Preserve the stage file; the requested content remains unverified.",
             failedBoundary: { stepId: context.step.id, missingEvidenceKinds: [], violatedSkillRequirements: [], reusableEvidenceRefs: ["write-report"], suggestedRepairShape: "fail" },
           } }] };
