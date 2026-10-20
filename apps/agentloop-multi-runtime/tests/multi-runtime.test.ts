@@ -69,7 +69,6 @@ import {
   localRuntimeToolsRoot,
   requiredLocalRuntimePythonModules,
 } from "../scripts/local-runtime-tools.mjs";
-// @ts-expect-error The Web server is a plain Node module and is intentionally tested without a build step.
 import { runtimeConfigScript, staticFilePath } from "../web/server.mjs";
 
 function runtime(id: string, overrides: Partial<RuntimeInstance> = {}): RuntimeInstance {

@@ -107,6 +107,41 @@ deploy/centos7/deploy.sh up
 
 镜像标签必须和 `/opt/agentloop/.env` 的 `MULTI_RUNTIME_IMAGE` 相同。`init` 的初始占位标签是 `agentloop-multi-runtime:centos7`，而 `build-image.sh` 默认生成提交 SHA 标签；推荐用 `deploy.sh release IMAGE_ARCHIVE RELEASE_MANIFEST` 从 manifest 选择正确标签，或在 `up` 前显式修改 `.env`。
 
+## Local Runtime Agent 下载页
+
+Web `/downloads` 公开展示安装包，设备识别仅标记推荐项，用户可以选择其他系统、架构或历史版本。公开接口 `GET /v1/local-agent/releases` 只返回发布元数据；设备配对及业务 API 保持认证。旧的 `/v1/local-agent/releases/latest` 仍需认证。
+
+安装包独立于镜像，目录如下：
+
+```text
+/opt/agentloop/downloads/catalog/releases.json
+/opt/agentloop/downloads/installers/<release-id>/<installer.pkg 或 installer.msi>
+```
+
+`deploy.sh init` 创建空清单及目录，已有清单不会被覆盖。升级旧部署时先运行新版 `init`，再更新 Web/Router；Compose 将 catalog **目录**挂载给 Router，将 installers 目录只读挂载给 Web。Router 使用 `LOCAL_AGENT_RELEASES_FILE=/run/local-agent-catalog/releases.json`，Web 使用 `LOCAL_AGENT_DOWNLOADS_DIR=/run/local-agent-installers`。目录挂载允许清单原子替换后立即生效，无需重建镜像或重启服务。
+
+每次完成安装包构建后，在服务器上的源码目录执行（一次仅由一个发布进程更新清单）：
+
+```bash
+node scripts/publish-local-agent.mjs \
+  --root /opt/agentloop/downloads \
+  --installer /tmp/AgentLoop-Local-Runtime-0.1.0-macos-arm64.pkg \
+  --platform darwin --arch arm64 --version 0.1.0 \
+  --release-id 0_1_0-2638cf3 \
+  --signature '应用为 ad-hoc 签名；安装包未签名、未公证' \
+  --notes '首次提供 macOS Apple Silicon 安装包'
+```
+
+脚本验证 PKG/MSI 文件头、计算 SHA-256 和文件大小，将安装包复制到不可覆盖的版本路径，复核复制后的哈希，最后原子更新清单。已有同版本的不同内容不能覆盖，重新构建须发布新版本。Windows 使用 `--platform windows --arch x64` 及真实 `.msi` 文件；源码 ZIP 不可登记为安装包。
+
+清单字段为 `version`、`protocolVersion`、`platform`、`arch`、`fileName`、`size`（字节）、`publishedAt`（带时区的 ISO 日期）、`downloadUrl`、`sha256`、`signature`（真实签名状态）、可选 `releaseNotes`。每个平台/架构/协议组合按发布时间确定当前版本，其余进入历史版本。缺少兼容版本的卡片显示“暂未发布”。清单内禁止真实密钥、设备信息和内部服务器路径。
+
+`downloadUrl` 支持本站 `/downloads/local-agent/...` 路径或外部 HTTPS 地址。本站路径自然使用当前 Web 地址，例如 `http://47.101.178.145:3001/downloads/local-agent/...`，不影响 Router 的独立 `5001` 入口。外部 HTTPS 托管需正确配置文件下载响应头。Web 本站下载支持 GET、HEAD、单段 Range 和不可变缓存，只提供挂载目录内的 PKG/MSI 文件。
+
+本地验证可把上述 `--root` 换成临时目录，并分别设置 Router 的 `LOCAL_AGENT_RELEASES_FILE` 和 Web 的 `LOCAL_AGENT_DOWNLOADS_DIR`。小规模部署也可继续使用 `LOCAL_AGENT_RELEASES_JSON`（相同字段），但不能与文件配置同时设置。
+
+回滚时将 catalog 恢复为之前备份的有效 JSON，即可撤回当前推荐版本；版本文件保持原样，现有历史链接仍可用。上传后的 PKG/MSI 应保留并在登记后验证 HTTP 下载哈希和原生安装、启动、配对；登记清单本身不代表完成原生验收。
+
 ## 运维边界
 
 - 不要执行 `docker compose down -v`：它会删除数据库/附件等命名卷。`deploy.sh` 故意没有提供该命令。

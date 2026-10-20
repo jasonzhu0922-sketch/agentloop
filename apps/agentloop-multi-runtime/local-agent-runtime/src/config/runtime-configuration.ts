@@ -9,6 +9,7 @@ export interface LocalAgentRuntimeConfiguration {
   readonly root: string;
   /** The only database-configuration path exposed to Skill commands. */
   readonly environmentFile: string;
+  readonly providerConfigPath: string;
   readonly computerCommandEnvironment: Readonly<Record<string, string>>;
 }
 
@@ -32,6 +33,7 @@ export function localAgentRuntimeConfiguration(
   return {
     root,
     environmentFile,
+    providerConfigPath: resolve(environment.LOCAL_AGENT_PROVIDER_CONFIG_PATH ?? join(root, "config", "llm-providers.json")),
     computerCommandEnvironment: {
       DAM_TEST_ENV_FILE: environmentFile,
       ENTERPRISE_INFO_ENV_FILE: environmentFile,
@@ -75,6 +77,12 @@ export async function ensureLocalAgentRuntimeConfiguration(appRoot: string, conf
   const bundledTemplate = join(appRoot, "agent-loop-runtime", ".env.example");
   const installedTemplate = join(configuration.root, ".env.example");
   if (existsSync(bundledTemplate) && !existsSync(installedTemplate)) await copyFile(bundledTemplate, installedTemplate);
+  const bundledProviders = join(appRoot, "agent-loop-runtime", "config", "llm-providers.example.json");
+  const installedProviders = join(configuration.root, "config", "llm-providers.json");
+  if (existsSync(bundledProviders) && !existsSync(installedProviders)) {
+    await mkdir(dirname(installedProviders), { recursive: true, mode: 0o700 });
+    await copyFile(bundledProviders, installedProviders);
+  }
   const bundledMcpConfig = join(appRoot, "agent-loop-runtime", "config", "mcp-servers.json");
   const installedMcpConfig = join(configuration.root, "config", "mcp-servers.json");
   if (existsSync(bundledMcpConfig) && !existsSync(installedMcpConfig)) {

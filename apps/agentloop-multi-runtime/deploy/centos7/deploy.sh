@@ -97,6 +97,10 @@ init() {
   public_host="${AGENTLOOP_PUBLIC_HOST:-SERVER_IP}"
   umask 077
   mkdir -p "$DEPLOY_ROOT/config" "$DEPLOY_ROOT/data/workspace" "$DEPLOY_ROOT/secrets" "$DEPLOY_ROOT/backups"
+  mkdir -p "$DEPLOY_ROOT/downloads/catalog" "$DEPLOY_ROOT/downloads/installers"
+  if [ ! -f "$DEPLOY_ROOT/downloads/catalog/releases.json" ]; then
+    cp "$APP_ROOT/config/local-agent-releases.example.json" "$DEPLOY_ROOT/downloads/catalog/releases.json"
+  fi
   if [ ! -f "$DEPLOY_ROOT/config/llm-providers.json" ]; then
     cp "$APP_ROOT/config/llm-providers.example.json" "$DEPLOY_ROOT/config/llm-providers.json"
     note "created editable provider configuration: $DEPLOY_ROOT/config/llm-providers.json"

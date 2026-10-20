@@ -104,20 +104,19 @@ await writeFile(join(resources, "config/skill-directories.json"), JSON.stringify
 }, null, 2));
 await cp(join(appRoot, "config/step-execution-strategy.json"), join(resources, "config/step-execution-strategy.json"));
 await cp(join(appRoot, "config/practice-profiles.json"), join(resources, "config/practice-profiles.json"));
+await writeFile(join(resources, "agentloop-local-runtime.manifest.json"), `${JSON.stringify({ schema: "agentloop.localRuntimeRelease/v1", routerUrl, webOrigin }, null, 2)}\n`);
 await cp(join(appRoot, "distribution/macos/com.agentloop.local-runtime-agent.plist"), join(resources, "com.agentloop.local-runtime-agent.plist"));
 await mkdir(macOS, { recursive: true });
 run("/usr/bin/swiftc", [
   "-parse-as-library",
   "-module-cache-path", swiftModuleCache,
   join(appRoot, "distribution/macos/AgentLoopLocalRuntimeTray.swift"),
+  join(appRoot, "distribution/macos/LocalRuntimeInstallation.swift"),
   "-framework", "AppKit",
   "-o", join(macOS, "AgentLoop Local Runtime"),
 ]);
 const info = (await readFile(join(appRoot, "distribution/macos/Info.plist"), "utf8")).replaceAll("__VERSION__", version);
 await writeFile(join(contents, "Info.plist"), info);
-const logRoot = join(process.env.HOME ?? "/Users/Shared", "Library/Application Support/AgentLoop Local Runtime/logs");
-const plist = await readFile(join(resources, "com.agentloop.local-runtime-agent.plist"), "utf8");
-await writeFile(join(resources, "com.agentloop.local-runtime-agent.plist"), plist.replaceAll("__LOG_ROOT__", logRoot));
 await signNestedCode(resources, macOS);
 run("/usr/bin/codesign", ["--force", "--sign", process.env.APPLE_CODESIGN_IDENTITY ?? "-", "--options", "runtime", application]);
 run("/usr/bin/pkgbuild", ["--root", stagingRoot, "--identifier", "com.agentloop.local-runtime", "--version", version, "--install-location", "/", pkg]);

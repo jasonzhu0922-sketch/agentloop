@@ -76,6 +76,21 @@
   margin-left: 2ch;
 }
 
+.local-agent-downloads {
+  justify-self: end;
+  padding: 3px 0;
+  color: var(--text-2);
+  font-size: 11px;
+  text-decoration: none;
+}
+
+.local-agent-downloads:hover,
+.local-agent-downloads:focus-visible {
+  color: var(--brand);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .sidebar-foot > .identity {
   margin: 0;
   color: var(--text-3);

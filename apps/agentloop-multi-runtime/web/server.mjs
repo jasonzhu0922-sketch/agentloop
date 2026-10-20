@@ -4,6 +4,7 @@ import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { serveInstaller } from "./installer-downloads.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const sharedPreview = fileURLToPath(new URL("../../../packages/agentloop-artifact-preview/dist/index.js", import.meta.url));
@@ -32,18 +33,22 @@ export function staticFilePath(pathname) {
     ? "pages/app.html"
     : (decodedPathname === "/login" || decodedPathname === "/register" || decodedPathname === "/login.html"
       ? "pages/login.html"
-      : decodedPathname.slice(1));
+      : decodedPathname === "/downloads" || decodedPathname === "/downloads/" ? "pages/downloads.html" : decodedPathname.slice(1));
   const file = resolve(root, requested);
   return file === root || file.startsWith(`${root}${sep}`) ? file : undefined;
 }
 
-export function createWebServer() {
+export function createWebServer({ installerDirectory = process.env.LOCAL_AGENT_DOWNLOADS_DIR } = {}) {
   return createServer(async (request, response) => {
     // This is the local control-plane UI.  Its browser state and Router
     // protocol evolve together, so a cached app.js can otherwise keep an old
     // SSE/recovery implementation alive after the Router has been restarted.
     response.setHeader("cache-control", "no-store");
     const pathname = new URL(request.url ?? "/", "http://web.local").pathname;
+    if (pathname.startsWith("/downloads/local-agent/")) {
+      await serveInstaller(request, response, pathname, installerDirectory);
+      return;
+    }
     if (pathname === "/api" || pathname.startsWith("/api/")) {
       proxyRouterRequest(request, response);
       return;

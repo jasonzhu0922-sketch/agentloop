@@ -3,7 +3,8 @@ import { resolve } from "node:path";
 import { SharedFilesystemAttachmentBroker } from "./attachments/shared-filesystem-attachment-broker.ts";
 import { loadMultiRuntimeConfig, toRuntimeInstance } from "../shared/config.ts";
 import { ControlPlaneStore } from "./persistence/control-plane-store.ts";
-import { createRouterHttpServer, type LocalAgentRelease } from "./api/router-api.ts";
+import { createRouterHttpServer } from "./api/router-api.ts";
+import { localAgentReleaseSource } from "./releases/local-agent-releases.ts";
 import { HttpRuntimeControl } from "./runtime-control/http-runtime-control.ts";
 import { RouterService } from "./service/router-service.ts";
 import { startAssignmentReconciler } from "./service/assignment-reconciler.ts";
@@ -64,7 +65,7 @@ const server = createRouterHttpServer(router, {
   attachments,
   runtimeAttachmentToken,
   runtimeDispatchToken,
-  localAgentReleases: localAgentReleases(process.env.LOCAL_AGENT_RELEASES_JSON),
+  localAgentReleaseSource: localAgentReleaseSource(process.env),
   localAgentControl: runtimeConnections,
   // Comma-separated explicit origins allow localhost and 127.0.0.1 during local development.
   ...(process.env.WEB_ORIGIN === undefined ? {} : { webOrigin: process.env.WEB_ORIGIN }),
@@ -106,32 +107,4 @@ function requiredEnv(name: string): string {
   const value = process.env[name];
   if (value === undefined || value.length < 16) throw new Error(`${name} must be set to a non-trivial shared secret`);
   return value;
-}
-
-function localAgentReleases(value: string | undefined): readonly LocalAgentRelease[] {
-  if (value === undefined || value.trim() === "") return [];
-  const parsed: unknown = JSON.parse(value);
-  if (!Array.isArray(parsed)) throw new Error("LOCAL_AGENT_RELEASES_JSON must be a JSON array");
-  return parsed.map((item, index) => {
-    if (item === null || typeof item !== "object" || Array.isArray(item)) throw new Error(`LOCAL_AGENT_RELEASES_JSON[${index}] must be an object`);
-    const release = item as Record<string, unknown>;
-    const platform = release.platform;
-    const arch = release.arch;
-    if (platform !== "darwin" && platform !== "windows" && platform !== "linux") throw new Error(`LOCAL_AGENT_RELEASES_JSON[${index}].platform is invalid`);
-    if (arch !== "arm64" && arch !== "x64") throw new Error(`LOCAL_AGENT_RELEASES_JSON[${index}].arch is invalid`);
-    const required = (name: string): string => {
-      const field = release[name];
-      if (typeof field !== "string" || field.trim() === "") throw new Error(`LOCAL_AGENT_RELEASES_JSON[${index}].${name} is required`);
-      return field;
-    };
-    const downloadUrl = required("downloadUrl");
-    if (new URL(downloadUrl).protocol !== "https:") throw new Error(`LOCAL_AGENT_RELEASES_JSON[${index}].downloadUrl must use HTTPS`);
-    const launchUrl = typeof release.launchUrl === "string" && release.launchUrl.trim() !== "" ? release.launchUrl : undefined;
-    return {
-      version: required("version"), protocolVersion: required("protocolVersion"), platform, arch,
-      downloadUrl, sha256: required("sha256"), signature: required("signature"),
-      ...(typeof release.releaseNotes === "string" ? { releaseNotes: release.releaseNotes } : {}),
-      ...(launchUrl === undefined ? {} : { launchUrl }),
-    };
-  });
 }

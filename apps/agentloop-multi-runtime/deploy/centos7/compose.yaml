@@ -36,6 +36,7 @@ services:
       # The Web service proxies browser traffic to Router, but this stays
       # explicit for any direct Router API client.
       WEB_ORIGIN: ${PUBLIC_WEB_ORIGIN:?set the externally visible Web URL}
+      LOCAL_AGENT_RELEASES_FILE: /run/local-agent-catalog/releases.json
       RUNTIME_DISPATCH_TOKEN: ${RUNTIME_DISPATCH_TOKEN:?set in deployment .env}
       RUNTIME_ATTACHMENT_TOKEN: ${RUNTIME_ATTACHMENT_TOKEN:?set in deployment .env}
       AGENTLOOP_ROUTER_STATE_DRIVER: ${AGENTLOOP_ROUTER_STATE_DRIVER:-${AGENTLOOP_STATE_DRIVER:-sqlite}}
@@ -53,6 +54,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - router-data:/app/apps/agentloop-multi-runtime/data
+      - ${DEPLOY_ROOT:-/opt/agentloop}/downloads/catalog:/run/local-agent-catalog:ro
       - runtime-state:/app/apps/agentloop-multi-runtime/data/state
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8788/healthz').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
@@ -124,6 +126,9 @@ services:
       ROUTER_URL: http://router:8788
       # This is copied into runtime-config.js for Local Runtime Agent pairing.
       ROUTER_PUBLIC_URL: ${PUBLIC_ROUTER_URL:?set the externally routable Router URL}
+      LOCAL_AGENT_DOWNLOADS_DIR: /run/local-agent-installers
+    volumes:
+      - ${DEPLOY_ROOT:-/opt/agentloop}/downloads/installers:/run/local-agent-installers:ro
     ports:
       - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-3001}:5174"
     depends_on:

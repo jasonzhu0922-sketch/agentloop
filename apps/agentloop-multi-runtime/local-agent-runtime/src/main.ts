@@ -56,7 +56,7 @@ const stepMaxTurns = boundedPositiveInteger(
   "STEP_MAX_TURNS",
 );
 const mcpServersConfigPath = resolve(process.env.LOCAL_AGENT_MCP_SERVERS_CONFIG_PATH ?? join(runtimeConfiguration.root, "config", "mcp-servers.json"));
-const providerConfigPath = resolve(process.env.LOCAL_AGENT_PROVIDER_CONFIG_PATH ?? join(appRoot, "local-agent-runtime", "config", "llm-providers.json"));
+const providerConfigPath = runtimeConfiguration.providerConfigPath;
 const skillDirectoriesConfigPath = resolve(process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? join(appRoot, "config", "skill-directories.json"));
 const stepExecutionStrategyConfigPath = resolve(process.env.STEP_EXECUTION_STRATEGY_CONFIG_PATH ?? join(appRoot, "config", "step-execution-strategy.json"));
 const practiceProfileConfigPath = resolve(process.env.PRACTICE_PROFILE_CONFIG_PATH ?? join(appRoot, "config", "practice-profiles.json"));

@@ -24,6 +24,7 @@
               <label class="local-execution-toggle" title="启用后，下一次任务由所选本机 Runtime 执行"><input id="use-local-runtime" type="checkbox" disabled /><span>本机运行</span></label>
               <label class="local-runtime-select"><span class="sr-only">选择本机 Runtime</span><select id="runtime" disabled></select></label>
             </div>
+            <a id="local-agent-downloads" class="local-agent-downloads" href="/downloads" target="_blank" rel="noopener noreferrer" aria-label="下载或更新 Local Runtime Agent（新标签页打开）">下载 / 更新 ↗</a>
           </section>
           <div id="identity-label" class="identity"></div>
           <div class="foot-actions"><button id="theme-toggle" class="icon-btn" type="button" title="切换主题">◐</button><button id="auth-logout" class="icon-btn" type="button" title="退出登录">⇥</button></div>
@@ -70,10 +71,10 @@
     </div>
     <div id="agent-install-modal" class="runtime-modal" hidden>
       <div class="runtime-modal-card">
-        <div><strong>安装 Local Runtime Agent</strong><p id="agent-install-description">正在获取适合当前设备的签名安装包…</p></div>
+        <div><strong>安装 Local Runtime Agent</strong><p id="agent-install-description">选择适合你的系统与芯片的安装包。</p></div>
         <dl id="agent-install-detail" class="settings-detail"></dl>
         <p class="install-security-note">下载安装包后需要你明确运行安装器。完成安装后，页面会自动发现 Agent 并继续配对。</p>
-        <div class="runtime-modal-actions"><button id="agent-install-cancel" type="button">稍后</button><a id="agent-install-download" class="button primary" href="#" download hidden>下载安装包</a></div>
+        <div class="runtime-modal-actions"><button id="agent-install-cancel" type="button">稍后</button><a id="agent-install-download" class="button primary" href="/downloads" target="_blank" rel="noopener noreferrer">前往下载页</a></div>
       </div>
     </div>
     <div id="agent-settings-modal" class="runtime-modal" role="dialog" aria-modal="true" aria-labelledby="agent-settings-title" hidden>

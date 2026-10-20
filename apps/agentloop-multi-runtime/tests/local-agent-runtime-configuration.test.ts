@@ -9,6 +9,7 @@ test("Local Agent uses its top-level source configuration in development and dev
   const configuration = localAgentRuntimeConfiguration("/application", "/device-data", {});
   assert.equal(configuration.root, "/application/local-agent-runtime");
   assert.equal(configuration.environmentFile, "/application/local-agent-runtime/.env");
+  assert.equal(configuration.providerConfigPath, "/application/local-agent-runtime/config/llm-providers.json");
   assert.deepEqual(configuration.computerCommandEnvironment, {
     DAM_TEST_ENV_FILE: "/application/local-agent-runtime/.env",
     ENTERPRISE_INFO_ENV_FILE: "/application/local-agent-runtime/.env",
@@ -17,12 +18,15 @@ test("Local Agent uses its top-level source configuration in development and dev
 
   const packaged = localAgentRuntimeConfiguration("/application", "/device-data", { AGENTLOOP_AGENT_PACKAGED: "1" });
   assert.equal(packaged.environmentFile, "/device-data/agent-loop-runtime/.env");
+  assert.equal(packaged.providerConfigPath, "/device-data/agent-loop-runtime/config/llm-providers.json");
 
   const managed = localAgentRuntimeConfiguration("/application", "/device-data", {
     LOCAL_AGENT_RUNTIME_CONFIG_ROOT: "/managed/agent-runtime",
     LOCAL_AGENT_RUNTIME_ENV_FILE: "steel.env",
+    LOCAL_AGENT_PROVIDER_CONFIG_PATH: "/managed/models.json",
   });
   assert.equal(managed.environmentFile, "/managed/agent-runtime/steel.env");
+  assert.equal(managed.providerConfigPath, "/managed/models.json");
 });
 
 test("Local Agent seeds credential-free templates and preserves deployment-owned files", async () => {
@@ -34,14 +38,18 @@ test("Local Agent seeds credential-free templates and preserves deployment-owned
     await writeFile(join(appRoot, "agent-loop-runtime", ".env.example"), "STEEL_MARKET_DB_HOST=template\n");
     await mkdir(join(appRoot, "agent-loop-runtime", "config"), { recursive: true });
     await writeFile(join(appRoot, "agent-loop-runtime", "config", "mcp-servers.json"), "{\"servers\":[]}\n");
+    await writeFile(join(appRoot, "agent-loop-runtime", "config", "llm-providers.example.json"), "{\"providers\":{\"example\":{\"apiKeyEnv\":\"OPENAI_API_KEY\"}}}\n");
     await ensureLocalAgentRuntimeConfiguration(appRoot, configuration);
     assert.equal(await readFile(join(configuration.root, ".env.example"), "utf8"), "STEEL_MARKET_DB_HOST=template\n");
     assert.equal(await readFile(join(configuration.root, "config", "mcp-servers.json"), "utf8"), "{\"servers\":[]}\n");
+    assert.equal(await readFile(configuration.providerConfigPath, "utf8"), "{\"providers\":{\"example\":{\"apiKeyEnv\":\"OPENAI_API_KEY\"}}}\n");
 
     await writeFile(configuration.environmentFile, "STEEL_MARKET_DB_HOST=deployment\n");
+    await writeFile(configuration.providerConfigPath, "{\"providers\":{\"deployment\":{}}}\n");
     await writeFile(join(configuration.root, "config", "mcp-servers.json"), "{\"servers\":[{\"key\":\"deployment\"}]}\n");
     await ensureLocalAgentRuntimeConfiguration(appRoot, configuration);
     assert.equal(await readFile(configuration.environmentFile, "utf8"), "STEEL_MARKET_DB_HOST=deployment\n");
+    assert.equal(await readFile(configuration.providerConfigPath, "utf8"), "{\"providers\":{\"deployment\":{}}}\n");
     assert.equal(await readFile(join(configuration.root, "config", "mcp-servers.json"), "utf8"), "{\"servers\":[{\"key\":\"deployment\"}]}\n");
   } finally {
     await rm(root, { recursive: true, force: true });

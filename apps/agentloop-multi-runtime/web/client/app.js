@@ -306,7 +306,7 @@ async function enableLocalRuntime() {
       await startInstalledLocalAgent();
       return;
     }
-    if (localRuntimeState.agentStatus === "incompatible") throw new Error("Local Runtime Agent 协议版本不兼容，请安装匹配版本");
+    if (localRuntimeState.agentStatus === "incompatible") { await offerLocalAgentInstall(); return; }
     if (localRuntimeState.agentStatus !== "online_unpaired" && localRuntimeState.agentStatus !== "online") throw new Error("Local Runtime Agent 尚未就绪");
     if (localRuntimeState.agentHealth?.registered === true) {
       await connectRegisteredLocalAgent();
@@ -408,27 +408,17 @@ function renderLocalAgentState() {
 }
 
 async function offerLocalAgentInstall() {
-  const platform = detectedAgentPlatform();
-  const arch = await detectedAgentArchitecture();
   $("agent-install-modal").hidden = false;
-  $("agent-install-description").textContent = "正在从云端获取与当前设备匹配的签名安装包…";
+  $("agent-install-description").textContent = "在下载页选择适合你的系统、芯片和版本。下载页将在新标签页打开，当前会话会保留。";
   $("agent-install-detail").innerHTML = "";
-  $("agent-install-download").hidden = true;
-  try {
-    const response = await routerClient.request(`/v1/local-agent/releases/latest?platform=${encodeURIComponent(platform)}&arch=${encodeURIComponent(arch)}`);
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok || !Array.isArray(body.releases)) throw new Error(body.error || "当前环境尚未发布此设备的 Local Runtime Agent 安装包");
-    const release = body.releases.find((item) => item.arch === arch) || body.releases[0];
-    if (!release || release.protocolVersion !== LOCAL_AGENT_PROTOCOL_VERSION) throw new Error("没有与当前 Web 协议兼容的安装包");
-    $("agent-install-description").textContent = `将下载 Local Runtime Agent ${release.version}（${release.platform}/${release.arch}）。`;
-    $("agent-install-detail").innerHTML = `<dt>SHA-256</dt><dd>${escapeHtml(release.sha256)}</dd><dt>签名</dt><dd>${escapeHtml(release.signature)}</dd>`;
-    const download = $("agent-install-download");
-    download.href = release.downloadUrl;
-    download.hidden = false;
-    download.onclick = () => beginLocalAgentInstallPolling();
-  } catch (error) {
-    $("agent-install-description").textContent = `无法获得安装包：${error instanceof Error ? error.message : String(error)}`;
-  }
+  const download = $("agent-install-download");
+  download.href = "/downloads";
+  download.target = "_blank";
+  download.rel = "noopener noreferrer";
+  download.removeAttribute("download");
+  download.textContent = "前往下载页";
+  download.hidden = false;
+  download.onclick = () => beginLocalAgentInstallPolling();
 }
 
 function beginLocalAgentInstallPolling() {
@@ -471,15 +461,6 @@ function openLocalAgentProtocol(action, routerUrl = publicRouterUrl) {
 }
 
 function closeLocalAgentInstall() { $("agent-install-modal").hidden = true; }
-function detectedAgentPlatform() { return navigator.userAgent.includes("Windows") ? "windows" : navigator.userAgent.includes("Mac") ? "darwin" : "linux"; }
-async function detectedAgentArchitecture() {
-  const hints = navigator.userAgentData && typeof navigator.userAgentData.getHighEntropyValues === "function"
-    ? await navigator.userAgentData.getHighEntropyValues(["architecture"]).catch(() => ({})) : {};
-  const value = String(hints.architecture || "").toLowerCase();
-  if (value.includes("arm")) return "arm64";
-  if (value.includes("x86") || value.includes("x64")) return "x64";
-  return "unknown";
-}
 
 async function refreshLocalSession() {
   const deviceId = localRuntimeState.device?.id;

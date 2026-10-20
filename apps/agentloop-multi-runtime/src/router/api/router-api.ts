@@ -5,6 +5,7 @@ import { IdentityError, type IdentityService, type Principal } from "../identity
 import { ConversationDispatchInProgressError, ConversationRuntimeBindingError, RuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../ports/control-plane-contracts.ts";
 import { DeviceError, type DeviceRepository } from "../devices/device-service.ts";
 import { identityFromRequest, taskFromRequest, type RouterAttachmentBroker } from "./task-submission.ts";
+import { orderedLocalAgentReleases } from "../releases/local-agent-releases.ts";
 
 export { taskFromRequest } from "./task-submission.ts";
 
@@ -73,6 +74,9 @@ export interface LocalAgentRelease {
   readonly downloadUrl: string;
   readonly sha256: string;
   readonly signature: string;
+  readonly fileName?: string;
+  readonly size?: number;
+  readonly publishedAt?: string;
   readonly releaseNotes?: string;
   readonly launchUrl?: string;
 }
@@ -85,6 +89,7 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
   readonly runtimeDispatchToken?: string;
   readonly webOrigin?: string;
   readonly localAgentReleases?: readonly LocalAgentRelease[];
+  readonly localAgentReleaseSource?: () => Promise<readonly LocalAgentRelease[]>;
   readonly localAgentControl?: LocalAgentControlPlane;
 } = {}): Server {
   return createServer(async (request, response) => {
@@ -93,6 +98,15 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
       if (request.method === "OPTIONS") return json(response, 204, undefined);
       const url = new URL(request.url ?? "/", "http://agentloop-router.local");
       if (request.method === "GET" && url.pathname === "/healthz") return json(response, 200, { status: "ok" });
+      // Installer metadata is public; opening Downloads in a separate tab must
+      // not depend on the business tab's sessionStorage or expose its identity.
+      if (request.method === "GET" && url.pathname === "/v1/local-agent/releases") {
+        try {
+          const releases = orderedLocalAgentReleases(await options.localAgentReleaseSource?.() ?? options.localAgentReleases ?? []);
+          response.setHeader("cache-control", "no-store");
+          return json(response, 200, { protocolVersion: "1", releases });
+        } catch { return json(response, 503, { error: "local_agent_releases_unavailable" }); }
+      }
       if (request.method === "POST" && (url.pathname === "/v1/auth/register" || url.pathname === "/v1/auth/login")) {
         if (options.identity === undefined) return json(response, 503, { error: "identity_not_configured" });
         const body = record(await readJson(request), "request body");
@@ -139,8 +153,10 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
       if (request.method === "GET" && url.pathname === "/v1/local-agent/releases/latest") {
         const platform = url.searchParams.get("platform");
         const arch = url.searchParams.get("arch");
-        const releases = (options.localAgentReleases ?? []).filter((release) =>
-          (platform === null || release.platform === platform) && (arch === null || arch === "unknown" || release.arch === arch));
+        const releases = orderedLocalAgentReleases(await options.localAgentReleaseSource?.() ?? options.localAgentReleases ?? [])
+          .filter((release) => release.isLatest && release.protocolVersion === (url.searchParams.get("protocolVersion") ?? "1") &&
+            (platform === null || release.platform === platform) && (arch === null || arch === "unknown" || release.arch === arch))
+          .map(({ isLatest, ...release }) => release);
         if (releases.length === 0) return json(response, 404, { error: "local_agent_release_unavailable" });
         return json(response, 200, { protocolVersion: "1", releases });
       }

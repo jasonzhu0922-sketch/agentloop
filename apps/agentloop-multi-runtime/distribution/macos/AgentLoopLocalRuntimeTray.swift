@@ -43,7 +43,7 @@ final class AgentLoopLocalRuntimeTray: NSObject, NSApplicationDelegate {
   }
 
   @objc private func startAgent() {
-    let plist = launchAgentPath()
+    guard let plist = launchAgentPath() else { statusItem.button?.title = "AgentLoop !"; return }
     let uid = getuid()
     run("/bin/launchctl", ["bootstrap", "gui/\(uid)", plist.path], allowFailure: true)
     run("/bin/launchctl", ["kickstart", "-k", "gui/\(uid)/\(label)"], allowFailure: true)
@@ -55,16 +55,15 @@ final class AgentLoopLocalRuntimeTray: NSObject, NSApplicationDelegate {
     run(agentURL.path, arguments, allowFailure: false)
   }
 
-  private func launchAgentPath() -> URL {
-    let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
-    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    let target = directory.appendingPathComponent("\(label).plist")
-    let source = Bundle.main.resourceURL!.appendingPathComponent("\(label).plist")
-    if !FileManager.default.fileExists(atPath: target.path) { try? FileManager.default.copyItem(at: source, to: target) }
-    return target
+  private func launchAgentPath() -> URL? {
+    try? LocalRuntimeInstallation.launchAgentPath(resources: Bundle.main.resourceURL!, home: FileManager.default.homeDirectoryForCurrentUser, label: label)
   }
 
-  @objc private func openWeb() { NSWorkspace.shared.open(URL(string: "https://agentloop.local")!) }
+  @objc private func openWeb() {
+    do {
+      NSWorkspace.shared.open(try LocalRuntimeInstallation.webURL(resources: Bundle.main.resourceURL!))
+    } catch { statusItem.button?.title = "AgentLoop !" }
+  }
   @objc private func openLogs() { NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/AgentLoop Local Runtime/logs")) }
   @objc private func quit() { NSApplication.shared.terminate(nil) }
 
