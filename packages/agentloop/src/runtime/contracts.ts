@@ -383,7 +383,6 @@ export interface AgentLoopResult {
   readonly steps: number;
   readonly toolEvidence: readonly AgentLoopToolEvidence[];
   readonly activatedSkillNames: readonly string[];
-  readonly deferredValidation?: boolean;
   readonly completionCaveat?: RuntimeCompletionCaveat;
 }
 
@@ -429,9 +428,6 @@ export interface CandidateCompletionContext {
 export interface CandidateCompletionEvaluation {
   readonly approved: boolean;
   readonly feedback: string;
-  readonly deferredValidation?: boolean;
-  readonly evidenceBoundary?: boolean;
-  readonly allowRepairLimitCompletion?: boolean;
   /** A holistic assessor rejected the candidate for a substantive gap. */
   readonly requiresEvidenceProgress?: boolean;
   /** Runtime blocked this candidate because that substantive gap has no new evidence. */

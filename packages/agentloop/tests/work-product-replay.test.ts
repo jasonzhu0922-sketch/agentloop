@@ -72,7 +72,7 @@ for (const id of ["a", "b"]) test(`fixture ${id}: bounded scripted tools + empty
       maxSteps: data.events.length + 4, emit: (event) => { emitted.push(event); },
       // Script the persisted repeated-assessment boundary as well as the model.
       evaluateCandidate: async () => ({ approved: false, feedback: "Completion remains unverified",
-        allowRepairLimitCompletion: false, assessmentReused: ++assessments > 1 }),
+        assessmentReused: ++assessments > 1 }),
     }), (error: unknown) => error instanceof Error && /already rejected against the same evidence/.test(error.message));
     const completions = emitted.filter((event) => event.type === "tool.completed");
     assert.equal(completions.length, data.events.length);

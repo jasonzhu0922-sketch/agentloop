@@ -89,7 +89,7 @@ export interface AgentLoopOptions {
   readonly convergenceGraceSteps?: number;
   /** Additional tool-enabled steps available when a completion candidate needs another Runtime repair turn. */
   readonly candidateRepairGraceSteps?: number;
-  /** Bounds rejected assessed candidates and malformed no-tool candidates before the Runtime terminates or caves the result. */
+  /** Bounds rejected assessed candidates and malformed no-tool candidates before the Runtime requests recovery. */
   readonly candidateRepairAssessmentLimit?: number;
   /** The Run owner may still revise a failed leaf; report only if it commits failure. */
   readonly deferFailureReport?: boolean;
@@ -693,7 +693,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         data: {
           step,
           approved: evaluation.approved,
-          deferredValidation: evaluation.deferredValidation === true,
           feedback: evaluation.feedback,
         },
       });
@@ -862,55 +861,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         activatedSkillNames: [...activatedSkillNames],
       };
     }
-    if (evaluation.deferredValidation === true) {
-      const output = deferredValidationOutput(input.output, evaluation.feedback);
-      const completionCaveat = { reason: "deferred_validation" as const, feedback: evaluation.feedback };
-      const deliveryCandidate = buildDeliveryCandidate({
-        output,
-        stepSemanticFrame: input.stepSemanticFrame,
-        toolEvidence,
-        sourceToolCallIds: input.projectedToolEvidence.map((item) => item.toolCallId),
-      });
-      await emit({
-        type: "candidate.validation_deferred",
-        data: { step: input.step, output, feedback: evaluation.feedback },
-      });
-      await emit({ type: "loop.completed", data: { step: input.step, output, deferredValidation: true, completionCaveat } });
-      return {
-        output,
-        deliveryCandidate,
-        messages,
-        steps: input.step,
-        toolEvidence,
-        activatedSkillNames: [...activatedSkillNames],
-        deferredValidation: true,
-        completionCaveat,
-      };
-    }
-    if (evaluation.evidenceBoundary === true) {
-      const output = evidenceBoundaryOutput(input.output, evaluation.feedback);
-      const completionCaveat = { reason: "evidence_boundary" as const, feedback: evaluation.feedback };
-      const deliveryCandidate = buildDeliveryCandidate({
-        output,
-        stepSemanticFrame: input.stepSemanticFrame,
-        toolEvidence,
-        sourceToolCallIds: input.projectedToolEvidence.map((item) => item.toolCallId),
-      });
-      await emit({
-        type: "candidate.evidence_boundary_accepted",
-        data: { step: input.step, output, feedback: evaluation.feedback },
-      });
-      await emit({ type: "loop.completed", data: { step: input.step, output, completionCaveat } });
-      return {
-        output,
-        deliveryCandidate,
-        messages,
-        steps: input.step,
-        toolEvidence,
-        activatedSkillNames: [...activatedSkillNames],
-        completionCaveat,
-      };
-    }
     await stopRepeatedAssessmentWithoutNewEvidence({
       step: input.step,
       output: input.output,
@@ -918,57 +868,26 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     });
     rejectedCandidateAssessments += 1;
     if (rejectedCandidateAssessments > candidateRepairAssessmentLimit) {
-      if (evaluation.allowRepairLimitCompletion !== true) {
-        await emit({
-          type: "candidate.repair_limit_blocked",
-          data: {
-            step: input.step,
-            output: input.output,
-            feedback: evaluation.feedback,
-            rejectedCandidateAssessments,
-            candidateRepairAssessmentLimit,
-          },
-        });
-        throw await completionFailure(new AppError(
-          "STEP_NOT_COMPLETED",
-          "The latest completion candidate still fails required success criteria and cannot be accepted with a repair-limit caveat.",
-          422,
-          {
-            feedback: evaluation.feedback,
-            repairExhausted: true,
-            ...(evaluation.failedBoundary === undefined ? {} : { failedBoundary: evaluation.failedBoundary }),
-          },
-        ), input.step, input.output, evaluation);
-      }
-      const output = repairLimitCompletionOutput(input.output, candidateRepairAssessmentLimit);
-      const completionCaveat = { reason: "repair_limit" as const, feedback: evaluation.feedback };
-      const deliveryCandidate = buildDeliveryCandidate({
-        output,
-        stepSemanticFrame: input.stepSemanticFrame,
-        toolEvidence,
-        sourceToolCallIds: input.projectedToolEvidence.map((item) => item.toolCallId),
-      });
       await emit({
-        type: "candidate.completion_caveated",
+        type: "candidate.repair_limit_blocked",
         data: {
           step: input.step,
-          output,
+          output: input.output,
           feedback: evaluation.feedback,
-          reason: completionCaveat.reason,
           rejectedCandidateAssessments,
           candidateRepairAssessmentLimit,
         },
       });
-      await emit({ type: "loop.completed", data: { step: input.step, output, completionCaveat } });
-      return {
-        output,
-        deliveryCandidate,
-        messages,
-        steps: input.step,
-        toolEvidence,
-        activatedSkillNames: [...activatedSkillNames],
-        completionCaveat,
-      };
+      throw await completionFailure(new AppError(
+        "STEP_NOT_COMPLETED",
+        "The latest completion candidate still fails required success criteria and cannot be accepted with a repair-limit caveat.",
+        422,
+        {
+          feedback: evaluation.feedback,
+          repairExhausted: true,
+          ...(evaluation.failedBoundary === undefined ? {} : { failedBoundary: evaluation.failedBoundary }),
+        },
+      ), input.step, input.output, evaluation);
     }
     requestedConvergenceReason = undefined;
     setCandidateRepairDirective([
@@ -1652,51 +1571,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           activatedSkillNames: [...activatedSkillNames],
         };
       }
-      if (evaluation.deferredValidation === true) {
-        const output = deferredValidationOutput(response.content, evaluation.feedback);
-        const completionCaveat = { reason: "deferred_validation" as const, feedback: evaluation.feedback };
-        await emit({
-          type: "candidate.validation_deferred",
-          data: { step, output, feedback: evaluation.feedback },
-        });
-        await emit({ type: "loop.completed", data: { step, output, deferredValidation: true, completionCaveat } });
-        return {
-          output,
-          deliveryCandidate: buildDeliveryCandidate({
-            output,
-            stepSemanticFrame: options.stepSemanticFrame,
-            toolEvidence,
-          }),
-          messages,
-          steps: step,
-          toolEvidence,
-          activatedSkillNames: [...activatedSkillNames],
-          deferredValidation: true,
-          completionCaveat,
-        };
-      }
-      if (evaluation.evidenceBoundary === true) {
-        const output = evidenceBoundaryOutput(response.content, evaluation.feedback);
-        const completionCaveat = { reason: "evidence_boundary" as const, feedback: evaluation.feedback };
-        await emit({
-          type: "candidate.evidence_boundary_accepted",
-          data: { step, output, feedback: evaluation.feedback },
-        });
-        await emit({ type: "loop.completed", data: { step, output, completionCaveat } });
-        return {
-          output,
-          deliveryCandidate: buildDeliveryCandidate({
-            output,
-            stepSemanticFrame: options.stepSemanticFrame,
-            toolEvidence,
-          }),
-          messages,
-          steps: step,
-          toolEvidence,
-          activatedSkillNames: [...activatedSkillNames],
-          completionCaveat,
-        };
-      }
       await stopRepeatedAssessmentWithoutNewEvidence({
         step,
         output: response.content,
@@ -1704,55 +1578,26 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       });
       rejectedCandidateAssessments += 1;
       if (rejectedCandidateAssessments > candidateRepairAssessmentLimit) {
-        if (evaluation.allowRepairLimitCompletion !== true) {
-          await emit({
-            type: "candidate.repair_limit_blocked",
-            data: {
-              step,
-              output: response.content,
-              feedback: evaluation.feedback,
-              rejectedCandidateAssessments,
-              candidateRepairAssessmentLimit,
-            },
-          });
-          throw await completionFailure(new AppError(
-            "STEP_NOT_COMPLETED",
-            "The latest completion candidate still fails required success criteria and cannot be accepted with a repair-limit caveat.",
-            422,
-            {
-              feedback: evaluation.feedback,
-              repairExhausted: true,
-              ...(evaluation.failedBoundary === undefined ? {} : { failedBoundary: evaluation.failedBoundary }),
-            },
-          ), step, response.content, evaluation);
-        }
-        const output = repairLimitCompletionOutput(response.content, candidateRepairAssessmentLimit);
-        const completionCaveat = { reason: "repair_limit" as const, feedback: evaluation.feedback };
         await emit({
-          type: "candidate.completion_caveated",
+          type: "candidate.repair_limit_blocked",
           data: {
             step,
-            output,
+            output: response.content,
             feedback: evaluation.feedback,
-            reason: completionCaveat.reason,
             rejectedCandidateAssessments,
             candidateRepairAssessmentLimit,
           },
         });
-        await emit({ type: "loop.completed", data: { step, output, completionCaveat } });
-        return {
-          output,
-          deliveryCandidate: buildDeliveryCandidate({
-            output,
-            stepSemanticFrame: options.stepSemanticFrame,
-            toolEvidence,
-          }),
-          messages,
-          steps: step,
-          toolEvidence,
-          activatedSkillNames: [...activatedSkillNames],
-          completionCaveat,
-        };
+        throw await completionFailure(new AppError(
+          "STEP_NOT_COMPLETED",
+          "The latest completion candidate still fails required success criteria and cannot be accepted with a repair-limit caveat.",
+          422,
+          {
+            feedback: evaluation.feedback,
+            repairExhausted: true,
+            ...(evaluation.failedBoundary === undefined ? {} : { failedBoundary: evaluation.failedBoundary }),
+          },
+        ), step, response.content, evaluation);
       }
       requestedConvergenceReason = undefined;
       removeRejectedAssistantCandidate(messages, assistantMessage);
@@ -2593,28 +2438,6 @@ async function shouldUseFinalConvergence(
 ): Promise<boolean> {
   if (predicate === undefined) return true;
   return await predicate(context);
-}
-
-function deferredValidationOutput(output: string, feedback: string): string {
-  const trimmedOutput = output.trim();
-  const trimmedFeedback = feedback.trim();
-  if (trimmedFeedback.length === 0 || trimmedOutput.includes(trimmedFeedback)) return trimmedOutput;
-  if (trimmedOutput.length === 0) return trimmedFeedback;
-  return `${trimmedOutput}\n\nDeferred validation note: ${trimmedFeedback}`;
-}
-
-function evidenceBoundaryOutput(output: string, feedback: string): string {
-  const trimmedOutput = output.trim();
-  const trimmedFeedback = feedback.trim();
-  if (trimmedFeedback.length === 0 || trimmedOutput.includes(trimmedFeedback)) return trimmedOutput;
-  if (trimmedOutput.length === 0) return trimmedFeedback;
-  return `${trimmedOutput}\n\nEvidence boundary note: ${trimmedFeedback}`;
-}
-
-function repairLimitCompletionOutput(output: string, repairLimit: number): string {
-  const trimmedOutput = output.trim();
-  const caveat = `Repair caveat: the candidate was assessed again after ${repairLimit} repair attempt(s), but the remaining issue did not converge. The latest deliverable is accepted with this caveat instead of continuing the repair loop.`;
-  return [trimmedOutput, caveat].filter((part) => part.length > 0).join("\n\n");
 }
 
 function removeRejectedAssistantCandidate(messages: ModelMessage[], candidate: ModelMessage): void {

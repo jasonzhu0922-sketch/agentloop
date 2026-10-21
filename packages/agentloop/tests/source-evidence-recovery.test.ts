@@ -260,6 +260,94 @@ test("source receipts and non-empty fabricated claims cannot bypass semantic ass
 });
 
 for (const approveRepair of [true, false]) {
+  test(`unverified source-boundary prose enters canonical recovery instead of Result publication (repair=${approveRepair})`, async () => {
+    const database = new AppDatabase(":memory:");
+    let fetches = 0;
+    let assessments = 0;
+    let recoveryCalls = 0;
+    const rejectedOutput = "目前无法核实董事长和总裁姓名，原文无法取得，来源访问受限。";
+    const answer = "周丁、赵丙";
+    try {
+      const base = singleStepTestPlanner();
+      const runs = new RunService({
+        database, skills: new SkillService(database),
+        plannerFactory: () => ({ plan: async (task) => {
+          const proposal = await base.plan(task);
+          return { ...proposal, steps: proposal.steps.map((step) => ({ ...step,
+            requiredCapabilities: ["web_research", "conversation_delivery"],
+            evidenceContract: { requiredKinds: ["source_summary", "source_urls"], caveatPolicy: "mark_unverified_facts" as const },
+            successCriteria: [{ id: "names", description: "Deliver both requested names from readable evidence.", source: "task" as const }],
+          })) };
+        } }),
+        recoveryPlannerFactory: () => ({ decide: async (input) => {
+          recoveryCalls += 1;
+          assert.ok(input.canonicalGap);
+          assert.ok(input.canonicalGap.unmetCriteria?.length);
+          assert.ok(input.canonicalGap.evidenceRefs.length);
+          assert.equal(input.canonicalGap.status, "open");
+          if (!approveRepair) return { actionId: input.action.id, expectedActionRevision: input.action.revision,
+            decision: "fail" as const, rationale: "No readable source confirms the requested facts.", evidenceRefs: ["lookup-1"] };
+          const repair = repairLeafForFailedBoundary(input.plan!.steps.find((step) => step.id === input.failedBoundary!.stepId)!, input.failedBoundary!, input.plan!.version);
+          return { actionId: input.action.id, expectedActionRevision: input.action.revision, decision: "revise_plan" as const,
+            rationale: "Read an alternative source and close the same fact gap.", evidenceRefs: ["lookup-1"],
+            planRevision: { schema: "agentloop.outcomePlan/v2" as const, shape: "recovery_patch" as const,
+              goal: input.plan!.goal, selectedSkillIds: [], steps: [repair] } };
+        } }),
+        planRevisionAssessorFactory: () => ({ assess: async () => ({ approved: true, feedback: "", evidenceRefs: [] }) }),
+        tools: [{ name: "webfetch", description: "Read source text", inputSchema: { type: "object" }, executionMode: "parallel", replaySafe: true,
+          parse: (value) => value, execute: async () => {
+            fetches += 1;
+            if (fetches === 2) throw new Error("HTTP 403: source unavailable");
+            return { schema: "agentloop.webFetch/v1", content: fetches === 1 ? "只有公司介绍，没有负责人姓名。" : "现任董事长周丁，总裁赵丙。",
+              evidenceReceipt: { schema: "agentloop.toolEvidenceReceipt/v1", sourceType: "web_page", sourceRefs: [{ url: `https://example.test/leadership/${fetches}` }],
+                evidenceKinds: { satisfied: ["source_summary", "source_urls"], caveated: [], failed: [] } } };
+          } }],
+        modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+          if ((request.runtimeContext?.content ?? "").includes("<runtime_failure_report>")) {
+            return { content: "来源访问受限，尚未核实姓名。", finishReason: "stop", toolCalls: [] };
+          }
+          const repair = request.messages.some((message) => message.role === "user" && message.content.includes("Continue the same unresolved canonical GoalGap"));
+          if ((repair && fetches < 3) || fetches === 0 || (fetches === 1 && assessments === 1)) {
+            return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `lookup-${fetches + 1}`, name: "webfetch", arguments: { url: `https://example.test/leadership/${fetches + 1}` } }] };
+          }
+          return { content: repair ? answer : rejectedOutput, finishReason: "stop", toolCalls: [] };
+        } }),
+        assessorFactory: () => ({ assess: async (input) => {
+          assessments += 1;
+          const approved = await approvingTestAssessor().assess(input);
+          if (input.step.role === "repair" && fetches === 3) return approved;
+          return { ...approved, approved: false,
+            criteria: approved.criteria.map((criterion) => ({ ...criterion, satisfied: false, blocking: true, status: "unverified" as const,
+              rationale: "No names were delivered. The full text remains unverified and the source is unavailable." })),
+            feedback: "No names were delivered; full text remains unverified. Read an alternative source.",
+            failedBoundary: { stepId: input.step.id, missingEvidenceKinds: ["source_summary", "source_urls"], violatedSkillRequirements: [],
+              reusableEvidenceRefs: ["lookup-1"], suggestedRepairShape: "repair_leaf" as const } };
+        } }),
+      });
+      const run = await runs.execute("owner", "示例公司的董事长是谁，总裁是谁？只回答名字。");
+      const events = await runs.events("owner", run.id);
+      assert.equal(run.status, approveRepair ? "completed" : "failed", JSON.stringify(events.filter((event) => /failed|recovery/.test(event.type))));
+      assert.equal(recoveryCalls, 1);
+      assert.equal(fetches, approveRepair ? 3 : 2);
+      assert.ok(assessments >= 2);
+      assert.equal(events.some((event) => event.type === "candidate.evidence_boundary_accepted" || event.type === "candidate.validation_deferred"), false);
+      assert.ok(events.some((event) => event.type === "run.repairing"));
+      assert.equal(events.some((event) => event.type === "run.failed" && event.data.code === "CONFLICT"), false);
+      assert.equal(events.some((event) => event.type === "terminal.delivery_committed"), approveRepair);
+      assert.equal(events.some((event) => event.type === "plan.step.completed" && event.data.output === rejectedOutput), false);
+      const state = await new CanonicalRunStateRepository(database).get(run.id);
+      const gaps = state.gaps.filter((gap) => gap.targetId === undefined);
+      assert.equal(gaps.length, 1);
+      assert.equal(gaps[0]?.status, approveRepair ? "resolved" : "open");
+      const outcome = await database.prepare("SELECT status, delivery_receipt_json FROM run_outcomes WHERE run_id = ?").get(run.id) as Record<string, unknown>;
+      assert.equal(outcome.status, approveRepair ? "completed" : "failed");
+      if (approveRepair) assert.equal(run.output, answer);
+      else assert.equal(outcome.delivery_receipt_json, null);
+    } finally { database.close(); }
+  });
+}
+
+for (const approveRepair of [true, false]) {
   test(`automatic repair reuses committed Results and keeps one bounded GoalGap (approve=${approveRepair})`, async () => {
     const database = new AppDatabase(":memory:");
     let reads = 0;

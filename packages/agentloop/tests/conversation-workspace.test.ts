@@ -630,6 +630,129 @@ test("conversation resolver gives field-specific repair feedback for an invalid 
   }
 });
 
+// Exercise parser failures that previously fell through a separate feedback
+// validator and produced the same non-actionable message on every retry.
+for (const fixture of [
+  { name: "non-ASCII target ID", deliverable: { targetId: "众筹推荐" }, feedback: /deliverables\[0\]\.targetId must match/ },
+  { name: "duplicate target ID", duplicate: true, feedback: /deliverables\[1\]\.targetId must be unique/ },
+  { name: "oversized purpose", deliverable: { purpose: "a".repeat(501) }, feedback: /deliverables\[0\]\.purpose must be/ },
+  { name: "invalid action", deliverable: { action: "generate" }, feedback: /deliverables\[0\]\.action must be/ },
+  { name: "invalid semantic kind", deliverable: { kind: "pptx" }, feedback: /deliverables\[0\]\.kind must be/ },
+  { name: "invalid surface", deliverable: { surface: "file" }, feedback: /deliverables\[0\]\.surface must be/ },
+  { name: "oversized format", deliverable: { format: "x".repeat(33) }, feedback: /deliverables\[0\]\.format must be/ },
+  { name: "count exceeding the aggregate bound", deliverable: { expectedArtifactCount: 5 }, duplicate: true, distinctId: true, feedback: /at most 8 workspace artifacts in total/ },
+  { name: "long multi-artifact ID", deliverable: { targetId: "a".repeat(127), expectedArtifactCount: 2 }, feedback: /targetId must be at most 126/ },
+  { name: "inferred capability", root: { requiredCapabilityReferences: [{ kind: "skill", reference: "presentations" }] }, feedback: /requiredCapabilityReferences must be/ },
+  { name: "bound strategy without a directory", root: { evidenceStrategy: "bound_visible_sources" }, feedback: /evidenceStrategy and sourceBinding must agree/ },
+  { name: "empty primary directory binding", root: { sourceBinding: { mode: "primary_data", visibleDirectoryIds: [] } }, feedback: /evidenceStrategy and sourceBinding must agree/ },
+  { name: "uploaded source used as a directory", root: { sourceBinding: { mode: "primary_data", visibleDirectoryIds: ["src_uploaded"] } }, feedback: /sourceBinding must contain mode/ },
+  { name: "missing prior Result selector", root: { inputMode: "prior_result" }, feedback: /inputMode=prior_result requires resultCandidateId/ },
+  { name: "missing prior artifact selector", root: { inputMode: "prior_artifact" }, feedback: /inputMode=prior_artifact requires targetArtifact.path/ },
+  { name: "reply that requests new evidence", root: { mode: "reply", evidenceStrategy: "lookup_lite" }, noExecution: true, feedback: /mode=reply or clarify requires evidenceStrategy=none/ },
+]) {
+  test(`conversation resolver repairs ${fixture.name} using its parser rejection`, async () => {
+    const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-resolver-repair-"));
+    const database = new AppDatabase(":memory:");
+    try {
+      const owner = testOwner();
+      let attempts = 0;
+      const repairPrompts: string[] = [];
+      const model: ModelAdapter = {
+        limits: TEST_MODEL_LIMITS,
+        complete: async (request) => {
+          assert.ok(request.runId.startsWith("conversation-turn:"));
+          attempts += 1;
+          if (attempts > 1) repairPrompts.push(request.systemPrompt);
+          const repaired = attempts > 1 && fixture.feedback.test(request.systemPrompt);
+          const deliverable = {
+            targetId: "crowdfunding-deck", purpose: "制作游戏众筹推荐演示文稿", expectedArtifactCount: 1,
+            action: "create", kind: "presentation", format: "pptx", surface: "workspace_artifact",
+            ...(repaired ? {} : fixture.deliverable),
+          };
+          return {
+            content: "", finishReason: "tool_calls",
+            toolCalls: [{ id: `resolution-${attempts}`, name: "resolve_conversation_turn", arguments: {
+              mode: "execute", relation: "new_goal", inputMode: "none",
+              effectiveGoal: "基于上传的游戏设计稿，生成游戏众筹推荐 PPTX。",
+              evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+              userConstraints: [], requiredCapabilityReferences: [],
+              taskIntent: {
+                schema: "agentloop.conversationTaskIntent/v1", operation: "create_artifact",
+                requiresExecution: repaired || !fixture.noExecution,
+                deliverables: [deliverable, ...(!repaired && fixture.duplicate ? [{ ...deliverable, ...(fixture.distinctId ? { targetId: "second-deck" } : {}) }] : [])],
+              },
+              ...(repaired ? {} : fixture.root),
+            } }],
+          };
+        },
+      };
+      const runs = new RunService({
+        database, workspaceRoot: workspace, skills: new SkillService(database), modelFactory: () => model,
+        plannerFactory: () => ({ plan: async (task) => {
+          assert.equal(task.canonicalState.intent.understanding.deliverables[0]?.kind, "presentation");
+          assert.equal(task.sources?.[0]?.originalName, "游戏设计稿.md");
+          throw new AppError("PLANNING_ERROR", "repaired resolution reached Planner", 422);
+        } }),
+      });
+      const conversation = "resolver-repair-fixture";
+      await runs.ensureConversation(owner.user.id, conversation, "设计稿");
+      await runs.uploadSource(owner.user.id, { conversationId: conversation, originalName: "游戏设计稿.md", content: Buffer.from("# 游戏设计稿\n玩家探索村庄并发现秘密。") });
+      let runId: string | undefined;
+      await assert.rejects(
+        () => runs.executeConversation(owner.user.id, "帮我生成一份 pptx，用于游戏众筹推荐", { conversationId: conversation }),
+        (error: unknown) => {
+          if (!(error instanceof AppError)) return false;
+          runId = typeof error.details?.runId === "string" ? error.details.runId : undefined;
+          return /repaired resolution reached Planner/.test(error.message);
+        },
+      );
+      assert.equal(attempts, 2);
+      assert.equal(repairPrompts.length, 1);
+      assert.match(repairPrompts[0]!, fixture.feedback);
+      assert.ok(runId);
+      const events = await runs.events(owner.user.id, runId);
+      const rejected = events.filter((event) => event.type === "conversation.turn.resolution_rejected");
+      assert.equal(rejected.length, 1);
+      assert.match(String(rejected[0]?.data.feedback), fixture.feedback);
+      assert.ok(events.some((event) => event.type === "conversation.turn.resolved"));
+    } finally {
+      await database.close();
+      await fs.rm(workspace, { recursive: true, force: true });
+    }
+  });
+}
+
+test("conversation resolver preserves a concrete contract error after three unrepairable attempts", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const validModel = new MissingExpectedArtifactCountResolverModel();
+    let attempts = 0;
+    let plannerCalls = 0;
+    const runs = new RunService({
+      database, skills: new SkillService(database),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        attempts += 1;
+        const response = await validModel.complete(request);
+        const args = response.toolCalls[0]!.arguments as Record<string, unknown>;
+        args.requiredCapabilityReferences = [{ kind: "skill", reference: "invented-skill" }];
+        return response;
+      } }),
+      plannerFactory: () => ({ plan: async () => { plannerCalls += 1; throw new Error("invalid resolution reached Planner"); } }),
+    });
+    await assert.rejects(() => runs.executeConversation(owner.user.id, "生成一个 PDF 文件"), (error: unknown) => {
+      assert.ok(error instanceof AppError);
+      assert.match(error.message, /canonical contract after 3 attempts/);
+      assert.match(String(error.details?.repairFeedback), /requiredCapabilityReferences must be/);
+      return true;
+    });
+    assert.equal(attempts, 3);
+    assert.equal(plannerCalls, 0);
+  } finally {
+    await database.close();
+  }
+});
+
 test("a new-goal resolver exposes only Runtime-issued candidates and repairs invented prior selectors", async () => {
   const visible = await fs.mkdtemp(join(tmpdir(), "agentloop-new-goal-candidate-schema-"));
   const database = new AppDatabase(":memory:");
@@ -661,7 +784,7 @@ test("a new-goal resolver exposes only Runtime-issued candidates and repairs inv
     assert.match(model.firstRuntimeContext, /"priorGoalCandidates":\[\]/);
     assert.match(model.firstRuntimeContext, /"reusableArtifacts":\[\]/);
     assert.match(model.firstRuntimeContext, /"reusableResultCandidates":\[\]/);
-    assert.match(model.repairPrompts[0] ?? "", /relation=new_goal forbids prior-work selector field\(s\): targetGoalCandidateId, targetArtifact/);
+    assert.match(model.repairPrompts[0] ?? "", /targetArtifact\.path must select one unambiguous Runtime-issued reusable prior artifact path/);
   } finally {
     await database.close();
     await fs.rm(visible, { recursive: true, force: true });

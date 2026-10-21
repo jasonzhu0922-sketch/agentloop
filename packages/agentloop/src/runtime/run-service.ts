@@ -2751,12 +2751,6 @@ export class RunService {
           });
           const reusedAssessment = assessedCandidates.get(assessmentSignature);
           if (reusedAssessment !== undefined) {
-            const deferredValidation = shouldDeferValidationToUser({
-              assessment: reusedAssessment,
-              assessmentAttempt,
-              step: activeStep,
-              evidence,
-            });
             await input.emit({
               type: "skill.compliance.assessment_reused",
               data: {
@@ -2769,7 +2763,6 @@ export class RunService {
                 approved: reusedAssessment.approved,
                 feedback: reusedAssessment.feedback,
                 ...(reusedAssessment.failedBoundary === undefined ? {} : { failedBoundary: reusedAssessment.failedBoundary }),
-                deferredValidation,
               },
             });
             if (!reusedAssessment.approved && reusedAssessment.failedBoundary !== undefined) {
@@ -2787,18 +2780,10 @@ export class RunService {
             return {
               approved: reusedAssessment.approved,
               feedback: reusedAssessment.feedback,
-              deferredValidation,
-                evidenceBoundary: shouldCompleteWithEvidenceBoundary({
-                  assessment: reusedAssessment,
-                  assessmentAttempt,
-                  step: activeStep,
-                  evidence,
-                }),
-                allowRepairLimitCompletion: shouldAllowRepairLimitCompletion(reusedAssessment),
-                requiresEvidenceProgress: requiresEvidenceProgressAfterAssessment(reusedAssessment),
-                ...(reusedAssessment.failedBoundary === undefined ? {} : { failedBoundary: reusedAssessment.failedBoundary }),
-                assessmentReused: true,
-              };
+              requiresEvidenceProgress: requiresEvidenceProgressAfterAssessment(reusedAssessment),
+              ...(reusedAssessment.failedBoundary === undefined ? {} : { failedBoundary: reusedAssessment.failedBoundary }),
+              assessmentReused: true,
+            };
           }
           const runtimeEvidenceBundles = await this.assessmentEvidenceBundles.verify({
             runId: input.runId,
@@ -2880,19 +2865,6 @@ export class RunService {
           return {
             approved: assessment.approved,
             feedback: assessment.feedback,
-            deferredValidation: shouldDeferValidationToUser({
-              assessment,
-              assessmentAttempt,
-              step: activeStep,
-              evidence,
-            }),
-            evidenceBoundary: shouldCompleteWithEvidenceBoundary({
-              assessment,
-              assessmentAttempt,
-              step: activeStep,
-              evidence,
-            }),
-            allowRepairLimitCompletion: shouldAllowRepairLimitCompletion(assessment),
             requiresEvidenceProgress: requiresEvidenceProgressAfterAssessment(assessment),
             ...(assessment.failedBoundary === undefined ? {} : { failedBoundary: assessment.failedBoundary }),
           };
@@ -5743,20 +5715,6 @@ export function completionCaveatReasonCode(
   return undefined;
 }
 
-function shouldDeferValidationToUser(input: {
-  assessment: SkillComplianceAssessment;
-  assessmentAttempt: number;
-  step: ExecutionPlan["steps"][number];
-  evidence: StepEvidence;
-}): boolean {
-  if (input.assessment.approved) return false;
-  if (input.assessmentAttempt < 2) return false;
-  if (!stepRequiresFileOutput(input.step)) return false;
-  if (!input.assessment.skills.some((skill) => skill.status === "skipped_unavailable")) return false;
-  if (artifactExtensionsProducedByEvidence(input.evidence.toolCalls).size === 0) return false;
-  return input.assessment.criteria.some((criterion) => !criterion.satisfied);
-}
-
 function requiresEvidenceProgressAfterAssessment(
   assessment: SkillComplianceAssessment,
 ): boolean {
@@ -5764,49 +5722,6 @@ function requiresEvidenceProgressAfterAssessment(
     && !assessment.approved
     && assessment.failedBoundary?.suggestedRepairShape === "repair_leaf"
     && (assessment.failedBoundary?.missingEvidenceKinds.length ?? 0) > 0;
-}
-
-function shouldCompleteWithEvidenceBoundary(input: {
-  assessment: SkillComplianceAssessment;
-  assessmentAttempt: number;
-  step: ExecutionPlan["steps"][number];
-  evidence: StepEvidence;
-}): boolean {
-  if (input.assessment.approved) return false;
-  if (!stepNeedsReusableSourceEvidence(input.step) && !stepUsesExternalSourceTools(input.step)) return false;
-  if (stepRequiresFileOutput(input.step) && artifactExtensionsProducedByEvidence(input.evidence.toolCalls).size === 0) {
-    return false;
-  }
-  const boundaryText = [
-    input.step.objective,
-    ...input.step.successCriteria.map((criterion) => criterion.description),
-    input.evidence.candidateOutput,
-    input.assessment.feedback,
-    ...input.assessment.criteria.map((criterion) => criterion.rationale),
-  ].join("\n");
-  if (
-    input.step.evidenceContract?.caveatPolicy === "strict_fail_on_missing_source"
-    || requiresStrictExternalSourceCompletion(boundaryText)
-  ) return false;
-  if (!acknowledgesEvidenceBoundary(boundaryText)) return false;
-  // A pure delivery leaf with no source-acquisition capability cannot change
-  // the evidence state on another model turn. Accept its honest bounded result
-  // immediately instead of manufacturing an unresolvable rejection loop.
-  if (deliveryStepHasNoSourceAcquisitionPath(input.step)) return true;
-  if (input.assessmentAttempt < 2) return false;
-  if (!stepUsesExternalSourceTools(input.step)) return false;
-  if (!hasSuccessfulExternalSourceEvidence(input.evidence.toolCalls)) return false;
-  return hasUnavailableExternalSourceEvidence(input.evidence.toolCalls)
-    || acknowledgesMissingSourceFacts(boundaryText);
-}
-
-function deliveryStepHasNoSourceAcquisitionPath(step: ExecutionPlan["steps"][number]): boolean {
-  if (step.role !== "deliver") return false;
-  const sourceTools = stepResolvedToolNames(step).filter((name) =>
-    /(?:search|fetch|query|read|list|find|inspect|source|browser|http)/iu.test(name)
-  );
-  return sourceTools.length === 0
-    && step.executionBinding.sourceKinds.every((kind) => kind === "conversation_workset");
 }
 
 function stepNeedsReusableSourceEvidence(step: ExecutionPlan["steps"][number]): boolean {
@@ -5820,46 +5735,6 @@ function stepNeedsReusableSourceEvidence(step: ExecutionPlan["steps"][number]): 
     || kind === "structured_extraction_artifact"
     || kind === "explicit_caveats"
   );
-}
-
-function stepUsesExternalSourceTools(step: ExecutionPlan["steps"][number]): boolean {
-  return stepHasSourceKind(step, "web");
-}
-
-function hasSuccessfulExternalSourceEvidence(toolCalls: readonly ToolEvidence[]): boolean {
-  return toolCalls.some((toolCall) =>
-    !toolCall.isError && (toolCall.toolName === "websearch" || toolCall.toolName === "webfetch")
-  );
-}
-
-function hasUnavailableExternalSourceEvidence(toolCalls: readonly ToolEvidence[]): boolean {
-  return toolCalls.some((toolCall) =>
-    (toolCall.toolName === "websearch" || toolCall.toolName === "webfetch")
-    && toolCall.isError
-    && /(?:\b(?:403|404|429|500|502|503|504)\b|forbidden|not found|timeout|timed out|unavailable|refused|blocked|denied|network|fetching|无法|不可访问|拒绝|超时|不可用|失败)/iu.test(toolCall.result)
-  );
-}
-
-function acknowledgesEvidenceBoundary(value: string): boolean {
-  return /(?:未核验|未取得|无法取得|不可获取|不可访问|尚未取得|尚未核验|访问受限|权威.*缺|缺少.*权威|有限|局部|部分|不足以|不足|边界|降级|无法|403|404|429|500|502|503|504|\bnot verified\b|\bunverified\b|\bunavailable\b|\binaccessible\b|\blimited\b|\binsufficient\b|\bpartial\b|\bboundary\b)/iu
-    .test(value);
-}
-
-function acknowledgesMissingSourceFacts(value: string): boolean {
-  return /(?:标准全文未|全文未|未(?:取得|获得|提供|公开|核验|验证|确认|查到).*(?:全文|权威|标准|来源|资料|事实|条款|要求|细则)|无法(?:取得|获得|访问|核验|验证|确认|公开确认|可靠核实).*(?:全文|权威|标准|来源|资料|事实|条款|要求|细则)|(?:不可用|未验证|未核验|未确认|无法公开确认|无法可靠核实).{0,24}(?:事实|内容|要求|条款|细则|全文)|没有.*(?:权威|充分).*证据|缺少.*(?:权威|来源|事实|条款|全文|要求|细则)|不可作为.*(?:标准事实|已确认事实)|不能.*(?:作为|认定|批准).*事实|不得.*(?:标为|写成).*事实|仍待核验|待核验|not claim.*verified|missing source facts|source facts remain unverified|full text remains unverified)/iu
-    .test(value);
-}
-
-function requiresStrictExternalSourceCompletion(value: string): boolean {
-  return /(?:必须(?:严格)?(?:依据|按照|基于).*(?:全文|原文|逐条|条款|最新|现行|权威)|不得使用.*(?:模型|自身知识|通用知识)|不能使用.*(?:模型|自身知识|通用知识)|只(?:能|允许).*(?:权威|官方|标准全文|原文)|strictly.*(?:official|authoritative|standard|clause)|must.*(?:official|authoritative|standard text|exact clause)|only.*(?:official|authoritative|standard text|exact clause))/iu
-    .test(value);
-}
-
-function shouldAllowRepairLimitCompletion(assessment: SkillComplianceAssessment): boolean {
-  // A repair limit only bounds retries. It must never override an Assessment
-  // rejection: deferred-validation and evidence-boundary completion are
-  // explicit, separately classified outcomes.
-  return assessment.approved;
 }
 
 /**
@@ -6044,53 +5919,6 @@ function hasSuccessfulArtifactAcceptance(evidence: readonly AgentLoopToolEvidenc
       && Array.isArray(evidenceKinds.satisfied)
       && evidenceKinds.satisfied.includes("artifact_acceptance");
   });
-}
-
-const ARTIFACT_EXTENSIONS = new Set([
-  "csv", "doc", "docx", "gif", "html", "jpeg", "jpg", "json", "md", "pdf", "png",
-  "pptx", "svg", "txt", "wav", "webp", "xlsx",
-]);
-const ARTIFACT_EXTENSION_PATTERN = /\.([a-z0-9]+)(?=$|[\s'"),.:;])/gi;
-
-function artifactExtensionsProducedByEvidence(evidence: readonly AgentLoopToolEvidence[]): Set<string> {
-  const extensions = new Set<string>();
-  for (const item of evidence) {
-    if (item.isError) continue;
-    if (
-      item.toolName !== "computer_write_file"
-      && item.toolName !== "computer_patch_file"
-      && item.toolName !== "convert_artifact"
-      && item.toolName !== "computer_list_directory"
-      && item.toolName !== "computer_run_command"
-    ) continue;
-    const parsed = parseToolResult(item.result);
-    if (
-      (item.toolName === "computer_write_file" || item.toolName === "computer_patch_file")
-      && isPlainRecord(parsed)
-      && typeof parsed.path === "string"
-    ) {
-      addArtifactExtensions(extensions, parsed.path);
-    }
-    if (item.toolName === "convert_artifact" && isPlainRecord(parsed)) {
-      const output = asRecord(parsed.output);
-      if (typeof output?.path === "string") addArtifactExtensions(extensions, output.path);
-    }
-    if (item.toolName === "computer_list_directory" && Array.isArray(parsed)) {
-      for (const entry of parsed) {
-        if (!isPlainRecord(entry)) continue;
-        const record = entry;
-        if (record.type === "file" && typeof record.name === "string") {
-          addArtifactExtensions(extensions, record.name);
-        }
-      }
-    }
-    if (item.toolName === "computer_run_command" && isPlainRecord(parsed)) {
-      for (const path of artifactPathsFromCommandFileChanges(parsed)) {
-        addArtifactExtensions(extensions, path);
-      }
-    }
-  }
-  return extensions;
 }
 
 function isLookupToolName(name: string): boolean {
@@ -6414,19 +6242,6 @@ function parseJsonRecord(value: unknown): Record<string, unknown> | undefined {
 
 function numberValue(value: unknown): number | undefined {
   return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : undefined;
-}
-
-function addArtifactExtensions(target: Set<string>, text: string): void {
-  for (const match of text.matchAll(ARTIFACT_EXTENSION_PATTERN)) {
-    const extension = typeof match[1] === "string" ? match[1].toLowerCase() : undefined;
-    if (extension !== undefined && ARTIFACT_EXTENSIONS.has(extension)) {
-      target.add(normalizeArtifactExtension(extension));
-    }
-  }
-}
-
-function normalizeArtifactExtension(extension: string): string {
-  return canonicalArtifactFormatFamily(extension);
 }
 
 function parseToolResult(value: string): Record<string, unknown> | unknown[] | undefined {
@@ -7532,8 +7347,9 @@ async function resolveConversationTurn(
       purpose: "conversation_turn_resolver",
       resolverAttempt: attempt,
     }, signal);
-    const resolution = parseConversationTurnResolution(response, context, input);
-    if (resolution !== undefined) {
+    const parsed = parseConversationTurnResolution(response, context, input);
+    if (parsed.valid) {
+      const resolution = parsed.resolution;
       const artifactBound = bindUnambiguousPriorArtifact(resolution, input, context.conversationWorkingSet);
       const relationBound = bindPriorArtifactMutationRelation(artifactBound, input);
       const inherited = inheritContinuedConversationIntent(relationBound, context.conversationWorkingSet);
@@ -7565,7 +7381,7 @@ async function resolveConversationTurn(
       });
       continue;
     }
-    repairFeedback = conversationTurnRepairFeedback(response, context);
+    repairFeedback = parsed.feedback;
     await emit({
       type: "conversation.turn.resolution_rejected",
       data: {
@@ -8094,21 +7910,27 @@ function parseConversationTurnResolution(
   response: ModelResponse,
   context: ConversationIntentExternalContext,
   input: string,
-): ConversationTurnResolution | undefined {
+): { valid: true; resolution: ConversationTurnResolution } | { valid: false; feedback: string } {
+  const reject = (feedback: string) => ({ valid: false as const, feedback });
   const workset = context.conversationWorkingSet;
   const calls = response.toolCalls.filter((call) => call.name === CONVERSATION_TURN_TOOL_NAME);
   if (response.toolCalls.length !== 1 || calls.length !== 1) {
-    return undefined;
+    return reject(`Return exactly one ${CONVERSATION_TURN_TOOL_NAME} tool call; received ${response.toolCalls.length} calls (${response.toolCalls.map((call) => call.name).join(", ")}).`);
   }
   const argumentsRecord = optionalRecord(calls[0].arguments);
   const mode = argumentsRecord.mode;
   const relation = argumentsRecord.relation;
   const inputMode = argumentsRecord.inputMode;
   const evidenceStrategy = parseConversationEvidenceStrategy(argumentsRecord.evidenceStrategy);
-  const taskIntent = parseConversationTaskIntent(argumentsRecord.taskIntent);
+  let taskIntentFeedback = "taskIntent must describe the requested terminal outputs.";
+  const taskIntent = parseConversationTaskIntent(argumentsRecord.taskIntent, (feedback) => {
+    taskIntentFeedback = feedback;
+  });
   const sourceBinding = parseConversationSourceBinding(argumentsRecord.sourceBinding, context.visibleDirectories);
   const requiredCapabilityReferences = parseRequiredCapabilityReferences(argumentsRecord.requiredCapabilityReferences, input);
-  if (requiredCapabilityReferences === undefined) return undefined;
+  if (requiredCapabilityReferences === undefined) {
+    return reject("requiredCapabilityReferences must be an array of at most 32 {kind, reference} entries. kind must be skill, tool_source, or tool; reference must be a non-empty string of at most 200 characters copied exactly from the latest user request. Do not infer mandatory capabilities from output formats or the available catalog; use [] when none were explicitly named.");
+  }
   const effectiveGoal = typeof argumentsRecord.effectiveGoal === "string"
     ? argumentsRecord.effectiveGoal.trim()
     : "";
@@ -8146,43 +7968,45 @@ function parseConversationTurnResolution(
     && argumentsRecord.userConstraints.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= 240)
     ? argumentsRecord.userConstraints.map((item) => (item as string).trim())
     : undefined;
-  if (mode !== "reply" && mode !== "execute" && mode !== "clarify") return undefined;
-  if (!isConversationTurnRelation(normalizedRelation)) return undefined;
-  if (!isConversationTurnInputMode(normalizedInputMode)) return undefined;
-  if (evidenceStrategy === undefined || sourceBinding === undefined) return undefined;
-  if (taskIntent === undefined) return undefined;
-  if (taskIntent !== undefined && taskIntent.requiresExecution !== (mode === "execute")) return undefined;
+  if (mode !== "reply" && mode !== "execute" && mode !== "clarify") return reject("mode must be reply, execute, or clarify.");
+  if (!isConversationTurnRelation(normalizedRelation)) return reject("relation must be new_goal, continue_prior, correct_prior, refine_prior, or challenge_prior.");
+  if (!isConversationTurnInputMode(normalizedInputMode)) return reject("inputMode must be none, prior_result, prior_artifact, or refresh_sources.");
+  if (evidenceStrategy === undefined) return reject("evidenceStrategy must be one of none, lookup_lite, source_grounded, strict_user_source, or bound_visible_sources.");
+  if (sourceBinding === undefined) return reject("sourceBinding must contain mode (none or primary_data) and visibleDirectoryIds (unique Runtime-issued visible directory IDs; use [] with mode=none). Uploaded sources are not visible directory candidates.");
+  if (taskIntent === undefined) return reject(taskIntentFeedback);
+  if (taskIntent.requiresExecution !== (mode === "execute")) return reject("taskIntent.requiresExecution must be true exactly when mode=execute.");
   if (
     taskIntent !== undefined
     && !taskIntent.requiresExecution
     && (normalizedInputMode !== "none" || targetArtifact !== undefined || targetResult !== undefined)
-  ) return undefined;
-  if (argumentsRecord.targetArtifact !== undefined && targetArtifact === undefined) return undefined;
-  if (targetGoalCandidateId !== undefined && candidateTargetRunId === undefined && targetArtifact === undefined) return undefined;
-  if (resultCandidateId !== undefined && targetResult === undefined) return undefined;
-  if (normalizedInputMode === "prior_result" && targetResult === undefined) return undefined;
-  if (normalizedInputMode !== "prior_result" && resultCandidateId !== undefined) return undefined;
-  if (normalizedInputMode === "prior_artifact" && targetArtifact === undefined) return undefined;
-  if (normalizedInputMode !== "prior_artifact" && targetArtifact !== undefined) return undefined;
-  if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000 || userConstraints === undefined) return undefined;
+  ) return reject("A reply or clarification must use inputMode=none and omit targetArtifact and resultCandidateId; consuming prior artifacts or results requires mode=execute.");
+  if (argumentsRecord.targetArtifact !== undefined && targetArtifact === undefined) return reject("targetArtifact.path must select one unambiguous Runtime-issued reusable prior artifact path, never a new output path.");
+  if (targetGoalCandidateId !== undefined && candidateTargetRunId === undefined && targetArtifact === undefined) return reject("targetGoalCandidateId must be one of the Runtime-issued candidates in priorGoalCandidates. Never invent a candidate ID.");
+  if (resultCandidateId !== undefined && targetResult === undefined) return reject("resultCandidateId must select a Runtime-issued reusableResultCandidates entry. Never invent a candidate ID.");
+  if (normalizedInputMode === "prior_result" && targetResult === undefined) return reject("inputMode=prior_result requires resultCandidateId from reusableResultCandidates.");
+  if (normalizedInputMode !== "prior_result" && resultCandidateId !== undefined) return reject("resultCandidateId requires inputMode=prior_result; otherwise omit it.");
+  if (normalizedInputMode === "prior_artifact" && targetArtifact === undefined) return reject("inputMode=prior_artifact requires targetArtifact.path from Runtime-issued reusable prior artifacts.");
+  if (normalizedInputMode !== "prior_artifact" && targetArtifact !== undefined) return reject("targetArtifact requires inputMode=prior_artifact; otherwise omit it.");
+  if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000) return reject("effectiveGoal must be a non-empty string no longer than 2000 characters.");
+  if (userConstraints === undefined) return reject("userConstraints must be an array of at most 8 non-empty strings, each no longer than 240 characters; use [] when no additional constraint applies.");
   const evidenceDemand = conversationEvidenceDemandForStrategy(evidenceStrategy);
-  if (!isConversationSourceBindingConsistent(evidenceStrategy, sourceBinding)) return undefined;
-  if (mode !== "execute" && (evidenceDemand !== "none" || sourceBinding.mode !== "none")) return undefined;
+  if (!isConversationSourceBindingConsistent(evidenceStrategy, sourceBinding)) return reject("evidenceStrategy and sourceBinding must agree: bound_visible_sources requires sourceBinding.mode=primary_data with at least one Runtime-issued visibleDirectoryId. All other evidence strategies require mode=none and visibleDirectoryIds=[]. For uploaded or non-directory evidence, choose a non-bound evidenceStrategy.");
+  if (mode !== "execute" && (evidenceDemand !== "none" || sourceBinding.mode !== "none")) return reject("mode=reply or clarify requires evidenceStrategy=none and sourceBinding.mode=none. Acquiring evidence requires mode=execute.");
 
   const priorRunIds = conversationTurnTargetRunIds(workset);
   if (normalizedRelation === "new_goal") {
-    if (targetRunId !== undefined && !priorRunIds.has(targetRunId)) return undefined;
+    if (targetRunId !== undefined && !priorRunIds.has(targetRunId)) return reject("targetGoalCandidateId must identify a prior goal in this conversation.");
   } else if (targetRunId === undefined || !priorRunIds.has(targetRunId)) {
-    return undefined;
+    return reject(`relation=${normalizedRelation} requires targetGoalCandidateId selected from priorGoalCandidates; use relation=new_goal when no prior candidate applies.`);
   }
   if (targetArtifact !== undefined) {
-    if (normalizedRelation === "new_goal") return undefined;
+    if (normalizedRelation === "new_goal") return reject("relation=new_goal cannot select targetArtifact; a prior artifact transformation requires prior goal lineage.");
     const isReusable = workset?.reusableArtifacts.some((artifact) =>
       artifact.runId === targetArtifact.runId && artifact.path === targetArtifact.path && artifact.reusable,
     ) === true;
-    if (!isReusable) return undefined;
+    if (!isReusable) return reject("targetArtifact.path must identify a reusable prior artifact in this conversation.");
   }
-  return {
+  return { valid: true, resolution: {
     schema: "agentloop.conversationTurnResolution/v1",
     mode,
     relation: normalizedRelation,
@@ -8198,7 +8022,7 @@ function parseConversationTurnResolution(
     userConstraints,
     requiredCapabilityReferences,
     source: guardedPriorArtifact ? "model_guarded" : "model",
-  };
+  } };
 }
 
 function conversationTurnResolutionAttemptSummary(response: ModelResponse): Readonly<Record<string, unknown>> {
@@ -8223,19 +8047,23 @@ function conversationTurnResolutionAttemptSummary(response: ModelResponse): Read
   };
 }
 
-function parseConversationTaskIntent(value: unknown): ConversationTaskIntent | undefined {
-  if (value === undefined) return undefined;
+function parseConversationTaskIntent(
+  value: unknown,
+  onInvalid?: (feedback: string) => void,
+): ConversationTaskIntent | undefined {
+  const reject = (feedback: string): undefined => { onInvalid?.(feedback); return undefined; };
   const record = optionalRecord(value);
-  if (record.schema !== "agentloop.conversationTaskIntent/v1") return undefined;
+  if (record.schema !== "agentloop.conversationTaskIntent/v1") return reject("taskIntent.schema must be agentloop.conversationTaskIntent/v1.");
   const operations = new Set(["answer", "lookup", "analysis", "create_artifact", "transform_artifact", "composite"]);
-  if (typeof record.operation !== "string" || !operations.has(record.operation)) return undefined;
-  if (typeof record.requiresExecution !== "boolean") return undefined;
-  if (!Array.isArray(record.deliverables) || record.deliverables.length > 8) return undefined;
+  if (typeof record.operation !== "string" || !operations.has(record.operation)) return reject("taskIntent.operation must be one of answer, lookup, analysis, create_artifact, transform_artifact, or composite.");
+  if (typeof record.requiresExecution !== "boolean") return reject("taskIntent.requiresExecution must be a boolean and must agree with mode=execute.");
+  if (!Array.isArray(record.deliverables) || record.deliverables.length > 8) return reject("taskIntent.deliverables must be an array containing at most 8 terminal output families.");
   const actions = new Set(["none", "create", "modify", "transform"]);
   const kinds = new Set(["html", "document", "presentation", "spreadsheet", "image", "audio", "code", "none"]);
   const surfaces = new Set(["conversation", "workspace_artifact"]);
   const targetIds = new Set<string>();
-  const deliverables = record.deliverables.map((item) => {
+  const deliverables: ConversationTaskIntent["deliverables"][number][] = [];
+  for (const [index, item] of record.deliverables.entries()) {
     const deliverable = optionalRecord(item);
     const action = deliverable.action;
     const kind = deliverable.kind;
@@ -8244,34 +8072,39 @@ function parseConversationTaskIntent(value: unknown): ConversationTaskIntent | u
     const targetId = deliverable.targetId;
     const purpose = deliverable.purpose;
     const expectedArtifactCount = deliverable.expectedArtifactCount;
-    if (
-      typeof action !== "string" || !actions.has(action)
-      || typeof kind !== "string" || !kinds.has(kind)
-      || typeof surface !== "string" || !surfaces.has(surface)
-      || typeof targetId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(targetId) || targetId.length > 128 || targetIds.has(targetId)
-      || typeof purpose !== "string" || purpose.trim().length === 0 || purpose.length > 500
-      || !Number.isInteger(expectedArtifactCount) || (expectedArtifactCount as number) < 1 || (expectedArtifactCount as number) > 8
-      || ((expectedArtifactCount as number) > 1 && typeof targetId === "string" && targetId.length > 126)
-      || (format !== undefined && (typeof format !== "string" || format.trim().length === 0 || format.length > 32))
-    ) return undefined;
+    const path = `taskIntent.deliverables[${index}]`;
+    if (typeof targetId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(targetId) || targetId.length > 128) {
+      return reject(`${path}.targetId must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ and be at most 128 characters. Use an ASCII identifier; put the user-visible title in purpose.`);
+    }
+    if (targetIds.has(targetId)) return reject(`${path}.targetId must be unique across taskIntent.deliverables.`);
+    if (typeof purpose !== "string" || purpose.trim().length === 0 || purpose.length > 500) return reject(`${path}.purpose must be a non-empty string no longer than 500 characters.`);
+    if (typeof action !== "string" || !actions.has(action)) return reject(`${path}.action must be one of none, create, modify, or transform.`);
+    if (typeof kind !== "string" || !kinds.has(kind)) return reject(`${path}.kind must be one of html, document, presentation, spreadsheet, image, audio, code, or none. Put a concrete file format in format.`);
+    if (typeof surface !== "string" || !surfaces.has(surface)) return reject(`${path}.surface must be conversation or workspace_artifact.`);
+    if (!Number.isInteger(expectedArtifactCount) || (expectedArtifactCount as number) < 1 || (expectedArtifactCount as number) > 8) {
+      return reject(`${path}.expectedArtifactCount must be an integer from 1 to 8. Preserve the number of terminal artifacts explicitly requested by the user; use 1 only when exactly one artifact is requested.`);
+    }
+    if ((expectedArtifactCount as number) > 1 && targetId.length > 126) return reject(`${path}.targetId must be at most 126 characters when expectedArtifactCount is greater than 1, leaving room for per-artifact IDs.`);
+    if (format !== undefined && (typeof format !== "string" || format.trim().length === 0 || format.length > 32)) return reject(`${path}.format must be a non-empty string no longer than 32 characters when present.`);
     targetIds.add(targetId);
-    return {
+    deliverables.push({
       targetId: targetId.trim(),
       purpose: purpose.trim(),
       expectedArtifactCount: expectedArtifactCount as number,
       action: action as ConversationTaskIntent["deliverables"][number]["action"],
       kind: kind as ConversationTaskIntent["deliverables"][number]["kind"],
-      ...(format === undefined ? {} : { format: format.trim() }),
+      ...(format === undefined ? {} : { format: (format as string).trim() }),
       surface: surface as ConversationTaskIntent["deliverables"][number]["surface"],
-    };
-  });
-  if (deliverables.some((item) => item === undefined)) return undefined;
-  if (deliverables.reduce((count, item) => count + (item?.surface === "workspace_artifact" ? item.expectedArtifactCount : 0), 0) > 8) return undefined;
+    });
+  }
+  if (deliverables.reduce((count, item) => count + (item.surface === "workspace_artifact" ? item.expectedArtifactCount : 0), 0) > 8) {
+    return reject("taskIntent.deliverables must request at most 8 workspace artifacts in total across all output families. Preserve explicit user cardinality; do not silently reduce the requested count.");
+  }
   return {
     schema: "agentloop.conversationTaskIntent/v1",
     operation: record.operation as ConversationTaskIntent["operation"],
     requiresExecution: record.requiresExecution,
-    deliverables: deliverables as ConversationTaskIntent["deliverables"],
+    deliverables,
   };
 }
 
@@ -8300,128 +8133,6 @@ function isConversationTurnInputMode(value: unknown): value is ConversationTurnI
     || value === "prior_result"
     || value === "prior_artifact"
     || value === "refresh_sources";
-}
-
-function conversationTurnRepairFeedback(
-  response: ModelResponse,
-  context: ConversationIntentExternalContext,
-): string {
-  if (response.toolCalls.length === 0 && response.content.trim().length === 0) {
-    return "The previous response was empty and contained no structured resolution.";
-  }
-  if (response.toolCalls.length !== 1) {
-    return `The previous response returned ${response.toolCalls.length} tool calls; exactly one is required.`;
-  }
-  if (response.toolCalls[0]?.name !== CONVERSATION_TURN_TOOL_NAME) {
-    return `The previous response called ${response.toolCalls[0]?.name ?? "an unnamed tool"} instead of ${CONVERSATION_TURN_TOOL_NAME}.`;
-  }
-  const value = optionalRecord(response.toolCalls[0].arguments);
-  const relation = value.relation;
-  if (relation === "new_goal") {
-    const forbiddenSelectors = ["targetGoalCandidateId", "targetArtifact", "resultCandidateId"]
-      .filter((field) => value[field] !== undefined);
-    if (forbiddenSelectors.length > 0) {
-      return `relation=new_goal forbids prior-work selector field(s): ${forbiddenSelectors.join(", ")}. Remove them; targetArtifact is an existing prior artifact, never a new output path.`;
-    }
-  }
-  const goalCandidateIds = [...conversationTurnTargetRunIds(context.conversationWorkingSet)]
-    .map((_, index) => `goal_candidate_${index + 1}`);
-  const targetGoalCandidateId = value.targetGoalCandidateId;
-  if (typeof targetGoalCandidateId === "string" && !goalCandidateIds.includes(targetGoalCandidateId)) {
-    return goalCandidateIds.length === 0
-      ? "No priorGoalCandidates exist. Use relation=new_goal and omit targetGoalCandidateId, targetArtifact, and resultCandidateId."
-      : `targetGoalCandidateId must be one of the Runtime-issued candidates: ${goalCandidateIds.join(", ")}. Never invent a candidate ID.`;
-  }
-  if (
-    typeof relation === "string"
-    && relation !== "new_goal"
-    && targetGoalCandidateId === undefined
-  ) {
-    return `relation=${relation} requires targetGoalCandidateId selected from: ${goalCandidateIds.length === 0 ? "no available candidates; use relation=new_goal" : goalCandidateIds.join(", ")}.`;
-  }
-  if (value.targetArtifact !== undefined) {
-    const artifactPath = optionalRecord(value.targetArtifact).path;
-    const artifactPaths = [...new Set(
-      context.conversationWorkingSet?.reusableArtifacts
-        .filter((artifact) => artifact.reusable)
-        .map((artifact) => artifact.path) ?? [],
-    )];
-    if (typeof artifactPath !== "string" || !artifactPaths.includes(artifactPath)) {
-      return artifactPaths.length === 0
-        ? "No reusable prior artifacts exist. Omit targetArtifact; it is never the output path of a new artifact."
-        : `targetArtifact.path must be one of the Runtime-issued reusable artifact paths: ${artifactPaths.join(", ")}. Never invent an artifact path.`;
-    }
-  }
-  if (value.resultCandidateId !== undefined) {
-    const resultCandidateIds = (context.conversationWorkingSet?.resultCards ?? [])
-      .map((_, index) => `result_candidate_${index + 1}`);
-    if (typeof value.resultCandidateId !== "string" || !resultCandidateIds.includes(value.resultCandidateId)) {
-      return resultCandidateIds.length === 0
-        ? "No reusableResultCandidates exist. Omit resultCandidateId."
-        : `resultCandidateId must be one of the Runtime-issued candidates: ${resultCandidateIds.join(", ")}. Never invent a candidate ID.`;
-    }
-  }
-  const intent = optionalRecord(value.taskIntent);
-  if (intent.schema !== "agentloop.conversationTaskIntent/v1") {
-    return "taskIntent.schema must be agentloop.conversationTaskIntent/v1.";
-  }
-  if (
-    intent.operation !== "answer"
-    && intent.operation !== "lookup"
-    && intent.operation !== "analysis"
-    && intent.operation !== "create_artifact"
-    && intent.operation !== "transform_artifact"
-    && intent.operation !== "composite"
-  ) {
-    return "taskIntent.operation must be one of answer, lookup, analysis, create_artifact, transform_artifact, or composite.";
-  }
-  if (typeof intent.requiresExecution !== "boolean") {
-    return "taskIntent.requiresExecution must be a boolean and must agree with mode=execute.";
-  }
-  if (intent.requiresExecution !== (value.mode === "execute")) {
-    return "taskIntent.requiresExecution must be true exactly when mode=execute.";
-  }
-  if (!Array.isArray(intent.deliverables) || intent.deliverables.length > 8) {
-    return "taskIntent.deliverables must be an array containing at most 8 terminal output families.";
-  }
-  if (Array.isArray(intent.deliverables)) {
-    const invalidDeliverableIndex = intent.deliverables.findIndex((item) => {
-      const deliverable = optionalRecord(item);
-      return typeof deliverable.targetId !== "string" || deliverable.targetId.trim().length === 0
-        || typeof deliverable.purpose !== "string" || deliverable.purpose.trim().length === 0
-        || typeof deliverable.action !== "string"
-        || typeof deliverable.kind !== "string"
-        || typeof deliverable.surface !== "string"
-        || (deliverable.format !== undefined && (typeof deliverable.format !== "string" || deliverable.format.trim().length === 0));
-    });
-    if (invalidDeliverableIndex >= 0) {
-      return `taskIntent.deliverables[${invalidDeliverableIndex}] must include non-empty targetId and purpose, plus action, kind, surface, and an optional non-empty format.`;
-    }
-    const invalidCountIndex = intent.deliverables.findIndex((item) => {
-      const count = optionalRecord(item).expectedArtifactCount;
-      return !Number.isInteger(count) || (count as number) < 1 || (count as number) > 8;
-    });
-    if (invalidCountIndex >= 0) {
-      return `taskIntent.deliverables[${invalidCountIndex}].expectedArtifactCount must be an integer from 1 to 8. Preserve the number of terminal artifacts explicitly requested by the user; use 1 only when exactly one artifact is requested.`;
-    }
-  }
-  if (typeof value.effectiveGoal !== "string" || value.effectiveGoal.trim().length === 0 || value.effectiveGoal.length > 2_000) {
-    return "effectiveGoal must be a non-empty string no longer than 2000 characters.";
-  }
-  if (parseConversationEvidenceStrategy(value.evidenceStrategy) === undefined) {
-    return "evidenceStrategy must be one of none, lookup_lite, source_grounded, strict_user_source, or bound_visible_sources.";
-  }
-  if (parseConversationSourceBinding(value.sourceBinding, context.visibleDirectories) === undefined) {
-    return "sourceBinding must contain mode (none or primary_data) and visibleDirectoryIds (an allowed ID array; use [] with mode=none).";
-  }
-  if (
-    !Array.isArray(value.userConstraints)
-    || value.userConstraints.length > 8
-    || !value.userConstraints.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= 240)
-  ) {
-    return "userConstraints must be an array of at most 8 non-empty strings, each no longer than 240 characters; use [] when no additional constraint applies.";
-  }
-  return "The previous response did not provide a valid mode, relation, input mode, opaque candidate selection, effective goal, evidence demand, and constraint list.";
 }
 
 function conversationTurnResolutionFromEvents(

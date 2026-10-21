@@ -3334,133 +3334,46 @@ test("rejected completion candidates are not projected as prior assistant answer
   assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
 });
 
-test("deferred validation candidate stops repair loop with a caveat", async () => {
-  let executions = 0;
-  let assessments = 0;
-  const tool: RuntimeTool<unknown> = {
-    name: "render_probe",
-    description: "Probe renderer availability",
-    inputSchema: { type: "object" },
-    executionMode: "parallel",
-    replaySafe: true,
-    parse: (value) => value,
-    execute: async () => {
-      executions += 1;
-      return executions === 1
-        ? { fileChanges: [{ changeType: "created", path: "deck.pptx" }] }
-        : { error: "renderer unavailable" };
-    },
-  };
-  const model = new DeferredValidationModel();
-  const events: RuntimeEvent[] = [];
-  const grant = makeGrant(["render_probe"]);
-  const result = await runAgentLoop({
-    runId: grant.runId,
-    systemPrompt: "Build and validate.",
-    input: "build deck",
-    model,
-    tools: new ToolRegistry([tool]),
-    grant,
-    maxSteps: 2,
-    candidateRepairGraceSteps: 4,
-    emit: (event) => { events.push(event); },
-    evaluateCandidate: async (candidate) => {
-      assessments += 1;
-      return assessments === 1
-        ? { approved: false, feedback: "Renderer missing; try one probe." }
-        : {
-          approved: false,
-          feedback: "Renderer remains unavailable; leave visual validation to the user.",
-          deferredValidation: true,
-        };
-    },
-  });
-
-  assert.equal(result.deferredValidation, true);
-  assert.match(result.output, /leave visual validation to the user/);
-  assert.equal(executions, 2);
-  assert.equal(assessments, 2);
-  assert.equal(events.filter((event) => event.type === "candidate.validation_deferred").length, 1);
-  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
-});
-
-test("evidence-boundary candidate stops repair loop with a caveat", async () => {
-  let calls = 0;
-  const model: ModelAdapter = {
-    limits: TEST_MODEL_LIMITS,
-    complete: async () => {
-      calls += 1;
-      return {
-        content: "Verified metadata is available, but full text remains unverified because the source returned HTTP 403.",
-        finishReason: "stop",
-        toolCalls: [],
-      };
-    },
-  };
-  const events: RuntimeEvent[] = [];
-  const grant = makeGrant([]);
-  const result = await runAgentLoop({
-    runId: grant.runId,
-    systemPrompt: "Research public sources.",
-    input: "research",
-    model,
-    tools: new ToolRegistry([]),
-    grant,
-    maxSteps: 3,
-    emit: (event) => { events.push(event); },
-    evaluateCandidate: async () => ({
-      approved: false,
-      feedback: "Proceed only as a limited evidence-boundary delivery.",
-      evidenceBoundary: true,
-    }),
-  });
-
-  assert.equal(calls, 1);
-  assert.equal(result.completionCaveat?.reason, "evidence_boundary");
-  assert.match(result.output, /Evidence boundary note/);
-  assert.equal(events.filter((event) => event.type === "candidate.evidence_boundary_accepted").length, 1);
-  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
-});
-
-test("candidate repair assessment limit accepts the latest output with a caveat", async () => {
-  let calls = 0;
-  let assessments = 0;
-  const model: ModelAdapter = {
-    limits: TEST_MODEL_LIMITS,
-    complete: async () => {
-      calls += 1;
-      return { content: `candidate ${calls}`, finishReason: "stop", toolCalls: [] };
-    },
-  };
-  const events: RuntimeEvent[] = [];
-  const grant = makeGrant([]);
-  const result = await runAgentLoop({
-    runId: grant.runId,
-    systemPrompt: "Produce the candidate.",
-    input: "produce",
-    model,
-    tools: new ToolRegistry([]),
-    grant,
-    maxSteps: 3,
-    emit: (event) => { events.push(event); },
-    evaluateCandidate: async () => {
-      assessments += 1;
-      return {
-        approved: false,
-        feedback: "Quality issue remained after repair.",
-        allowRepairLimitCompletion: true,
-      };
-    },
-  });
-
-  assert.equal(calls, 3);
-  assert.equal(assessments, 3);
-  assert.equal(result.completionCaveat?.reason, "repair_limit");
-  assert.match(result.output, /Repair caveat/);
-  assert.doesNotMatch(result.output, /Quality issue remained after repair/);
-  assert.equal(events.filter((event) => event.type === "candidate.completion_caveated").length, 1);
-  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
-});
+// Obsolete completion hints from an external evaluator cannot override the
+// single Assessment verdict, for either prose or a projected tool candidate.
+for (const hint of ["deferredValidation", "evidenceBoundary", "allowRepairLimitCompletion"]) {
+  for (const toolCandidate of [false, true]) {
+    test(`rejected ${toolCandidate ? "tool" : "prose"} candidate cannot complete through ${hint}`, async () => {
+      const events: RuntimeEvent[] = [];
+      const grant = makeGrant(toolCandidate ? ["lookup_api"] : []);
+      let assessments = 0;
+      await assert.rejects(() => runAgentLoop({
+        runId: grant.runId, grant, input: "Read the requested source facts", systemPrompt: "Deliver verified facts",
+        maxSteps: 4, candidateRepairAssessmentLimit: 0, deferFailureReport: true,
+        emit: (event) => { events.push(event); },
+        tools: new ToolRegistry(toolCandidate ? [{
+          name: "lookup_api", description: "Read a source", inputSchema: { type: "object" },
+          executionMode: "parallel", replaySafe: true, parse: (value) => value,
+          execute: async () => ({ schema: "source_fixture/v1", deliveryCandidate: { output: "Full source facts remain unverified." } }),
+        }] : []),
+        model: { limits: TEST_MODEL_LIMITS, complete: async () => toolCandidate
+          ? { content: "", finishReason: "tool_calls", toolCalls: [{ id: "source-1", name: "lookup_api", arguments: {} }] }
+          : { content: "Full source facts remain unverified.", finishReason: "stop", toolCalls: [] } },
+        evaluateCandidate: async () => {
+          assessments += 1;
+          return { approved: false, feedback: "Required facts remain unverified.", [hint]: true,
+            failedBoundary: { stepId: "lookup", missingEvidenceKinds: ["source_summary"], violatedSkillRequirements: [],
+              reusableEvidenceRefs: ["source-1"], suggestedRepairShape: "repair_leaf" } };
+        },
+      }), (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.equal(error.code, "STEP_NOT_COMPLETED");
+        assert.equal(error.details?.repairExhausted, true);
+        assert.equal((error.details?.failedBoundary as { stepId: string }).stepId, "lookup");
+        return true;
+      });
+      assert.equal(assessments, 1);
+      assert.equal(events.some((event) => event.type === "loop.completed" || event.type === "candidate.evidence_boundary_accepted"
+        || event.type === "candidate.validation_deferred" || event.type === "candidate.completion_caveated"), false);
+      assert.equal(events.filter((event) => event.type === "candidate.repair_limit_blocked").length, 1);
+    });
+  }
+}
 
 test("candidate repair assessment limit does not turn a rejected completion into a caveated success by default", async () => {
   const model: ModelAdapter = {
@@ -3517,7 +3430,6 @@ test("candidate repair assessment limit can be blocked for unmet prerequisite cr
       evaluateCandidate: async () => ({
         approved: false,
         feedback: "No source file was found, so no success criteria are satisfied.",
-        allowRepairLimitCompletion: false,
       }),
     }),
     (error) => error instanceof Error && /cannot be accepted with a repair-limit caveat/.test(error.message),
@@ -6970,34 +6882,6 @@ class CandidateRepairGraceModel implements ModelAdapter {
       };
     }
     return { content: "report verified; evidence consistent", finishReason: "stop", toolCalls: [] };
-  }
-}
-
-class DeferredValidationModel implements ModelAdapter {
-  readonly limits = TEST_MODEL_LIMITS;
-  calls = 0;
-
-  async complete(request: ModelInvocation): Promise<ModelResponse> {
-    this.calls += 1;
-    if (this.calls === 1) {
-      return {
-        content: "",
-        finishReason: "tool_calls",
-        toolCalls: [{ id: "build", name: "render_probe", arguments: { action: "build" } }],
-      };
-    }
-    if (this.calls === 2) {
-      return { content: "deck.pptx exists, but visual validation has not run", finishReason: "stop", toolCalls: [] };
-    }
-    if (this.calls === 3) {
-      assert.match(request.runtimeContext?.content ?? "", /Renderer missing/);
-      return {
-        content: "",
-        finishReason: "tool_calls",
-        toolCalls: [{ id: "probe", name: "render_probe", arguments: { action: "probe" } }],
-      };
-    }
-    return { content: "deck.pptx exists, but renderer validation is unavailable", finishReason: "stop", toolCalls: [] };
   }
 }
 
