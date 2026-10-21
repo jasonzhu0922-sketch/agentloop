@@ -3,20 +3,27 @@ import { badRequest } from "../shared/errors.ts";
 import { requireRecord, requireString, requireStringArray } from "../shared/validation.ts";
 import type { CriterionBasis, SuccessCriterion } from "./contracts.ts";
 
-export const CRITERION_BASIS_SCHEMA = {
+/**
+ * Model-facing basis shape. Provenance text is Runtime-owned and is bound from
+ * the canonical intent after the model response is parsed.
+ */
+export const MODEL_CRITERION_BASIS_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["kind", "intentId", "targetIds", "requirement", "rationale"],
+  required: ["kind", "intentId", "targetIds", "rationale"],
   properties: {
     kind: { type: "string", enum: ["user_requirement", "necessary_condition", "execution_method"] },
     intentId: { type: "string" },
     targetIds: { type: "array", items: { type: "string" } },
-    requirement: { type: "string", description: "Exact supporting text from canonical intent.userInput, not a Plan or Skill instruction." },
     rationale: { type: "string", description: "Explain the relation to the requested result. A necessary condition must explain why the result cannot be valid without it." },
   },
 } as const;
 
-export function parseCriterionBasis(value: unknown, name: string): CriterionBasis {
+export function parseModelCriterionBasis(value: unknown, name: string, state: CanonicalRunState): CriterionBasis {
   const record = requireRecord(value, name);
+  const unexpected = Object.keys(record).filter((key) => !Object.hasOwn(MODEL_CRITERION_BASIS_SCHEMA.properties, key));
+  if (unexpected.length > 0) {
+    throw badRequest(`${name} contains unsupported fields: ${unexpected.join(", ")}; requirement is Runtime-owned and must not be submitted`);
+  }
   const kind = requireString(record.kind, `${name}.kind`, { max: 32 });
   if (kind !== "user_requirement" && kind !== "necessary_condition" && kind !== "execution_method") {
     throw badRequest(`${name}.kind is invalid`);
@@ -24,7 +31,7 @@ export function parseCriterionBasis(value: unknown, name: string): CriterionBasi
   return {
     kind, intentId: requireString(record.intentId, `${name}.intentId`, { max: 128 }),
     targetIds: requireStringArray(record.targetIds, `${name}.targetIds`, 100),
-    requirement: requireString(record.requirement, `${name}.requirement`, { max: 20_000 }),
+    requirement: state.intent.userInput,
     rationale: requireString(record.rationale, `${name}.rationale`, { max: 4_000 }),
   };
 }
@@ -38,8 +45,8 @@ export function goalCriterionBasis(
 
 export function assertCriterionBasis(basis: CriterionBasis, state: CanonicalRunState, ownedTargetIds: readonly string[]): void {
   if (basis.intentId !== state.intent.id) throw badRequest("Criterion basis must reference this canonical intent");
-  if (!basis.requirement.trim() || !state.intent.userInput.includes(basis.requirement)) {
-    throw badRequest("Criterion basis requirement must quote the original user input");
+  if (basis.requirement !== state.intent.userInput) {
+    throw badRequest("Criterion basis requirement is Runtime-owned and must equal the original user input");
   }
   if (!basis.rationale.trim()) throw badRequest("Criterion basis must explain its relation to the user goal");
   if (new Set(basis.targetIds).size !== basis.targetIds.length

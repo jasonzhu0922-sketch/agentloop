@@ -96,12 +96,14 @@ for (const humanPause of [false, true]) {
           assert.equal(input.canonicalGap!.id, gapId);
           assert.equal(input.canonicalGap!.repairAttempts, 0);
           const failed = input.plan!.steps.find((step) => step.id === input.failedBoundary!.stepId)!;
-          return { actionId: input.action.id, expectedActionRevision: input.action.revision, decision: "revise_plan" as const,
+          return parseRecoveryDecision({ id: "repair-plan", name: "submit_recovery_decision", arguments: {
+            actionId: input.action.id, expectedActionRevision: input.action.revision, decision: "revise_plan",
             rationale: "Read the missing second total, preserving existing observations.", evidenceRefs: input.canonicalGap!.evidenceRefs,
             planRevision: { goal: input.plan!.goal, shape: "recovery_patch" as const, selectedSkillIds: [],
               steps: [{ id: "complete-records", objective: failed.objective, role: "repair" as const, dependencies: [], skillIds: [],
-                targetIds: failed.executionBinding.targetIds, requiredCapabilities: failed.requiredCapabilities,
-                evidenceContract: failed.evidenceContract, successCriteria: recoveryProposalSuccessCriteria(failed.successCriteria) }] } };
+                targetIds: failed.executionBinding.targetIds, requiredCapabilities: failed.requiredCapabilities, sourceConstraint: null,
+                evidenceContract: failed.evidenceContract, successCriteria: recoveryModelCriteria(failed.successCriteria) }] } },
+          }, input.canonicalState!);
         } }),
         planRevisionAssessorFactory: () => ({ assess: async () => ({ approved: true, feedback: "", evidenceRefs: [] }) }),
       });
@@ -144,6 +146,14 @@ function fixture() {
   return { state, proposal, basis };
 }
 
+function recoveryModelCriteria(criteria: readonly import("../src/planning/contracts.ts").SuccessCriterion[]) {
+  return recoveryProposalSuccessCriteria(criteria).map((criterion) => {
+    if (criterion.basis === undefined) return criterion;
+    const { requirement: _requirement, ...basis } = criterion.basis;
+    return { ...criterion, basis };
+  });
+}
+
 test("a canonical synthesis gap allows a corrected answer from unchanged observations", async () => {
   const database = new AppDatabase(":memory:");
   let turns = 0;
@@ -180,6 +190,7 @@ test("a canonical synthesis gap allows a corrected answer from unchanged observa
 test("criterion provenance rejects foreign intents, invented quotes and unowned targets without weakening the criterion", () => {
   const { state, proposal, basis } = fixture();
   for (const invalid of [{ ...basis, intentId: "foreign" }, { ...basis, requirement: "invented request" },
+    { ...basis, requirement: "two recorded totals" },
     { ...basis, targetIds: ["foreign-target"] }, { ...basis, kind: "execution_method" as const }]) {
     const changed = { ...proposal, steps: proposal.steps.map((step) => ({ ...step,
       successCriteria: step.successCriteria.map((criterion) => ({ ...criterion, basis: invalid })) })) };
@@ -246,19 +257,40 @@ for (const duplicate of [false, true]) {
 }
 
 test("Recovery parsing preserves result criteria, original source identities and user provenance", () => {
-  const { proposal, basis } = fixture();
+  const { state, proposal, basis } = fixture();
+  const { requirement: _requirement, ...basisMetadata } = basis;
   const sourceConstraint = { requiredToolSourceIds: ["records"], requiredUploadedSourceIds: [], requiredVisibleDirectoryIds: [] };
   const step = { ...proposal.steps[0], role: "repair", targetIds: [], sourceConstraint,
     requiredFacts: [{ id: "totals", description: "The two recorded totals", evidenceKinds: ["source_summary"], basis }] };
   const decision = parseRecoveryDecision({ id: "recovery", name: "submit_recovery_decision", arguments: {
     actionId: "action", expectedActionRevision: 1, decision: "revise_plan", rationale: "Repair the comparison", evidenceRefs: [],
-    planRevision: { ...proposal, shape: "recovery_patch", steps: [step] },
-  } });
+    planRevision: { ...proposal, shape: "recovery_patch", steps: [{ ...step,
+      successCriteria: recoveryModelCriteria(step.successCriteria),
+      requiredFacts: step.requiredFacts.map((fact) => ({ ...fact, basis: basisMetadata })),
+    }] },
+  } }, state);
   const parsed = decision.planRevision!.steps[0]!;
   assert.deepEqual(parsed.successCriteria, step.successCriteria);
   assert.deepEqual(parsed.requiredFacts, step.requiredFacts);
   assert.deepEqual(parsed.targetIds, []);
   assert.deepEqual(parsed.sourceConstraint, sourceConstraint);
+});
+
+test("Recovery parsing treats a null sourceConstraint as absent while rejecting malformed constraints", () => {
+  const { state, proposal } = fixture();
+  const step = { ...proposal.steps[0], role: "repair", targetIds: [], sourceConstraint: null,
+    successCriteria: recoveryModelCriteria(proposal.steps[0]!.successCriteria) };
+  const decision = parseRecoveryDecision({ id: "recovery-null-source", name: "submit_recovery_decision", arguments: {
+    actionId: "action", expectedActionRevision: 1, decision: "revise_plan", rationale: "Repair the comparison", evidenceRefs: [],
+    planRevision: { ...proposal, shape: "recovery_patch", steps: [step] },
+  }}, state);
+  assert.equal(decision.planRevision!.steps[0]!.sourceConstraint, undefined);
+  for (const malformed of ["records", [], false, 0, { requiredToolSourceIds: null }, { requiredUploadedSourceIds: [12] }]) {
+    assert.throws(() => parseRecoveryDecision({ id: "recovery-bad-source", name: "submit_recovery_decision", arguments: {
+      actionId: "action", expectedActionRevision: 1, decision: "revise_plan", rationale: "Repair the comparison", evidenceRefs: [],
+      planRevision: { ...proposal, shape: "recovery_patch", steps: [{ ...step, sourceConstraint: malformed }] },
+    }}, state), (error: any) => error.code === "PLANNING_ERROR");
+  }
 });
 
 test("an invalid Recovery response commits a stopped Outcome and retains the open Gap", async () => {

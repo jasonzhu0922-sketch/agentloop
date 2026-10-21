@@ -1,6 +1,6 @@
 import { AppError, badRequest } from "../shared/errors.ts";
 import { requireRecord, requireString, requireStringArray } from "../shared/validation.ts";
-import { parseCriterionBasis } from "../planning/criterion-basis.ts";
+import { MODEL_CRITERION_BASIS_SCHEMA, parseModelCriterionBasis } from "../planning/criterion-basis.ts";
 import type {
   EvidenceContract,
   FailedBoundary,
@@ -42,7 +42,7 @@ export interface RecoveryPlannerInput {
   readonly events: readonly Readonly<{ seq: number; type: string; data: Readonly<Record<string, unknown>> }>[];
   readonly userResponses: readonly Readonly<{ actionId: string; response: string; createdAt: number }>[];
   readonly canonicalGap?: CanonicalGoalGap;
-  readonly canonicalState?: CanonicalRunState;
+  readonly canonicalState: CanonicalRunState;
   readonly availableTools?: readonly PlanningToolSummary[];
   readonly availableSkills?: readonly { readonly id: string; readonly name: string; readonly description: string }[];
   readonly availableCapabilities?: readonly PlanningCapability[];
@@ -112,6 +112,8 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
         "Choose exactly one structured recovery decision. replayPolicy=unsafe never permits resume_step.",
         "A Plan revision retires a Step from future scheduling only. It never erases, authorizes, compensates for, or replays an Action already recorded for that Step. If a retired Action has an unknown external effect, preserve that fact and choose a continuation that neither relies on nor repeats that effect, or fail when no such continuation exists.",
         "If the failed boundary shows the current Plan's evidence contract is wrong for the evidence that actually exists, prefer revise_plan and repair the Plan boundary rather than resubmitting the same step.",
+        "planRevision is a complete replacement proposal, not a patch. Every step must explicitly declare targetIds, dependencies, skillIds, requiredCapabilities and successCriteria. Current bindings are in currentPlan.steps[].executionBinding.targetIds. Preserve every canonical delivery target exactly once on its producing or adopting leaf; use targetIds: [] for a prerequisite that owns no user-visible target. Do not infer ownership from criteria or requiredFacts[].basis.targetIds: those basis references may support targets owned by downstream dependent leaves. Preserve required facts and their exact user-input provenance when correcting execution methods or unsupported criteria. Runtime regenerates delivery_target criteria from targetIds; omit those derived criteria from the proposal.",
+        "Submit basis metadata (kind, intentId, targetIds, rationale) only. Omit basis.requirement, including when copying currentPlan criteria or facts: Runtime binds it from canonicalState.intent.userInput. A rationale must justify the condition; binding provenance does not prove that a derived condition is necessary.",
         "Use failedBoundary.unmetCriteria to identify the actual result gap and any contractIssue. Choose a continuation that can change that cause, considering previously attempted strategies, available capabilities and the remaining gap budget in runtimeContext. A locally stalled turn does not prove global exhaustion. Never repeat unchanged work or weaken an explicit user requirement to obtain approval.",
         "Do not ask the user to authorize a Plan revision, confirm whether a recorded Action had an effect, or accept a candidate as evidence that it meets a result criterion. Those are Runtime recovery and assessment obligations. Use ask_user only for a concrete, missing input that only the user can supply and that an execution continuation will consume; a missing capability to observe or verify the requested result is not such an input. When the available capabilities cannot change or verify a remaining result gap, choose fail and retain the stage artifact and its evidence.",
       ].join("\n"),
@@ -123,7 +125,7 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
     if (response.finishReason === "length" || response.toolCalls.length !== 1 || response.toolCalls[0].name !== SUBMIT_RECOVERY_DECISION_TOOL.name) {
       throw new AppError("PLANNING_ERROR", "Recovery Planner must submit exactly one structured recovery decision", 422);
     }
-    return parseRecoveryDecision(response.toolCalls[0]);
+    return parseRecoveryDecision(response.toolCalls[0], input.canonicalState);
   }
 }
 
@@ -163,7 +165,7 @@ export class ModelPlanRevisionAssessor implements PlanRevisionAssessor {
   }
 }
 
-export function parseRecoveryDecision(call: ModelToolCall): RecoveryDecisionProposal {
+export function parseRecoveryDecision(call: ModelToolCall, canonicalState: CanonicalRunState): RecoveryDecisionProposal {
   try {
     const value = requireRecord(call.arguments, "submit_recovery_decision arguments");
     const decision = requireString(value.decision, "decision", { max: 32 }) as RecoveryDecisionKind;
@@ -173,7 +175,7 @@ export function parseRecoveryDecision(call: ModelToolCall): RecoveryDecisionProp
     if (!Number.isSafeInteger(value.expectedActionRevision) || (value.expectedActionRevision as number) < 1) {
       throw badRequest("expectedActionRevision must be a positive integer");
     }
-    const planRevision = value.planRevision === undefined ? undefined : parsePlanProposal(value.planRevision);
+    const planRevision = value.planRevision === undefined ? undefined : parsePlanProposal(value.planRevision, canonicalState);
     const question = value.question === undefined ? undefined : requireString(value.question, "question", { max: 8_000 });
     if (decision === "revise_plan" && planRevision === undefined) throw badRequest("planRevision is required for revise_plan");
     if (decision !== "revise_plan" && planRevision !== undefined) throw badRequest("planRevision is only valid for revise_plan");
@@ -237,7 +239,7 @@ function planRevisionRuntimeContext(input: PlanRevisionAssessmentInput): Runtime
   };
 }
 
-function parsePlanProposal(value: unknown): PlanProposal {
+function parsePlanProposal(value: unknown, canonicalState: CanonicalRunState): PlanProposal {
   const record = requireRecord(value, "planRevision");
   if (!Array.isArray(record.steps) || record.steps.length === 0 || record.steps.length > 100) {
     throw badRequest("planRevision.steps must contain between 1 and 100 entries");
@@ -247,12 +249,15 @@ function parsePlanProposal(value: unknown): PlanProposal {
     ...(record.shape === undefined ? {} : { shape: parsePlanShape(record.shape) }),
     selectedSkillIds: requireStringArray(record.selectedSkillIds, "planRevision.selectedSkillIds", 100),
     ...(record.selectedSkillRoles === undefined ? {} : { selectedSkillRoles: parseSelectedSkillRoles(record.selectedSkillRoles) }),
-    steps: record.steps.map((step, index) => parseStep(step, index)),
+    steps: record.steps.map((step, index) => parseStep(step, index, canonicalState)),
   };
 }
 
-function parseStep(value: unknown, index: number): PlanStepProposal {
+function parseStep(value: unknown, index: number, canonicalState: CanonicalRunState): PlanStepProposal {
   const record = requireRecord(value, `planRevision.steps[${index}]`);
+  if (!Array.isArray(record.targetIds)) {
+    throw badRequest(`planRevision.steps[${index}].targetIds must be an array; use [] for a prerequisite that owns no canonical target`);
+  }
   if (!Array.isArray(record.successCriteria) || record.successCriteria.length === 0 || record.successCriteria.length > 50) {
     throw badRequest(`planRevision.steps[${index}].successCriteria must contain between 1 and 50 entries`);
   }
@@ -266,9 +271,9 @@ function parseStep(value: unknown, index: number): PlanStepProposal {
     ...(record.refinementState === undefined ? {} : { refinementState: parseRefinementState(record.refinementState, index) }),
     skillIds: requireStringArray(record.skillIds, `planRevision.steps[${index}].skillIds`, 100),
     requiredCapabilities: requireStringArray(record.requiredCapabilities, `planRevision.steps[${index}].requiredCapabilities`, 100),
-    ...(record.targetIds === undefined ? {} : { targetIds: requireStringArray(record.targetIds, "targetIds", 100) }),
-    ...(record.sourceConstraint === undefined ? {} : { sourceConstraint: parseRecoverySourceConstraint(record.sourceConstraint) }),
-    ...(record.requiredFacts === undefined ? {} : { requiredFacts: parseRecoveryRequiredFacts(record.requiredFacts) }),
+    targetIds: requireStringArray(record.targetIds, `planRevision.steps[${index}].targetIds`, 100),
+    ...(record.sourceConstraint === undefined || record.sourceConstraint === null ? {} : { sourceConstraint: parseRecoverySourceConstraint(record.sourceConstraint) }),
+    ...(record.requiredFacts === undefined ? {} : { requiredFacts: parseRecoveryRequiredFacts(record.requiredFacts, canonicalState) }),
     ...(record.evidenceContract === undefined ? {} : { evidenceContract: parseEvidenceContract(record.evidenceContract, index) }),
     successCriteria: record.successCriteria.map((criterion, criterionIndex): SuccessCriterion => {
       const row = requireRecord(criterion, `planRevision.steps[${index}].successCriteria[${criterionIndex}]`);
@@ -277,7 +282,7 @@ function parseStep(value: unknown, index: number): PlanStepProposal {
         description: requireString(row.description, "criterion description", { max: 2_000 }),
         source: row.source === "task" ? "task" : "planner",
         ...(row.targetId === undefined ? {} : { targetId: requireString(row.targetId, "criterion targetId", { max: 128 }) }),
-        ...(row.basis === undefined ? {} : { basis: parseCriterionBasis(row.basis, "criterion basis") }),
+        ...(row.basis === undefined ? {} : { basis: parseModelCriterionBasis(row.basis, "criterion basis", canonicalState) }),
         ...(row.blocking === undefined ? {} : { blocking: parseBoolean(row.blocking, "criterion blocking") }),
         ...(row.verification === undefined ? {} : { verification: parseCriterionVerification(row.verification) }),
       };
@@ -285,14 +290,14 @@ function parseStep(value: unknown, index: number): PlanStepProposal {
   };
 }
 
-function parseRecoveryRequiredFacts(value: unknown): NonNullable<PlanStepProposal["requiredFacts"]> {
+function parseRecoveryRequiredFacts(value: unknown, canonicalState: CanonicalRunState): NonNullable<PlanStepProposal["requiredFacts"]> {
   if (!Array.isArray(value) || value.length > 20) throw badRequest("requiredFacts must be an array of at most 20 facts");
   return value.map((item) => {
     const row = requireRecord(item, "required fact");
     return { id: requireString(row.id, "fact id", { max: 128 }),
       description: requireString(row.description, "fact description", { max: 2_000 }),
       evidenceKinds: requireStringArray(row.evidenceKinds, "fact evidenceKinds", 20),
-      basis: parseCriterionBasis(row.basis, "fact basis") };
+      basis: parseModelCriterionBasis(row.basis, "fact basis", canonicalState) };
   });
 }
 
@@ -316,6 +321,55 @@ function parseCriterionVerification(value: unknown): NonNullable<SuccessCriterio
 }
 
 function planProposalSchema(): Record<string, unknown> {
+  const requiredFact = {
+    type: "object",
+    additionalProperties: false,
+    required: ["id", "description", "evidenceKinds", "basis"],
+    properties: {
+      id: { type: "string" }, description: { type: "string" },
+      evidenceKinds: { type: "array", minItems: 1, items: { type: "string" } }, basis: MODEL_CRITERION_BASIS_SCHEMA,
+    },
+  };
+  const evidenceContract = {
+    type: "object", additionalProperties: false, required: ["requiredKinds", "caveatPolicy"],
+    properties: {
+      requiredKinds: { type: "array", minItems: 1, items: { type: "string" } },
+      caveatPolicy: { type: "string", enum: ["none", "mark_unverified_facts", "strict_fail_on_missing_source"] },
+    },
+  };
+  const sourceConstraint = {
+    type: ["object", "null"], additionalProperties: false,
+    properties: {
+      requiredToolSourceIds: { type: "array", items: { type: "string" } },
+      requiredUploadedSourceIds: { type: "array", items: { type: "string" } },
+      requiredVisibleDirectoryIds: { type: "array", items: { type: "string" } },
+    },
+  };
+  const criterion = {
+    type: "object", additionalProperties: false,
+    required: ["id", "description", "source"],
+    properties: {
+      id: { type: "string" }, description: { type: "string" },
+      source: { type: "string", enum: ["task", "planner"] }, targetId: { type: "string" },
+      basis: MODEL_CRITERION_BASIS_SCHEMA, blocking: { type: "boolean" },
+      verification: { type: "string", enum: ["deterministic", "model_judged", "decision_context"] },
+    },
+  };
+  const step = {
+    type: "object", additionalProperties: false,
+    required: ["id", "objective", "dependencies", "skillIds", "requiredCapabilities", "targetIds", "successCriteria"],
+    properties: {
+      id: { type: "string" }, kind: { type: "string", enum: ["leaf", "milestone"] }, parentId: { type: "string" },
+      objective: { type: "string" }, dependencies: { type: "array", items: { type: "string" } },
+      role: { type: "string", enum: ["fact_acquisition", "produce", "deliver", "repair"] },
+      refinementState: { type: "string", enum: ["not_refinable", "pending_facts", "ready_to_refine", "refining", "refined"] },
+      skillIds: { type: "array", items: { type: "string" } },
+      requiredCapabilities: { type: "array", items: { type: "string" } },
+      targetIds: { type: "array", description: "Runtime-owned canonical target bindings. Use [] for a prerequisite that owns no user-visible target.", items: { type: "string" } },
+      sourceConstraint, requiredFacts: { type: "array", items: requiredFact }, evidenceContract,
+      successCriteria: { type: "array", minItems: 1, items: criterion },
+    },
+  };
   return {
     type: "object",
     additionalProperties: false,
@@ -324,8 +378,11 @@ function planProposalSchema(): Record<string, unknown> {
       goal: { type: "string" },
       shape: { enum: ["single_leaf", "fact_then_produce", "multi_deliverable", "pipeline", "recovery_patch"] },
       selectedSkillIds: { type: "array", items: { type: "string" } },
-      selectedSkillRoles: { type: "array", items: { type: "object" } },
-      steps: { type: "array", items: { type: "object" } },
+      selectedSkillRoles: { type: "array", items: {
+        type: "object", additionalProperties: false, required: ["skillId", "role", "reason"],
+        properties: { skillId: { type: "string" }, role: { type: "string", enum: ["primary_builder", "source_provider", "support", "qa"] }, reason: { type: "string" } },
+      } },
+      steps: { type: "array", minItems: 1, items: step },
     },
   };
 }

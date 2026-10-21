@@ -8,6 +8,8 @@ import { understandTask } from "../src/runtime/task-intent.ts";
 import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
 import type { PrivateSkill } from "../src/skills/skill-service.ts";
 import { planningCapabilitiesFromSkills, planningCapabilitiesFromToolNames, skillSourceProviderCapabilityId } from "../src/planning/step-execution-binding.ts";
+import { ModelRecoveryPlanner } from "../src/runtime/recovery-planning.ts";
+import { recoveryProposalSuccessCriteria } from "../src/runtime/run-service.ts";
 
 class RedundantSourceConstraintPlannerModel implements ModelAdapter {
   readonly limits = { contextWindowTokens: 40_000, maxOutputTokens: 2_048 } as const;
@@ -644,6 +646,237 @@ test("source-grounded conversation lookup receives a single delivery boundary in
   assert.match(coreCriterion.description, /Directly fulfill the user-facing delivery target/i);
   assert.match(coreCriterion.description, /Source extracts, field tables, and raw evidence alone/i);
 });
+
+function webpageSummaryPlanningFixture() {
+  const objective = "帮我抓取总结一下这个网页的内容https://3499f4649d1e4e1092dd5218afd028ba.app.workbuddy.host/";
+  const targetId = "webpage-summary";
+  const tools = [
+    { name: "websearch", description: "Search public web sources." },
+    { name: "webfetch", description: "Fetch a public web page." },
+  ];
+  const understanding = understandTask({
+    objective,
+    toolNames: tools.map((tool) => tool.name),
+    evidenceDemand: "source_grounded",
+    resolvedTaskIntent: {
+      schema: "agentloop.conversationTaskIntent/v1",
+      operation: "analysis",
+      requiresExecution: true,
+      deliverables: [{ targetId, purpose: "抓取并总结网页内容", expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }],
+    },
+  });
+  const runId = "run-webpage-summary-contract-repair";
+  const canonicalState = createCanonicalRunState({ runId, userInput: objective, understanding, now: 1 });
+  const fact = () => ({
+    id: "webpage-content",
+    description: "网页正文内容",
+    evidenceKinds: ["source_summary"],
+    basis: {
+      kind: "user_requirement",
+      intentId: canonicalState.intent.id,
+      targetIds: [targetId],
+      rationale: "The fetched page is the evidence needed to summarize the requested webpage.",
+    },
+  });
+  return {
+    task: { runId, canonicalState, availableSkills: [], availableTools: tools, availableToolNames: tools.map((tool) => tool.name) },
+    response(violation?: "quote" | "ownership", requirement = "向用户提供该网页内容的中文摘要"): ModelResponse {
+      const acquisition = {
+        id: "fetch-page",
+        objective: "抓取网页正文作为总结依据。",
+        requiredFacts: [fact()],
+        dependsOn: [], role: "fact_acquisition", skillIds: [], requiredCapabilities: ["web_research"],
+        sourceConstraint: null, evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "mark_unverified_facts" },
+        targetIds: violation === "ownership" ? [targetId] : [],
+      };
+      const delivery = {
+        id: "deliver-summary",
+        objective: "根据网页正文交付总结。",
+        requiredFacts: [{ ...fact(), basis: { ...fact().basis, ...(violation === "quote" ? { requirement } : {}) } }],
+        dependsOn: ["fetch-page"], role: "deliver", skillIds: [],
+        requiredCapabilities: ["conversation_delivery"], sourceConstraint: null,
+        evidenceContract: { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" }, targetIds: [targetId],
+      };
+      return {
+        content: "", finishReason: "tool_calls" as const,
+        toolCalls: [{ id: "webpage-plan", name: "submit_outcome_plan", arguments: {
+          schema: "agentloop.outcomePlan/v2", goal: objective, shape: "fact_then_produce", selectedSkillRoles: [],
+          leaves: [acquisition, delivery],
+        } }],
+      };
+    },
+  };
+}
+
+test("webpage summary provenance is Runtime-bound and both live paraphrases are rejected as model fields", async (t) => {
+  for (const requirement of [undefined, "向用户提供该网页内容的中文摘要", "输出为中文摘要"]) {
+    await t.test(requirement ?? "model omits the Runtime-owned field", async () => {
+      const fixture = webpageSummaryPlanningFixture();
+      let calls = 0;
+      const failures: string[] = [];
+      const proposal = await new ModelPlanner({
+        limits: { contextWindowTokens: 40_000, maxOutputTokens: 4_096 },
+        async complete(request) {
+          calls += 1;
+          const schema = request.tools[0]!.inputSchema as any;
+          const basisSchema = schema.properties.leaves.items.properties.requiredFacts.items.properties.basis;
+          assert.equal(basisSchema.additionalProperties, false);
+          assert.equal(Object.hasOwn(basisSchema.properties, "requirement"), false);
+          assert.equal(basisSchema.required.includes("requirement"), false);
+          return fixture.response(calls === 1 && requirement !== undefined ? "quote" : undefined, requirement);
+        },
+      }).plan(fixture.task, undefined, async (event) => {
+        if (event.type === "planning.contract_failed") failures.push(String(event.data.validationError));
+      });
+      assert.equal(calls, requirement === undefined ? 1 : 2);
+      assert.equal(failures.length, requirement === undefined ? 0 : 1);
+      for (const failure of failures) assert.match(failure, /requirement is Runtime-owned and must not be submitted/);
+      const plan = admitPlan({ ...fixture.task, proposal, availableToolNames: new Set(fixture.task.availableToolNames) });
+      for (const step of plan.steps) {
+        assert.equal(step.requiredFacts[0]!.basis!.requirement, fixture.task.canonicalState.intent.userInput);
+        assert.equal(step.successCriteria.find((criterion) => criterion.id === "required_fact:webpage-content")!
+          .basis!.requirement, fixture.task.canonicalState.intent.userInput);
+      }
+    });
+  }
+});
+
+test("Planner repairs independent basis and target-ownership violations without dropping prerequisite provenance", async () => {
+  const fixture = webpageSummaryPlanningFixture();
+  let calls = 0;
+  const failures: string[] = [];
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 40_000, maxOutputTokens: 4_096 },
+    async complete(request) {
+      calls += 1;
+      if (calls > 1) {
+        assert.match(request.runtimeContext?.content ?? "", /requiredFacts\[\].basis\.targetIds records which canonical targets a fact supports/);
+        assert.match(request.runtimeContext?.content ?? "", /Bind every canonical delivery target exactly once across leaves/);
+      }
+      return fixture.response(calls === 1 ? "quote" : calls === 2 ? "ownership" : undefined);
+    },
+  };
+  const proposal = await new ModelPlanner(model, { maxPlanningTurns: 3 }).plan(fixture.task, undefined, async (event) => {
+    if (event.type === "planning.contract_failed") failures.push(String(event.data.validationError));
+  });
+  assert.equal(calls, 3);
+  assert.equal(failures.length, 2);
+  assert.match(failures[0]!, /requirement is Runtime-owned and must not be submitted/);
+  assert.equal(failures[1], "Plan targetIds must cover canonical delivery targets exactly once: multiply owned webpage-summary");
+  const admitted = admitPlan({
+    ...fixture.task, proposal, availableToolNames: new Set(fixture.task.availableToolNames),
+  });
+  const acquisition = admitted.steps.find((step) => step.id === "fetch-page")!;
+  const delivery = admitted.steps.find((step) => step.id === "deliver-summary")!;
+  assert.deepEqual(acquisition.executionBinding.targetIds, []);
+  assert.deepEqual(delivery.executionBinding.targetIds, ["webpage-summary"]);
+  const acquisitionCore = acquisition.successCriteria.find((criterion) => criterion.id === "fetch-page-core-result");
+  assert.ok(acquisitionCore);
+  assert.match(acquisitionCore.description, /source facts|fact summary/i);
+  assert.doesNotMatch(acquisitionCore.description, /HTML artifact|workspace path|non-empty file/i);
+  for (const step of [acquisition, delivery]) {
+    assert.deepEqual(step.requiredFacts[0]?.basis?.targetIds, ["webpage-summary"]);
+    assert.equal(step.requiredFacts[0]?.basis?.requirement, fixture.task.canonicalState.intent.userInput);
+    assert.deepEqual(step.requiredFacts[0]?.evidenceKinds, ["source_summary"]);
+  }
+});
+
+test("Planner stops repeated ownership failures and respects the total turn budget across distinct failures", async (t) => {
+  for (const repeated of [true, false]) {
+    await t.test(repeated ? "same violation stops early" : "different violations cannot exceed turn limit", async () => {
+      const fixture = webpageSummaryPlanningFixture();
+      let calls = 0;
+      const planner = new ModelPlanner({
+        limits: { contextWindowTokens: 40_000, maxOutputTokens: 4_096 },
+        async complete() {
+          calls += 1;
+          return fixture.response(!repeated && calls === 1 ? "quote" : "ownership");
+        },
+      }, { maxPlanningTurns: repeated ? 8 : 2 });
+      await assert.rejects(planner.plan(fixture.task), /multiply owned webpage-summary/);
+      assert.equal(calls, 2);
+    });
+  }
+});
+
+test("Recovery resubmits explicit ownership and downstream fact provenance through Plan admission", async () => {
+  const fixture = webpageSummaryPlanningFixture();
+  const proposal = await new ModelPlanner({
+    limits: { contextWindowTokens: 40_000, maxOutputTokens: 4_096 },
+    complete: async () => fixture.response(),
+  }).plan(fixture.task);
+  const plan = admitPlan({ ...fixture.task, proposal, availableToolNames: new Set(fixture.task.availableToolNames) });
+  const input = {
+    runId: fixture.task.runId, userInput: fixture.task.canonicalState.intent.userInput,
+    plan, canonicalState: fixture.task.canonicalState, events: [], userResponses: [],
+    action: { id: "review-webpage-contract", runId: fixture.task.runId, kind: "recovery_review" as const,
+      state: "recovery_required" as const, attempt: 1, maxAttempts: 3, replayPolicy: "safe" as const,
+      fence: 1, revision: 1, metadata: {}, effectState: "not_started" as const, createdAt: 1, updatedAt: 1 },
+  };
+  for (const binding of ["explicit", "missing", "duplicate", "foreign", "forged-fact", "forged-criterion", "foreign-intent", "method"] as const) {
+    const recovery = new ModelRecoveryPlanner({
+      limits: { contextWindowTokens: 40_000, maxOutputTokens: 4_096 },
+      complete: async (request) => {
+        const schema = request.tools[0]!.inputSchema as any;
+        const stepSchema = schema.properties.planRevision.properties.steps.items;
+        assert.ok(stepSchema.required.includes("targetIds"));
+        assert.ok(stepSchema.required.includes("dependencies"));
+        assert.ok(stepSchema.properties.requiredFacts.items.required.includes("basis"));
+        assert.equal(Object.hasOwn(stepSchema.properties.requiredFacts.items.properties.basis.properties, "requirement"), false);
+        assert.equal(Object.hasOwn(stepSchema.properties.successCriteria.items.properties.basis.properties, "requirement"), false);
+        assert.match(request.systemPrompt, /executionBinding.targetIds/);
+        assert.match(request.systemPrompt, /complete replacement proposal/);
+        const context = JSON.parse(request.runtimeContext!.content);
+        assert.deepEqual(context.currentPlan.steps.map((step: any) => step.executionBinding.targetIds), [[], ["webpage-summary"]]);
+        return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "correct-contract", name: "submit_recovery_decision", arguments: {
+          actionId: input.action.id, expectedActionRevision: 1, decision: "revise_plan",
+          rationale: "Retain source evidence and repair only the unsupported artifact criterion.", evidenceRefs: ["fetch-result"],
+          planRevision: { goal: plan.goal, shape: "fact_then_produce", selectedSkillIds: [], steps: plan.steps.map((step) => ({
+            id: step.id, objective: step.objective, role: step.role, dependencies: step.dependencies,
+            skillIds: step.skillIds, requiredCapabilities: step.requiredCapabilities,
+            ...(binding === "missing" ? {} : { targetIds: binding === "duplicate" ? ["webpage-summary"]
+              : binding === "foreign" ? ["foreign-target"] : step.executionBinding.targetIds }),
+            requiredFacts: step.requiredFacts.map((fact) => ({ ...fact, basis: {
+              ...modelBasis(fact.basis!),
+              ...(binding === "forged-fact" ? { requirement: "输出为中文摘要" } : {}),
+              ...(binding === "foreign-intent" ? { intentId: "foreign" } : {}),
+              ...(binding === "method" ? { kind: "execution_method" } : {}),
+            } })),
+            evidenceContract: step.evidenceContract,
+            successCriteria: recoveryProposalSuccessCriteria(step.successCriteria)
+              .map((criterion) => ({ ...criterion, basis: { ...modelBasis(criterion.basis!),
+                ...(binding === "forged-criterion" ? { requirement: "向用户提供该网页内容的中文摘要" } : {}),
+              } })),
+          })) },
+        } }] };
+      },
+    });
+    if (binding === "missing") {
+      await assert.rejects(recovery.decide(input), /planRevision.steps\[0\].targetIds must be an array/);
+      continue;
+    }
+    if (binding === "forged-fact" || binding === "forged-criterion") {
+      await assert.rejects(recovery.decide(input), /requirement is Runtime-owned and must not be submitted/);
+      continue;
+    }
+    const decision = await recovery.decide(input);
+    const readmit = () => admitPlan({ ...fixture.task, proposal: decision.planRevision!, availableToolNames: new Set(fixture.task.availableToolNames) });
+    if (binding !== "explicit") {
+      assert.throws(readmit, /canonical targets|canonical delivery targets|unknown.*target|canonical intent|execution method/i);
+      continue;
+    }
+    const revised = readmit();
+    assert.deepEqual(revised.steps.map((step) => step.executionBinding.targetIds), [[], ["webpage-summary"]]);
+    assert.deepEqual(revised.steps.map((step) => step.requiredFacts), plan.steps.map((step) => step.requiredFacts));
+    assert.deepEqual(revised.steps[1]!.dependencies, ["fetch-page"]);
+    assert.equal(revised.steps[1]!.successCriteria.filter((criterion) => criterion.id === "delivery_target:webpage-summary").length, 1);
+  }
+});
+
+function modelBasis(basis: import("../src/planning/contracts.ts").CriterionBasis) {
+  const { requirement: _requirement, ...metadata } = basis;
+  return metadata;
+}
 
 test("Planner repair uses a bound prior Result instead of recreating its fact-acquisition leaf", async () => {
   let calls = 0;

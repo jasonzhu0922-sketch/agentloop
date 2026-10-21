@@ -28,7 +28,7 @@ import { resolveCapabilityGaps, resolveSourceGroundingGap } from "./capability-r
 import { planningCapabilitiesFromToolNames, planningCapabilitiesFromTools, skillSourceProviderCapabilityId } from "./step-execution-binding.ts";
 import { runtimeResultBindingsForConversationTurn, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
 import { assertCanonicalDeliveryTargetInventory } from "../runtime/canonical-run-state.ts";
-import { CRITERION_BASIS_SCHEMA, goalCriterionBasis, parseCriterionBasis } from "./criterion-basis.ts";
+import { MODEL_CRITERION_BASIS_SCHEMA, goalCriterionBasis, parseModelCriterionBasis } from "./criterion-basis.ts";
 import { EVIDENCE_KINDS } from "./contracts.ts";
 
 const EVIDENCE_KIND_VALUES = [
@@ -89,6 +89,8 @@ const CAVEAT_POLICY_VALUES = [
 // authority that validates it before a model is invoked.
 export const DEFAULT_MAX_PLANNING_TURNS = 4;
 export const MAX_SUPPORTED_PLANNING_TURNS = 64;
+const TARGET_OWNERSHIP_GUIDANCE = "requestedTargets is Runtime-owned and immutable. Bind every canonical delivery target exactly once across leaves, on the leaf that produces or adopts it. Every leaf must include targetIds; use [] for a prerequisite that delivers no user-visible target. Do not invent IDs or rewrite purpose, surface, kind, or format.";
+const REQUIRED_FACT_TARGET_GUIDANCE = "requiredFacts[].basis.targetIds records which canonical targets a fact supports, not delivery ownership. It may reference targets owned by this leaf or by downstream leaves that depend on it, directly or transitively. A prerequisite with targetIds: [] can reference downstream targets in its facts' basis; do not copy those references into the prerequisite's targetIds.";
 const OUTCOME_LEAF_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -116,7 +118,13 @@ const OUTCOME_LEAF_SCHEMA = {
         properties: {
           id: { type: "string" },
           description: { type: "string" },
-          basis: CRITERION_BASIS_SCHEMA,
+          basis: {
+            ...MODEL_CRITERION_BASIS_SCHEMA,
+            properties: {
+              ...MODEL_CRITERION_BASIS_SCHEMA.properties,
+              targetIds: { ...MODEL_CRITERION_BASIS_SCHEMA.properties.targetIds, description: REQUIRED_FACT_TARGET_GUIDANCE },
+            },
+          },
           evidenceKinds: { type: "array", minItems: 1, maxItems: 20, items: { type: "string", enum: EVIDENCE_KIND_VALUES } },
         },
       },
@@ -161,6 +169,7 @@ const OUTCOME_LEAF_SCHEMA = {
     },
     targetIds: {
       type: "array",
+      description: TARGET_OWNERSHIP_GUIDANCE,
       maxItems: 8,
       items: { type: "string", minLength: 1, maxLength: 128 },
     },
@@ -307,7 +316,7 @@ export class ModelPlanner implements Planner {
     let planningTask = task;
     let selectedSkillRoles = task.selectedSkillRoles ?? selectInitialSkillRoles(task.availableSkills, taskProfile);
     let capabilityRecoveryCount = 0;
-    const attemptedContractRepairs = new Set<PlannerContractRetryKind>();
+    const attemptedContractRepairs = new Set<string>();
     let lastPlanningError: AppError | undefined;
     await emit?.({
       type: "planning.profile.created",
@@ -335,16 +344,17 @@ export class ModelPlanner implements Planner {
         "When a conversation TaskProfile has shape single_leaf, submit exactly one deliver leaf that owns every conversation target. Gather source evidence inside that leaf; do not create a fact_acquisition-to-deliver pair merely to rewrite the same findings.",
         "Plan source work by coverage of each requested fact, not by the first available Tool or Skill. Before selecting capabilities, identify what must be answered and compare it with each source's declared scope and freshness. For lookups, identification, explanations and comparisons alike, bind complementary acquisition when the provider does not establish a requested fact; include that acquisition and the final synthesis in the leaf objective. Do not replace a missing requested fact with a related provider field or a caveat. Keep complementary acquisition in the same conversation deliver leaf, and omit redundant sources when one source covers the request.",
         "In requiredFacts, enumerate the concrete factual answers explicitly required by the user, with their exact concepts, scope and time, before selecting source capabilities. These are answer obligations, not acquisition actions or receipt labels. Use [] when no concrete source-backed facts are requested. Artifact edit instructions and requested output properties are covered by requested_goal acceptance, not new source-backed facts. Every requiredFacts item must include all four fields: id, description, evidenceKinds (a non-empty array of allowed evidence kinds), and basis. A source with narrower scope can provide leads, but cannot redefine a required fact. Choose capabilities that can obtain every required fact; do not plan to satisfy an answer obligation merely by reporting that the first provider lacks its field.",
-        "Every requiredFact must carry basis referencing canonicalRunState.intent.id, owned targetIds, an exact quote from intent.userInput, and a rationale. Use user_requirement for explicitly requested answers; necessary_condition must explain why the requested result would be invalid without it. Research references, implementation preferences, Skill workflow steps, and receipt labels are execution methods, not new factual answer obligations. They must not expand the user's acceptance conditions.",
+        "Every requiredFact must carry basis metadata referencing canonicalRunState.intent.id, related canonical targetIds, and a rationale. requirement is Runtime-owned: do not submit it; Runtime binds the complete canonicalRunState.intent.userInput after parsing. Resolver userConstraints, Plan paraphrases, and Skill instructions cannot provide provenance.",
+        "Use user_requirement for explicitly requested answers; necessary_condition must explain why the requested result would be invalid without it. Research references, implementation preferences, Skill workflow steps, and receipt labels are execution methods, not new factual answer obligations. They must not expand the user's acceptance conditions.",
+        REQUIRED_FACT_TARGET_GUIDANCE,
         "Preserve every fact, role, measure, scope and time requested by the user. Source-provider fields and related concepts are not substitutes for the requested concepts. If a provider does not cover one requested fact, plan the complementary acquisition needed for that fact instead of redefining the deliverable to fit the provider; mark genuinely unavailable facts as gaps without claiming they were answered.",
         "Leaves are durable evidence boundaries, not workflow scripts or internal tool checklists.",
         "selectedSkillRoles is an execution-selection list, not a candidate list: every listed Skill, regardless of role, must also appear in at least one concrete leaf.skillIds; otherwise omit it.",
         "Keep local receipt, export, and readback evidence inside the producing leaf.",
         "For requested file or media formats, the minimum usability of that format is core delivery evidence: readable/openable output, requested format/type, workspace path, and non-empty receipt.",
-        "requestedTargets is Runtime-owned and immutable. Every outcome leaf must bind the user-visible deliverable targetIds it owns; do not invent IDs or rewrite purpose, surface, kind, or format.",
+        TARGET_OWNERSHIP_GUIDANCE,
         "Delivery evidence is scoped by each leaf's targetIds. A leaf that owns only conversation targets must not require artifact_path, artifact_non_empty, format_matches_request, artifact_acceptance, artifact_openable, or workspace_artifact_write merely because another leaf owns a workspace target.",
         "Artifact receipts belong only to leaves that own workspace_artifact targets; conversation summary leaves use conversation_delivery unless they are also producing a workspace target.",
-        "Every leaf must include targetIds. Use [] only for a prerequisite leaf that delivers no user-visible target.",
         "HIL pauses an outcome; preserve its requested deliverable and continue production after the response.",
         "For browser/document artifacts, require format/openability; Skill-owned QA covers navigation and polish unless required.",
         "Do not create Skill-loading-only, polish-only, QA, or repair/verification tail leaves. Skill-required QA is handled inside the Skill-bound leaf after load_skill, not as a Planner template.",
@@ -490,8 +500,12 @@ export class ModelPlanner implements Planner {
         const contractRetry = sourceProviderViolations.length > 0
           ? { kind: "source_provider_contract" as const, directive: sourceProviderContractDirective(planningError, sourceProviderViolations) }
           : plannerContractRetryDirective(planningError, response, outcomePlanCalls, planningTask);
-        if (contractRetry !== undefined && !attemptedContractRepairs.has(contractRetry.kind)) {
-          attemptedContractRepairs.add(contractRetry.kind);
+        // A repaired proposal can expose a different violation in the same
+        // contract family. Stop repeated failures, not distinct corrections;
+        // maxPlanningTurns still bounds the entire sequence.
+        const repairKey = contractRetry === undefined ? undefined : JSON.stringify([contractRetry.kind, planningError.message]);
+        if (contractRetry !== undefined && repairKey !== undefined && !attemptedContractRepairs.has(repairKey)) {
+          attemptedContractRepairs.add(repairKey);
           runtimeDirective = contractRetry.directive;
           if (contractRetry.kind === "native_skill_binding") {
             await emit?.({
@@ -979,7 +993,9 @@ function plannerOutcomePlanAdmissionDirective(
     "planning_context.candidateSkillRoles are relevance suggestions, not preselected dependencies. Omit any candidate that is not bound to and executed by a concrete leaf.",
     "Every selected primary_builder Skill must be bound to at least one concrete leaf that uses it.",
     "Every dependsOn entry must name a leaf id present in the current submit_outcome_plan.leaves array. Do not reference leaf ids from earlier rejected attempts.",
-    "Every requiredFact must retain id, description, evidenceKinds, and basis when correcting the plan. basis.requirement must be an exact substring of canonicalRunState.intent.userInput; resolver userConstraints, Plan paraphrases, and Skill instructions are not user-authored quotes. For a necessary preservation condition, quote the original edit request and explain the necessity in basis.rationale using kind necessary_condition.",
+    TARGET_OWNERSHIP_GUIDANCE,
+    REQUIRED_FACT_TARGET_GUIDANCE,
+    "Every requiredFact must retain id, description, evidenceKinds, and basis when correcting the plan. Do not submit basis.requirement: Runtime binds it to the complete canonicalRunState.intent.userInput. Resolver userConstraints, Plan paraphrases, and Skill instructions are not provenance. Explain any necessary preservation condition in basis.rationale using kind necessary_condition.",
     "A terminal leaf that only proposes options or waits for Human-in-the-Loop cannot satisfy a requested artifact. Keep the artifact-producing obligation in the same resumed leaf or add a dependent production leaf with observable artifact evidence.",
     "If a Skill is only a style/reference fallback and is not needed for execution, omit it from selectedSkillRoles instead of selecting it as support.",
     "Keep QA, verification, readback, and local acceptance inside the producing leaf unless TaskProfile.planShape is recovery_patch.",
@@ -992,7 +1008,9 @@ function plannerOutcomePlanArgumentsDirective(call: ModelToolCall, planningError
       "Your previous submit_outcome_plan call violated the tool's argument schema before Runtime Admission.",
       `Validation error: ${summarizePlanningError(planningError.message)}.`,
       "Submit exactly one corrected submit_outcome_plan call for the same user goal, preserving all required fields in the tool schema.",
-      "Each requiredFacts item must include id, description, evidenceKinds (a non-empty array of allowed evidence kinds), and basis (kind, intentId, targetIds, requirement, rationale). Do not remove sibling fields when repairing basis.",
+      "Each requiredFacts item must include id, description, evidenceKinds (a non-empty array of allowed evidence kinds), and basis (kind, intentId, targetIds, rationale). requirement is omitted because Runtime binds it. Do not remove sibling fields when repairing basis.",
+      TARGET_OWNERSHIP_GUIDANCE,
+      REQUIRED_FACT_TARGET_GUIDANCE,
       "Use requiredFacts: [] only when the request contains no concrete source-backed factual answers; requested artifact properties remain covered by requested_goal acceptance. Do not remove genuine requested facts to bypass validation.",
       "Do not execute work, call execution tools, load Skills, or declare completion during planning.",
     ].join("\n");
@@ -1353,7 +1371,7 @@ function planningRuntimeContext(
           skillIdPolicy: "Only availableSkillIds are Skills; capabilities, Tools, ToolSources, and evidence IDs use requiredCapabilities. Empty availableSkillIds means no Skills.",
           sourceConstraintPolicy: "Set sourceConstraint to null when a leaf has no concrete uploaded or visible-directory input binding. When present, submit sourceConstraint.bindings only for uploaded_source IDs listed in sources or visible_directory IDs listed in visibleDirectories. Runtime derives ToolSource bindings from requiredCapabilities and user-required source policy; do not submit tool_source, Tool names, MCP names, or Skill IDs.",
           requestedTargets: canonicalTaskUnderstanding(task).deliverables ?? [],
-          targetBindingPolicy: "requestedTargets is the complete immutable delivery inventory. Bind every requested target exactly once with targetIds on its producing or adopting leaf. Evidence and capabilities are scoped by each leaf's owned targetIds: workspace_artifact targets require artifact receipts on their owner leaf, while conversation-only targets must not require artifact evidence or workspace_artifact_write. Runtime materializes workspace artifact targets from the same canonical target inventory.",
+          targetBindingPolicy: `${TARGET_OWNERSHIP_GUIDANCE} ${REQUIRED_FACT_TARGET_GUIDANCE} Evidence and capabilities are scoped by each leaf's owned targetIds: workspace_artifact targets require artifact receipts on their owner leaf, while conversation-only targets must not require artifact evidence or workspace_artifact_write. Runtime materializes workspace artifact targets from the same canonical target inventory.`,
           allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
           allowedEvidenceKinds: EVIDENCE_KIND_VALUES,
           caveatPolicies: CAVEAT_POLICY_VALUES,
@@ -1403,6 +1421,7 @@ function submitOutcomePlanToolForTask(task: TaskSpec): ModelInvocation["tools"][
       sourceConstraint: sourceConstraintSchemaForTask(task),
       targetIds: {
         type: "array",
+        description: TARGET_OWNERSHIP_GUIDANCE,
         ...(allowedArtifactTargetIds.length === 0
           ? { maxItems: 0, items: { type: "string" } }
           : {
@@ -2463,9 +2482,16 @@ function isArtifactDeliveryEvidenceKind(kind: string): kind is typeof ARTIFACT_D
 }
 
 function coreSuccessCriterionDescription(step: PlanStepProposal, task: TaskSpec): string {
-  const ownsConversationTarget = (step.targetIds ?? []).some((targetId) =>
-    task.canonicalState.targets[targetId]?.surface === "conversation"
-  );
+  const ownedTargets = (step.targetIds ?? [])
+    .map((targetId) => task.canonicalState.targets[targetId])
+    .filter((target): target is NonNullable<typeof target> => target !== undefined);
+  // File delivery is derived from the canonical target contract. A source
+  // acquisition objective may mention a page or browser while owning no
+  // user-visible target, and therefore must not acquire an HTML obligation.
+  if (ownedTargets.some((target) => target.surface === "workspace_artifact")) {
+    return "Deliver the requested workspace artifact with an observable workspace path and non-empty file evidence.";
+  }
+  const ownsConversationTarget = ownedTargets.some((target) => target.surface === "conversation");
   // A source-backed conversation delivery has two independent obligations:
   // acquire trustworthy facts and answer the user's question with them.  The
   // former must not silently replace the latter simply because a source
@@ -2473,11 +2499,7 @@ function coreSuccessCriterionDescription(step: PlanStepProposal, task: TaskSpec)
   if (ownsConversationTarget && step.role !== "fact_acquisition") {
     return "Directly fulfill the user-facing delivery target by synthesizing the relevant evidence into the requested answer or explanation. Source extracts, field tables, and raw evidence alone are supporting material, not a substitute for the requested result.";
   }
-  const text = normalizePlannerText(`${step.id}\n${step.objective}`);
-  if (/(?:html[-_ ]?ppt|html|网页|页面|浏览器)/iu.test(text)) {
-    return "Deliver the requested HTML artifact with an observable workspace path and non-empty file evidence.";
-  }
-  if (/(?:source|research|web|fact|来源|调研|检索|事实|资料)/iu.test(text)) {
+  if (step.role === "fact_acquisition") {
     return "Produce a bounded fact summary with available source references and explicit caveats for unavailable facts.";
   }
   return "Produce observable evidence for the step objective without making unrequested optional enhancements blocking.";
@@ -2671,7 +2693,7 @@ function parseOutcomeLeaf(value: unknown, index: number, task: TaskSpec): PlanSt
     ? undefined
     : parseSourceConstraint(record.sourceConstraint, index, task);
   const targetIds = parseTargetIds(record.targetIds, index);
-  const requiredFacts = record.requiredFacts === undefined ? [] : parseRequiredFacts(record.requiredFacts, index);
+  const requiredFacts = record.requiredFacts === undefined ? [] : parseRequiredFacts(record.requiredFacts, index, task);
   return {
     id: requireString(record.id, `leaves[${index}].id`, { max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }),
     kind: "leaf",
@@ -2700,7 +2722,7 @@ function parseOutcomeLeaf(value: unknown, index: number, task: TaskSpec): PlanSt
   };
 }
 
-function parseRequiredFacts(value: unknown, leafIndex: number): NonNullable<PlanStepProposal["requiredFacts"]> {
+function parseRequiredFacts(value: unknown, leafIndex: number, task: TaskSpec): NonNullable<PlanStepProposal["requiredFacts"]> {
   if (!Array.isArray(value) || value.length > 20) throw badRequest(`leaves[${leafIndex}].requiredFacts must be an array with at most 20 items`);
   return value.map((entry, index) => {
     const name = `leaves[${leafIndex}].requiredFacts[${index}]`;
@@ -2715,7 +2737,7 @@ function parseRequiredFacts(value: unknown, leafIndex: number): NonNullable<Plan
     }
     return { id: requireString(fact.id, `${name}.id`, { max: 128 }),
       description: requireString(fact.description, `${name}.description`, { max: 2_000 }), evidenceKinds,
-      basis: parseCriterionBasis(fact.basis, `${name}.basis`) };
+      basis: parseModelCriterionBasis(fact.basis, `${name}.basis`, task.canonicalState) };
   });
 }
 

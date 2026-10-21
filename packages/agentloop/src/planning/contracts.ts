@@ -454,7 +454,7 @@ export interface CriterionBasis {
   readonly kind: "user_requirement" | "necessary_condition" | "execution_method";
   readonly intentId: string;
   readonly targetIds: readonly string[];
-  /** Exact user-authored text supporting the condition. */
+  /** Runtime-bound canonical intent.userInput; never authored by the model. */
   readonly requirement: string;
   readonly rationale: string;
 }

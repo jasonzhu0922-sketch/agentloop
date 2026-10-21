@@ -24,7 +24,7 @@ function factRepairFixture() {
   });
   const fact = { id: "current-chairman", description: "示例公司现任董事长的姓名", evidenceKinds: ["source_summary"],
     basis: { kind: "user_requirement", intentId: canonicalState.intent.id, targetIds: ["answer"],
-      requirement: "现任董事长", rationale: "The user explicitly requests the current holder of this role." } };
+      rationale: "The user explicitly requests the current holder of this role." } };
   return {
     fact,
     task: { runId, canonicalState, availableSkills: [], availableTools: tools, availableToolNames: ["webfetch"] },
@@ -39,7 +39,7 @@ function factRepairFixture() {
   };
 }
 
-test("a basis repair followed by missing fact fields gets a separate bounded argument repair without losing the requested fact", async () => {
+test("a forbidden requirement followed by missing fact fields gets bounded repairs without losing the requested fact", async () => {
   const fixture = factRepairFixture();
   let calls = 0;
   const failures: string[] = [];
@@ -50,8 +50,7 @@ test("a basis repair followed by missing fact fields gets a separate bounded arg
       if (calls === 1) return fixture.response({ ...fixture.fact,
         basis: { ...fixture.fact.basis, requirement: "Resolver-authored constraint absent from the user input" } });
       if (calls === 2) {
-        assert.match(request.runtimeContext!.content, /Criterion basis requirement must quote the original user input/);
-        assert.match(request.runtimeContext!.content, /resolver userConstraints, Plan paraphrases/);
+        assert.match(request.runtimeContext!.content, /requirement is Runtime-owned and must not be submitted/);
         // The live failure repaired basis while omitting both sibling fields.
         return fixture.response({ description: fixture.fact.description, basis: fixture.fact.basis });
       }
@@ -64,9 +63,11 @@ test("a basis repair followed by missing fact fields gets a separate bounded arg
     if (event.type === "planning.contract_failed") failures.push(String(event.data.validationError));
   });
   assert.equal(calls, 3);
-  assert.deepEqual(failures, ["Criterion basis requirement must quote the original user input",
-    "leaves[0].requiredFacts[0] is missing required fields: id, evidenceKinds"]);
-  assert.deepEqual(proposal.steps[0]!.requiredFacts, [fixture.fact]);
+  assert.equal(failures.length, 2);
+  assert.match(failures[0]!, /requirement is Runtime-owned and must not be submitted/);
+  assert.equal(failures[1], "leaves[0].requiredFacts[0] is missing required fields: id, evidenceKinds");
+  assert.deepEqual(proposal.steps[0]!.requiredFacts, [{ ...fixture.fact,
+    basis: { ...fixture.fact.basis, requirement: fixture.task.canonicalState.intent.userInput } }]);
   assert.equal(proposal.steps[0]!.successCriteria.find((criterion) => criterion.id === "required_fact:current-chairman")?.blocking, true);
 });
 
@@ -236,7 +237,7 @@ test("requested facts survive model planning, persisted admission, execution and
     { id: "president", description: "示例公司现任总裁的姓名，不能以登记总经理代替", evidenceKinds: ["source_summary"] },
   ].map((fact) => ({ ...fact, basis: {
     kind: "user_requirement" as const, intentId: canonicalState.intent.id, targetIds: ["answer"],
-    requirement: fact.id === "chairman" ? "现任董事长" : "总裁", rationale: "The user explicitly requests the current holder of this role.",
+    rationale: "The user explicitly requests the current holder of this role.",
   } }));
   const proposal = await new ModelPlanner({
     limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
@@ -262,7 +263,7 @@ test("requested facts survive model planning, persisted admission, execution and
     const plan = await repository.getByRun(runId);
     assert.ok(plan);
     const step = plan.steps[0]!;
-    assert.deepEqual(step.requiredFacts, facts);
+    assert.deepEqual(step.requiredFacts, facts.map((fact) => ({ ...fact, basis: { ...fact.basis, requirement: objective } })));
     for (const fact of facts) {
       const criterion = step.successCriteria.find((item) => item.id === `required_fact:${fact.id}`);
       assert.ok(criterion?.blocking);

@@ -285,6 +285,7 @@ export class RunService {
   private readonly systemPrompt: string;
   private readonly maxSteps: number;
   private readonly defaultModelKey?: string;
+  private readonly requireExplicitModel: boolean;
   private readonly allowedModelKeys?: ReadonlySet<string>;
   private readonly workspaceRoot: string;
   private readonly sourceStorageRoot: string;
@@ -345,6 +346,8 @@ export class RunService {
     /** Bounded model-turn budget per executable Plan step. */
     maxSteps?: number;
     defaultModelKey?: string;
+    /** Reject model-less Run creation before persisting or admitting execution. */
+    requireExplicitModel?: boolean;
     modelKeys?: readonly string[];
     runEventLogSink?: RunEventLogSink;
     planningExtensions?: readonly PlanningExtension[];
@@ -366,6 +369,7 @@ export class RunService {
     this.systemPrompt = options.systemPrompt ?? DEFAULT_RUNNER_SYSTEM_PROMPT;
     this.maxSteps = stepTurnLimit(options.maxSteps);
     this.defaultModelKey = options.defaultModelKey;
+    this.requireExplicitModel = options.requireExplicitModel === true;
     this.allowedModelKeys = options.modelKeys === undefined ? undefined : new Set(options.modelKeys);
     const skillReadOnlyRoots = [
       ...options.skills.skillDirectories,
@@ -1003,6 +1007,7 @@ export class RunService {
     )
       ?? await this.recoveryPlannerFactory(model).decide({
         runId,
+        canonicalState,
         userInput: run.input,
         action,
         ...(currentPlan === undefined ? {} : { plan: currentPlan }),
@@ -1455,6 +1460,9 @@ export class RunService {
   }
 
   private resolveRunModelKey(requestedModelKey: string | undefined): string | undefined {
+    if (this.requireExplicitModel && (requestedModelKey === undefined || requestedModelKey.trim().length === 0)) {
+      throw new AppError("BAD_REQUEST", "model_required", 400);
+    }
     const modelKey = requestedModelKey ?? this.defaultModelKey;
     if (modelKey === undefined) return undefined;
     if (this.allowedModelKeys !== undefined && !this.allowedModelKeys.has(modelKey)) {
