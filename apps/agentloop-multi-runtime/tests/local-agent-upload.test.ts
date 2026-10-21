@@ -55,6 +55,23 @@ test("Local Agent stores browser uploads as sources in the selected Runtime with
     await once(agent, "listening");
     const agentAddress = agent.address();
     assert.ok(agentAddress !== null && typeof agentAddress !== "string");
+    const preflight = await fetch(`http://127.0.0.1:${agentAddress.port}/healthz`, {
+      method: "OPTIONS",
+      headers: {
+        origin: "http://web.test",
+        "access-control-request-method": "GET",
+        "access-control-request-private-network": "true",
+      },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get("access-control-allow-origin"), "http://web.test");
+    assert.equal(preflight.headers.get("access-control-allow-private-network"), "true");
+    const deniedPreflight = await fetch(`http://127.0.0.1:${agentAddress.port}/healthz`, {
+      method: "OPTIONS",
+      headers: { origin: "http://untrusted.test", "access-control-request-private-network": "true" },
+    });
+    assert.equal(deniedPreflight.headers.get("access-control-allow-origin"), null);
+    assert.equal(deniedPreflight.headers.get("access-control-allow-private-network"), null);
     const response = await fetch(`http://127.0.0.1:${agentAddress.port}/v1/uploads`, {
       method: "POST",
       headers: { origin: "http://web.test", "content-type": "application/json", "x-local-session": "s".repeat(32) },

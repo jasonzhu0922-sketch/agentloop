@@ -72,7 +72,7 @@ test("Router derives task identity and accepts opaque local Runtime placement", 
         "x-tenant-id": "attacker-tenant",
         "x-user-id": "attacker-user",
       },
-      body: JSON.stringify({ conversationId: "c1", clientMessageId: "m1", input: "hello" }),
+      body: JSON.stringify({ conversationId: "c1", clientMessageId: "m1", input: "hello", requestedModelKey: "gpt-test" }),
     });
     assert.equal(created.status, 202);
     assert.equal(submitted?.tenantId, session.principal.tenantId);
@@ -83,7 +83,7 @@ test("Router derives task identity and accepts opaque local Runtime placement", 
     const forgedBodyIdentity = await fetch(`${base}/v1/tasks`, {
       method: "POST",
       headers: { authorization: `Bearer ${session.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ tenantId: "attacker-tenant", ownerUserId: "attacker-user", conversationId: "c1", clientMessageId: "m2", input: "hello" }),
+      body: JSON.stringify({ tenantId: "attacker-tenant", ownerUserId: "attacker-user", conversationId: "c1", clientMessageId: "m2", input: "hello", requestedModelKey: "gpt-test" }),
     });
     assert.equal(forgedBodyIdentity.status, 400);
 
@@ -95,6 +95,7 @@ test("Router derives task identity and accepts opaque local Runtime placement", 
         conversationId: "c1",
         clientMessageId: "m3",
         input: "read my folder",
+        requestedModelKey: "gpt-test",
         executionTarget: { kind: "local_device", deviceId: "device-1", runtimeId: "local-runtime-1" },
         dataPolicy: { mode: "local" },
         localDirectoryScopeIds: ["lds_opaque"],
@@ -115,13 +116,14 @@ test("Router derives task identity and accepts opaque local Runtime placement", 
         conversationId: "runtime-bound-conversation",
         clientMessageId: "m-runtime-conflict",
         input: "switch Runtime",
+        requestedModelKey: "gpt-test",
         executionTarget: { kind: "cloud_pool" },
         dataPolicy: { mode: "cloud" },
       }),
     });
     assert.equal(runtimeConflict.status, 409);
     assert.deepEqual(await runtimeConflict.json(), {
-      error: "当前会话已绑定 Runtime runtime-original；请新建会话后再切换 Runtime。",
+      error: "当前会话的执行位置或本机 Runtime 与本次请求不一致；请新建会话后再切换。",
       code: "conversation_runtime_conflict",
     });
 
@@ -133,12 +135,21 @@ test("Router derives task identity and accepts opaque local Runtime placement", 
         conversationId: "runtime-dispatching-conversation",
         clientMessageId: "m-dispatch-conflict",
         input: "race dispatch",
+        requestedModelKey: "gpt-test",
         executionTarget: { kind: "cloud_pool" },
         dataPolicy: { mode: "cloud" },
       }),
     });
     assert.equal(dispatchConflict.status, 409);
     assert.equal((await dispatchConflict.json()).code, "conversation_dispatch_in_progress");
+
+    const missingModel = await fetch(`${base}/v1/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${session.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ conversationId: "c1", clientMessageId: "m-missing-model", input: "choose implicitly" }),
+    });
+    assert.equal(missingModel.status, 409);
+    assert.deepEqual(await missingModel.json(), { error: "model_required: choose a model before sending" });
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -267,9 +278,42 @@ test("a Local Runtime Agent consumes one user-approved registration token and ca
     await assert.rejects(devices.authorizeLocalSession(agent.agentToken, localSession.token), /invalid or expired/i);
     assert.equal((await devices.authorizeLocalSession(agent.agentToken, refreshedLocalSession.token)).ownerUserId, owner.principal.userId);
     await assert.rejects(devices.authorizeLocalSession("invalid-agent-token-which-is-long-enough-123456", localSession.token), /not authorized|invalid/i);
+    await devices.revokeLocalSessions(owner.principal);
+    await assert.rejects(devices.authorizeLocalSession(agent.agentToken, refreshedLocalSession.token), /invalid or expired/i);
     await devices.revoke(owner.principal, agent.id);
     await assert.rejects(devices.heartbeat(agent.agentToken), /not authorized/);
   } finally {
+    await database.close();
+  }
+});
+
+test("logging out invalidates the user's active browser-to-Local-Agent session", async () => {
+  const database = new AppDatabase(":memory:");
+  const identity = new IdentityService(database);
+  const devices = new SqlDeviceRepository(database);
+  const session = await identity.register("logout-owner@example.test", "correct-horse-battery-7");
+  const registration = await devices.issueRegistrationToken(session.principal);
+  const publicKey = generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString();
+  const agent = await devices.registerAgent({ registrationToken: registration.token, displayName: "Owner Mac", publicKey });
+  const localSession = await devices.issueLocalSession(session.principal, agent.id);
+  const server = createRouterHttpServer({
+    async submit() { return { id: "unused", tenantId: session.principal.tenantId, ownerUserId: session.principal.userId }; },
+    async assignment() { return undefined; },
+  }, { identity, devices });
+  try {
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/auth/logout`, {
+      method: "POST", headers: { authorization: `Bearer ${session.token}` },
+    });
+    assert.equal(response.status, 204);
+    await assert.rejects(devices.authorizeLocalSession(agent.agentToken, localSession.token), /invalid or expired/i);
+    await assert.rejects(identity.authenticate(`Bearer ${session.token}`), /invalid or expired/i);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     await database.close();
   }
 });

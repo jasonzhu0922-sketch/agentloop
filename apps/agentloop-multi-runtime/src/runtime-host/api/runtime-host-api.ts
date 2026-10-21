@@ -1,13 +1,40 @@
 import { createServer, type Server } from "node:http";
 import { assertRuntimeDispatchEnvelope, type RuntimeHostService } from "../service/runtime-host-service.ts";
+import type { LlmProviderRegistry } from "@zhujun/agentloop";
 import type { RuntimeModelSummary } from "../../shared/contracts.ts";
+import { invocationFrom, responseAbortSignal, writeModelRecord } from "../../shared/model-proxy.ts";
 
 /** Private Router-to-Host transport. It is not exposed as a browser API. */
-export function createRuntimeHostHttpServer(host: RuntimeHostService, options: { readonly dispatchToken?: string; readonly models?: readonly RuntimeModelSummary[] } = {}): Server {
+export function createRuntimeHostHttpServer(host: RuntimeHostService, options: { readonly dispatchToken?: string; readonly models?: readonly RuntimeModelSummary[]; readonly providers?: LlmProviderRegistry } = {}): Server {
   return createServer(async (request, response) => {
     try {
       if (request.method === "GET" && request.url === "/healthz") return json(response, 200, { status: "ok" });
       if (request.method === "GET" && request.url === "/v1/models") return json(response, 200, { models: options.models ?? [] });
+      if (request.method === "POST" && request.url === "/v1/model-completions") {
+        if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) return json(response, 401, { error: "runtime_dispatch_unauthorized" });
+        if (options.providers === undefined) return json(response, 503, { error: "model_invocation_unavailable" });
+        const body = readRecord(await readJson(request));
+        if (typeof body.modelKey !== "string" || body.invocation === undefined) return json(response, 400, { error: "model_invocation_invalid" });
+        const invocation = invocationFrom(body.invocation);
+        response.statusCode = 200;
+        response.setHeader("content-type", "application/x-ndjson");
+        response.setHeader("cache-control", "no-store");
+        const signal = responseAbortSignal(response);
+        try {
+          const model = options.providers.create(body.modelKey, async (info) => { await writeModelRecord(response, { type: "retry", info }); });
+          const result = model.streamComplete === undefined
+            ? await model.complete(invocation, signal)
+            : await model.streamComplete(invocation, async (event) => { await writeModelRecord(response, { type: "delta", event }); }, signal);
+          await writeModelRecord(response, { type: "result", response: result });
+          response.end();
+        } catch (error) {
+          if (!response.destroyed) {
+            await writeModelRecord(response, { type: "error", error: error instanceof Error ? error.message : String(error) });
+            response.end();
+          }
+        }
+        return;
+      }
       const runMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)$/);
       if (request.method === "GET" && runMatch !== undefined && runMatch !== null) {
         if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) {

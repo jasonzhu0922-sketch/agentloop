@@ -121,7 +121,15 @@ const info = (await readFile(join(appRoot, "distribution/macos/Info.plist"), "ut
 await writeFile(join(contents, "Info.plist"), info);
 await signNestedCode(resources, macOS);
 run("/usr/bin/codesign", ["--force", "--sign", process.env.APPLE_CODESIGN_IDENTITY ?? "-", "--options", "runtime", application]);
-run("/usr/bin/pkgbuild", ["--root", stagingRoot, "--component-plist", join(appRoot, "distribution/macos/components.plist"), "--identifier", "com.agentloop.local-runtime", "--version", version, "--install-location", "/", pkg]);
+run("/usr/bin/pkgbuild", [
+  "--root", stagingRoot,
+  "--scripts", join(appRoot, "distribution/macos/scripts"),
+  "--component-plist", join(appRoot, "distribution/macos/components.plist"),
+  "--identifier", "com.agentloop.local-runtime",
+  "--version", version,
+  "--install-location", "/",
+  pkg,
+]);
 await rm(buildRoot, { recursive: true, force: true });
 process.stdout.write(`Built ${pkg} (${seaInjected ? "Node SEA" : "bundled Node fallback"})\n`);
 

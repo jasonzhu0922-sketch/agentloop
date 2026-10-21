@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
-import { AppDatabase, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools, loadMcpToolsFromConfig } from "@zhujun/agentloop";
+import { AppDatabase, AppError, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools, loadMcpToolsFromConfig, type ModelAdapter, type ModelInvocation, type ModelResponse, type ModelRetryReporter, type ModelStreamSink } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { loadPracticeProfileConfig, loadStepExecutionStrategyProfileConfig, webToolsOptionsFromEnvironment } from "../../../src/shared/config.ts";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
@@ -8,6 +8,36 @@ import { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.t
 import type { ResolvedLocalRuntimeConfiguration } from "../persistence/local-runtime-configuration-store.ts";
 import { LocalModelStreamCaptureStore } from "../persistence/model-stream-capture-store.ts";
 import { LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
+import { LocalAgentStateStore } from "../persistence/local-agent-state-store.ts";
+import { consumeModelResponse } from "../../../src/shared/model-proxy.ts";
+
+class CloudProxyModel implements ModelAdapter {
+  readonly limits = { contextWindowTokens: 1_000_000, maxOutputTokens: 1_000_000 };
+  readonly completeTimeoutMs = 30 * 60_000;
+  readonly operationTimeoutMs = 30 * 60_000;
+  readonly reasoningVisibility = "visible" as const;
+  private readonly input: LocalAgentOptions;
+  private readonly key: string;
+  private readonly onRetry?: ModelRetryReporter;
+
+  constructor(input: LocalAgentOptions, key: string, onRetry?: ModelRetryReporter) {
+    this.input = input;
+    this.key = key;
+    this.onRetry = onRetry;
+  }
+  async complete(invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse> {
+    return await this.streamComplete(invocation, async () => undefined, signal);
+  }
+  async streamComplete(invocation: ModelInvocation, sink: ModelStreamSink, signal?: AbortSignal): Promise<ModelResponse> {
+    const state = await new LocalAgentStateStore(this.input.statePath).read();
+    if (state.device === undefined || this.input.routerUrl === undefined) throw new LocalRuntimeSupervisorError(409, "cloud_model_device_not_registered");
+    const response = await fetch(new URL("/v1/device-agent/model-completions", this.input.routerUrl), {
+      method: "POST", headers: { authorization: `Bearer ${state.device.agentToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ modelKey: this.key, invocation }), signal,
+    });
+    return await consumeModelResponse(response, sink, this.onRetry);
+  }
+}
 
 interface McpStartupIntegration {
   readonly loadedServers: readonly { readonly key: string; readonly toolCount: number }[];
@@ -83,9 +113,14 @@ export class LocalRuntimeFactory {
     const scopes = new LocalDirectoryScopeStore(database);
     await scopes.ready();
     const streamCaptures = new LocalModelStreamCaptureStore(join(runtimeRoot, "diagnostics", "model-streams"));
-    const provider = await LlmProviderRegistry.fromConfigFile(this.input.providerConfigPath, integrationEnvironment, {
-      streamRawCaptureWriter: streamCaptures.capture,
-    });
+    const localModelConfiguration = configuration.modelConfiguration;
+    const modelEnvironment = { ...integrationEnvironment, ...(localModelConfiguration?.environment ?? {}) };
+    if (localModelConfiguration?.configured === true && localModelConfiguration.registryConfig === undefined && !localModelConfiguration.reuseCloudModels) {
+      throw new LocalRuntimeSupervisorError(409, "local_model_configuration_has_no_models");
+    }
+    const provider = localModelConfiguration?.configured === true
+      ? localModelConfiguration.registryConfig === undefined ? undefined : LlmProviderRegistry.fromConfigObject(localModelConfiguration.registryConfig, modelEnvironment, { streamRawCaptureWriter: streamCaptures.capture })
+      : await LlmProviderRegistry.fromConfigFile(this.input.providerConfigPath, modelEnvironment, { streamRawCaptureWriter: streamCaptures.capture });
     const packaged = environment.AGENTLOOP_BUNDLED_SKILL_DIRECTORIES?.split(",").map((path) => path.trim()).filter(Boolean);
     const skills = new SkillService(database, {
       packageStoreRoot: this.input.skillPackageStoreRoot,
@@ -100,10 +135,23 @@ export class LocalRuntimeFactory {
       { environment: integrationEnvironment },
     );
     const runs = new RunService({
-      database, skills, modelFactory: (onRetry, modelKey) => provider.create(modelKey, onRetry),
+      requireExplicitModel: true,
+      database, skills, modelFactory: (onRetry, modelKey) => {
+        if (modelKey === undefined || modelKey.length === 0) throw new AppError("MODEL_ERROR", "model_required", 400);
+        if (typeof modelKey === "string" && modelKey.startsWith("cloud:")) {
+          if (localModelConfiguration?.reuseCloudModels !== true) throw new AppError("MODEL_ERROR", "cloud_model_reuse_disabled", 409);
+          if (modelKey.length === "cloud:".length) throw new AppError("MODEL_ERROR", "model_key_invalid", 400);
+          return new CloudProxyModel(this.input, modelKey.slice("cloud:".length), onRetry);
+        }
+        if (typeof modelKey === "string" && modelKey.startsWith("local:")) {
+          if (provider === undefined) throw new AppError("MODEL_ERROR", "local_model_unavailable", 409);
+          return provider.create(modelKey.slice("local:".length), onRetry);
+        }
+        throw new AppError("MODEL_ERROR", "model_source_required: choose a model from the Local Runtime catalog", 400);
+      },
       ...(this.input.planningMaxTurns === undefined ? {} : { maxPlanningTurns: this.input.planningMaxTurns }),
       ...(this.input.stepMaxTurns === undefined ? {} : { maxSteps: this.input.stepMaxTurns }),
-      defaultModelKey: provider.defaultModelKey, modelKeys: provider.modelKeys(), workspaceRoot: sharedStorageRoot, sourceStorageRoot,
+      workspaceRoot: sharedStorageRoot, sourceStorageRoot,
       ownerScopedWorkspace: true,
       stepExecutionStrategy: createStepExecutionStrategyProfile(strategy.profile, strategy.projection),
       practiceProfileCatalog: practiceProfiles,
@@ -132,7 +180,7 @@ export class LocalRuntimeFactory {
       try { if (shouldRetainRestoredRunActivity(await runs.get(row.owner_user_id, row.remote_run_id), restoredAt)) activeRunIds.add(row.remote_run_id); }
       catch { /* Orphaned ledger rows are not active admissions. */ }
     }
-    return { ...definition, database, scopes, runs, modelKeys: provider.modelKeys(), activeRunIds };
+    return { ...definition, database, scopes, runs, modelKeys: provider?.modelKeys().map((key) => `local:${key}`) ?? [], activeRunIds };
   }
 
   runtimeRootFor(definition: LocalRuntimeDefinition): string | undefined {

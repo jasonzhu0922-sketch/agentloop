@@ -9,11 +9,12 @@ import { RuntimeConnectionClient } from "../connection/router-runtime-control-cl
 import { pickNativeDirectory } from "../infrastructure/native-directory-picker.ts";
 import { LocalAgentStateStore, type LocalAgentState } from "../persistence/local-agent-state-store.ts";
 import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, type LocalRuntimeMcpServerInput } from "../persistence/local-runtime-configuration-store.ts";
+import { LocalModelConfigurationStore, type LocalModelConfigurationInput } from "../persistence/local-model-configuration-store.ts";
 import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local-runtime-secret-store.ts";
 import { loadSkillDirectoriesConfig } from "../../../src/shared/config.ts";
 import { LocalSkillPackageInstaller } from "./local-skill-package-installer.ts";
 
-export const LOCAL_AGENT_VERSION = "0.1.1";
+export const LOCAL_AGENT_VERSION = "0.1.3";
 export const LOCAL_AGENT_PROTOCOL_VERSION = "1";
 
 export class LocalAgentApplicationError extends Error {
@@ -30,17 +31,18 @@ export class LocalAgentService {
   private readonly stateStore: LocalAgentStateStore;
   private readonly supervisor: LocalRuntimeSupervisor;
   private readonly configurations: LocalRuntimeConfigurationStore;
+  private readonly modelConfigurations: LocalModelConfigurationStore;
   private readonly skillPackageInstaller: LocalSkillPackageInstaller;
   private readonly picker: () => Promise<string | undefined>;
   private readonly sharedStorageRoot: { value: string };
   private readonly uploadStorageRoot: { value: string };
   private constructor(
     input: LocalAgentOptions, stateStore: LocalAgentStateStore,
-    supervisor: LocalRuntimeSupervisor, configurations: LocalRuntimeConfigurationStore, skillPackageInstaller: LocalSkillPackageInstaller, picker: () => Promise<string | undefined>,
+    supervisor: LocalRuntimeSupervisor, configurations: LocalRuntimeConfigurationStore, modelConfigurations: LocalModelConfigurationStore, skillPackageInstaller: LocalSkillPackageInstaller, picker: () => Promise<string | undefined>,
     sharedStorageRoot: { value: string }, uploadStorageRoot: { value: string },
   ) {
     this.input = input; this.stateStore = stateStore;
-    this.supervisor = supervisor; this.configurations = configurations; this.skillPackageInstaller = skillPackageInstaller; this.picker = picker; this.sharedStorageRoot = sharedStorageRoot; this.uploadStorageRoot = uploadStorageRoot;
+    this.supervisor = supervisor; this.configurations = configurations; this.modelConfigurations = modelConfigurations; this.skillPackageInstaller = skillPackageInstaller; this.picker = picker; this.sharedStorageRoot = sharedStorageRoot; this.uploadStorageRoot = uploadStorageRoot;
   }
 
   static async create(input: LocalAgentOptions): Promise<LocalAgentService> {
@@ -64,9 +66,12 @@ export class LocalAgentService {
       configPath: input.skillDirectoriesConfigPath,
     });
     const secretStore = new EncryptedLocalRuntimeSecretStore(join(dirname(supervisorDatabasePath), "runtime-secrets"));
+    const modelSecretStore = new EncryptedLocalRuntimeSecretStore(join(dirname(supervisorDatabasePath), "model-secrets"));
+    const modelConfigurations = new LocalModelConfigurationStore(supervisorDatabase, modelSecretStore);
+    await modelConfigurations.ready();
     const uploadedSkillPackageRoot = join(input.skillPackageStoreRoot, "uploaded");
     const skillPackageInstaller = new LocalSkillPackageInstaller(uploadedSkillPackageRoot);
-    const configurations = new LocalRuntimeConfigurationStore(supervisorDatabase, secretStore, customSkillDirectories, uploadedSkillPackageRoot);
+    const configurations = new LocalRuntimeConfigurationStore(supervisorDatabase, secretStore, customSkillDirectories, uploadedSkillPackageRoot, modelConfigurations);
     const supervisor = new LocalRuntimeSupervisor(
       supervisorDatabase,
       (definition, configuration) => factory.create(definition, configuration, sharedStorageRoot.value, uploadStorageRoot.value),
@@ -82,7 +87,7 @@ export class LocalAgentService {
       mcpConfiguration: await readLegacyLocalMcpConfiguration(input.mcpServersConfigPath),
       integrationEnvironment: input.integrationEnvironment,
     });
-    const service = new LocalAgentService(input, stateStore, supervisor, configurations, skillPackageInstaller, input.directoryPicker ?? pickNativeDirectory, sharedStorageRoot, uploadStorageRoot);
+    const service = new LocalAgentService(input, stateStore, supervisor, configurations, modelConfigurations, skillPackageInstaller, input.directoryPicker ?? pickNativeDirectory, sharedStorageRoot, uploadStorageRoot);
     service.connection = new RuntimeConnectionClient(input.routerUrl, supervisor, (method, payload) => service.agentControl(method, payload));
     await service.connection.ready();
     if (state.device !== undefined) service.connection.setDevice(state.device);
@@ -95,6 +100,41 @@ export class LocalAgentService {
   }
 
   async health(): Promise<unknown> { return await this.status(await this.stateStore.read()); }
+
+  async localModelConfiguration(): Promise<unknown> {
+    return { configuration: await this.modelConfigurations.read() };
+  }
+
+  async localModels(includeCloud?: boolean): Promise<unknown> {
+    const configuration = await this.modelConfigurations.read();
+    const local = configuration.providers.flatMap((provider) => provider.models.map((model) => ({
+      key: `local:${model.key}`, displayName: model.displayName, provider: provider.displayName, source: "local" as const,
+    })));
+    const state = await this.stateStore.read();
+    let cloud: Array<{ key: string; displayName: string; source: "cloud" }> = [];
+    if ((includeCloud ?? configuration.reuseCloudModels) && state.device !== undefined && this.input.routerUrl !== undefined) {
+      const response = await fetch(new URL("/v1/device-agent/models", this.input.routerUrl), { headers: { authorization: `Bearer ${state.device.agentToken}` } });
+      const body = await response.json().catch(() => ({})) as { models?: Array<{ key?: string; displayName?: string }> };
+      if (response.ok && Array.isArray(body.models)) cloud = body.models.filter((model) => typeof model.key === "string").map((model) => ({ key: `cloud:${model.key}`, displayName: model.displayName ?? model.key!, source: "cloud" as const }));
+    }
+    return { models: [...local, ...cloud] };
+  }
+
+  async updateLocalModelConfiguration(configuration: LocalModelConfigurationInput): Promise<unknown> {
+    return await this.supervisor.withDeviceReconfiguration(async () => {
+      const snapshot = await this.modelConfigurations.snapshot();
+      const updated = await this.modelConfigurations.write(configuration);
+      try {
+        await this.supervisor.reloadRunningInstances();
+        await this.modelConfigurations.commit(snapshot);
+      } catch (error) {
+        await this.modelConfigurations.restore(snapshot);
+        await this.supervisor.reloadRunningInstances().catch(() => undefined);
+        throw error;
+      }
+      return { configuration: updated, runtimes: await this.supervisor.list() };
+    });
+  }
 
   async registerDevice(origin: string | undefined, registrationToken: string): Promise<unknown> {
     this.requireOrigin(origin);
@@ -209,6 +249,9 @@ export class LocalAgentService {
   }
 
   async startStrictLocalRun(session: LocalSession, value: { runtimeId: string; conversationId: string; clientMessageId: string; input: string; localDirectoryScopeIds: readonly string[]; localUploadedSourceIds: readonly string[]; allowDangerousTools: boolean; requestedModelKey?: string }): Promise<unknown> {
+    if (typeof value.requestedModelKey !== "string" || value.requestedModelKey.trim().length === 0) {
+      throw new LocalAgentApplicationError(400, "model_required");
+    }
     const dispatchId = `strict:${session.ownerUserId}:${value.clientMessageId}`;
     const current = this.supervisor.runtime(value.runtimeId);
     const existing = await current.database.prepare("SELECT remote_run_id FROM local_runtime_dispatches WHERE dispatch_key = ? AND owner_user_id = ?").get(dispatchId, session.ownerUserId) as { remote_run_id: string } | undefined;

@@ -620,7 +620,7 @@ test("web keeps strict_local recovery support while normal placement uses the Lo
   assert.match(app, /localToggle\.checked = preference === true/, "an uncached device must not inherit another device's checked state");
   assert.match(app, /Losing the live pairing only suspends the UI/);
   assert.match(app, /data-revoke-local-scope/);
-  assert.match(app, /const activeScopes = localScopes\.filter\(\(scope\) => scope\.status === "active"\)/);
+  assert.match(app, /const activeScopes = localRuntimeState\.scopes\.filter\(\(scope\) => scope\.status === "active"\)/);
   assert.match(app, /\/v1\/local-runtimes\/\$\{encodeURIComponent\(runtimeId\)\}\/runs/);
   assert.doesNotMatch(app, /输入要授权给本机 Runtime 的目录绝对路径/);
   assert.doesNotMatch(app, /window\.prompt/);
@@ -632,13 +632,13 @@ test("web keeps strict_local recovery support while normal placement uses the Lo
   assert.doesNotMatch(index, /id="execution-target"/);
   assert.match(index, /class="local-capability-title"[\s\S]*?id="local-agent-version"[\s\S]*?id="enable-local-runtime"/, "the compact readiness tag belongs beside the local-capability version");
   assert.match(index, /id="local-runtime-picker"[\s\S]*?id="use-local-runtime"[\s\S]*?id="runtime"/, "the local-execution checkbox must sit before the Runtime selector");
-  assert.match(app, /const executionTarget = isLocalExecution\(\) \? "local" : "cloud"/);
+  assert.match(app, /const executionTarget = binding === undefined[\s\S]*?\? isLocalExecution\(\) \? "local" : "cloud"/);
   assert.match(app, /dataPolicy: \{ mode: executionTarget \}/);
   assert.match(app, /localAgentRouterPath/);
   assert.match(app, /async function localAgentFetch\(path, init = \{\}\)/);
   assert.match(localAgentClient, /body\.error !== "local_session_invalid" && body\.error !== "local_session_required"/);
   assert.match(app, /await refreshLocalSessionOnce\(\)/);
-  assert.match(app, /localRuntimes\.find\(\(runtime\) => runtime\.status === "ready" && runtime\.isDefault\)/, "the initial picker choice must prefer the persistent default Runtime");
+  assert.match(app, /localRuntimeState\.runtimes\.find\(\(runtime\) => runtime\.status === "ready" && runtime\.isDefault\)/, "the initial picker choice must prefer the persistent default Runtime");
   assert.match(app, /\$\("local-runtime-picker"\)\.hidden = !paired/, "a paired ready device exposes its Runtime selector even before local execution is enabled");
   assert.match(app, /localAgentFetch\("\/v1\/directory-scopes\/pick"/);
   assert.match(app, /const response = await agentAwareFetch\(endpoint\(\), \{ headers: headers\(\) \}\)/);
@@ -658,7 +658,7 @@ test("web keeps strict_local recovery support while normal placement uses the Lo
   assert.match(factory, /skillPackageRoots: configuration\.customSkillDirectories/);
   assert.match(factory, /servers: configuration\.mcpServers/);
   assert.doesNotMatch(factory, /loadSkillDirectoriesConfig|loadOptionalMcpToolsFromConfigFile/, "Factory must not load device-wide Runtime extensions");
-  assert.doesNotMatch(agent, /@zhujun\/agentloop|readFile\(|writeFile\(|LocalRuntimeSupervisor/, "HTTP transport must not own Runtime construction or device state persistence");
+  assert.doesNotMatch(agent, /import\s+\{[^}]*\}\s+from "@zhujun\/agentloop"|readFile\(|writeFile\(|new\s+LocalRuntimeSupervisor/, "HTTP transport must not own Runtime construction or device state persistence");
   assert.doesNotMatch(agent, /skills\/(install|update|rollback)/);
 });
 

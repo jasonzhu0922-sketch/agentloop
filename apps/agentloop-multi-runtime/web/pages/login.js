@@ -26,6 +26,15 @@ async function authenticate() {
   error.hidden = true;
   submit.disabled = true;
   try {
+    // A browser may arrive here while sessionStorage still contains another
+    // user's identity. Revoke that identity first so its Local Runtime
+    // browser capability cannot survive a user switch in this tab.
+    const previousToken = sessionStorage.getItem(AUTH_TOKEN_KEY);
+    if (previousToken) {
+      await fetch(`${api}/v1/auth/logout`, { method: "POST", headers: { authorization: `Bearer ${previousToken}` } }).catch(() => undefined);
+      sessionStorage.removeItem(AUTH_TOKEN_KEY);
+      sessionStorage.removeItem(ACTIVE_USER_KEY);
+    }
     const response = await fetch(`${api}/v1/auth/${mode}`, {
       method: "POST",
       headers: { "content-type": "application/json" },

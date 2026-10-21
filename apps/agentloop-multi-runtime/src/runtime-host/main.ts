@@ -120,12 +120,15 @@ const planTemplateObserver = await loadOptionalPlanTemplateObserver({
     : { configPath: process.env.PLAN_TEMPLATE_CONFIG_PATH }),
 });
 const runs = new RunService({
+  requireExplicitModel: true,
   database,
   skills,
-  modelFactory: (onRetry, modelKey) => providers.create(modelKey, onRetry),
+  modelFactory: (onRetry, modelKey) => {
+    if (modelKey === undefined || modelKey.length === 0) throw new Error("model_required");
+    return providers.create(modelKey, onRetry);
+  },
   maxPlanningTurns: planningMaxTurns,
   maxSteps: stepMaxTurns,
-  defaultModelKey: providers.defaultModelKey,
   modelKeys: providers.modelKeys(),
   workspaceRoot,
   stepExecutionStrategy,
@@ -147,7 +150,7 @@ const runtimeHost = new RuntimeHostService(new AgentLoopRuntimeRunPort(runs), ne
   maxConcurrentRuns,
   activeRunCount: activeRunCount,
 }, dispatchStore);
-const server = createRuntimeHostHttpServer(runtimeHost, { dispatchToken: runtimeDispatchToken, models: providers.modelCatalog().map(({ key, displayName }) => ({ key, displayName })) });
+const server = createRuntimeHostHttpServer(runtimeHost, { dispatchToken: runtimeDispatchToken, providers, models: providers.modelCatalog().map(({ key, displayName }) => ({ key, displayName })) });
 server.listen(port, host, () => {
   process.stdout.write(`AgentLoop Runtime Host ${runtimeId} listening on http://${host}:${port}; discovered ${skillDirectorySync.discoveredSkills.length} Skill package(s) from ${skillDirectories.join(", ")}\n`);
   void sendHeartbeat();

@@ -58,6 +58,7 @@ export class LocalRuntimeSupervisor {
   private readonly instances = new Map<string, LocalRuntimeControl>();
   private readonly pendingAdmissions = new Map<string, number>();
   private readonly runtimeMutations = new Map<string, Promise<void>>();
+  private deviceReconfiguration = false;
   private readonly listeners = new Set<() => void>();
   private readonly database: AppDatabase;
   private readonly factory: (definition: LocalRuntimeDefinition, configuration: ResolvedLocalRuntimeConfiguration) => Promise<LocalRuntimeControl>;
@@ -218,6 +219,7 @@ export class LocalRuntimeSupervisor {
   }
 
   async admitRun<T>(runtimeId: string, start: (runtime: LocalRuntimeControl) => Promise<{ readonly runId: string; readonly value: T }>): Promise<T> {
+    if (this.deviceReconfiguration) throw new LocalRuntimeSupervisorError(409, "runtime_reconfiguration_in_progress");
     const runtime = this.runtime(runtimeId, true);
     if (this.activeWorkCount(runtimeId) >= this.maxConcurrentRuns) {
       throw new LocalRuntimeSupervisorError(429, "runtime_capacity_exhausted");
@@ -340,6 +342,14 @@ export class LocalRuntimeSupervisor {
   hasActiveWork(): boolean {
     return [...new Set([...this.instances.keys(), ...this.pendingAdmissions.keys()])]
       .some((runtimeId) => this.hasActiveWorkForRuntime(runtimeId));
+  }
+
+  async withDeviceReconfiguration<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.deviceReconfiguration || this.runtimeMutations.size > 0) throw new LocalRuntimeSupervisorError(409, "runtime_operation_in_progress");
+    if (this.hasActiveWork()) throw new LocalRuntimeSupervisorError(409, "runtime_active_runs_prevent_reconfiguration");
+    this.deviceReconfiguration = true;
+    try { return await operation(); }
+    finally { this.deviceReconfiguration = false; }
   }
 
   /** Recreate every running instance after a device-level configuration change. */
@@ -550,6 +560,7 @@ export class LocalRuntimeSupervisor {
   }
 
   private async withRuntimeMutation<T>(runtimeId: string, operation: () => Promise<T>, waitForExisting = false): Promise<T> {
+    if (this.deviceReconfiguration) throw new LocalRuntimeSupervisorError(409, "runtime_reconfiguration_in_progress");
     while (this.runtimeMutations.has(runtimeId)) {
       if (!waitForExisting) throw new LocalRuntimeSupervisorError(409, "runtime_operation_in_progress");
       await this.runtimeMutations.get(runtimeId);

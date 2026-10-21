@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,4 +47,34 @@ print("release origin and per-user LaunchAgent verified")
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("macOS PKG includes an upgrade cleanup script without deleting runtime state", async () => {
+  const [preinstall, postinstall] = await Promise.all([
+    readFile(new URL("../distribution/macos/scripts/preinstall", import.meta.url), "utf8"),
+    readFile(new URL("../distribution/macos/scripts/postinstall", import.meta.url), "utf8"),
+  ]);
+  assert.match(preinstall, /launchctl bootout/);
+  assert.match(preinstall, /\$\{1:-\/\}/);
+  assert.match(preinstall, /launchctl print/);
+  assert.match(preinstall, /pkill -TERM -u .* -f/);
+  assert.match(preinstall, /pgrep -u .* -f/);
+  assert.match(preinstall, /AgentLoop Local Runtime is still running/);
+  assert.match(preinstall, /exit 1/);
+  assert.match(preinstall, /agentloop-local-runtime-agent/);
+  assert.match(preinstall, /\\\.mjs/);
+  assert.match(preinstall, /Contents\/MacOS\/AgentLoop Local Runtime/);
+  assert.match(postinstall, /LaunchAgents/);
+  assert.match(postinstall, /\$\{1:-\/\}/);
+  assert.match(postinstall, /rm -f/);
+  assert.match(postinstall, /launchctl asuser/);
+  assert.match(postinstall, /sudo -u/);
+  assert.match(postinstall, /set -eu/);
+  assert.match(postinstall, /open -a/);
+  assert.doesNotMatch(postinstall, /Application Support\/AgentLoop Local Runtime.*rm|rm .*Application Support\/AgentLoop Local Runtime/);
+  const packager = await readFile(new URL("../scripts/package-local-agent-macos.mjs", import.meta.url), "utf8");
+  assert.match(packager, /["']--scripts["']/);
+  assert.match(packager, /distribution\/macos\/scripts/);
+  assert.equal(execFileSync("/bin/sh", [new URL("../distribution/macos/scripts/preinstall", import.meta.url).pathname, "/Volumes/Other", "unused", "unused"], { encoding: "utf8" }), "");
+  assert.equal(execFileSync("/bin/sh", [new URL("../distribution/macos/scripts/postinstall", import.meta.url).pathname, "/Volumes/Other", "unused", "unused"], { encoding: "utf8" }), "");
 });

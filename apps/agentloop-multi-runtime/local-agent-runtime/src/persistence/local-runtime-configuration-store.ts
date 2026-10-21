@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import type { LocalModelConfigurationStore, ResolvedLocalModelConfiguration } from "./local-model-configuration-store.ts";
 import {
   discoverSkillDirectory,
   inspectSkillPackage,
@@ -116,6 +117,7 @@ export interface LocalRuntimeSecretStore {
 }
 
 export interface ResolvedLocalRuntimeConfiguration {
+  readonly modelConfiguration?: ResolvedLocalModelConfiguration;
   readonly customSkillDirectories: readonly string[];
   readonly mcpServers: readonly McpServerRegistration[];
   readonly integrationEnvironment: Readonly<Record<string, string | undefined>>;
@@ -170,17 +172,20 @@ export class LocalRuntimeConfigurationStore {
   private readonly secretStore: LocalRuntimeSecretStore;
   private readonly customSkillDirectories: readonly string[];
   private readonly uploadedPackageRoot?: string;
+  private readonly modelConfigurations?: LocalModelConfigurationStore;
 
   constructor(
     database: AppDatabase,
     secretStore: LocalRuntimeSecretStore = EMPTY_SECRET_STORE,
     customSkillDirectories: readonly string[] = [],
     uploadedPackageRoot?: string,
+    modelConfigurations?: LocalModelConfigurationStore,
   ) {
     this.database = database;
     this.secretStore = secretStore;
     this.customSkillDirectories = customSkillDirectories;
     this.uploadedPackageRoot = uploadedPackageRoot;
+    this.modelConfigurations = modelConfigurations;
   }
 
   async ready(): Promise<void> {
@@ -653,7 +658,8 @@ export class LocalRuntimeConfigurationStore {
     for (const row of await this.mcpRows(runtimeId)) {
       mcpServers.push(await this.resolveMcpServer(row, environment));
     }
-    return { customSkillDirectories, mcpServers, integrationEnvironment: environment };
+    return { customSkillDirectories, mcpServers, integrationEnvironment: environment,
+      ...(this.modelConfigurations === undefined ? {} : { modelConfiguration: await this.modelConfigurations.resolve() }) };
   }
 
   private async assertValidPackages(packageIds: readonly string[]): Promise<void> {

@@ -390,6 +390,8 @@ npm run package:local-agent:mac --workspace agentloop-multi-runtime
 
 安装后 Agent 通过 macOS LaunchAgent 登录启动；托盘只提供在线状态、重连、打开 Web、查看日志和退出，业务配置仍由 Web 管理。Router 地址作为固定构建配置嵌入 Agent；Agent 的 bootstrap 文件仅作为安装器/运维迁移用途保留。
 
+macOS PKG 支持直接覆盖安装，无需先卸载。安装前停止当前桌面用户的旧 LaunchAgent 和旧托盘进程，确认退出后再替换应用；安装后移除旧 plist，并以该用户身份打开新版 App，由它重新注册后台服务。无法停止旧服务时安装中止并显示原因。没有登录桌面用户时不启动 App，登录后手动打开一次。升级保留 `~/Library/Application Support/AgentLoop Local Runtime/` 中的 SQLite、设备身份、配置和工作区。此流程处理当前桌面用户；其他系统账户下的服务不在此次清理范围内。
+
 ### 打包 Local Runtime Agent（Windows x64 MSI）
 
 Windows 使用 WiX 生成 per-machine `.msi`，安装到 `Program Files`，注册 `agentloop-local-runtime://` 协议。协议唤起的原生 .NET 托盘壳会启动本机 Agent，并在首次运行时写入当前用户的登录自启项；业务配置仍只存在于 Web。它同样优先使用 Node SEA，无法注入时携带 Node fallback，不包含 Electron。

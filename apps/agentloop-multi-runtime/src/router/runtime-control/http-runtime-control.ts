@@ -1,5 +1,8 @@
 import type { RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments } from "../../shared/contracts.ts";
 import { RuntimeDispatchOutcomeUnknownError } from "../ports/control-plane-contracts.ts";
+import type { ModelInvocation, ModelResponse } from "@zhujun/agentloop";
+import type { ModelRetryReporter, ModelStreamSink } from "@zhujun/agentloop";
+import { consumeModelResponse } from "../../shared/model-proxy.ts";
 
 export class HttpRuntimeControl implements RuntimeControlPort {
   private readonly endpoint: string;
@@ -80,6 +83,21 @@ export class HttpRuntimeControl implements RuntimeControlPort {
     const body = await response.json() as { models?: RuntimeModelSummary[]; error?: string };
     if (!response.ok || !Array.isArray(body.models)) throw new Error(body.error ?? `runtime model catalog failed with HTTP ${response.status}`);
     return body.models;
+  }
+
+  async completeModel(modelKey: string, invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse> {
+    return await this.completeModelStream(modelKey, invocation, async () => undefined, undefined, signal);
+  }
+
+  async completeModelStream(modelKey: string, invocation: ModelInvocation, sink: ModelStreamSink, onRetry?: ModelRetryReporter, signal?: AbortSignal): Promise<ModelResponse> {
+    const response = await fetch(new URL("/v1/model-completions", `${this.endpoint.replace(/\/$/, "")}/`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(this.authorization === undefined ? {} : { authorization: this.authorization }) },
+      body: JSON.stringify({ modelKey, invocation }),
+      signal,
+    });
+    if (!response.ok) throw new Error(`model_proxy_failed:${response.status}`);
+    return await consumeModelResponse(response, sink, onRetry);
   }
 
   async cancelRun(remoteRunId: string): Promise<RuntimeRunStatus> {

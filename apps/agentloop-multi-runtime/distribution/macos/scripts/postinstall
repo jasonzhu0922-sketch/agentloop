@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+[ "${1:-/}" = "/" ] || exit 0
+
+# The preinstall hook stops the old service. Remove only its per-user plist so
+# the new tray app can write a definition with the new bundle's resource paths.
+# Runtime state and configuration intentionally remain untouched.
+readonly LABEL="com.agentloop.local-runtime-agent"
+readonly CONSOLE_USER="$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || true)"
+
+case "$CONSOLE_USER" in
+  ""|root|loginwindow)
+    exit 0
+    ;;
+esac
+
+USER_UID="$(/usr/bin/id -u "$CONSOLE_USER" 2>/dev/null || true)"
+USER_HOME="$(/usr/bin/dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | /usr/bin/sed 's/^NFSHomeDirectory: //' || true)"
+case "$USER_UID" in
+  ''|*[!0-9]*)
+    exit 0
+    ;;
+esac
+case "$USER_HOME" in
+  /*)
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+
+/bin/rm -f "$USER_HOME/Library/LaunchAgents/$LABEL.plist"
+if ! /bin/launchctl asuser "$USER_UID" /usr/bin/sudo -u "$CONSOLE_USER" /usr/bin/open -a "/Applications/AgentLoop Local Runtime.app"; then
+  echo "AgentLoop updated. Open /Applications/AgentLoop Local Runtime.app to start it." >&2
+fi
+exit 0

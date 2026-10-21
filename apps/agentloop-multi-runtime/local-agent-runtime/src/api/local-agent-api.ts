@@ -13,7 +13,7 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
     const origin = request.headers.origin;
     if (originAllowed(origin, input.webOrigin)) response.setHeader("access-control-allow-origin", origin!);
     response.setHeader("vary", "origin");
-    if (request.method === "OPTIONS") return options(response);
+    if (request.method === "OPTIONS") return options(request, response, originAllowed(origin, input.webOrigin));
     const url = new URL(request.url ?? "/", "http://local-agent");
     try {
       if (request.method === "GET" && url.pathname === "/healthz") return json(response, 200, await service.health());
@@ -25,6 +25,19 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
       if (request.method === "GET" && url.pathname === "/v1/local-skill-packages") {
         await session(request, service);
         return json(response, 200, await service.listLocalSkillPackages());
+      }
+      if (request.method === "GET" && url.pathname === "/v1/local-models/configuration") {
+        await session(request, service);
+        return json(response, 200, await service.localModelConfiguration());
+      }
+      if (request.method === "GET" && url.pathname === "/v1/local-models") {
+        await session(request, service);
+        return json(response, 200, await service.localModels(url.searchParams.has("includeCloud") ? url.searchParams.get("includeCloud") === "true" : undefined));
+      }
+      if (request.method === "PUT" && url.pathname === "/v1/local-models/configuration") {
+        await session(request, service);
+        const value = await body(request);
+        return json(response, 200, await service.updateLocalModelConfiguration(value as never));
       }
       if (request.method === "POST" && url.pathname === "/v1/local-skill-package-uploads") {
         await session(request, service);
@@ -120,7 +133,15 @@ async function session(request: IncomingMessage, service: LocalAgentService) {
   const value = request.headers["x-local-session"];
   return await service.authorize(request.headers.origin, typeof value === "string" ? value : undefined);
 }
-function options(response: ServerResponse): void { response.statusCode = 204; response.setHeader("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS"); response.setHeader("access-control-allow-headers", "content-type, x-local-session"); response.end(); }
+function options(request: IncomingMessage, response: ServerResponse, allowedOrigin: boolean): void {
+  response.statusCode = 204;
+  response.setHeader("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+  response.setHeader("access-control-allow-headers", "content-type, x-local-session");
+  if (allowedOrigin && request.headers["access-control-request-private-network"] === "true") {
+    response.setHeader("access-control-allow-private-network", "true");
+  }
+  response.end();
+}
 async function body(request: IncomingMessage, maxBytes = 26 * 1024 * 1024): Promise<Record<string, unknown>> { const chunks: Buffer[] = []; let bytes = 0; for await (const chunk of request) { const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); bytes += buffer.length; if (bytes > maxBytes) throw Object.assign(new Error("request_body_too_large"), { status: 413 }); chunks.push(buffer); } const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8")); if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("request_body_invalid"); return parsed as Record<string, unknown>; }
 function queryRuntimeId(url: URL): string { const runtimeId = url.searchParams.get("runtimeId"); if (runtimeId === null) throw new Error("runtimeId_required"); return runtimeId; }
 function stringValue(value: unknown, name: string): string { if (typeof value !== "string" || value.length === 0 || value.length > 200_000) throw new Error(`${name}_invalid`); return value; }

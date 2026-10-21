@@ -18,6 +18,7 @@ import { autoResizeComposerInput, resetComposerInput, shouldSubmitComposerOnKeyd
 import { hasSelectedTextWithin } from "./ui/message-selection.js";
 import { createClientId } from "./ui/client-id.js";
 import { modelSelectionStatus } from "./ui/model-selection-status.js";
+import { createModelCatalog } from "./state/model-catalog.js";
 import { observeAssignment } from "./api/assignment-stream.js";
 import { createRouterClient, routerProxyPath } from "./api/router-client.js";
 import { createLocalAgentClient } from "./local-runtime/local-agent-client.js";
@@ -77,6 +78,25 @@ const localAgentClient = createLocalAgentClient({
     refresh: refreshLocalSessionOnce,
   },
 });
+const modelCatalog = createModelCatalog({
+  async fetchModels(context) {
+    const response = context.local
+      ? await localAgentFetch("/v1/local-models")
+      : await routerClient.request("/v1/models");
+    if (!response.ok) throw new Error(`model_catalog_unavailable:${response.status}`);
+    const body = await response.json();
+    return Array.isArray(body.models) ? body.models : [];
+  },
+  onChange({ models, loading, error }) {
+    availableModels = models;
+    const select = $("model-select");
+    const previousSelection = select.value;
+    select.innerHTML = `<option value="">${loading ? "正在加载模型…" : "请选择模型"}</option>` + models.map((model) => `<option value="${escapeHtml(model.key)}">${escapeHtml(model.displayName || model.key)}</option>`).join("");
+    select.value = models.some((model) => model.key === previousSelection) ? previousSelection : "";
+    select.disabled = loading;
+    setStatus(error ? `读取模型失败：${error instanceof Error ? error.message : String(error)}` : modelSelectionStatus(models, select.value), error ? "error" : "ok");
+  },
+});
 // Compatibility bridge for the legacy page functions that still call fetch()
 // directly. New transport code must use routerClient/localAgentClient; this
 // bridge keeps the existing DOM workflow authenticated while migration is
@@ -120,6 +140,13 @@ $("agent-storage-pick").addEventListener("click", () => void pickSharedStorage()
 $("agent-upload-storage-pick").addEventListener("click", () => void pickUploadStorage());
 $("agent-settings-close").addEventListener("click", closeLocalAgentSettings);
 $("agent-settings-close-icon").addEventListener("click", closeLocalAgentSettings);
+$("local-model-provider-form").addEventListener("submit", (event) => { event.preventDefault(); addLocalModelProvider(); });
+$("local-model-save").addEventListener("click", () => void saveLocalModelConfiguration());
+$("reuse-cloud-models").addEventListener("change", async () => {
+  await loadLocalModelCatalog();
+  renderLocalModelConfiguration();
+});
+document.querySelectorAll("[data-agent-settings-view]").forEach((button) => button.addEventListener("click", () => activateAgentSettingsView(button.dataset.agentSettingsView)));
 $("agent-install-cancel").addEventListener("click", closeLocalAgentInstall);
 $("runtime-config-cancel").addEventListener("click", closeConfigureLocalRuntime);
 $("runtime-config-form").addEventListener("submit", (event) => { event.preventDefault(); void saveLocalRuntimeConfiguration(); });
@@ -152,7 +179,8 @@ $("use-local-runtime").addEventListener("change", () => {
     render();
     return;
   }
-  saveLocalRuntimePreference(localStorage, sessionState.user?.id, localRuntimeState.device?.id, isLocalExecution());
+  const localDevice = localRuntimeState.device;
+  saveLocalRuntimePreference(localStorage, sessionState.user?.id, localDevice?.id, isLocalExecution());
   refreshRuntimeOptions();
   updateLocalControls();
   if (isLocalExecution()) {
@@ -306,6 +334,10 @@ async function enableLocalRuntime() {
       await startInstalledLocalAgent();
       return;
     }
+    if (localRuntimeState.agentStatus === "unreachable") {
+      await startInstalledLocalAgent();
+      return;
+    }
     if (localRuntimeState.agentStatus === "incompatible") { await offerLocalAgentInstall(); return; }
     if (localRuntimeState.agentStatus !== "online_unpaired" && localRuntimeState.agentStatus !== "online") throw new Error("Local Runtime Agent 尚未就绪");
     if (localRuntimeState.agentHealth?.registered === true) {
@@ -379,7 +411,7 @@ async function probeLocalAgent() {
       : body.routerConnected ? "online" : "router_disconnected";
   } catch {
     localRuntimeState.agentHealth = undefined;
-    localRuntimeState.agentStatus = localStorage.getItem("agentloop.local-agent-seen.v1") === "1" ? "installed_stopped" : "not_installed";
+    localRuntimeState.agentStatus = "unreachable";
   } finally {
     clearTimeout(timeout);
     renderLocalAgentState();
@@ -393,6 +425,7 @@ function renderLocalAgentState() {
     not_installed: ["未安装 · 安装", "安装后可在本机安全地访问已授权目录。"],
     router_not_configured: ["需重新安装", "此安装包未配置当前服务端。"],
     installed_stopped: ["未启动 · 启动", "已安装的 Agent 将通过系统启动协议恢复。"],
+    unreachable: ["无法访问 · 重试", "无法从当前浏览器访问本机 Agent；请确认 Agent 正在运行并重试。"],
     online_unpaired: ["未配对 · 配对", "配对后 Router 才可调度本机 Runtime。"],
     online: ["已就绪", "本机 Agent 已连接；本机目录和产物默认不上传云端。"],
     router_disconnected: ["连接中断 · 重试", "Agent 正在自动重连 Router；恢复后才可调度本机 Runtime。"],
@@ -549,9 +582,10 @@ async function loadLocalScopes() {
 
 function updateLocalControls() {
   const binding = applyConversationRuntimeBinding();
+  const localDevice = localRuntimeState.device;
   const view = localRuntimeViewModel({
     agentStatus: localRuntimeState.agentStatus,
-    device: localRuntimeState.device,
+    device: localDevice,
     localSessionToken: sessionState.localSessionToken,
     runtimes: localRuntimeState.runtimes,
     runtimeId: localRuntimeState.runtimeId,
@@ -562,9 +596,9 @@ function updateLocalControls() {
   localToggle.disabled = !paired || binding !== undefined;
   localToggle.title = binding === undefined ? "" : runtimeBindingMessage(binding);
   if (paired && binding === undefined) {
-    const preferenceKey = localRuntimePreferenceKey(sessionState.user?.id, localRuntimeState.device?.id);
+    const preferenceKey = localRuntimePreferenceKey(sessionState.user?.id, localDevice?.id);
     if (preferenceKey) {
-      const preference = loadLocalRuntimePreference(localStorage, sessionState.user?.id, localRuntimeState.device?.id);
+      const preference = loadLocalRuntimePreference(localStorage, sessionState.user?.id, localDevice?.id);
       // A missing value belongs to this user/device just as much as an
       // explicit false: never carry the previous device's DOM state across.
       localToggle.checked = preference === true;
@@ -588,10 +622,11 @@ function updateLocalControls() {
   $("runtime").disabled = view.runtimeDisabled || binding !== undefined;
   $("runtime").title = binding === undefined ? "" : runtimeBindingMessage(binding);
   $("directory-scope")?.toggleAttribute("disabled", view.directoryScopeDisabled);
-  $("local-runtime-manager").hidden = view.runtimeManagerHidden;
+  syncAgentSettingsView(view.paired);
   $("upload-file").toggleAttribute("disabled", view.uploadDisabled);
   syncLocalRuntimeManager();
   renderLocalScopes();
+  void modelCatalog.load(modelCatalogContext());
 }
 
 async function addDirectoryScope() {
@@ -1008,10 +1043,96 @@ function defaultUploadStoragePath(sharedStoragePath) {
 
 async function openLocalAgentSettings() {
   if (!sessionState.localSessionToken) return;
-  await Promise.all([loadLocalAgentConfig(), loadLocalRuntimes()]);
+  await Promise.all([loadLocalAgentConfig(), loadLocalRuntimes(), loadLocalModelConfiguration()]);
   renderLocalAgentConfig();
   syncLocalRuntimeManager();
+  activateAgentSettingsView("models");
   $("agent-settings-modal").hidden = false;
+}
+
+let localModelConfiguration = { reuseCloudModels: false, providers: [] };
+let localCloudModels = [];
+let activeAgentSettingsView = "models";
+
+async function loadLocalModelConfiguration() {
+  try {
+    const response = await localAgentFetch("/v1/local-models/configuration");
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Router HTTP ${response.status}`);
+    localModelConfiguration = body.configuration || { reuseCloudModels: false, providers: [] };
+    $("reuse-cloud-models").checked = localModelConfiguration.reuseCloudModels === true;
+    await loadLocalModelCatalog();
+    renderLocalModelConfiguration();
+  } catch (error) { $("local-model-save-status").textContent = `读取模型配置失败：${error instanceof Error ? error.message : String(error)}`; }
+}
+
+async function loadLocalModelCatalog() {
+  if (!$("reuse-cloud-models").checked) { localCloudModels = []; return; }
+  try {
+    const response = await localAgentFetch("/v1/local-models?includeCloud=true");
+    const body = await response.json().catch(() => ({}));
+    if (response.ok) localCloudModels = (body.models || []).filter((model) => model.source === "cloud");
+  } catch { localCloudModels = []; }
+}
+
+function renderLocalModelConfiguration() {
+  const list = $("local-model-provider-list");
+  list.innerHTML = localModelConfiguration.providers.map((provider) => `<article class="local-model-provider"><div><strong>${escapeHtml(provider.displayName)}</strong><small>${escapeHtml(provider.baseUrl)} · ${provider.credentialConfigured ? "API Key 已配置" : "未配置 API Key"}</small></div><button type="button" class="remove-model-provider" data-provider-key="${escapeHtml(provider.key)}" aria-label="删除 ${escapeHtml(provider.displayName)}" title="删除 Provider">删除</button></article>`).join("") || `<div class="local-model-empty">尚未添加本机 Provider</div>`;
+  list.querySelectorAll("[data-provider-key]").forEach((button) => button.addEventListener("click", () => {
+    localModelConfiguration.providers = localModelConfiguration.providers.filter((provider) => provider.key !== button.dataset.providerKey);
+    renderLocalModelConfiguration();
+  }));
+  const models = [
+    ...localModelConfiguration.providers.flatMap((provider) => provider.models.map((model) => ({ ...model, key: `local:${model.key}`, providerName: provider.displayName, source: "local" }))),
+    ...($("reuse-cloud-models").checked ? localCloudModels.map((model) => ({ ...model, providerName: "云端 Provider", source: "cloud" })) : []),
+  ];
+  $("local-model-count").textContent = `${models.length} 个模型`;
+  $("local-model-table").innerHTML = models.length ? `<div class="local-model-table-wrap"><table class="local-model-table"><thead><tr><th>模型</th><th>Provider</th><th>位置</th></tr></thead><tbody>${models.map((model) => `<tr><td><strong>${escapeHtml(model.displayName)}</strong><small>${escapeHtml(model.key)}</small></td><td>${escapeHtml(model.providerName)}</td><td><span class="model-origin-${model.source}">${model.source === "cloud" ? "云端" : "本机"}</span></td></tr>`).join("")}</tbody></table></div>` : `<div class="local-model-empty">添加 Provider 或启用云端模型后，模型会显示在这里</div>`;
+}
+
+function addLocalModelProvider() {
+  const form = $("local-model-provider-form");
+  const values = new FormData(form);
+  const provider = {
+    key: String(values.get("key")).trim(), displayName: String(values.get("displayName")).trim(),
+    baseUrl: String(values.get("baseUrl")).trim(), apiKey: String(values.get("apiKey")).trim(),
+    models: [{ key: String(values.get("modelKey")).trim(), displayName: String(values.get("modelKey")).trim(), providerModel: String(values.get("providerModel")).trim(), protocol: String(values.get("protocol")) }],
+  };
+  if (localModelConfiguration.providers.some((entry) => entry.key === provider.key)) { $("local-model-form-error").textContent = "Provider ID 已存在"; return; }
+  if (!provider.apiKey) { $("local-model-form-error").textContent = "请输入 API Key"; return; }
+  $("local-model-form-error").textContent = "";
+  localModelConfiguration.providers.push(provider);
+  form.reset();
+  renderLocalModelConfiguration();
+}
+
+async function saveLocalModelConfiguration() {
+  const value = { ...localModelConfiguration, reuseCloudModels: $("reuse-cloud-models").checked };
+  try {
+    const response = await localAgentFetch("/v1/local-models/configuration", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Router HTTP ${response.status}`);
+    localModelConfiguration = body.configuration;
+    await loadLocalModelCatalog();
+    renderLocalModelConfiguration();
+    $("local-model-save-status").textContent = "已保存；本机 Runtime 已重新加载模型配置。";
+    await loadModels();
+  } catch (error) { $("local-model-save-status").textContent = `保存失败：${error instanceof Error ? error.message : String(error)}`; }
+}
+
+function activateAgentSettingsView(view) {
+  if (view !== "models" && view !== "general" && view !== "runtimes") view = "models";
+  activeAgentSettingsView = view;
+  const paired = localRuntimeState.agentStatus === "online"
+    && Boolean(localRuntimeState.device && sessionState.localSessionToken);
+  syncAgentSettingsView(paired);
+}
+
+function syncAgentSettingsView(paired) {
+  document.querySelectorAll("[data-agent-settings-view]").forEach((button) => button.classList.toggle("active", button.dataset.agentSettingsView === activeAgentSettingsView));
+  $("agent-model-settings").hidden = activeAgentSettingsView !== "models";
+  $("agent-general-settings").hidden = activeAgentSettingsView !== "general";
+  $("local-runtime-manager").hidden = activeAgentSettingsView !== "runtimes" || !paired;
 }
 
 function closeLocalAgentSettings() { $("agent-settings-modal").hidden = true; }
@@ -1588,18 +1709,13 @@ function mergeDetailEvents(currentEvents, incomingEvents) {
   return [...bySequence.values()].sort((left, right) => left.seq - right.seq);
 }
 
+function modelCatalogContext() {
+  const local = isLocalExecution();
+  return { local, key: JSON.stringify([sessionState.user?.id, local ? "local" : "cloud", local ? localRuntimeState.device?.id : undefined, local ? Boolean(sessionState.localSessionToken) : Boolean(sessionState.authToken)]) };
+}
+
 async function loadModels() {
-  try {
-    const response = await fetch(`${api}/v1/models`);
-    if (!response.ok) throw new Error(`router_unavailable:${response.status}`);
-    const body = await response.json();
-    availableModels = Array.isArray(body.models) ? body.models : [];
-    const select = $("model-select");
-    const previousSelection = select.value;
-    select.innerHTML = `<option value="">使用 Runtime 默认模型</option>` + availableModels.map((model) => `<option value="${escapeHtml(model.key)}">${escapeHtml(model.displayName || model.key)}</option>`).join("");
-    select.value = availableModels.some((model) => model?.key === previousSelection) ? previousSelection : "";
-    setStatus(modelSelectionStatus(availableModels, select.value), "ok");
-  } catch (error) { setStatus(`Router 暂不可达：${error instanceof Error ? error.message : String(error)}`, "error"); }
+  await modelCatalog.load(modelCatalogContext(), { force: true });
 }
 
 function refreshRuntimeOptions() {
@@ -1630,6 +1746,10 @@ async function submit() {
   const conversation = activeConversation();
   if (!input || !conversation) return;
   const binding = applyConversationRuntimeBinding(conversation);
+  const modelContext = modelCatalogContext();
+  void modelCatalog.load(modelContext);
+  const requestedModelKey = $("model-select").value;
+  if (!modelCatalog.accepts(modelContext, requestedModelKey)) { setStatus("请选择模型后再发送", "error"); $("model-select").focus(); return; }
   const executionTarget = binding === undefined
     ? isLocalExecution() ? "local" : "cloud"
     : binding.executionLocation === "cloud" ? "cloud" : "local";
@@ -1681,7 +1801,7 @@ async function submit() {
       ...(executionTarget === "local" ? { localDirectoryScopeIds: localRuntimeState.scopes.filter((scope) => scope.status === "active").map((scope) => scope.id) } : {}),
       ...(executionTarget === "local" && localSourceIds.length > 0 ? { localUploadedSourceIds: localSourceIds } : {}),
       ...(executionTarget === "local" && localSourceIds.length > 0 ? { messageAttachments: attachmentSnapshots(attachments) } : {}),
-      ...($("model-select").value ? { requestedModelKey: $("model-select").value } : {}),
+      requestedModelKey,
     };
     activeRun.submitTimeout = setTimeout(() => { activeRun.submitTimedOut = true; activeRun.submitAbortController.abort(); }, 15_000);
     const body = await call("/v2/tasks", {

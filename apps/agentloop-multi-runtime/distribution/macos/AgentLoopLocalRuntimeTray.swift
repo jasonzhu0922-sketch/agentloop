@@ -20,14 +20,23 @@ final class AgentLoopLocalRuntimeTray: NSObject, NSApplicationDelegate {
     statusItem.button?.title = "AgentLoop"
     let menu = NSMenu()
     menu.addItem(NSMenuItem(title: "Local Runtime Agent", action: nil, keyEquivalent: ""))
-    menu.addItem(NSMenuItem(title: "启动或重连", action: #selector(startAgent), keyEquivalent: "r"))
-    menu.addItem(NSMenuItem(title: "打开 AgentLoop Web", action: #selector(openWeb), keyEquivalent: "o"))
-    menu.addItem(NSMenuItem(title: "查看本地日志", action: #selector(openLogs), keyEquivalent: "l"))
+    menu.addItem(actionItem(title: "启动或重连", action: #selector(startAgent), keyEquivalent: "r"))
+    menu.addItem(actionItem(title: "打开 AgentLoop Web", action: #selector(openWeb), keyEquivalent: "o"))
+    menu.addItem(actionItem(title: "查看本地日志", action: #selector(openLogs), keyEquivalent: "l"))
     menu.addItem(.separator())
-    menu.addItem(NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
+    menu.addItem(actionItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
     statusItem.menu = menu
     NSAppleEventManager.shared().setEventHandler(self, andSelector: #selector(handleURL(_:withReplyEvent:)), forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
     startAgent()
+  }
+
+  private func actionItem(title: String, action: Selector, keyEquivalent: String) -> NSMenuItem {
+    let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
+    // Status-item menus do not reliably resolve actions through the responder
+    // chain. Bind every actionable item to this delegate explicitly so a click
+    // cannot silently do nothing.
+    item.target = self
+    return item
   }
 
   @objc private func handleURL(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
@@ -49,7 +58,10 @@ final class AgentLoopLocalRuntimeTray: NSObject, NSApplicationDelegate {
       }
       let plist = try LocalRuntimeInstallation.launchAgentPath(resources: Bundle.main.resourceURL!, home: FileManager.default.homeDirectoryForCurrentUser, label: label)
       try LocalRuntimeInstallation.restartAgent(plist: plist, label: label, uid: getuid())
-      statusItem.button?.title = "AgentLoop"
+      statusItem.button?.title = "AgentLoop ✓"
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+        self?.statusItem.button?.title = "AgentLoop"
+      }
     } catch {
       statusItem.button?.title = "AgentLoop !"
       let alert = NSAlert()

@@ -44,6 +44,7 @@ export interface DeviceRepository {
   authenticateAgent(agentToken: unknown): Promise<AuthenticatedDeviceAgent>;
   list(principal: Principal): Promise<readonly RegisteredDevice[]>;
   revoke(principal: Principal, deviceId: string): Promise<void>;
+  revokeLocalSessions(principal: Principal): Promise<void>;
   issueLocalSession(principal: Principal, deviceId: string, ttlMs?: number): Promise<LocalDeviceSession>;
   authorizeLocalSession(agentToken: unknown, sessionToken: unknown): Promise<LocalDeviceSession>;
 }
@@ -188,6 +189,14 @@ export class SqlDeviceRepository implements DeviceRepository {
     if (result.changes !== 1) throw new DeviceError(404, "device_not_found", "Device was not found");
     await this.database.prepare("DELETE FROM mr_device_agent_sessions WHERE device_id = ?").run(deviceId);
     await this.database.prepare("DELETE FROM mr_device_local_sessions WHERE device_id = ?").run(deviceId);
+  }
+
+  /** Invalidates every browser-to-Agent capability owned by this user. */
+  async revokeLocalSessions(principal: Principal): Promise<void> {
+    await this.ready();
+    await this.database.prepare(`
+      DELETE FROM mr_device_local_sessions WHERE tenant_id = ? AND owner_user_id = ?
+    `).run(principal.tenantId, principal.userId);
   }
 
   /**

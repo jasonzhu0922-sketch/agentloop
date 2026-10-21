@@ -1,4 +1,5 @@
 import type { RuntimeArtifact, RuntimeCommandOutput, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
+import type { ModelInvocation, ModelResponse, ModelRetryReporter, ModelStreamSink } from "@zhujun/agentloop";
 import {
   RuntimeCapacityError,
   RuntimeDispatchOutcomeUnknownError,
@@ -88,6 +89,37 @@ export class RouterService {
     }));
     for (const models of catalogs) for (const model of models) if (!seen.has(model.key)) seen.set(model.key, model);
     return [...seen.values()].sort((left, right) => left.key.localeCompare(right.key));
+  }
+
+  async cloudModels(tenantId: string, ownerUserId: string): Promise<readonly RuntimeModelSummary[]> {
+    // Cloud model reuse is served by Cloud Hosts only. Local model catalogs and
+    // credentials stay on the user's device and must never enter this proxy.
+    const endpoints = await this.store.runtimeEndpoints();
+    const available = await Promise.all(endpoints.map(async (runtime) => {
+      try { return await this.endpointFactory(runtime.endpoint).models?.() ?? []; } catch { return []; }
+    }));
+    const models = new Map<string, RuntimeModelSummary>();
+    for (const catalog of available) for (const model of catalog) if (!models.has(model.key)) models.set(model.key, model);
+    return [...models.values()].sort((left, right) => left.key.localeCompare(right.key));
+  }
+
+  async completeCloudModel(tenantId: string, ownerUserId: string, modelKey: string, invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse> {
+    return await this.completeCloudModelStream(tenantId, ownerUserId, modelKey, invocation, async () => undefined, undefined, signal);
+  }
+
+  async completeCloudModelStream(tenantId: string, ownerUserId: string, modelKey: string, invocation: ModelInvocation, sink: ModelStreamSink, onRetry?: ModelRetryReporter, signal?: AbortSignal): Promise<ModelResponse> {
+    const endpoints = await this.store.runtimeEndpoints();
+    for (const runtime of endpoints) {
+      const endpoint = this.endpointFactory(runtime.endpoint) as RuntimeControlPort & {
+        completeModelStream?: (key: string, input: ModelInvocation, sink: ModelStreamSink, onRetry?: ModelRetryReporter, signal?: AbortSignal) => Promise<ModelResponse>;
+      };
+      if (endpoint.completeModelStream === undefined) continue;
+      let hasModel = false;
+      try { hasModel = (await endpoint.models?.() ?? []).some((model) => model.key === modelKey); }
+      catch { continue; }
+      if (hasModel) return await endpoint.completeModelStream(modelKey, invocation, sink, onRetry, signal);
+    }
+    throw new Error("cloud_model_unavailable");
   }
 
   /** Reconcile projection only. Never dispatch, resume, cancel, or infer failure from transport errors. */

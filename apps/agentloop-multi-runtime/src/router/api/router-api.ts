@@ -16,6 +16,9 @@ interface LocalAgentControlPlane {
 interface RouterTaskApi {
   submit(task: SubmitConversationTask): Promise<{ readonly id: string; readonly tenantId: string; readonly ownerUserId: string }>;
   models?(tenantId?: string, ownerUserId?: string): Promise<readonly RuntimeModelSummary[]>;
+  cloudModels?(tenantId: string, ownerUserId: string): Promise<readonly RuntimeModelSummary[]>;
+  completeCloudModel?(tenantId: string, ownerUserId: string, modelKey: string, invocation: unknown, signal?: AbortSignal): Promise<unknown>;
+  completeCloudModelStream?(tenantId: string, ownerUserId: string, modelKey: string, invocation: unknown, sink: (event: unknown) => void | Promise<void>, onRetry: (info: unknown) => void | Promise<void>, signal?: AbortSignal): Promise<unknown>;
   runtimes?(tenantId?: string, ownerUserId?: string): Promise<readonly { id: string; profile: string }[]>;
   conversations?(tenantId: string, ownerUserId: string, page: { readonly limit: number; readonly offset: number }): Promise<{
     readonly conversations: readonly {
@@ -83,7 +86,7 @@ export interface LocalAgentRelease {
 
 export function createRouterHttpServer(router: RouterTaskApi, options: {
   readonly identity?: Pick<IdentityService, "register" | "login" | "authenticate" | "revoke">;
-  readonly devices?: Pick<DeviceRepository, "issueRegistrationToken" | "registerAgent" | "heartbeat" | "list" | "revoke" | "issueLocalSession" | "authorizeLocalSession">;
+  readonly devices?: Pick<DeviceRepository, "issueRegistrationToken" | "registerAgent" | "heartbeat" | "authenticateAgent" | "list" | "revoke" | "revokeLocalSessions" | "issueLocalSession" | "authorizeLocalSession">;
   readonly attachments?: RouterAttachmentBroker;
   readonly runtimeAttachmentToken?: string;
   readonly runtimeDispatchToken?: string;
@@ -125,6 +128,35 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
         if (options.devices === undefined) return json(response, 503, { error: "devices_not_configured" });
         const authorization = Array.isArray(request.headers.authorization) ? request.headers.authorization[0] : request.headers.authorization;
         return json(response, 200, { device: await options.devices.heartbeat(authorization?.replace(/^Bearer\s+/i, "")) });
+      }
+      if (url.pathname.startsWith("/v1/device-agent/") && url.pathname !== "/v1/device-agent/register" && url.pathname !== "/v1/device-agent/heartbeat" && url.pathname !== "/v1/device-agent/authorize-session") {
+        if (options.devices === undefined) return json(response, 503, { error: "devices_not_configured" });
+        const authorization = Array.isArray(request.headers.authorization) ? request.headers.authorization[0] : request.headers.authorization;
+        const agent = await options.devices.authenticateAgent(authorization?.replace(/^Bearer\s+/i, ""));
+        if (request.method === "GET" && url.pathname === "/v1/device-agent/models") {
+          return json(response, 200, { models: await router.cloudModels?.(agent.tenantId, agent.ownerUserId) ?? [] });
+        }
+        if (request.method === "POST" && url.pathname === "/v1/device-agent/model-completions") {
+          const body = record(await readJson(request), "request body");
+          if (typeof body.modelKey !== "string" || body.invocation === undefined) return json(response, 400, { error: "model_invocation_invalid" });
+          if (router.completeCloudModelStream === undefined) return json(response, 503, { error: "model_invocation_unavailable" });
+          response.statusCode = 200;
+          response.setHeader("content-type", "application/x-ndjson");
+          response.setHeader("cache-control", "no-store");
+          const { invocationFrom, responseAbortSignal, writeModelRecord } = await import("../../shared/model-proxy.ts");
+          try {
+            const result = await router.completeCloudModelStream(agent.tenantId, agent.ownerUserId, body.modelKey, invocationFrom(body.invocation),
+              (event) => writeModelRecord(response, { type: "delta", event: event as never }),
+              (info) => writeModelRecord(response, { type: "retry", info: info as never }),
+              responseAbortSignal(response));
+            await writeModelRecord(response, { type: "result", response: result as never });
+          } catch (error) {
+            if (!response.destroyed) await writeModelRecord(response, { type: "error", error: error instanceof Error ? error.message : String(error) });
+          }
+          if (!response.destroyed) response.end();
+          return;
+        }
+        return json(response, 404, { error: "not_found" });
       }
       if (request.method === "POST" && url.pathname === "/v1/device-agent/authorize-session") {
         if (options.devices === undefined) return json(response, 503, { error: "devices_not_configured" });
@@ -216,6 +248,7 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
         return json(response, 204, undefined);
       }
       if (request.method === "POST" && url.pathname === "/v1/auth/logout") {
+        if (principal !== undefined) await options.devices?.revokeLocalSessions(principal);
         await options.identity?.revoke(request.headers.authorization);
         return json(response, 204, undefined);
       }

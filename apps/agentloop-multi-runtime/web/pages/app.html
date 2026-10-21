@@ -44,7 +44,7 @@
               <div class="composer-box">
                 <div id="pending-attachments" class="source-row" aria-label="本次上传文件" hidden></div>
                 <textarea id="input" class="composer-input" rows="1" placeholder="给 AgentLoop 一个任务……（⌘/Ctrl + Enter 发送，Enter 换行）"></textarea>
-                <div class="composer-tools"><div class="composer-bar"><button id="directory-scope" type="button" class="dir-picker-btn" disabled title="用系统选择器授权本机目录">▣ 添加目录</button><input id="attachment" class="hidden" type="file" accept=".txt,.md,.csv,.json,.html,.htm,.pdf,.doc,.docx,.xlsx,.pptx" multiple /><button id="upload-file" type="button" class="dir-picker-btn" title="上传文件" aria-label="上传文件">▤ 上传文件</button><label class="chip">模型<select id="model-select"><option value="">使用 Runtime 默认模型</option></select></label><span class="composer-hint">⌘/Ctrl + Enter 发送 · Enter 换行</span><span id="conversation-id" class="conversation-id"></span><span class="composer-spacer"></span><button id="submit" class="composer-action" type="button" aria-label="发送任务" title="发送任务">↑</button></div></div>
+                <div class="composer-tools"><div class="composer-bar"><button id="directory-scope" type="button" class="dir-picker-btn" disabled title="用系统选择器授权本机目录">▣ 添加目录</button><input id="attachment" class="hidden" type="file" accept=".txt,.md,.csv,.json,.html,.htm,.pdf,.doc,.docx,.xlsx,.pptx" multiple /><button id="upload-file" type="button" class="dir-picker-btn" title="上传文件" aria-label="上传文件">▤ 上传文件</button><label class="chip">模型<select id="model-select" required><option value="">请选择模型</option></select></label><span class="composer-hint">⌘/Ctrl + Enter 发送 · Enter 换行</span><span id="conversation-id" class="conversation-id"></span><span class="composer-spacer"></span><button id="submit" class="composer-action" type="button" aria-label="发送任务" title="发送任务">↑</button></div></div>
               </div>
             </form>
           </section>
@@ -79,13 +79,39 @@
     </div>
     <div id="agent-settings-modal" class="runtime-modal" role="dialog" aria-modal="true" aria-labelledby="agent-settings-title" hidden>
       <div class="runtime-modal-card agent-settings-card">
-        <div class="agent-settings-header"><div><strong id="agent-settings-title">Local Runtime Agent 设置</strong><p>这是设备级 Supervisor。所有子 Runtime 共享同一工作目录与上传源文件根目录；Skill 仍在各 Runtime 启动时按统一配置加载。</p></div><button id="agent-settings-close-icon" class="runtime-modal-close" type="button" title="关闭" aria-label="关闭 Local Runtime Agent 设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg></button></div>
-        <dl class="settings-detail"><dt>Agent</dt><dd id="agent-settings-version">-</dd><dt>服务端</dt><dd id="agent-router-url">-</dd><dt>共享工作目录</dt><dd class="settings-detail-value"><span id="agent-settings-storage">-</span><button id="agent-storage-pick" class="icon-button" type="button" title="编辑共享工作目录" aria-label="编辑共享工作目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg></button></dd><dt>上传源文件目录</dt><dd class="settings-detail-value"><span id="agent-settings-upload-storage">-</span><button id="agent-upload-storage-pick" class="icon-button" type="button" title="编辑上传源文件目录" aria-label="编辑上传源文件目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg></button></dd><dt>Skill 模式</dt><dd>Runtime 启动时统一加载</dd></dl>
-        <p class="install-security-note">切换任一目录前必须没有活动任务；原位置数据不会被自动删除。上传源文件在公共根目录内按 Runtime 分区，删除子 Runtime 只回收其自身分区。</p>
-        <section id="local-runtime-manager" class="local-runtime-manager agent-runtime-manager" aria-labelledby="local-runtime-manager-title" hidden>
+        <div class="agent-settings-header"><div><strong id="agent-settings-title">本机能力设置</strong><p>模型配置保存在这台设备上。API Key 仅在本机加密存储。</p></div><button id="agent-settings-close-icon" class="runtime-modal-close" type="button" title="关闭" aria-label="关闭 Local Runtime Agent 设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg></button></div>
+        <div class="agent-settings-layout">
+          <nav class="agent-settings-nav" aria-label="本机能力设置"><button type="button" class="active" data-agent-settings-view="models">模型配置</button><button type="button" data-agent-settings-view="general">常规</button><button type="button" data-agent-settings-view="runtimes">Runtime 管理</button></nav>
+          <div class="agent-settings-content">
+            <section id="agent-model-settings" class="agent-settings-view">
+              <div class="settings-page-heading"><div><h2>模型配置</h2><p>添加本机 Provider。模型调用由本机 Runtime 直接发送到对应 Provider。</p></div><span class="settings-local-badge">仅本机保存</span></div>
+              <label class="cloud-model-option"><input id="reuse-cloud-models" type="checkbox" /><span><strong>复用云端模型配置</strong><small>本机 Run 可选择云端模型；请求内容将经 Router 发送到云端，API Key 保留在云端。</small></span></label>
+              <div id="local-model-provider-list" class="local-model-provider-list"></div>
+              <form id="local-model-provider-form" class="local-model-form">
+                <div class="settings-section-title"><strong>添加 Provider</strong><small>支持 OpenAI 兼容接口</small></div>
+                <div class="local-model-form-grid">
+                  <label>名称<input name="displayName" required maxlength="80" placeholder="例如：OpenAI Compatible" /></label>
+                  <label>Provider ID<input name="key" required pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="my-provider" /></label>
+                  <label class="wide">API 地址<input name="baseUrl" type="url" required placeholder="https://api.example.com/v1" /></label>
+                  <label>API Key<input name="apiKey" type="password" autocomplete="new-password" placeholder="输入后加密保存在本机" /></label>
+                  <label>协议<select name="protocol"><option value="responses">Responses</option><option value="chat-completions">Chat Completions</option></select></label>
+                  <label>模型 ID<input name="modelKey" required pattern="[a-z0-9]+([.-][a-z0-9]+)*" placeholder="my-model" /></label>
+                  <label>上游模型名称<input name="providerModel" required placeholder="model-name" /></label>
+                </div>
+                <div class="local-model-form-actions"><span id="local-model-form-error" role="alert"></span><button type="submit" class="primary">添加模型</button></div>
+              </form>
+              <div class="local-model-catalog"><div class="settings-section-title"><strong>本机可用模型</strong><small id="local-model-count">0 个模型</small></div><div id="local-model-table"></div></div>
+              <p id="local-model-save-status" class="settings-save-status" role="status"></p>
+              <div class="runtime-modal-actions"><button id="local-model-save" type="button" class="primary">保存配置</button></div>
+            </section>
+            <section id="agent-general-settings" class="agent-settings-view" hidden>
+              <dl class="settings-detail"><dt>Agent</dt><dd id="agent-settings-version">-</dd><dt>服务端</dt><dd id="agent-router-url">-</dd><dt>共享工作目录</dt><dd class="settings-detail-value"><span id="agent-settings-storage">-</span><button id="agent-storage-pick" class="icon-button" type="button" title="编辑共享工作目录" aria-label="编辑共享工作目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg></button></dd><dt>上传源文件目录</dt><dd class="settings-detail-value"><span id="agent-settings-upload-storage">-</span><button id="agent-upload-storage-pick" class="icon-button" type="button" title="编辑上传源文件目录" aria-label="编辑上传源文件目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg></button></dd><dt>Skill 模式</dt><dd>Runtime 启动时统一加载</dd></dl><p class="install-security-note">切换任一目录前必须没有活动任务；原位置数据不会被自动删除。上传源文件在公共根目录内按 Runtime 分区。</p></section>
+            <section id="local-runtime-manager" class="agent-settings-view local-runtime-manager agent-runtime-manager" aria-labelledby="local-runtime-manager-title" hidden>
           <div class="local-runtime-manager-head"><div><strong id="local-runtime-manager-title">子 Runtime 管理</strong><small>在此新增、停止、重启、删除和进入细节配置。</small></div><button id="local-runtime-create" type="button">＋ 新增</button></div>
           <div id="local-runtime-list" class="local-runtime-list" role="list" aria-label="子 Runtime 列表"></div>
-        </section>
+            </section>
+          </div>
+        </div>
         <div class="runtime-modal-actions"><button id="agent-settings-close" type="button">完成</button></div>
       </div>
     </div>
