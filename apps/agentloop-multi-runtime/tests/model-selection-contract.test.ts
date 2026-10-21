@@ -175,3 +175,27 @@ test("cloud model invocation does not fail over after a Host has begun the model
   await assert.rejects(router.completeCloudModelStream("tenant-1", "user-1", "model-a", {} as never, async () => undefined), /provider_request_failed/);
   assert.equal(invocations, 1);
 });
+
+test("an empty configured model catalog keeps Runtime management available while rejecting model execution", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-empty-model-catalog-"));
+  const appRoot = new URL("../", import.meta.url).pathname;
+  await mkdir(join(root, "skills"));
+  const runtime = await new LocalRuntimeFactory({
+    appRoot, statePath: join(root, "state.json"), databasePath: join(root, "runtime.db"),
+    workspaceRoot: join(root, "workspace"), skillPackageStoreRoot: join(root, "packages"),
+    providerConfigPath: join(root, "must-not-load.json"), skillDirectoriesConfigPath: join(root, "unused-skills.json"),
+    stepExecutionStrategyConfigPath: join(appRoot, "config", "step-execution-strategy.json"),
+    environment: { AGENTLOOP_BUNDLED_SKILL_DIRECTORIES: join(root, "skills") },
+  }).create({ id: "empty", displayName: "Empty Runtime", storageKey: "default", isDefault: true }, {
+    customSkillDirectories: [], mcpServers: [], integrationEnvironment: { WEB_SEARCH_DISABLED: "1" },
+    modelConfiguration: { configured: true, reuseCloudModels: false, registryConfig: undefined, environment: {} },
+  }, join(root, "workspace"), join(root, "uploads"));
+  try {
+    assert.deepEqual(runtime.modelKeys, []);
+    await assert.rejects(runtime.runs.executeConversation("owner", "hello", { modelKey: "local:missing" }), /local_model_unavailable/);
+    await assert.rejects(runtime.runs.executeConversation("owner", "hello", { modelKey: "cloud:missing" }), /cloud_model_reuse_disabled/);
+  } finally {
+    runtime.database.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

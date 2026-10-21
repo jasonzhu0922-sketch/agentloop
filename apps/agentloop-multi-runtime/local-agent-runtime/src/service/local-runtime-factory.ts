@@ -6,6 +6,7 @@ import { loadPracticeProfileConfig, loadStepExecutionStrategyProfileConfig, webT
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
 import { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.ts";
 import type { ResolvedLocalRuntimeConfiguration } from "../persistence/local-runtime-configuration-store.ts";
+import type { LocalModelConfigurationStore } from "../persistence/local-model-configuration-store.ts";
 import { LocalModelStreamCaptureStore } from "../persistence/model-stream-capture-store.ts";
 import { LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
 import { LocalAgentStateStore } from "../persistence/local-agent-state-store.ts";
@@ -82,8 +83,12 @@ export function redactMcpDiagnostic(message: string, secretValues: readonly stri
 /** Creates the isolated kernel, storage and skill catalog for one device Runtime. */
 export class LocalRuntimeFactory {
   private readonly input: LocalAgentOptions;
+  private readonly modelConfigurations?: LocalModelConfigurationStore;
 
-  constructor(input: LocalAgentOptions) { this.input = input; }
+  constructor(input: LocalAgentOptions, modelConfigurations?: LocalModelConfigurationStore) {
+    this.input = input;
+    this.modelConfigurations = modelConfigurations;
+  }
 
   async create(
     definition: LocalRuntimeDefinition,
@@ -113,14 +118,26 @@ export class LocalRuntimeFactory {
     const scopes = new LocalDirectoryScopeStore(database);
     await scopes.ready();
     const streamCaptures = new LocalModelStreamCaptureStore(join(runtimeRoot, "diagnostics", "model-streams"));
-    const localModelConfiguration = configuration.modelConfiguration;
+    let localModelConfiguration = this.modelConfigurations?.current() ?? configuration.modelConfiguration;
     const modelEnvironment = { ...integrationEnvironment, ...(localModelConfiguration?.environment ?? {}) };
-    if (localModelConfiguration?.configured === true && localModelConfiguration.registryConfig === undefined && !localModelConfiguration.reuseCloudModels) {
-      throw new LocalRuntimeSupervisorError(409, "local_model_configuration_has_no_models");
-    }
-    const provider = localModelConfiguration?.configured === true
-      ? localModelConfiguration.registryConfig === undefined ? undefined : LlmProviderRegistry.fromConfigObject(localModelConfiguration.registryConfig, modelEnvironment, { streamRawCaptureWriter: streamCaptures.capture })
+    // Empty catalogs are editable configuration states. Model admission below
+    // rejects unavailable selections while Runtime management remains usable.
+    const legacyProvider = localModelConfiguration?.configured === true ? undefined
       : await LlmProviderRegistry.fromConfigFile(this.input.providerConfigPath, modelEnvironment, { streamRawCaptureWriter: streamCaptures.capture });
+    let provider = localModelConfiguration?.configured === true
+      ? localModelConfiguration.registryConfig === undefined ? undefined : LlmProviderRegistry.fromConfigObject(localModelConfiguration.registryConfig, modelEnvironment, { streamRawCaptureWriter: streamCaptures.capture })
+      : legacyProvider;
+    const currentModels = () => {
+      const latest = this.modelConfigurations?.current() ?? configuration.modelConfiguration;
+      if (latest !== localModelConfiguration) {
+        const updated = latest?.configured !== true ? legacyProvider : latest.registryConfig === undefined ? undefined : LlmProviderRegistry.fromConfigObject(
+          latest.registryConfig, { ...integrationEnvironment, ...latest.environment }, { streamRawCaptureWriter: streamCaptures.capture },
+        );
+        provider = updated;
+        localModelConfiguration = latest;
+      }
+      return { provider, configuration: localModelConfiguration };
+    };
     const packaged = environment.AGENTLOOP_BUNDLED_SKILL_DIRECTORIES?.split(",").map((path) => path.trim()).filter(Boolean);
     const skills = new SkillService(database, {
       packageStoreRoot: this.input.skillPackageStoreRoot,
@@ -137,9 +154,10 @@ export class LocalRuntimeFactory {
     const runs = new RunService({
       requireExplicitModel: true,
       database, skills, modelFactory: (onRetry, modelKey) => {
+        const { provider, configuration: modelConfiguration } = currentModels();
         if (modelKey === undefined || modelKey.length === 0) throw new AppError("MODEL_ERROR", "model_required", 400);
         if (typeof modelKey === "string" && modelKey.startsWith("cloud:")) {
-          if (localModelConfiguration?.reuseCloudModels !== true) throw new AppError("MODEL_ERROR", "cloud_model_reuse_disabled", 409);
+          if (modelConfiguration?.reuseCloudModels !== true) throw new AppError("MODEL_ERROR", "cloud_model_reuse_disabled", 409);
           if (modelKey.length === "cloud:".length) throw new AppError("MODEL_ERROR", "model_key_invalid", 400);
           return new CloudProxyModel(this.input, modelKey.slice("cloud:".length), onRetry);
         }
@@ -180,7 +198,8 @@ export class LocalRuntimeFactory {
       try { if (shouldRetainRestoredRunActivity(await runs.get(row.owner_user_id, row.remote_run_id), restoredAt)) activeRunIds.add(row.remote_run_id); }
       catch { /* Orphaned ledger rows are not active admissions. */ }
     }
-    return { ...definition, database, scopes, runs, modelKeys: provider?.modelKeys().map((key) => `local:${key}`) ?? [], activeRunIds };
+    return { ...definition, database, scopes, runs,
+      get modelKeys() { return currentModels().provider?.modelKeys().map((key) => `local:${key}`) ?? []; }, activeRunIds };
   }
 
   runtimeRootFor(definition: LocalRuntimeDefinition): string | undefined {

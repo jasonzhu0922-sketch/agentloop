@@ -1,3 +1,5 @@
+import { createLocalModelSettings } from "./local-runtime/local-model-settings.js";
+import { clearToast, showToast } from "./ui/toast.js";
 import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "./projections/assistant-event-projection.js";
 import { conversationMessagesFromTurns } from "./projections/conversation-history.js";
 import { commandToolCallIds, executionActivities } from "./projections/execution-detail-projection.js";
@@ -140,12 +142,6 @@ $("agent-storage-pick").addEventListener("click", () => void pickSharedStorage()
 $("agent-upload-storage-pick").addEventListener("click", () => void pickUploadStorage());
 $("agent-settings-close").addEventListener("click", closeLocalAgentSettings);
 $("agent-settings-close-icon").addEventListener("click", closeLocalAgentSettings);
-$("local-model-provider-form").addEventListener("submit", (event) => { event.preventDefault(); addLocalModelProvider(); });
-$("local-model-save").addEventListener("click", () => void saveLocalModelConfiguration());
-$("reuse-cloud-models").addEventListener("change", async () => {
-  await loadLocalModelCatalog();
-  renderLocalModelConfiguration();
-});
 document.querySelectorAll("[data-agent-settings-view]").forEach((button) => button.addEventListener("click", () => activateAgentSettingsView(button.dataset.agentSettingsView)));
 $("agent-install-cancel").addEventListener("click", closeLocalAgentInstall);
 $("runtime-config-cancel").addEventListener("click", closeConfigureLocalRuntime);
@@ -1050,75 +1046,10 @@ async function openLocalAgentSettings() {
   $("agent-settings-modal").hidden = false;
 }
 
-let localModelConfiguration = { reuseCloudModels: false, providers: [] };
-let localCloudModels = [];
+const localModelSettings = createLocalModelSettings({ getElement: $, request: localAgentFetch, onSaved: loadModels, notify: showToast });
 let activeAgentSettingsView = "models";
 
-async function loadLocalModelConfiguration() {
-  try {
-    const response = await localAgentFetch("/v1/local-models/configuration");
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || `Router HTTP ${response.status}`);
-    localModelConfiguration = body.configuration || { reuseCloudModels: false, providers: [] };
-    $("reuse-cloud-models").checked = localModelConfiguration.reuseCloudModels === true;
-    await loadLocalModelCatalog();
-    renderLocalModelConfiguration();
-  } catch (error) { $("local-model-save-status").textContent = `读取模型配置失败：${error instanceof Error ? error.message : String(error)}`; }
-}
-
-async function loadLocalModelCatalog() {
-  if (!$("reuse-cloud-models").checked) { localCloudModels = []; return; }
-  try {
-    const response = await localAgentFetch("/v1/local-models?includeCloud=true");
-    const body = await response.json().catch(() => ({}));
-    if (response.ok) localCloudModels = (body.models || []).filter((model) => model.source === "cloud");
-  } catch { localCloudModels = []; }
-}
-
-function renderLocalModelConfiguration() {
-  const list = $("local-model-provider-list");
-  list.innerHTML = localModelConfiguration.providers.map((provider) => `<article class="local-model-provider"><div><strong>${escapeHtml(provider.displayName)}</strong><small>${escapeHtml(provider.baseUrl)} · ${provider.credentialConfigured ? "API Key 已配置" : "未配置 API Key"}</small></div><button type="button" class="remove-model-provider" data-provider-key="${escapeHtml(provider.key)}" aria-label="删除 ${escapeHtml(provider.displayName)}" title="删除 Provider">删除</button></article>`).join("") || `<div class="local-model-empty">尚未添加本机 Provider</div>`;
-  list.querySelectorAll("[data-provider-key]").forEach((button) => button.addEventListener("click", () => {
-    localModelConfiguration.providers = localModelConfiguration.providers.filter((provider) => provider.key !== button.dataset.providerKey);
-    renderLocalModelConfiguration();
-  }));
-  const models = [
-    ...localModelConfiguration.providers.flatMap((provider) => provider.models.map((model) => ({ ...model, key: `local:${model.key}`, providerName: provider.displayName, source: "local" }))),
-    ...($("reuse-cloud-models").checked ? localCloudModels.map((model) => ({ ...model, providerName: "云端 Provider", source: "cloud" })) : []),
-  ];
-  $("local-model-count").textContent = `${models.length} 个模型`;
-  $("local-model-table").innerHTML = models.length ? `<div class="local-model-table-wrap"><table class="local-model-table"><thead><tr><th>模型</th><th>Provider</th><th>位置</th></tr></thead><tbody>${models.map((model) => `<tr><td><strong>${escapeHtml(model.displayName)}</strong><small>${escapeHtml(model.key)}</small></td><td>${escapeHtml(model.providerName)}</td><td><span class="model-origin-${model.source}">${model.source === "cloud" ? "云端" : "本机"}</span></td></tr>`).join("")}</tbody></table></div>` : `<div class="local-model-empty">添加 Provider 或启用云端模型后，模型会显示在这里</div>`;
-}
-
-function addLocalModelProvider() {
-  const form = $("local-model-provider-form");
-  const values = new FormData(form);
-  const provider = {
-    key: String(values.get("key")).trim(), displayName: String(values.get("displayName")).trim(),
-    baseUrl: String(values.get("baseUrl")).trim(), apiKey: String(values.get("apiKey")).trim(),
-    models: [{ key: String(values.get("modelKey")).trim(), displayName: String(values.get("modelKey")).trim(), providerModel: String(values.get("providerModel")).trim(), protocol: String(values.get("protocol")) }],
-  };
-  if (localModelConfiguration.providers.some((entry) => entry.key === provider.key)) { $("local-model-form-error").textContent = "Provider ID 已存在"; return; }
-  if (!provider.apiKey) { $("local-model-form-error").textContent = "请输入 API Key"; return; }
-  $("local-model-form-error").textContent = "";
-  localModelConfiguration.providers.push(provider);
-  form.reset();
-  renderLocalModelConfiguration();
-}
-
-async function saveLocalModelConfiguration() {
-  const value = { ...localModelConfiguration, reuseCloudModels: $("reuse-cloud-models").checked };
-  try {
-    const response = await localAgentFetch("/v1/local-models/configuration", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || `Router HTTP ${response.status}`);
-    localModelConfiguration = body.configuration;
-    await loadLocalModelCatalog();
-    renderLocalModelConfiguration();
-    $("local-model-save-status").textContent = "已保存；本机 Runtime 已重新加载模型配置。";
-    await loadModels();
-  } catch (error) { $("local-model-save-status").textContent = `保存失败：${error instanceof Error ? error.message : String(error)}`; }
-}
+async function loadLocalModelConfiguration() { await localModelSettings.load(); }
 
 function activateAgentSettingsView(view) {
   if (view !== "models" && view !== "general" && view !== "runtimes") view = "models";
@@ -1135,7 +1066,12 @@ function syncAgentSettingsView(paired) {
   $("local-runtime-manager").hidden = activeAgentSettingsView !== "runtimes" || !paired;
 }
 
-function closeLocalAgentSettings() { $("agent-settings-modal").hidden = true; }
+function closeLocalAgentSettings() {
+  if (!$("agent-settings-modal").hidden && localModelSettings.canClose()) {
+    $("agent-settings-modal").hidden = true;
+    clearToast();
+  }
+}
 
 async function pickSharedStorage() {
   try {

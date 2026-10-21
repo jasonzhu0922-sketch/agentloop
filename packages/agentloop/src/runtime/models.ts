@@ -42,6 +42,9 @@ export interface OpenAICompatibleModelOptions {
   readonly reasoningContinuationStore?: ResponsesReasoningContinuationStore;
   /** Internal profile scope for the registry-owned store. */
   readonly reasoningContinuationScope?: string;
+  /** Optional upstream sampling controls; omitted values are not sent. */
+  readonly temperature?: number;
+  readonly topP?: number;
   /** Control Responses reasoning, or disable reasoning for tool-calling Chat Completions. */
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   /** Control thinking for Chat Completions providers that expose DeepSeek's thinking extension. */
@@ -284,6 +287,8 @@ export class OpenAICompatibleModel implements ModelAdapter {
   private readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   private readonly runtimeContextPlacement: RuntimeContextPlacement;
   private readonly reasoningSummary?: "auto" | "detailed";
+  private readonly temperature?: number;
+  private readonly topP?: number;
   private readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   private readonly thinkingMode?: "enabled" | "disabled";
   private readonly thinkingEffort?: "low" | "medium" | "high";
@@ -323,6 +328,13 @@ export class OpenAICompatibleModel implements ModelAdapter {
     this.toolChoiceMode = options.toolChoiceMode ?? "native";
     this.runtimeContextPlacement = options.runtimeContextPlacement ?? "system";
     this.reasoningSummary = options.reasoningSummary;
+    for (const [name, value, max] of [["temperature", options.temperature, 2], ["topP", options.topP, 1]] as const) {
+      if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > max)) {
+        throw new TypeError(`LLM ${name} must be a number between 0 and ${max}`);
+      }
+    }
+    this.temperature = options.temperature;
+    this.topP = options.topP;
     this.reasoningEffort = options.reasoningEffort;
     this.thinkingMode = options.thinkingMode;
     this.thinkingEffort = options.thinkingEffort;
@@ -596,6 +608,8 @@ export class OpenAICompatibleModel implements ModelAdapter {
       : this.thinkingMode;
     const body = JSON.stringify({
       model: this.model,
+      ...(this.temperature === undefined ? {} : { temperature: this.temperature }),
+      ...(this.topP === undefined ? {} : { top_p: this.topP }),
       messages: prompt.messages,
       tools: providerTools,
       ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
@@ -890,6 +904,8 @@ export class ResponsesModel implements ModelAdapter {
   private readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   private readonly runtimeContextPlacement: RuntimeContextPlacement;
   private readonly reasoningSummary?: "auto" | "detailed";
+  private readonly temperature?: number;
+  private readonly topP?: number;
   private readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   private readonly reasoningEncryptedContent: boolean;
   private readonly reasoningContinuationStore?: ResponsesReasoningContinuationStore;
@@ -928,6 +944,13 @@ export class ResponsesModel implements ModelAdapter {
     this.toolChoiceMode = options.toolChoiceMode ?? "native";
     this.runtimeContextPlacement = options.runtimeContextPlacement ?? "system";
     this.reasoningSummary = options.reasoningSummary;
+    for (const [name, value, max] of [["temperature", options.temperature, 2], ["topP", options.topP, 1]] as const) {
+      if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > max)) {
+        throw new TypeError(`LLM ${name} must be a number between 0 and ${max}`);
+      }
+    }
+    this.temperature = options.temperature;
+    this.topP = options.topP;
     this.reasoningEffort = options.reasoningEffort;
     this.reasoningEncryptedContent = options.reasoningEncryptedContent ?? false;
     this.reasoningContinuationStore = options.reasoningContinuationStore;
@@ -1089,6 +1112,8 @@ export class ResponsesModel implements ModelAdapter {
       : toResponsesToolChoice(invocation.toolChoice ?? "auto", this.toolChoiceMode, invocation.tools.length);
     const body = JSON.stringify({
       model: this.model,
+      ...(this.temperature === undefined ? {} : { temperature: this.temperature }),
+      ...(this.topP === undefined ? {} : { top_p: this.topP }),
       ...(instructions.length === 0 ? {} : { instructions }),
       input,
       tools: providerTools,

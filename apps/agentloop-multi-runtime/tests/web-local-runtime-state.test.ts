@@ -47,7 +47,7 @@ test("settings preserve the active tab across Agent refreshes and reopen on mode
   const controls = runInNewContext(`
     let activeAgentSettingsView = "models";
     ${sourceBetween("function updateLocalControls()", "async function addDirectoryScope()")}
-    ${sourceBetween("async function openLocalAgentSettings()", "let localModelConfiguration")}
+    ${sourceBetween("async function openLocalAgentSettings()", "const localModelSettings")}
     ${sourceBetween("function activateAgentSettingsView(view)", "function closeLocalAgentSettings()")}
     ({ activateAgentSettingsView, updateLocalControls, openLocalAgentSettings })
   `, {

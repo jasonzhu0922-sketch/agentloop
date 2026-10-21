@@ -78,31 +78,46 @@
       </div>
     </div>
     <div id="agent-settings-modal" class="runtime-modal" role="dialog" aria-modal="true" aria-labelledby="agent-settings-title" hidden>
+      <div id="app-notifications" class="app-notifications" aria-label="操作提示"></div>
       <div class="runtime-modal-card agent-settings-card">
         <div class="agent-settings-header"><div><strong id="agent-settings-title">本机能力设置</strong><p>模型配置保存在这台设备上。API Key 仅在本机加密存储。</p></div><button id="agent-settings-close-icon" class="runtime-modal-close" type="button" title="关闭" aria-label="关闭 Local Runtime Agent 设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg></button></div>
         <div class="agent-settings-layout">
           <nav class="agent-settings-nav" aria-label="本机能力设置"><button type="button" class="active" data-agent-settings-view="models">模型配置</button><button type="button" data-agent-settings-view="general">常规</button><button type="button" data-agent-settings-view="runtimes">Runtime 管理</button></nav>
           <div class="agent-settings-content">
             <section id="agent-model-settings" class="agent-settings-view">
-              <div class="settings-page-heading"><div><h2>模型配置</h2><p>添加本机 Provider。模型调用由本机 Runtime 直接发送到对应 Provider。</p></div><span class="settings-local-badge">仅本机保存</span></div>
+              <div class="settings-page-heading"><div><h2>模型配置</h2><p>使用 JSON 管理本机 Provider、模型和调用参数。保存后用于后续新任务。</p></div><span class="settings-local-badge">仅本机保存</span></div>
               <label class="cloud-model-option"><input id="reuse-cloud-models" type="checkbox" /><span><strong>复用云端模型配置</strong><small>本机 Run 可选择云端模型；请求内容将经 Router 发送到云端，API Key 保留在云端。</small></span></label>
-              <div id="local-model-provider-list" class="local-model-provider-list"></div>
-              <form id="local-model-provider-form" class="local-model-form">
-                <div class="settings-section-title"><strong>添加 Provider</strong><small>支持 OpenAI 兼容接口</small></div>
-                <div class="local-model-form-grid">
-                  <label>名称<input name="displayName" required maxlength="80" placeholder="例如：OpenAI Compatible" /></label>
-                  <label>Provider ID<input name="key" required pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="my-provider" /></label>
-                  <label class="wide">API 地址<input name="baseUrl" type="url" required placeholder="https://api.example.com/v1" /></label>
-                  <label>API Key<input name="apiKey" type="password" autocomplete="new-password" placeholder="输入后加密保存在本机" /></label>
-                  <label>协议<select name="protocol"><option value="responses">Responses</option><option value="chat-completions">Chat Completions</option></select></label>
-                  <label>模型 ID<input name="modelKey" required pattern="[a-z0-9]+([.-][a-z0-9]+)*" placeholder="my-model" /></label>
-                  <label>上游模型名称<input name="providerModel" required placeholder="model-name" /></label>
+              <div id="local-model-editable" class="local-model-json-layout">
+                <section class="local-model-section">
+                  <div class="settings-section-title"><strong>本机 Providers</strong><button id="local-provider-add" type="button">＋ 添加 Provider</button></div>
+                  <div id="local-model-provider-list" class="local-model-provider-list"></div>
+                </section>
+                <div id="local-model-json-empty" class="local-model-empty">添加 Provider 后，使用 JSON 配置服务连接和模型列表。</div>
+                <div id="local-model-json-editors" class="local-model-section" hidden>
+                  <section class="local-model-section">
+                    <div class="settings-section-title"><label for="local-provider-json"><strong>Provider 配置</strong></label><div class="local-model-actions"><button id="local-provider-format" type="button">格式化</button><button id="local-provider-delete" type="button" class="danger">删除 Provider</button></div></div>
+                    <p id="local-provider-key-hint" class="local-model-field-note"></p>
+                    <textarea id="local-provider-json" class="local-model-json" aria-describedby="local-provider-key-hint" spellcheck="false" autocomplete="off" autocapitalize="off" rows="8"></textarea>
+                  </section>
+                  <section class="local-model-section">
+                    <div class="settings-section-title"><label for="local-models-json"><strong>模型列表与参数</strong></label><div class="local-model-actions"><button id="local-model-example" type="button">填入模型示例</button><button id="local-model-format" type="button">格式化</button></div></div>
+                    <p id="local-model-json-hint" class="local-model-field-note">填写 JSON 数组；每个对象表示一个模型。可添加多个模型，也可先保留空数组 []。</p>
+                    <textarea id="local-models-json" class="local-model-json" aria-describedby="local-model-json-hint" spellcheck="false" autocomplete="off" autocapitalize="off" rows="14"></textarea>
+                    <details class="local-model-json-help"><summary>配置字段说明</summary><div>
+                      <p>Provider 必填：<code>key</code>（唯一 ID）、<code>displayName</code>、<code>baseUrl</code>；新增时填写 <code>apiKey</code>。基础地址例如 <code>https://api.example.com/v1</code>。</p>
+                      <p>模型必填：<code>key</code>（本机唯一 ID）、<code>displayName</code>、<code>providerModel</code>（上游模型名称）。<code>protocol</code> 可选 <code>responses</code>（默认）或 <code>chat-completions</code>。</p>
+                      <p>容量：<code>contextWindowTokens</code> 默认 128000；<code>maxOutputTokens</code> 默认最多 8192，必须小于上下文窗口。</p>
+                      <p>采样：<code>temperature</code> 为 0–2，<code>topP</code> 为 0–1；仅配置上游支持的参数，省略时不发送。</p>
+                      <p>Responses：<code>reasoningEffort</code> 为 <code>none / low / medium / high</code>；<code>reasoningSummary</code> 为 <code>auto / detailed</code>；<code>reasoningEncryptedContent</code> 为布尔值。</p>
+                      <p>Chat Completions：支持扩展的服务商可配置 <code>thinkingMode</code>（<code>enabled / disabled</code>）、<code>thinkingEffort</code>（<code>low / medium / high</code>）、<code>planningThinkingMode</code> 和 <code>chatTemplateKwargs</code>（对象）。</p>
+                      <p>请求：<code>timeoutMs</code> 默认 120000；<code>maxAttempts</code> 默认 3（含首次，范围 1–5）；<code>retryDelayMs</code> 默认 250。时间单位为毫秒。</p>
+                      <p>高级选项：<code>toolChoiceMode</code>（<code>native / constrained-as-auto / named-as-required</code>）、<code>runtimeContextPlacement</code>（<code>system / user-envelope</code>）、<code>reasoningVisibility</code>（<code>visible / hidden</code>）。</p>
+                    </div></details>
+                  </section>
                 </div>
-                <div class="local-model-form-actions"><span id="local-model-form-error" role="alert"></span><button type="submit" class="primary">添加模型</button></div>
-              </form>
-              <div class="local-model-catalog"><div class="settings-section-title"><strong>本机可用模型</strong><small id="local-model-count">0 个模型</small></div><div id="local-model-table"></div></div>
-              <p id="local-model-save-status" class="settings-save-status" role="status"></p>
-              <div class="runtime-modal-actions"><button id="local-model-save" type="button" class="primary">保存配置</button></div>
+              </div>
+              <section id="local-cloud-model-section" class="local-model-section" hidden><div class="settings-section-title"><strong>复用的云端模型</strong><small id="local-model-count"></small></div><p class="local-model-field-note">在云端管理 Provider 和模型参数，此处只读。</p><div id="local-cloud-model-table"></div></section>
+              <div class="local-model-save-bar"><p id="local-model-save-status" class="settings-save-status" role="status" aria-live="polite"></p><div class="local-model-actions"><button id="local-model-discard" type="button" disabled>放弃更改</button><button id="local-model-save" type="button" class="primary" disabled>保存配置</button></div></div>
             </section>
             <section id="agent-general-settings" class="agent-settings-view" hidden>
               <dl class="settings-detail"><dt>Agent</dt><dd id="agent-settings-version">-</dd><dt>服务端</dt><dd id="agent-router-url">-</dd><dt>共享工作目录</dt><dd class="settings-detail-value"><span id="agent-settings-storage">-</span><button id="agent-storage-pick" class="icon-button" type="button" title="编辑共享工作目录" aria-label="编辑共享工作目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg></button></dd><dt>上传源文件目录</dt><dd class="settings-detail-value"><span id="agent-settings-upload-storage">-</span><button id="agent-upload-storage-pick" class="icon-button" type="button" title="编辑上传源文件目录" aria-label="编辑上传源文件目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg></button></dd><dt>Skill 模式</dt><dd>Runtime 启动时统一加载</dd></dl><p class="install-security-note">切换任一目录前必须没有活动任务；原位置数据不会被自动删除。上传源文件在公共根目录内按 Runtime 分区。</p></section>

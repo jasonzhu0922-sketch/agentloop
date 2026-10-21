@@ -7,14 +7,31 @@ export interface LocalModelProviderInput {
   readonly baseUrl: string;
   readonly apiKey?: string;
   readonly credentialConfigured?: boolean;
-  readonly models: readonly {
-    readonly key: string;
-    readonly displayName: string;
-    readonly providerModel: string;
-    readonly contextWindowTokens?: number;
-    readonly maxOutputTokens?: number;
-    readonly protocol?: "responses" | "chat-completions";
-  }[];
+  readonly models: readonly LocalModelInput[];
+}
+
+export interface LocalModelInput {
+  readonly key: string;
+  readonly displayName: string;
+  readonly providerModel: string;
+  readonly protocol?: "responses" | "chat-completions";
+  readonly contextWindowTokens?: number;
+  readonly maxOutputTokens?: number;
+  readonly temperature?: number;
+  readonly topP?: number;
+  readonly timeoutMs?: number;
+  readonly maxAttempts?: number;
+  readonly retryDelayMs?: number;
+  readonly reasoningEffort?: "none" | "low" | "medium" | "high";
+  readonly reasoningSummary?: "auto" | "detailed";
+  readonly thinkingMode?: "enabled" | "disabled";
+  readonly thinkingEffort?: "low" | "medium" | "high";
+  readonly toolChoiceMode?: "native" | "constrained-as-auto" | "named-as-required";
+  readonly runtimeContextPlacement?: "system" | "user-envelope";
+  readonly reasoningEncryptedContent?: boolean;
+  readonly reasoningVisibility?: "visible" | "hidden";
+  readonly planningThinkingMode?: "enabled" | "disabled";
+  readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
 }
 
 export interface LocalModelConfigurationInput {
@@ -35,6 +52,7 @@ export interface LocalModelConfigurationSnapshot { readonly row?: ModelConfigura
 export class LocalModelConfigurationStore {
   private readonly database: AppDatabase;
   private readonly secrets: LocalRuntimeSecretStore;
+  private currentConfiguration?: ResolvedLocalModelConfiguration;
 
   constructor(database: AppDatabase, secrets: LocalRuntimeSecretStore) {
     this.database = database;
@@ -46,6 +64,13 @@ export class LocalModelConfigurationStore {
       singleton INTEGER PRIMARY KEY CHECK(singleton = 1), configuration_json TEXT NOT NULL,
       secret_storage_key TEXT, updated_at INTEGER NOT NULL
     )`);
+    this.currentConfiguration = await this.resolve();
+  }
+
+  /** Published only after a successful durable write; new model admissions read this snapshot. */
+  current(): ResolvedLocalModelConfiguration {
+    if (this.currentConfiguration === undefined) throw new Error("local_model_configuration_not_ready");
+    return this.currentConfiguration;
   }
 
   async read(): Promise<LocalModelConfigurationInput> {
@@ -85,7 +110,11 @@ export class LocalModelConfigurationStore {
       if (secretStorageKey !== null) await this.secrets.remove(secretStorageKey);
       throw error;
     }
-    return await this.read();
+    this.currentConfiguration = {
+      configured: true, reuseCloudModels: stored.reuseCloudModels,
+      registryConfig: registry, environment: secretValues,
+    };
+    return stored;
   }
 
   async snapshot(): Promise<LocalModelConfigurationSnapshot> {
@@ -99,6 +128,7 @@ export class LocalModelConfigurationStore {
       VALUES (1, ?, ?, ?) ON CONFLICT(singleton) DO UPDATE SET configuration_json = excluded.configuration_json,
       secret_storage_key = excluded.secret_storage_key, updated_at = excluded.updated_at`)
       .run(snapshot.row.configuration_json, snapshot.row.secret_storage_key, snapshot.row.updated_at);
+    this.currentConfiguration = await this.resolve();
     if (current !== undefined && current.secret_storage_key !== null && current.secret_storage_key !== snapshot.row?.secret_storage_key) await this.secrets.remove(current.secret_storage_key);
   }
 
@@ -131,25 +161,26 @@ function configurationWithoutLegacyDefaults(serialized: string): LocalModelConfi
 }
 
 function registryConfiguration(config: LocalModelConfigurationInput): unknown {
-  if (config.providers.length === 0) return undefined;
+  // A Provider may be configured before it has any models. Only explicitly
+  // configured models enter the executable registry; no synthetic model is added.
+  const activeProviders = config.providers.filter((provider) => provider.models.length > 0);
+  if (activeProviders.length === 0) return undefined;
   const providers: Record<string, unknown> = {};
   const models: Record<string, unknown> = {};
-  for (const provider of config.providers) {
+  for (const provider of activeProviders) {
     providers[provider.key] = {
       kind: "openai-compatible", baseUrl: provider.baseUrl,
       apiKeyEnv: `LOCAL_MODEL_KEY_${provider.key.toUpperCase().replace(/-/g, "_")}`,
-      defaultModel: provider.models[0]!.providerModel, protocol: provider.models[0]!.protocol ?? "responses",
+      defaultModel: provider.models[0]!.providerModel, protocol: "responses",
     };
-    for (const model of provider.models) models[model.key] = {
-      displayName: model.displayName, providerKey: provider.key, providerModel: model.providerModel,
-      ...(model.protocol === undefined ? {} : { protocol: model.protocol }),
-      ...(model.contextWindowTokens === undefined ? {} : { contextWindowTokens: model.contextWindowTokens }),
-      ...(model.maxOutputTokens === undefined ? {} : { maxOutputTokens: model.maxOutputTokens }),
-    };
+    for (const model of provider.models) {
+      const { key, ...configuration } = model;
+      models[key] = { ...configuration, providerKey: provider.key };
+    }
   }
   return {
-    defaultProvider: config.providers[0]!.key,
-    defaultModelKey: config.providers[0]!.models[0]!.key,
+    defaultProvider: activeProviders[0]!.key,
+    defaultModelKey: activeProviders[0]!.models[0]!.key,
     providers, models,
   };
 }
@@ -159,7 +190,8 @@ function normalizeInput(value: LocalModelConfigurationInput): LocalModelConfigur
   const keys = new Set<string>();
   const modelKeys = new Set<string>();
   const providers = (value.providers as readonly LocalModelProviderInput[]).map((provider): LocalModelProviderInput => {
-    if (!provider || typeof provider !== "object" || typeof provider.key !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(provider.key) || keys.has(provider.key) || provider.key.length > 80 || !Array.isArray(provider.models) || provider.models.length === 0 || provider.models.length > 100) throw new TypeError("local_model_configuration_invalid");
+    if (!provider || typeof provider !== "object" || typeof provider.key !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(provider.key) || keys.has(provider.key) || provider.key.length > 80 || !Array.isArray(provider.models) || provider.models.length > 100) throw new TypeError("local_model_configuration_invalid");
+    if (Object.keys(provider).some((key) => !["key", "displayName", "baseUrl", "apiKey", "credentialConfigured", "models"].includes(key))) throw new TypeError("local_model_provider_parameter_unknown");
     keys.add(provider.key);
     let url: URL;
     try { url = new URL(provider.baseUrl); } catch { throw new TypeError("local_model_base_url_invalid"); }
@@ -168,14 +200,13 @@ function normalizeInput(value: LocalModelConfigurationInput): LocalModelConfigur
     const models = (provider.models as LocalModelProviderInput["models"]).map((model) => {
       if (!model || typeof model !== "object" || typeof model.key !== "string" || model.key.length > 100 || !/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(model.key) || modelKeys.has(model.key)) throw new TypeError("local_model_configuration_invalid");
       modelKeys.add(model.key);
-      if (model.protocol !== undefined && model.protocol !== "responses" && model.protocol !== "chat-completions") throw new TypeError("local_model_configuration_invalid");
-      for (const [limit, max] of [[model.contextWindowTokens, 10_000_000], [model.maxOutputTokens, 1_000_000]] as const) if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > max)) throw new TypeError("local_model_limits_invalid");
-      return {
-        key: model.key, displayName: text(model.displayName, 100), providerModel: text(model.providerModel, 200),
-        ...(model.protocol === undefined ? {} : { protocol: model.protocol }),
-        ...(model.contextWindowTokens === undefined ? {} : { contextWindowTokens: model.contextWindowTokens }),
-        ...(model.maxOutputTokens === undefined ? {} : { maxOutputTokens: model.maxOutputTokens }),
-      };
+      const allowed = new Set(["key", "displayName", "providerModel", "protocol", "contextWindowTokens", "maxOutputTokens",
+        "temperature", "topP", "timeoutMs", "maxAttempts", "retryDelayMs", "reasoningEffort", "reasoningSummary", "thinkingMode", "thinkingEffort", "toolChoiceMode", "runtimeContextPlacement", "reasoningEncryptedContent",
+        "reasoningVisibility", "planningThinkingMode", "chatTemplateKwargs"]);
+      if (Object.keys(model).some((key) => !allowed.has(key))) throw new TypeError("local_model_parameter_unknown");
+      // Keep every admitted parameter. The canonical registry below validates
+      // protocol constraints and numeric ranges before anything is persisted.
+      return { ...model, key: model.key, displayName: text(model.displayName, 100), providerModel: text(model.providerModel, 160) };
     });
     return { key: provider.key, displayName: text(provider.displayName, 100), baseUrl: url.href.replace(/\/$/, ""),
       ...(provider.apiKey === undefined ? {} : { apiKey: provider.apiKey.trim() }), models };

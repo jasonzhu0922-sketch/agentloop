@@ -623,3 +623,35 @@ function hasAppError(error: unknown, code: string, status: number): boolean {
     && (error as { code: unknown }).code === code
     && (error as { status: unknown }).status === status;
 }
+
+test("sampling defaults, model overrides, zero values, and omission survive registry selection", async (t) => {
+  const provider = { kind: "openai-compatible", baseUrl: "https://models.example.test/v1", apiKeyEnv: "TEST_API_KEY", defaultModel: "upstream", maxAttempts: 1 };
+  const registry = LlmProviderRegistry.fromConfigObject({
+    defaultProvider: "configured", defaultModelKey: "inherited",
+    providers: { configured: { ...provider, temperature: 0.5, topP: 0.8 }, plain: provider },
+    models: {
+      inherited: { providerKey: "configured", providerModel: "first", protocol: "responses" },
+      overridden: { providerKey: "configured", providerModel: "second", temperature: 0, topP: 0 },
+      omitted: { providerKey: "plain", providerModel: "third" },
+    },
+  }, { TEST_API_KEY: "test-only-secret" });
+  const bodies: Array<Record<string, unknown>> = [];
+  t.mock.method(globalThis, "fetch", async (url: unknown, init: RequestInit) => {
+    bodies.push(JSON.parse(String(init.body)));
+    return new Response(JSON.stringify(String(url).endsWith("/responses")
+      ? { status: "completed", output_text: "ok", output: [] }
+      : { choices: [{ finish_reason: "stop", message: { content: "ok" } }] }), { headers: { "content-type": "application/json" } });
+  });
+  for (const key of ["inherited", "overridden", "omitted"]) {
+    await registry.create(key).complete({ runId: key, systemPrompt: "Test", phase: "execution", messages: [], tools: [] });
+  }
+  assert.equal(bodies[0]?.temperature, 0.5);
+  assert.equal(bodies[0]?.top_p, 0.8);
+  assert.equal(bodies[1]?.temperature, 0);
+  assert.equal(bodies[1]?.top_p, 0);
+  assert.equal(Object.hasOwn(bodies[2]!, "temperature"), false);
+  assert.equal(Object.hasOwn(bodies[2]!, "top_p"), false);
+  for (const invalid of [{ temperature: -1 }, { topP: 2 }, { temperature: NaN }, { topP: "0.5" }]) {
+    assert.throws(() => LlmProviderRegistry.fromConfigObject({ defaultProvider: "test", providers: { test: { ...provider, ...invalid } } }, { TEST_API_KEY: "test-only-secret" }));
+  }
+});

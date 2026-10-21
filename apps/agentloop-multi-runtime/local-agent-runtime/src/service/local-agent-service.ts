@@ -32,6 +32,7 @@ export class LocalAgentService {
   private readonly supervisor: LocalRuntimeSupervisor;
   private readonly configurations: LocalRuntimeConfigurationStore;
   private readonly modelConfigurations: LocalModelConfigurationStore;
+  private modelConfigurationUpdate: Promise<unknown> = Promise.resolve();
   private readonly skillPackageInstaller: LocalSkillPackageInstaller;
   private readonly picker: () => Promise<string | undefined>;
   private readonly sharedStorageRoot: { value: string };
@@ -56,7 +57,6 @@ export class LocalAgentService {
     }
     await mkdir(sharedStorageRoot.value, { recursive: true });
     await mkdir(uploadStorageRoot.value, { recursive: true });
-    const factory = new LocalRuntimeFactory(input);
     // Device-local Runtime state deliberately remains SQLite-only. The shared
     // Router/Host database adapter is not a valid replacement at this boundary.
     const supervisorDatabasePath = input.supervisorDatabasePath ?? join(dirname(input.databasePath), "supervisor.db");
@@ -69,6 +69,7 @@ export class LocalAgentService {
     const modelSecretStore = new EncryptedLocalRuntimeSecretStore(join(dirname(supervisorDatabasePath), "model-secrets"));
     const modelConfigurations = new LocalModelConfigurationStore(supervisorDatabase, modelSecretStore);
     await modelConfigurations.ready();
+    const factory = new LocalRuntimeFactory(input, modelConfigurations);
     const uploadedSkillPackageRoot = join(input.skillPackageStoreRoot, "uploaded");
     const skillPackageInstaller = new LocalSkillPackageInstaller(uploadedSkillPackageRoot);
     const configurations = new LocalRuntimeConfigurationStore(supervisorDatabase, secretStore, customSkillDirectories, uploadedSkillPackageRoot, modelConfigurations);
@@ -121,19 +122,21 @@ export class LocalAgentService {
   }
 
   async updateLocalModelConfiguration(configuration: LocalModelConfigurationInput): Promise<unknown> {
-    return await this.supervisor.withDeviceReconfiguration(async () => {
+    // Serialize credential-preserving writes without locking Run admission or
+    // touching Runtime lifecycle, Skills, MCP sessions, or Runtime databases.
+    const update = this.modelConfigurationUpdate.then(async () => {
       const snapshot = await this.modelConfigurations.snapshot();
       const updated = await this.modelConfigurations.write(configuration);
       try {
-        await this.supervisor.reloadRunningInstances();
         await this.modelConfigurations.commit(snapshot);
       } catch (error) {
         await this.modelConfigurations.restore(snapshot);
-        await this.supervisor.reloadRunningInstances().catch(() => undefined);
         throw error;
       }
-      return { configuration: updated, runtimes: await this.supervisor.list() };
+      return { configuration: updated };
     });
+    this.modelConfigurationUpdate = update.catch(() => undefined);
+    return await update;
   }
 
   async registerDevice(origin: string | undefined, registrationToken: string): Promise<unknown> {

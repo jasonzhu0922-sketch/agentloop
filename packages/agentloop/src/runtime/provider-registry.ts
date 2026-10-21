@@ -43,6 +43,8 @@ interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
   readonly runtimeContextPlacement: RuntimeContextPlacement;
   readonly reasoningSummary?: "auto" | "detailed";
   readonly reasoningEncryptedContent: boolean;
+  readonly temperature?: number;
+  readonly topP?: number;
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   readonly thinkingMode?: "enabled" | "disabled";
   readonly thinkingEffort?: "low" | "medium" | "high";
@@ -64,6 +66,8 @@ interface OpenAICompatibleModelConfig extends LlmModelSummary {
   readonly runtimeContextPlacement: RuntimeContextPlacement;
   readonly reasoningSummary?: "auto" | "detailed";
   readonly reasoningEncryptedContent: boolean;
+  readonly temperature?: number;
+  readonly topP?: number;
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   readonly thinkingMode?: "enabled" | "disabled";
   readonly thinkingEffort?: "low" | "medium" | "high";
@@ -220,6 +224,8 @@ export class LlmProviderRegistry {
         reasoningContinuationStore: this.reasoningContinuationStore,
         reasoningContinuationScope: model.key,
       } : {}),
+      ...(model.temperature === undefined ? {} : { temperature: model.temperature }),
+      ...(model.topP === undefined ? {} : { topP: model.topP }),
       ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
       ...(model.thinkingMode === undefined ? {} : { thinkingMode: model.thinkingMode }),
       ...(model.thinkingEffort === undefined ? {} : { thinkingEffort: model.thinkingEffort }),
@@ -294,6 +300,8 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
       "reasoningSummary",
       "reasoningEncryptedContent",
       "reasoningEffort",
+      "temperature",
+      "topP",
       "thinkingMode",
       "thinkingEffort",
       "reasoningVisibility",
@@ -351,6 +359,8 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
   );
   const reasoningSummary = optionalReasoningSummary(config.reasoningSummary, `${label}.reasoningSummary`);
   const reasoningEncryptedContent = optionalBoolean(config.reasoningEncryptedContent, false, `${label}.reasoningEncryptedContent`);
+  const temperature = optionalSamplingNumber(config.temperature, 2, `${label}.temperature`);
+  const topP = optionalSamplingNumber(config.topP, 1, `${label}.topP`);
   const reasoningEffort = optionalReasoningEffort(config.reasoningEffort, `${label}.reasoningEffort`);
   const thinkingMode = optionalThinkingMode(config.thinkingMode, `${label}.thinkingMode`);
   const thinkingEffort = optionalThinkingEffort(config.thinkingEffort, `${label}.thinkingEffort`);
@@ -388,6 +398,8 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     runtimeContextPlacement,
     ...(reasoningSummary === undefined ? {} : { reasoningSummary }),
     reasoningEncryptedContent,
+    ...(temperature === undefined ? {} : { temperature }),
+    ...(topP === undefined ? {} : { topP }),
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     ...(thinkingMode === undefined ? {} : { thinkingMode }),
     ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
@@ -435,6 +447,8 @@ function parseModel(
       "reasoningSummary",
       "reasoningEncryptedContent",
       "reasoningEffort",
+      "temperature",
+      "topP",
       "thinkingMode",
       "thinkingEffort",
       "reasoningVisibility",
@@ -467,6 +481,8 @@ function parseModel(
     `${label}.thinkingEffort`,
     provider.thinkingEffort,
   );
+  const temperature = optionalSamplingNumber(config.temperature, 2, `${label}.temperature`, provider.temperature);
+  const topP = optionalSamplingNumber(config.topP, 1, `${label}.topP`, provider.topP);
   const reasoningEffort = optionalReasoningEffort(
     config.reasoningEffort,
     `${label}.reasoningEffort`,
@@ -533,6 +549,8 @@ function parseModel(
       provider.reasoningSummary,
     ),
     reasoningEncryptedContent,
+    ...(temperature === undefined ? {} : { temperature }),
+    ...(topP === undefined ? {} : { topP }),
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     ...(thinkingMode === undefined ? {} : { thinkingMode }),
     ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
@@ -563,6 +581,8 @@ function legacyModelsFromProviders(
     runtimeContextPlacement: provider.runtimeContextPlacement,
     ...(provider.reasoningSummary === undefined ? {} : { reasoningSummary: provider.reasoningSummary }),
     reasoningEncryptedContent: provider.reasoningEncryptedContent,
+    ...(provider.temperature === undefined ? {} : { temperature: provider.temperature }),
+    ...(provider.topP === undefined ? {} : { topP: provider.topP }),
     ...(provider.reasoningEffort === undefined ? {} : { reasoningEffort: provider.reasoningEffort }),
     ...(provider.thinkingMode === undefined ? {} : { thinkingMode: provider.thinkingMode }),
     ...(provider.thinkingEffort === undefined ? {} : { thinkingEffort: provider.thinkingEffort }),
@@ -754,4 +774,12 @@ function optionalReasoningSummary(
   if (value === undefined) return fallback;
   if (value === "auto" || value === "detailed") return value;
   throw new Error(`${label} must be auto or detailed`);
+}
+
+function optionalSamplingNumber(value: unknown, max: number, label: string, inherited?: number): number | undefined {
+  if (value === undefined) return inherited;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > max) {
+    throw new Error(`${label} must be a number between 0 and ${max}`);
+  }
+  return value;
 }
