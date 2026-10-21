@@ -957,6 +957,9 @@ test("clarification turns do not misrepresent their intentionally tool-free step
     assert.doesNotMatch(run.output ?? "", /MCP.*不可用|工具.*不可用/);
     const events = await runs.events(owner.user.id, run.id);
     assert.equal(events.find((event) => event.type === "conversation.intent.classified")?.data.resolutionMode, "clarify");
+    const assessment = events.find((event) => event.type === "skill.compliance.assessed");
+    assert.equal(assessment?.data.assessmentProfile, "deterministic");
+    assert.equal(assessment?.data.assessmentMethod, "rule");
   } finally {
     await database.close();
   }

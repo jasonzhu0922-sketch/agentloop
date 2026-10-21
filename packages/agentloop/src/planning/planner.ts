@@ -557,7 +557,15 @@ function responseOnlyPlan(task: TaskSpec): PlanProposal {
       skillIds: [],
       requiredCapabilities: ["conversation_delivery"],
       targetIds,
-      successCriteria: [{ id: "answered", description: "A non-empty direct answer is returned.", source: "planner" }],
+      // A response-only turn has no unresolved execution or source contract.
+      // Its only completion condition is that Runtime received user-visible
+      // text, so Assessment must not ask a second model to reinterpret it.
+      successCriteria: [{
+        id: "answered",
+        description: "A non-empty direct answer is returned.",
+        source: "planner",
+        verification: "deterministic",
+      }],
     }],
   };
 }
