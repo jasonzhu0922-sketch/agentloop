@@ -9,9 +9,10 @@ export function executionLocationLabel(location) {
   return "执行位置未记录";
 }
 
-export function executionProvenanceParts(message) {
+export function executionProvenanceParts(message, models = []) {
   const runtimeName = text(message?.runtimeDisplayName);
   const modelKey = text(message?.modelKey);
+  const modelDisplayName = text(message?.modelDisplayName) ?? modelDisplayNameForKey(models, modelKey);
   const isLive = message?.status === "running";
   const runtimePart = message?.executionLocation === "cloud"
     ? []
@@ -19,8 +20,14 @@ export function executionProvenanceParts(message) {
   return [
     { kind: "location", label: executionLocationLabel(message?.executionLocation) },
     ...runtimePart,
-    { kind: "model", label: modelKey === undefined ? (isLive ? "模型确认中" : "模型未记录") : `模型 ${modelKey}` },
+    { kind: "model", label: modelKey === undefined ? (isLive ? "模型确认中" : "模型未记录") : `模型 ${modelDisplayName ?? modelKey}` },
   ];
+}
+
+function modelDisplayNameForKey(models, modelKey) {
+  if (modelKey === undefined || !Array.isArray(models)) return undefined;
+  const model = models.find((candidate) => candidate?.key === modelKey);
+  return text(model?.displayName);
 }
 
 function text(value) {

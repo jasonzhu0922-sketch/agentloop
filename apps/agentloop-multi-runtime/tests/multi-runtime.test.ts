@@ -582,11 +582,13 @@ test("persisted turns preserve actual Runtime data plane and resolved model", as
   assert.equal(turn?.assignment?.runtimeId, "local-runtime-provenance");
   assert.equal(turn?.assignment?.runtimeDisplayName, "研究 Runtime");
   assert.equal(turn?.finalTurn?.modelKey, "model-resolved-by-runtime");
-  const assistant = conversationMessagesFromTurns(turn === undefined ? [] : [turn])[1];
+  const assistant = conversationMessagesFromTurns(turn === undefined ? [] : [turn], [
+    { key: "model-resolved-by-runtime", displayName: "运行时模型" },
+  ])[1];
   assert.deepEqual(executionProvenanceParts(assistant), [
     { kind: "location", label: "本机" },
     { kind: "runtime", label: "Runtime 研究 Runtime" },
-    { kind: "model", label: "模型 model-resolved-by-runtime" },
+    { kind: "model", label: "模型 运行时模型" },
   ]);
   await database.close();
 });
@@ -604,6 +606,14 @@ test("execution provenance labels all supported data planes without Runtime ID i
     { kind: "location", label: "执行位置未记录" },
     { kind: "runtime", label: "Runtime 未命名" },
     { kind: "model", label: "模型未记录" },
+  ]);
+  assert.deepEqual(executionProvenanceParts(
+    { executionLocation: "local", modelKey: "local:shared-key" },
+    [{ key: "cloud:shared-key", displayName: "云端同名模型" }, { key: "local:shared-key", displayName: "本机同名模型" }],
+  ), [
+    { kind: "location", label: "本机" },
+    { kind: "runtime", label: "Runtime 未命名" },
+    { kind: "model", label: "模型 本机同名模型" },
   ]);
 });
 
@@ -634,6 +644,26 @@ test("persisted conversation turns become a replayable conversation stream on cl
   }]), true);
   assert.equal(assistant.status, "completed");
   assert.equal(assistant.text, "历史回答");
+});
+
+test("history model display names resolve within the active execution catalog", () => {
+  const messages = conversationMessagesFromTurns([{
+    clientMessageId: "message-model-history",
+    input: "模型名称",
+    createdAt: 10,
+    assignment: { id: "assignment-model-history", runtimeId: "runtime-history", hasRun: true, executionLocation: "cloud" },
+    finalTurn: { status: "completed", modelKey: "cloud:model", modelDisplayName: "持久化云端模型", completedAt: 20 },
+  }], [{ key: "cloud:model", displayName: "当前云端模型" }]);
+  assert.equal(messages[1]?.modelDisplayName, "持久化云端模型");
+
+  const resolved = conversationMessagesFromTurns([{
+    clientMessageId: "message-model-history-lookup",
+    input: "模型名称",
+    createdAt: 10,
+    assignment: { id: "assignment-model-history-lookup", runtimeId: "runtime-history", hasRun: true, executionLocation: "local" },
+    finalTurn: { status: "completed", modelKey: "local:model", completedAt: 20 },
+  }], [{ key: "cloud:model", displayName: "云端模型" }, { key: "local:model", displayName: "本机模型" }]);
+  assert.equal(resolved[1]?.modelDisplayName, "本机模型");
 });
 
 test("browser Runtime binding uses the persisted summary before local message history", () => {
@@ -694,7 +724,7 @@ test("Multi Runtime Web requests and appends conversation pages of 30", async ()
   assert.match(app, /conversationState\.visibleLimit \+= CONVERSATION_PAGE_SIZE/);
   assert.match(app, /加载更多对话/);
   assert.match(app, /\/v1\/conversations\/\$\{encodeURIComponent\(conversation\.id\)\}/);
-  assert.match(app, /conversationMessagesFromTurns\(body\.turns\)/);
+  assert.match(app, /conversationMessagesFromTurns\(body\.turns, availableModels\)/);
   assert.match(app, /hydratePersistedAssistant/);
   assert.match(app, /executionProvenanceParts/);
   assert.match(app, /executionLocation: executionTarget/);
@@ -1543,6 +1573,8 @@ test("Web session persistence falls back to a bounded recovery snapshot when loc
         reasoning: oversized,
         status: "running",
         assignmentId: "assignment-recoverable",
+        modelKey: "local:reasoner",
+        modelDisplayName: "本机推理模型",
         events: Array.from({ length: 160 }, (_, seq) => ({ seq, type: "tool.completed", data: { result: oversized }, createdAt: seq })),
         createdAt: messageIndex,
       }),
@@ -1552,9 +1584,10 @@ test("Web session persistence falls back to a bounded recovery snapshot when loc
   assert.equal(result.persisted, true);
   assert.ok(attemptedLengths.some((length) => length > 10_000));
   assert.ok(stored.length > 0 && stored.length <= 10_000);
-  const recovered = JSON.parse(stored) as Array<{ messages: Array<{ assignmentId?: string; events?: unknown[] }> }>;
+  const recovered = JSON.parse(stored) as Array<{ messages: Array<{ assignmentId?: string; modelDisplayName?: string; events?: unknown[] }> }>;
   assert.equal(recovered.length, 1);
   assert.equal(recovered[0]?.messages.some((message) => message.assignmentId === "assignment-recoverable"), true);
+  assert.equal(recovered[0]?.messages.some((message) => message.modelDisplayName === "本机推理模型"), true);
   assert.equal(recovered[0]?.messages.every((message) => (message.events?.length ?? 0) <= 4), true);
 });
 

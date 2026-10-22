@@ -84,7 +84,9 @@ export class RouterService {
 
   async models(tenantId?: string, ownerUserId?: string): Promise<readonly RuntimeModelSummary[]> {
     const seen = new Map<string, RuntimeModelSummary>();
-    const catalogs = await Promise.all((await this.store.runtimeEndpoints(tenantId, ownerUserId)).map(async (runtime) => {
+    // The browser uses this catalog for cloud execution. Device-owned models
+    // are available only through the selected Local Agent's catalog.
+    const catalogs = await Promise.all((await this.store.runtimeEndpoints()).map(async (runtime) => {
       try { return await this.endpointFactory(runtime.endpoint).models?.() ?? []; } catch { return []; }
     }));
     for (const models of catalogs) for (const model of models) if (!seen.has(model.key)) seen.set(model.key, model);
@@ -92,15 +94,7 @@ export class RouterService {
   }
 
   async cloudModels(tenantId: string, ownerUserId: string): Promise<readonly RuntimeModelSummary[]> {
-    // Cloud model reuse is served by Cloud Hosts only. Local model catalogs and
-    // credentials stay on the user's device and must never enter this proxy.
-    const endpoints = await this.store.runtimeEndpoints();
-    const available = await Promise.all(endpoints.map(async (runtime) => {
-      try { return await this.endpointFactory(runtime.endpoint).models?.() ?? []; } catch { return []; }
-    }));
-    const models = new Map<string, RuntimeModelSummary>();
-    for (const catalog of available) for (const model of catalog) if (!models.has(model.key)) models.set(model.key, model);
-    return [...models.values()].sort((left, right) => left.key.localeCompare(right.key));
+    return await this.models(tenantId, ownerUserId);
   }
 
   async completeCloudModel(tenantId: string, ownerUserId: string, modelKey: string, invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse> {

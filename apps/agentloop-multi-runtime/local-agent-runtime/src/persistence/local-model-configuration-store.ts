@@ -195,7 +195,7 @@ function normalizeInput(value: LocalModelConfigurationInput): LocalModelConfigur
     keys.add(provider.key);
     let url: URL;
     try { url = new URL(provider.baseUrl); } catch { throw new TypeError("local_model_base_url_invalid"); }
-    if (url.username || url.password || url.search || url.hash || (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))) throw new TypeError("local_model_base_url_invalid");
+    if (url.username || url.password || url.search || url.hash || (url.protocol !== "https:" && url.protocol !== "http:")) throw new TypeError("local_model_base_url_invalid");
     if (provider.apiKey !== undefined && (typeof provider.apiKey !== "string" || provider.apiKey.length > 4096)) throw new TypeError("local_model_configuration_invalid");
     const models = (provider.models as LocalModelProviderInput["models"]).map((model) => {
       if (!model || typeof model !== "object" || typeof model.key !== "string" || model.key.length > 100 || !/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(model.key) || modelKeys.has(model.key)) throw new TypeError("local_model_configuration_invalid");

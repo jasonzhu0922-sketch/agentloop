@@ -85,6 +85,8 @@ function compactMessage(message, tier) {
     partialText: string(value.partialText, tier.messageText),
     assignmentId: string(value.assignmentId, tier.text),
     remoteRunId: string(value.remoteRunId, tier.text),
+    modelKey: string(value.modelKey, tier.text),
+    modelDisplayName: string(value.modelDisplayName, tier.text),
     localRunId: string(value.localRunId, tier.text),
     localRuntimeId: string(value.localRuntimeId, tier.text),
     runtimeId: string(value.runtimeId, tier.text),

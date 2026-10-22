@@ -37,6 +37,51 @@ test("Provider-only JSON persists without inventing an executable model", async 
   assert.deepEqual(registry.modelKeys(), ["reasoner"]);
 });
 
+test("HTTP Provider endpoints survive save and reload into both model protocols", async (t) => {
+  for (const baseUrl of [
+    "http://192.168.1.20:3000/v1", "http://models.example.test:3000/v1", "http://[fd00::20]:3000/v1",
+  ]) {
+    await t.test(baseUrl, async (t) => {
+      const { store } = await fixture(t);
+      await store.write({ reuseCloudModels: false, providers: [{ ...connection, baseUrl: `${baseUrl}/`, models: [responses, chat] }] });
+      const saved = await store.read();
+      assert.equal(saved.providers[0]?.baseUrl, baseUrl);
+      await store.write(saved);
+      const resolved = await store.resolve();
+      const registry = LlmProviderRegistry.fromConfigObject(resolved.registryConfig, resolved.environment);
+      const requests: string[] = [];
+      t.mock.method(globalThis, "fetch", async (url: unknown, init: RequestInit) => {
+        requests.push(String(url));
+        assert.equal(new Headers(init.headers).get("authorization"), `Bearer ${connection.apiKey}`);
+        return Response.json(String(url).endsWith("/responses")
+          ? { status: "completed", output_text: "ok", output: [] }
+          : { choices: [{ finish_reason: "stop", message: { content: "ok" } }] });
+      });
+      for (const key of ["reasoner", "chat"]) {
+        await registry.create(key).complete({ runId: key, phase: "execution", systemPrompt: "Test", messages: [], tools: [] });
+      }
+      assert.deepEqual(requests, [`${baseUrl}/responses`, `${baseUrl}/chat/completions`]);
+    });
+  }
+});
+
+test("invalid Provider URLs leave saved metadata and credentials unchanged", async (t) => {
+  const { store } = await fixture(t);
+  await store.write({ reuseCloudModels: false, providers: [{ ...connection, models: [responses] }] });
+  const previous = await store.snapshot();
+  const current = store.current();
+  for (const baseUrl of [
+    "models.example.test/v1", "ftp://models.example.test/v1", "file:///tmp/model", "ws://models.example.test/v1",
+    "http://user:password@models.example.test/v1", "https://user:password@models.example.test/v1",
+    "http://models.example.test/v1?token=test", "https://models.example.test/v1?token=test",
+    "http://models.example.test/v1#fragment", "https://models.example.test/v1#fragment",
+  ]) {
+    await assert.rejects(store.write({ reuseCloudModels: false, providers: [{ ...connection, baseUrl, models: [responses] }] }), /local_model_base_url_invalid/);
+    assert.deepEqual(await store.snapshot(), previous);
+    assert.equal(store.current(), current);
+  }
+});
+
 test("model JSON survives save, redacted reload, and credential-preserving edit into both protocol payloads", async (t) => {
   const { store, database } = await fixture(t);
   await store.write({ reuseCloudModels: false, providers: [{ ...connection, models: [responses, chat] }] });
@@ -63,8 +108,8 @@ test("model JSON survives save, redacted reload, and credential-preserving edit 
   assert.equal(requests[0]?.url, `${connection.baseUrl}/responses`);
   assert.deepEqual(requests[0]?.body.reasoning, { effort: "high", summary: "auto" });
   assert.deepEqual(requests[0]?.body.include, ["reasoning.encrypted_content"]);
-  assert.equal(requests[0]?.body.temperature, 0);
-  assert.equal(requests[0]?.body.top_p, 0.8);
+  assert.equal(Object.hasOwn(requests[0]!.body, "temperature"), false);
+  assert.equal(Object.hasOwn(requests[0]!.body, "top_p"), false);
   assert.equal(requests[0]?.body.max_output_tokens, 4096);
   assert.equal(registry.create("reasoner").completeTimeoutMs, 30000);
   assert.equal(requests[1]?.url, `${connection.baseUrl}/chat/completions`);
@@ -94,6 +139,7 @@ test("invalid JSON model declarations fail before changing saved metadata or cre
   await assert.rejects(store.write({ reuseCloudModels: false, providers: [{ ...connection, models: [responses, responses] }] }));
   const saved = await store.read();
   await assert.rejects(store.write({ ...saved, providers: [{ ...saved.providers[0]!, baseUrl: "https://different.example.test/v1" }] }), /local_model_api_key_required/);
+  await assert.rejects(store.write({ ...saved, providers: [{ ...saved.providers[0]!, baseUrl: connection.baseUrl.replace("https:", "http:") }] }), /local_model_api_key_required/);
   await assert.rejects(store.write({ ...saved, providers: [{ ...saved.providers[0]!, key: "renamed-provider" }] }), /local_model_api_key_required/);
   assert.deepEqual(await store.snapshot(), previous);
   assert.equal((await store.resolve()).environment.LOCAL_MODEL_KEY_TEST_PROVIDER, connection.apiKey);

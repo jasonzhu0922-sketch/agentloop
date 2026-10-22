@@ -2,7 +2,7 @@
  * Build the browser projection for a persisted conversation turn index.
  * Host Run status and events are replayed separately through each Assignment.
  */
-export function conversationMessagesFromTurns(turns) {
+export function conversationMessagesFromTurns(turns, models = []) {
   return (Array.isArray(turns) ? turns : []).flatMap((turn) => {
     if (!turn || typeof turn.clientMessageId !== "string" || typeof turn.input !== "string") return [];
     const createdAt = finiteNumber(turn.createdAt, Date.now());
@@ -40,6 +40,11 @@ export function conversationMessagesFromTurns(turns) {
         ...(typeof assignment.runtimeDisplayName === "string" ? { runtimeDisplayName: assignment.runtimeDisplayName } : {}),
         ...(typeof assignment.executionLocation === "string" ? { executionLocation: assignment.executionLocation } : {}),
         ...(typeof finalTurn.modelKey === "string" ? { modelKey: finalTurn.modelKey } : {}),
+        ...(typeof finalTurn.modelDisplayName === "string" && finalTurn.modelDisplayName.trim().length > 0
+          ? { modelDisplayName: finalTurn.modelDisplayName }
+          : modelDisplayNameForKey(models, finalTurn.modelKey) === undefined
+            ? {}
+            : { modelDisplayName: modelDisplayNameForKey(models, finalTurn.modelKey) }),
         ...(typeof assignment.remoteRunId === "string" ? { remoteRunId: assignment.remoteRunId } : {}),
         createdAt,
         completedAt: finiteNumber(finalTurn.completedAt, createdAt),
@@ -63,6 +68,12 @@ export function conversationMessagesFromTurns(turns) {
       plan: [],
     }];
   });
+}
+
+function modelDisplayNameForKey(models, modelKey) {
+  if (typeof modelKey !== "string" || !Array.isArray(models)) return undefined;
+  const model = models.find((candidate) => candidate?.key === modelKey);
+  return typeof model?.displayName === "string" && model.displayName.trim().length > 0 ? model.displayName : undefined;
 }
 
 function failedAssistant(id, createdAt, message, assignment) {

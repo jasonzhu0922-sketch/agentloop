@@ -22,6 +22,7 @@ export async function taskFromRequest(
   const executionTarget = parseExecutionTarget(value.executionTarget ?? { kind: "cloud_pool" });
   const dataPolicy = parseDataPolicy(value.dataPolicy ?? { mode: "cloud" });
   if (typeof value.requestedModelKey !== "string" || value.requestedModelKey.trim().length === 0) throw conflict("model_required: choose a model before sending");
+  if (executionTarget.kind === "cloud_pool" && value.requestedModelKey.trim().startsWith("local:")) throw conflict("local_model_requires_local_runtime: cloud execution cannot use a device-local model");
   if (executionTarget.kind === "cloud_pool" && dataPolicy.mode !== "cloud") throw conflict("cloud_data_policy_required: cloud execution requires dataPolicy.mode=cloud");
   if (executionTarget.kind === "local_device" && dataPolicy.mode === "cloud") throw conflict("local_data_policy_required: local execution requires dataPolicy.mode=local or strict_local");
   if (executionTarget.kind === "local_device" && dataPolicy.mode === "strict_local") throw conflict("strict_local_direct_required: strict local task content must use the loopback data plane");

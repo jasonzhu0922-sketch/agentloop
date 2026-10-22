@@ -32,6 +32,20 @@ test("execution context changes invalidate selections immediately and discard la
   await oldRefresh;
   assert.deepEqual(state!.models, [{ key: "cloud:deepseek-v4-flash-2" }]);
   assert.equal(catalog.accepts(local, "cloud:deepseek-v4-flash-2"), true);
+
+  const oldLocalRefresh = catalog.load(local, { force: true });
+  await Promise.resolve();
+  const cloudLoad = catalog.load(cloud);
+  assert.deepEqual(state!.models, []);
+  assert.equal(catalog.accepts(cloud, "cloud:deepseek-v4-flash-2"), false);
+  await Promise.resolve();
+  requests[4]!([{ key: "deepseek-v4-flash-2" }]);
+  await cloudLoad;
+  requests[3]!([{ key: "local:ds-model" }, { key: "cloud:deepseek-v4-flash-2" }]);
+  await oldLocalRefresh;
+  assert.deepEqual(state!.models, [{ key: "deepseek-v4-flash-2" }]);
+  assert.equal(catalog.accepts(cloud, "local:ds-model"), false);
+  assert.equal(catalog.accepts(cloud, "deepseek-v4-flash-2"), true);
 });
 
 test("failed refresh removes the previously accepted catalog", async () => {

@@ -9,6 +9,7 @@ import { LocalModelConfigurationStore } from "../local-agent-runtime/src/persist
 import { RouterService } from "../src/router/service/router-service.ts";
 import { taskFromRequest } from "../src/router/api/task-submission.ts";
 import { LocalRuntimeFactory } from "../local-agent-runtime/src/service/local-runtime-factory.ts";
+import { ControlPlaneStore } from "../src/router/persistence/control-plane-store.ts";
 
 test("local RunService rejects a Run without an explicit model key", async () => {
   const database = new AppDatabase(":memory:");
@@ -152,6 +153,55 @@ test("cloud model reuse catalogs only Cloud Host models", async () => {
   assert.deepEqual(await router.cloudModels("tenant-1", "user-1"), [{ key: "cloud:model", displayName: "Cloud model" }]);
   assert.deepEqual(endpointCalls, ["https://cloud.test"]);
   assert.deepEqual(endpointSelections, [[]]);
+});
+
+test("cloud task submission rejects device-local models while local tasks preserve both model sources", async () => {
+  const principal = { tenantId: "tenant", userId: "owner", email: "owner@example.test" };
+  const body = { conversationId: "conversation", clientMessageId: "message", input: "hello" };
+  for (const requestedModelKey of ["local:ds-model", " local:gpt-model "]) {
+    await assert.rejects(taskFromRequest({ ...body, requestedModelKey }, principal, undefined),
+      (error: unknown) => (error as { statusCode?: number }).statusCode === 409
+        && (error as Error).message.startsWith("local_model_requires_local_runtime"));
+  }
+  for (const requestedModelKey of ["local:ds-model", "cloud:shared-model"]) {
+    const task = await taskFromRequest({
+      ...body, requestedModelKey,
+      executionTarget: { kind: "local_device", deviceId: "device", runtimeId: "local-runtime" },
+      dataPolicy: { mode: "local" },
+    }, principal, undefined);
+    assert.equal(task.requestedModelKey, requestedModelKey);
+  }
+});
+
+test("cloud execution and reuse catalogs never query a paired device's model endpoint", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const store = new ControlPlaneStore(database);
+    await store.ready();
+    await store.seedRuntimes([{
+      id: "cloud-host", endpoint: "https://cloud.test", profile: "general", capabilities: [],
+      maxConcurrentRuns: 1, activeRunCount: 0, status: "ready",
+    }]);
+    await store.registerLocalRuntime({
+      runtimeId: "local-runtime", deviceId: "device", tenantId: "tenant", ownerUserId: "owner",
+      connectionId: "connection", connectionEpoch: 1, profile: "general", capabilities: [],
+      maxConcurrentRuns: 1, status: "ready", catalogVersion: "1", leaseExpiresAt: Date.now() + 60000,
+    });
+    assert.equal((await store.runtimeEndpoints("tenant", "owner")).length, 2, "the user's local Runtime is registered and visible");
+    const calls: string[] = [];
+    const router = new RouterService({ store, endpointFactory(endpoint) {
+      calls.push(endpoint);
+      return { async models() { return endpoint.startsWith("local-runtime:")
+        ? [{ key: "local:ds-model", displayName: "Private" }]
+        : [{ key: "shared-model", displayName: "Shared" }]; } } as never;
+    } });
+    const expected = [{ key: "shared-model", displayName: "Shared" }];
+    assert.deepEqual(await router.models("tenant", "owner"), expected);
+    assert.deepEqual(await router.cloudModels("tenant", "owner"), expected);
+    assert.deepEqual(calls, ["https://cloud.test", "https://cloud.test"]);
+  } finally {
+    database.close();
+  }
 });
 
 test("cloud model invocation does not fail over after a Host has begun the model request", async () => {

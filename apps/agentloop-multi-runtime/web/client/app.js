@@ -1409,6 +1409,7 @@ async function selectConversation(conversationId) {
   if (conversation.historyLoaded === true || conversation.historyLoading === true) return;
   if (conversation.historyLoaded !== false && conversation.messages.length > 0) return;
   if (finiteNumber(conversation.runCount, 0) === 0) { conversation.historyLoaded = true; return; }
+  await modelCatalog.load(modelCatalogContext());
   const tenantId = $("tenant-id").value.trim();
   const userId = $("user-id").value.trim();
   if (!tenantId || !userId) return;
@@ -1421,7 +1422,7 @@ async function selectConversation(conversationId) {
     });
     const body = await response.json().catch(() => undefined);
     if (!response.ok || !Array.isArray(body?.turns)) throw new Error(body?.error || `HTTP ${response.status}`);
-    conversation.messages = conversationMessagesFromTurns(body.turns);
+    conversation.messages = conversationMessagesFromTurns(body.turns, availableModels);
     updateLocalControls();
     const hydratedBinding = conversationRuntimeBinding(conversation);
     if (hydratedBinding !== undefined && hydratedBinding.executionLocation !== "cloud") await loadLocalScopes();
@@ -1534,14 +1535,16 @@ function applyRecoveredRunState(assistant, run) {
   if (typeof run?.remoteRunId === "string") assistant.remoteRunId = run.remoteRunId;
   const modelChanged = typeof run?.modelKey === "string" && run.modelKey.trim().length > 0 && assistant.modelKey !== run.modelKey;
   if (modelChanged) assistant.modelKey = run.modelKey;
+  const modelDisplayNameChanged = typeof run?.modelDisplayName === "string" && run.modelDisplayName.trim().length > 0 && assistant.modelDisplayName !== run.modelDisplayName;
+  if (modelDisplayNameChanged) assistant.modelDisplayName = run.modelDisplayName;
   if (run?.status === "running") {
-    if ((assistant.events || []).some((event) => ["run.completed", "run.failed", "run.cancelled"].includes(event.type))) return modelChanged;
+    if ((assistant.events || []).some((event) => ["run.completed", "run.failed", "run.cancelled"].includes(event.type))) return modelChanged || modelDisplayNameChanged;
     if (assistant.status === "failed") {
       // Repair old browser caches that recorded a transport error as a Run failure.
       assistant.status = "running"; assistant.error = undefined; assistant.text = ""; assistant.completedAt = undefined;
       return true;
     }
-    return modelChanged;
+    return modelChanged || modelDisplayNameChanged;
   }
   if (!run || !["completed", "failed", "cancelled"].includes(run.status)) return false;
   assistant.status = run.status;
@@ -1709,6 +1712,8 @@ async function submit() {
   const assistantMessage = {
     id: createClientId(), role: "assistant", text: "", reasoning: "", status: "running", events: [], plan: [], createdAt: submittedAt,
     executionLocation: executionTarget,
+    modelKey: requestedModelKey,
+    modelDisplayName: availableModels.find((model) => model.key === requestedModelKey)?.displayName || requestedModelKey,
   };
   setVolatile(assistantMessage, "detailEvents", []);
   conversation.messages.push(userMessage, assistantMessage);
@@ -2446,7 +2451,7 @@ function renderMessage(message) {
 }
 
 function renderExecutionProvenance(message) {
-  return `<span class="execution-provenance" aria-label="本轮执行来源">${executionProvenanceParts(message).map((part) => `<span class="execution-provenance-chip ${escapeHtml(part.kind)}">${escapeHtml(part.label)}</span>`).join("")}</span>`;
+  return `<span class="execution-provenance" aria-label="本轮执行来源">${executionProvenanceParts(message, availableModels).map((part) => `<span class="execution-provenance-chip ${escapeHtml(part.kind)}">${escapeHtml(part.label)}</span>`).join("")}</span>`;
 }
 
 function renderInlineArtifacts(assistant) {
