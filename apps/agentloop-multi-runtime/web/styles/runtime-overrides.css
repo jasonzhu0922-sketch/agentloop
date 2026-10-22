@@ -1226,6 +1226,10 @@ body.workspace-resizing * {
 .local-model-field-note{margin:0;color:var(--text-3);font-size:11px;line-height:1.6}
 .local-model-json{display:block;width:100%;min-width:0;min-height:160px;padding:14px;resize:vertical;border:1px solid var(--border-2);border-radius:8px;background:var(--bg-2);color:var(--text);font:12px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;tab-size:2;white-space:pre;overflow:auto}
 .local-model-json:focus{outline:2px solid color-mix(in srgb,var(--brand) 32%,transparent);outline-offset:1px;border-color:var(--brand)}
+.runtime-mcp-json{min-height:240px;max-height:44vh}
+.runtime-capability-head-actions{display:flex;gap:6px;flex-shrink:0}
+.runtime-mcp-test-result{min-height:16px;color:var(--text-2);font-size:11px;line-height:1.5;white-space:pre-line;overflow-wrap:anywhere}
+.runtime-mcp-json-help pre{max-height:220px;margin:10px 0;overflow:auto;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font:11px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre}
 .local-model-json-help{border:1px solid var(--border);border-radius:7px;padding:10px 12px;font-size:11px;color:var(--text-2)}
 .local-model-json-help summary{cursor:pointer;font-weight:600}
 .local-model-json-help p{margin:10px 0 0;line-height:1.7;overflow-wrap:anywhere}

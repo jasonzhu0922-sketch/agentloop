@@ -674,9 +674,13 @@ test("child Runtime dialogs render above settings with tabbed Skill and MCP conf
   assert.match(index, /id="runtime-config-modal" class="runtime-modal runtime-modal-child"/);
   assert.match(index, /role="tab" aria-selected="true"[^>]*data-runtime-capability-tab="skills"/);
   assert.match(index, /role="tabpanel"[^>]*data-runtime-capability-panel="mcp" hidden/);
-  assert.match(index, /id="runtime-create-mcp-json"[^>]*>JSON 导入<\/button>/);
-  assert.match(index, /id="runtime-config-mcp-json"[^>]*>JSON 导入<\/button>/);
-  assert.match(index, /id="mcp-json-modal" class="runtime-modal runtime-modal-child runtime-json-modal"/);
+  for (const prefix of ["runtime-create", "runtime-config"]) {
+    assert.match(index, new RegExp(`<textarea id="${prefix}-mcp-json" class="local-model-json runtime-mcp-json"`));
+    assert.match(index, new RegExp(`id="${prefix}-mcp-format"[^>]*>格式化</button>`));
+    assert.match(index, new RegExp(`id="${prefix}-mcp-test"[^>]*>测试连接</button>`));
+    assert.match(index, new RegExp(`id="${prefix}-mcp-error"[^>]*role="alert"`));
+  }
+  assert.doesNotMatch(index, /id="mcp-json-modal"|id="runtime-(?:create|config)-mcp-add"/);
   assert.match(index, /id="agent-settings-modal"[^>]*role="dialog"[^>]*aria-labelledby="agent-settings-title"/);
   assert.match(index, /id="agent-settings-close-icon"[^>]*aria-label="关闭 Local Runtime Agent 设置"/);
   assert.match(styles, /\.runtime-modal\{[^}]*z-index:var\(--runtime-modal-layer,1200\)/);
@@ -690,12 +694,10 @@ test("child Runtime dialogs render above settings with tabbed Skill and MCP conf
   assert.match(app, /openLocalRuntimeDetails/);
   assert.match(app, /\$\("agent-settings-close-icon"\)\.addEventListener\("click", closeLocalAgentSettings\)/);
   assert.match(app, /renderLocalRuntimeDetails/);
-  assert.match(app, /class="runtime-mcp-toolbar"/);
-  assert.match(app, /class="runtime-mcp-remove" aria-label="移除 MCP Server" title="移除 MCP Server"/);
-  assert.match(app, /服务标识<input data-mcp-field="key"/);
-  assert.match(app, /用于工具命名空间，不是 \.env 凭据变量名/);
-  assert.match(app, /parseMcpJsonImport/);
-  assert.match(app, /toolAllowlist\.length === 0 \? \{\} : \{ toolAllowlist \}/);
+  assert.match(app, /parseRuntimeMcpConfiguration\(editor.value\)/);
+  assert.match(app, /JSON.stringify\(configuration.mcpServers \|\| \[\], null, 2\)/);
+  assert.match(app, /mcpServers: readRuntimeMcpJson\(prefix\)/);
+  assert.doesNotMatch(app, /appendMcpEditor|collectMcpEditor|parseMcpJsonImport|data-mcp-field/);
 });
 
 test("strict_local recovery cache retains local Run and artifact transport identity", () => {

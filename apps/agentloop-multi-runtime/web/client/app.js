@@ -29,7 +29,7 @@ import { conversationRuntimeBinding } from "./local-runtime/conversation-runtime
 import { loadLocalRuntimePreference, localRuntimePreferenceKey, saveLocalRuntimePreference } from "./local-runtime/local-runtime-preference.js";
 import { createLocalRuntimeState } from "./local-runtime/local-runtime-state.js";
 import { localRuntimeListMarkup, localRuntimeOptions, localRuntimeViewModel } from "./local-runtime/local-runtime-view-model.js";
-import { parseMcpJsonImport } from "./local-runtime/mcp-json-import.js";
+import { parseRuntimeMcpConfiguration, runtimeMcpConfigurationExample } from "./local-runtime/mcp-json-config.js";
 
 const api = String(globalThis.AGENTLOOP_ROUTER_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
 const publicRouterUrl = String(globalThis.AGENTLOOP_ROUTER_PUBLIC_URL || (api.startsWith("http") ? api : location.origin)).replace(/\/+$/, "");
@@ -64,7 +64,6 @@ let artifactPanelOpen = false;
 let artifactPanelWidth = loadArtifactPanelWidth();
 let resizeState;
 let localSkillPackages = [];
-let mcpJsonImportTarget;
 let availableModels = [];
 let modelsLoading = false;
 const modelSelection = createModelSelection();
@@ -152,12 +151,19 @@ document.querySelectorAll("[data-agent-settings-view]").forEach((button) => butt
 $("agent-install-cancel").addEventListener("click", closeLocalAgentInstall);
 $("runtime-config-cancel").addEventListener("click", closeConfigureLocalRuntime);
 $("runtime-config-form").addEventListener("submit", (event) => { event.preventDefault(); void saveLocalRuntimeConfiguration(); });
-$("runtime-create-mcp-add").addEventListener("click", () => appendMcpEditor("runtime-create-mcp"));
-$("runtime-config-mcp-add").addEventListener("click", () => appendMcpEditor("runtime-config-mcp"));
-$("runtime-create-mcp-json").addEventListener("click", () => openMcpJsonImport("runtime-create"));
-$("runtime-config-mcp-json").addEventListener("click", () => openMcpJsonImport("runtime-config"));
-$("mcp-json-cancel").addEventListener("click", closeMcpJsonImport);
-$("mcp-json-form").addEventListener("submit", (event) => { event.preventDefault(); importMcpJson(); });
+for (const prefix of ["runtime-create", "runtime-config"]) {
+  const help = document.createElement("details");
+  help.className = "local-model-json-help runtime-mcp-json-help";
+  help.innerHTML = '<summary>JSON 配置示例与字段说明</summary><pre></pre><p><code>aliases</code> 填写服务别名，<code>capabilities</code> 声明服务能力。可选字段：<code>protocolVersion</code>、<code>timeoutMs</code>、<code>toolAllowlist</code>、<code>toolBlocklist</code>、<code>trust</code>。无服务时填写 <code>[]</code>。</p><p>认证 <code>auth.kind</code>：<code>none</code>；<code>bearer</code> + <code>token</code>；<code>api_key_header</code> + <code>headerName</code> / <code>value</code>；<code>basic</code> + <code>username</code> / <code>password</code>；<code>query_parameter</code> + <code>parameterName</code> / <code>value</code>；<code>custom_headers</code> + <code>headers</code> 对象。</p>';
+  help.querySelector("pre").textContent = JSON.stringify(runtimeMcpConfigurationExample, null, 2);
+  $(`${prefix}-mcp-panel`).append(help);
+  $(`${prefix}-mcp-format`).addEventListener("click", () => formatRuntimeMcpJson(prefix));
+  $(`${prefix}-mcp-test`).addEventListener("click", () => void testRuntimeMcpJson(prefix));
+  $(`${prefix}-mcp-json`).addEventListener("input", () => {
+    $(`${prefix}-mcp-error`).textContent = "";
+    $(`${prefix}-mcp-test-result`).textContent = "";
+  });
+}
 $("runtime-create-skill-upload").addEventListener("click", () => $("runtime-create-skill-file").click());
 $("runtime-config-skill-upload").addEventListener("click", () => $("runtime-config-skill-file").click());
 $("runtime-create-skill-file").addEventListener("change", () => void uploadRuntimeSkill("runtime-create"));
@@ -674,7 +680,9 @@ async function revokeLocalScope(scopeId) {
 
 async function openCreateLocalRuntime() {
   $("runtime-create-name").value = "";
-  $("runtime-create-mcp").replaceChildren();
+  $("runtime-create-mcp-json").value = "[]";
+  $("runtime-create-mcp-error").textContent = "";
+  $("runtime-create-mcp-test-result").textContent = "";
   await loadRuntimeSkillOptions("runtime-create-skills", []);
   activateRuntimeCapabilityTab($("runtime-create-form"), "skills");
   $("runtime-create-modal").hidden = false;
@@ -683,7 +691,7 @@ async function openCreateLocalRuntime() {
 
 function closeCreateLocalRuntime() {
   $("runtime-create-modal").hidden = true;
-  $("runtime-create-mcp").replaceChildren();
+  $("runtime-create-mcp-json").value = "[]";
 }
 
 async function createLocalRuntime() {
@@ -719,8 +727,9 @@ async function openConfigureLocalRuntime(runtimeId = localRuntimeState.runtimeId
     if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
     const configuration = body.configuration || {};
     await loadRuntimeSkillOptions("runtime-config-skills", (configuration.skills || []).map((skill) => skill.packageId));
-    $("runtime-config-mcp").replaceChildren();
-    for (const server of configuration.mcpServers || []) appendMcpEditor("runtime-config-mcp", server);
+    $("runtime-config-mcp-json").value = JSON.stringify(configuration.mcpServers || [], null, 2);
+    $("runtime-config-mcp-error").textContent = "";
+    $("runtime-config-mcp-test-result").textContent = "";
     activateRuntimeCapabilityTab($("runtime-config-form"), "skills");
     $("runtime-config-modal").hidden = false;
     $("runtime-config-name").focus();
@@ -773,7 +782,8 @@ function mcpAuthSummary(auth = {}) {
 
 function closeConfigureLocalRuntime() {
   $("runtime-config-modal").hidden = true;
-  $("runtime-config-mcp").replaceChildren();
+  $("runtime-config-mcp-json").value = "[]";
+  $("runtime-config-mcp-error").textContent = "";
 }
 
 function activateRuntimeCapabilityTab(card, tabName, focus = false) {
@@ -849,158 +859,56 @@ function fileAsBase64(file) {
   });
 }
 
-function appendMcpEditor(containerId, server = {}) {
-  const item = document.createElement("article");
-  item.className = "runtime-mcp-item";
-  if (server.id) item.dataset.serverId = server.id;
-  item.dataset.toolAllowlist = JSON.stringify(server.toolAllowlist || []);
-  item.dataset.toolBlocklist = JSON.stringify(server.toolBlocklist || []);
-  item.dataset.trust = server.trust || "";
-  item.dataset.aliases = JSON.stringify(server.aliases || []);
-  item.dataset.capabilities = JSON.stringify(server.capabilities || []);
-  item.innerHTML = `<div class="runtime-mcp-toolbar">
-    <small data-mcp-test-result role="status"></small>
-    <div class="runtime-mcp-actions">
-      <button type="button" class="runtime-mcp-test" data-mcp-test><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"></path><path d="M20 4v6h-6"></path></svg><span>测试连接</span></button>
-      <button type="button" class="runtime-mcp-remove" aria-label="移除 MCP Server" title="移除 MCP Server"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="m19 6-1 14H6L5 6"></path><path d="M10 11v5M14 11v5"></path></svg></button>
-    </div>
-  </div><div class="runtime-mcp-fields">
-    <label>显示名称<input data-mcp-field="displayName" maxlength="100" value="${escapeHtml(server.displayName || "")}" required /></label>
-    <label>服务标识<input data-mcp-field="key" maxlength="80" value="${escapeHtml(server.key || "")}" placeholder="例如 contract-data" required /><small class="runtime-field-help">用于工具命名空间，不是 .env 凭据变量名</small></label>
-    <label class="runtime-mcp-url">URL<input data-mcp-field="url" type="url" value="${escapeHtml(server.url || "")}" required /></label>
-    <label>协议版本<input data-mcp-field="protocolVersion" value="${escapeHtml(server.protocolVersion || "")}" placeholder="使用客户端默认" /></label>
-    <label>超时（毫秒）<input data-mcp-field="timeoutMs" type="number" min="1" value="${escapeHtml(server.timeoutMs || "")}" placeholder="15000" /></label>
-    <label class="runtime-mcp-policy">Tool allowlist<input data-mcp-field="toolAllowlist" value="${escapeHtml((server.toolAllowlist || []).join(", "))}" placeholder="tool_a, tool_b" /></label>
-    <label class="runtime-mcp-policy">Tool blocklist<input data-mcp-field="toolBlocklist" value="${escapeHtml((server.toolBlocklist || []).join(", "))}" placeholder="tool_c" /></label>
-    <label>认证方式<select data-mcp-field="authKind"><option value="none">无认证</option><option value="bearer">Bearer Token</option><option value="api_key_header">API Key Header</option><option value="basic">Basic Auth</option><option value="query_parameter">Query 参数</option><option value="custom_headers">自定义 Headers</option></select></label>
-    <div data-mcp-auth-fields></div>
-  </div>`;
-  const authKind = server.auth?.kind || "none";
-  item.querySelector('[data-mcp-field="authKind"]').value = authKind;
-  item.querySelector('[data-mcp-field="authKind"]').addEventListener("change", (event) => renderMcpAuthFields(item, { kind: event.target.value }));
-  item.querySelector("[data-mcp-test]").addEventListener("click", () => void testMcpEditor(item));
-  item.querySelector(".runtime-mcp-remove").addEventListener("click", () => item.remove());
-  renderMcpAuthFields(item, server.auth || { kind: "none" });
-  populateMcpAuthSecrets(item, server.auth || { kind: "none" });
-  $(containerId).append(item);
-}
-
-function openMcpJsonImport(prefix) {
-  mcpJsonImportTarget = prefix;
-  $("mcp-json-input").value = "";
-  $("mcp-json-error").textContent = "";
-  $("mcp-json-modal").hidden = false;
-  $("mcp-json-input").focus();
-}
-
-function closeMcpJsonImport() {
-  $("mcp-json-modal").hidden = true;
-  $("mcp-json-input").value = "";
-  $("mcp-json-error").textContent = "";
-  mcpJsonImportTarget = undefined;
-}
-
-function importMcpJson() {
-  try {
-    const servers = parseMcpJsonImport($("mcp-json-input").value);
-    if (!mcpJsonImportTarget) return;
-    for (const server of servers) appendMcpEditor(`${mcpJsonImportTarget}-mcp`, server);
-    const count = servers.length;
-    closeMcpJsonImport();
-    setStatus(`已导入 ${count} 个 MCP Server`, "ok");
-  } catch (error) {
-    $("mcp-json-error").textContent = error instanceof Error ? error.message : String(error);
-  }
-}
-
-async function testMcpEditor(item) {
-  const result = item.querySelector("[data-mcp-test-result]");
-  result.dataset.state = "pending";
-  result.textContent = "测试中…";
-  try {
-    const response = await localAgentFetch("/v1/local-mcp-servers/test", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ server: collectMcpEditor(item) }),
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
-    if (!body.ok) throw new Error(`${body.stage || "connection"}: ${body.error || "连接失败"}`);
-    result.dataset.state = "success";
-    result.textContent = `已连接 · ${body.toolCount} tools`;
-  } catch (error) {
-    result.dataset.state = "error";
-    result.textContent = error instanceof Error ? error.message : String(error);
-  }
-}
-
-function renderMcpAuthFields(item, auth) {
-  const container = item.querySelector("[data-mcp-auth-fields]");
-  const configured = auth.credentialConfigured === true ? "已配置；留空保留" : auth.credentialConfigured === false ? "需要重新填写" : "";
-  if (auth.kind === "bearer") container.innerHTML = `<label>Token<input data-mcp-secret="token" type="password" autocomplete="new-password" placeholder="${configured}" /></label>`;
-  else if (auth.kind === "api_key_header") container.innerHTML = `<label>Header 名称<input data-mcp-auth="headerName" value="${escapeHtml(auth.headerName || "X-API-Key")}" required /></label><label>API Key<input data-mcp-secret="value" type="password" autocomplete="new-password" placeholder="${configured}" /></label>`;
-  else if (auth.kind === "basic") container.innerHTML = `<label>用户名<input data-mcp-auth="username" value="${escapeHtml(auth.username || "")}" required /></label><label>密码<input data-mcp-secret="password" type="password" autocomplete="new-password" placeholder="${configured}" /></label>`;
-  else if (auth.kind === "query_parameter") container.innerHTML = `<label>参数名称<input data-mcp-auth="parameterName" value="${escapeHtml(auth.parameterName || "key")}" required /></label><label>参数值<input data-mcp-secret="value" type="password" autocomplete="new-password" placeholder="${configured}" /></label>`;
-  else if (auth.kind === "custom_headers") container.innerHTML = `<label>Headers JSON<input data-mcp-secret="headers" type="password" autocomplete="new-password" placeholder="${configured || '{\"X-API-Key\":\"...\"}'}" /></label>`;
-  else container.replaceChildren();
-  item.dataset.headerNames = JSON.stringify(auth.headerNames || []);
-}
-
-function populateMcpAuthSecrets(item, auth) {
-  if (auth.kind === "bearer" && auth.token) item.querySelector('[data-mcp-secret="token"]').value = auth.token;
-  else if (auth.kind === "api_key_header" && auth.value) item.querySelector('[data-mcp-secret="value"]').value = auth.value;
-  else if (auth.kind === "basic" && auth.password) item.querySelector('[data-mcp-secret="password"]').value = auth.password;
-  else if (auth.kind === "query_parameter" && auth.value) item.querySelector('[data-mcp-secret="value"]').value = auth.value;
-  else if (auth.kind === "custom_headers" && auth.headers) item.querySelector('[data-mcp-secret="headers"]').value = JSON.stringify(auth.headers);
-}
-
 function collectRuntimeCapabilityConfiguration(prefix) {
   const skills = [...$(`${prefix}-skills`).querySelectorAll('input[type="checkbox"]:checked')].map((input) => ({ packageId: input.value }));
-  const mcpServers = [...$(`${prefix}-mcp`).querySelectorAll(".runtime-mcp-item")].map((item) => collectMcpEditor(item));
-  return { skills, mcpServers };
+  return { skills, mcpServers: readRuntimeMcpJson(prefix) };
 }
 
-function collectMcpEditor(item) {
-  const field = (name) => item.querySelector(`[data-mcp-field="${name}"]`)?.value.trim() || undefined;
-  const authKind = field("authKind");
-  const toolAllowlist = commaSeparatedValues(field("toolAllowlist"));
-  const toolBlocklist = commaSeparatedValues(field("toolBlocklist"));
-  let auth;
-  if (authKind === "bearer") auth = { kind: authKind, ...optionalSecret(item, "token") };
-  else if (authKind === "api_key_header") auth = { kind: authKind, headerName: item.querySelector('[data-mcp-auth="headerName"]').value.trim(), ...optionalSecret(item, "value") };
-  else if (authKind === "basic") auth = { kind: authKind, username: item.querySelector('[data-mcp-auth="username"]').value.trim(), ...optionalSecret(item, "password") };
-  else if (authKind === "query_parameter") auth = { kind: authKind, parameterName: item.querySelector('[data-mcp-auth="parameterName"]').value.trim(), ...optionalSecret(item, "value") };
-  else if (authKind === "custom_headers") {
-    const raw = item.querySelector('[data-mcp-secret="headers"]')?.value.trim();
-    auth = raw ? { kind: authKind, headers: parseHeaderJson(raw) } : { kind: authKind, headerNames: JSON.parse(item.dataset.headerNames || "[]") };
-  } else auth = { kind: "none" };
-  return {
-    ...(item.dataset.serverId ? { id: item.dataset.serverId } : {}),
-    displayName: field("displayName"), key: field("key"), transport: "http", url: field("url"),
-    ...(field("protocolVersion") ? { protocolVersion: field("protocolVersion") } : {}),
-    ...(field("timeoutMs") ? { timeoutMs: Number(field("timeoutMs")) } : {}),
-    auth,
-    ...(toolAllowlist.length === 0 ? {} : { toolAllowlist }),
-    ...(toolBlocklist.length === 0 ? {} : { toolBlocklist }),
-    ...(item.dataset.trust ? { trust: item.dataset.trust } : {}),
-    aliases: JSON.parse(item.dataset.aliases || "[]"),
-    capabilities: JSON.parse(item.dataset.capabilities || "[]"),
-  };
+function readRuntimeMcpJson(prefix) {
+  const editor = $(`${prefix}-mcp-json`);
+  const errorMessage = $(`${prefix}-mcp-error`);
+  try {
+    const servers = parseRuntimeMcpConfiguration(editor.value);
+    errorMessage.textContent = "";
+    return servers;
+  } catch (error) {
+    errorMessage.textContent = error instanceof Error ? error.message : String(error);
+    activateRuntimeCapabilityTab(editor.closest("form"), "mcp");
+    editor.focus();
+    throw error;
+  }
 }
 
-function commaSeparatedValues(value) {
-  return [...new Set(String(value || "").split(",").map((item) => item.trim()).filter(Boolean))];
+function formatRuntimeMcpJson(prefix) {
+  try { $(`${prefix}-mcp-json`).value = JSON.stringify(readRuntimeMcpJson(prefix), null, 2); }
+  catch { /* readRuntimeMcpJson displays the validation error beside the editor. */ }
 }
 
-function optionalSecret(item, name) {
-  const value = item.querySelector(`[data-mcp-secret="${name}"]`)?.value;
-  return value ? { [name]: value } : {};
-}
-
-function parseHeaderJson(raw) {
-  const value = JSON.parse(raw);
-  if (!value || Array.isArray(value) || typeof value !== "object" || Object.values(value).some((item) => typeof item !== "string" || item.length === 0)) throw new Error("自定义 Headers 必须是值为非空字符串的 JSON 对象");
-  return value;
+async function testRuntimeMcpJson(prefix) {
+  const button = $(`${prefix}-mcp-test`);
+  const result = $(`${prefix}-mcp-test-result`);
+  let servers;
+  try { servers = readRuntimeMcpJson(prefix); }
+  catch { return; }
+  if (servers.length === 0) { result.textContent = "请先填写 MCP Server 配置。"; return; }
+  button.disabled = true;
+  result.textContent = "测试中…";
+  const messages = [];
+  try {
+    for (const server of servers) {
+      try {
+        const response = await localAgentFetch("/v1/local-mcp-servers/test", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ server }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+        if (!body.ok) throw new Error(`${body.stage || "connection"}: ${body.error || "连接失败"}`);
+        messages.push(`${server.displayName}：已连接 · ${body.toolCount} tools`);
+      } catch (error) { messages.push(`${server.displayName}：${error instanceof Error ? error.message : String(error)}`); }
+      result.textContent = messages.join("\n");
+    }
+  } finally { button.disabled = false; }
 }
 
 async function deleteLocalRuntime(runtimeId = localRuntimeState.runtimeId) {
