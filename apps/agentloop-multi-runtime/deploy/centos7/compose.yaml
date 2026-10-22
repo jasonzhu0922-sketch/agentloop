@@ -33,6 +33,7 @@ services:
       HOST: 0.0.0.0
       PORT: 8788
       RUNTIME_CONFIG_PATH: /run/topology/runtimes.json
+      WORKSPACE_ROOT: /app/apps/agentloop-multi-runtime/workspace
       ATTACHMENT_BASE_URL: http://router:8788
       # The Web service proxies browser traffic to Router, but this stays
       # explicit for any direct Router API client.
@@ -58,6 +59,7 @@ services:
       - router-data:/app/apps/agentloop-multi-runtime/data
       - ${DEPLOY_ROOT:-/opt/agentloop}/downloads/catalog:/run/local-agent-catalog:ro
       - runtime-state:/app/apps/agentloop-multi-runtime/data/state
+      - ${RUNTIME_WORKSPACE_HOST_PATH:?set in deployment .env}:/app/apps/agentloop-multi-runtime/workspace:ro
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8788/healthz').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 5s

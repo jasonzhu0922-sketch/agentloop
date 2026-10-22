@@ -6,13 +6,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createLocalAgentServer } from "../local-agent-runtime/src/api/local-agent-api.ts";
+import { createLocalAgentClient } from "../web/client/local-runtime/local-agent-client.js";
 
 test("Local Agent stores browser uploads as sources in the selected Runtime without using Router attachment storage", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-local-agent-upload-"));
   const runtimeId = "local-runtime-upload";
-  const router = createServer((request, response) => {
+  const router = createServer(async (request, response) => {
     if (request.method === "POST" && request.url === "/v1/device-agent/authorize-session") {
       response.setHeader("content-type", "application/json");
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      if (JSON.parse(Buffer.concat(chunks).toString()).sessionToken === "expired".repeat(8)) {
+        response.statusCode = 401;
+        response.end(JSON.stringify({ code: "local_session_invalid", error: "Local Runtime session is invalid or expired" }));
+        return;
+      }
       response.end(JSON.stringify({ session: { ownerUserId: "local-owner" } }));
       return;
     }
@@ -55,6 +63,19 @@ test("Local Agent stores browser uploads as sources in the selected Runtime with
     await once(agent, "listening");
     const agentAddress = agent.address();
     assert.ok(agentAddress !== null && typeof agentAddress !== "string");
+    let token = "expired".repeat(8);
+    let refreshes = 0;
+    const client = createLocalAgentClient({
+      baseUrl: `http://127.0.0.1:${agentAddress.port}`,
+      session: {
+        ensureValid: async () => {}, token: () => token,
+        refresh: async () => { refreshes++; token = "s".repeat(32); },
+      },
+    });
+    const settings = await client.request("/v1/local-models/configuration", { headers: { origin: "http://web.test" } });
+    assert.equal(settings.status, 200, "settings must renew a session rejected by the real Router error contract");
+    assert.equal(refreshes, 1);
+    assert.ok((await settings.json() as { configuration?: unknown }).configuration);
     const preflight = await fetch(`http://127.0.0.1:${agentAddress.port}/healthz`, {
       method: "OPTIONS",
       headers: {

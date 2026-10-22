@@ -13,8 +13,9 @@ import { LocalModelConfigurationStore, type LocalModelConfigurationInput } from 
 import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local-runtime-secret-store.ts";
 import { loadSkillDirectoriesConfig } from "../../../src/shared/config.ts";
 import { LocalSkillPackageInstaller } from "./local-skill-package-installer.ts";
+import { LOCAL_AGENT_VERSION } from "../config/local-agent-version.ts";
 
-export const LOCAL_AGENT_VERSION = "0.1.3";
+export { LOCAL_AGENT_VERSION };
 export const LOCAL_AGENT_PROTOCOL_VERSION = "1";
 
 export class LocalAgentApplicationError extends Error {
@@ -170,7 +171,8 @@ export class LocalAgentService {
     });
     const value = await result.json().catch(() => ({}));
     if (!result.ok || typeof value.session?.ownerUserId !== "string") {
-      throw new LocalAgentApplicationError(result.status === 401 ? 401 : 409, typeof value.error === "string" ? value.error : "local_session_invalid");
+      throw new LocalAgentApplicationError(result.status === 401 ? 401 : 409,
+        typeof value.code === "string" ? value.code : typeof value.error === "string" ? value.error : "local_session_invalid");
     }
     return { ownerUserId: value.session.ownerUserId };
   }

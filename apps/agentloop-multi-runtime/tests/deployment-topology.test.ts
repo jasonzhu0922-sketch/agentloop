@@ -50,6 +50,11 @@ for (const [settings, count, capacity] of [["",2,20], ["RUNTIME_COUNT=1",1,20], 
       assert.equal(runtime.maxConcurrentRuns,capacity);
       assert.equal(runtime.endpoint,`http://runtime-${runtime.id}:${host.environment.PORT}`);
       assert.equal(host.ports,undefined);
+      const hostWorkspace = host.volumes.find((v: {target: string}) => v.target === services.router.environment.WORKSPACE_ROOT);
+      const routerWorkspace = services.router.volumes.find((v: {target: string}) => v.target === services.router.environment.WORKSPACE_ROOT);
+      assert.ok(routerWorkspace, "Router must read the same artifact bytes as the Runtime");
+      assert.equal(routerWorkspace.source, hostWorkspace.source);
+      assert.equal(routerWorkspace.read_only, true);
       ids.add(host.environment.RUNTIME_ID);
       volumes.add(host.volumes.find((v: {target: string}) => v.target === "/app/apps/agentloop-multi-runtime/data").source);
     }
