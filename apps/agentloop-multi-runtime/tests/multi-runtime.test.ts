@@ -570,6 +570,7 @@ test("persisted turns preserve actual Runtime data plane and resolved model", as
     conversationId: "conversation-provenance",
     clientMessageId: "message-provenance",
     input: "本机任务",
+    requestedModelKey: "cloud:user-selected-model",
     executionTarget: { kind: "local_device", deviceId: "device-provenance", runtimeId: "local-runtime-provenance" },
     dataPolicy: { mode: "local" },
   }, { heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 1_100 });
@@ -578,6 +579,7 @@ test("persisted turns preserve actual Runtime data plane and resolved model", as
     remoteRunId: "run-provenance", status: "completed", modelKey: "model-resolved-by-runtime", output: "完成", finishedAt: 1_200,
   }, 1_201);
   const turn = (await store.conversation("tenant-provenance", "user-provenance", "conversation-provenance"))?.turns[0];
+  assert.equal(turn?.requestedModelKey, "cloud:user-selected-model");
   assert.equal(turn?.assignment?.executionLocation, "local");
   assert.equal(turn?.assignment?.runtimeId, "local-runtime-provenance");
   assert.equal(turn?.assignment?.runtimeDisplayName, "研究 Runtime");
@@ -585,6 +587,7 @@ test("persisted turns preserve actual Runtime data plane and resolved model", as
   const assistant = conversationMessagesFromTurns(turn === undefined ? [] : [turn], [
     { key: "model-resolved-by-runtime", displayName: "运行时模型" },
   ])[1];
+  assert.equal(assistant?.requestedModelKey, "cloud:user-selected-model");
   assert.deepEqual(executionProvenanceParts(assistant), [
     { kind: "location", label: "本机" },
     { kind: "runtime", label: "Runtime 研究 Runtime" },

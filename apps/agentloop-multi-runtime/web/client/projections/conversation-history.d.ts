@@ -1,6 +1,7 @@
 export interface PersistedConversationTurn {
   readonly clientMessageId: string;
   readonly input: string;
+  readonly requestedModelKey?: string;
   readonly createdAt: number;
   readonly attachments?: readonly unknown[];
   readonly assignment?: {
@@ -27,6 +28,7 @@ export interface PersistedConversationMessage {
   readonly runtimeId?: string;
   readonly status?: string;
   readonly modelKey?: string;
+  readonly requestedModelKey?: string;
   readonly modelDisplayName?: string;
   readonly error?: string;
   readonly attachments?: readonly unknown[];

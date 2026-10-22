@@ -516,6 +516,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       SELECT
         t.client_message_id,
         t.input,
+        t.requested_model_key,
         t.resource_refs_json,
         t.message_attachments_json,
         t.data_policy_json,
@@ -560,6 +561,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
     `).all(tenantId, ownerUserId, conversationId) as Array<{
       client_message_id: string;
       input: string;
+      requested_model_key: string | null;
       resource_refs_json: string;
       message_attachments_json: string;
       data_policy_json: string;
@@ -583,6 +585,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       turns: rows.map((row) => ({
         clientMessageId: row.client_message_id,
         input: row.input,
+        ...(row.requested_model_key === null ? {} : { requestedModelKey: row.requested_model_key }),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         attachments: browserAttachments(row.message_attachments_json, row.resource_refs_json),

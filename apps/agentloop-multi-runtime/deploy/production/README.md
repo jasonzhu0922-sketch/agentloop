@@ -37,7 +37,10 @@ bash apps/agentloop-multi-runtime/deploy/production/package-local-agent.sh \
 ```text
 Router https://47.101.178.145:5001
 Web    https://47.101.178.145:3001
+Agent  http://127.0.0.1:18790（用户设备；开发源码使用 8790）
 ```
+
+生产 Web 的 `LOCAL_AGENT_URL` 必须指向安装版端口 `18790`；新版部署模板已设置此默认值。已运行的 Web 需重新应用新版模板并重建 / 重启，客户端需安装新版包，才能完成端口切换。
 
 可通过 `--router-url`、`--web-origin` 修改。产物和 `build-manifest.json` 放在 `apps/agentloop-multi-runtime/release/local-agent/<版本>-<SHA前12位>/`，可用 `--output` 指定父目录。脚本验证最终 PKG 可展开及 App 代码签名；原生覆盖安装、设备配对和真实 Run 需要另行验收。未设置签名身份时仍是 ad-hoc App 签名、未签名/未公证 PKG。
 

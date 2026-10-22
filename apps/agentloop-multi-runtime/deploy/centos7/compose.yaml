@@ -78,6 +78,8 @@ services:
       ROUTER_URL: http://router:8788
       # This is copied into runtime-config.js for Local Runtime Agent pairing.
       ROUTER_PUBLIC_URL: ${PUBLIC_ROUTER_URL:?set the externally routable Router URL}
+      # This is a browser-device loopback URL, not a cloud/container endpoint.
+      LOCAL_AGENT_URL: ${LOCAL_AGENT_URL:-http://127.0.0.1:18790}
       LOCAL_AGENT_DOWNLOADS_DIR: /run/local-agent-installers
     volumes:
       - ${DEPLOY_ROOT:-/opt/agentloop}/downloads/installers:/run/local-agent-installers:ro

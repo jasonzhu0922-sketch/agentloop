@@ -165,6 +165,8 @@ SQLite 不是多节点数据库：不要把它放到 NFS/RWX 卷。生产还应�
 
 ### Local Runtime Agent 独立部署配置
 
+开发源码（`start:local-agent` / `start:multi-runtime`）默认监听 `127.0.0.1:8790`，macOS/Windows 安装版默认监听 `127.0.0.1:18790`，可在同一设备同时运行。安装版使用独立设备数据目录。生产部署的 Web 默认连接 `http://127.0.0.1:18790`；源码 Web 默认连接开发端口，`NODE_ENV=production` 时使用安装端口。需要自定义时，Agent 进程设置 `LOCAL_AGENT_PORT`，对应 Web 设置 `LOCAL_AGENT_URL`（或相同的 `LOCAL_AGENT_PORT`）。用开发 Web 测试安装包时，也需显式设置 `LOCAL_AGENT_URL=http://127.0.0.1:18790`；Web 只连接配置的 Agent，不自动扫描其他端口。旧安装包需重新打包并安装，生产 Web 需更新部署后生效。
+
 Local Runtime Agent 的模型、联网搜索和 Skill 集成配置属于设备部署边界，不属于同步的 Skill 包。单独运行 `start:local-agent`、已安装 Agent 与本地 `start:multi-runtime` 都默认从 `local-agent-runtime/.env`（打包版为设备数据目录下的 `.env`）及 `local-agent-runtime/config/llm-providers.json` 读取；根 `.env` 只提供 Router 和 Runtime Host 的部署配置。受管部署仍可用 `LOCAL_AGENT_RUNTIME_ENV_FILE` 覆盖 Local Agent 的环境文件路径。已安装 Agent 首次启动会在设备数据目录创建 `agent-loop-runtime/.env.example`，运维应复制为同目录 `.env` 并以最小权限保存真实凭据。macOS 默认目录为 `~/Library/Application Support/AgentLoop Local Runtime/agent-loop-runtime/`，Windows 为 `%LOCALAPPDATA%\AgentLoop Local Runtime\agent-loop-runtime/`。该 `.env` 是 Local Agent 的模型/联网搜索配置来源：例如 `OPENAI_API_KEY`、`MY_LLM_API_KEY`、`WEB_SEARCH_*` 均仅被 Agent 进程内集成读取；`mysql-steel-data` 与 `enterprise-info` 只收到同一文件路径并自行读取各自字段。凭据绝不写入 Skill 包、Planner、模型上下文或命令环境。受管部署可用 `LOCAL_AGENT_RUNTIME_CONFIG_ROOT`、`LOCAL_AGENT_RUNTIME_ENV_FILE` 或 `LOCAL_AGENT_PROVIDER_CONFIG_PATH` 覆盖路径。
 
 Local Agent 的源码也作为独立部署单元位于 `local-agent-runtime/src/`；它只依赖共享内核包及 Multi Runtime 的中立配置/契约，Router 和云端 Runtime Host 入口仍保留在 `src/`。`start:local-agent`、本地启动器和 macOS/Windows 打包器都以此目录的 `main.ts` 为唯一入口。

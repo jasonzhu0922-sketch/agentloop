@@ -75,7 +75,7 @@ export class LocalModelConfigurationStore {
 
   async read(): Promise<LocalModelConfigurationInput> {
     const row = await this.row();
-    return row === undefined ? { reuseCloudModels: false, providers: [] } : configurationWithoutLegacyDefaults(row.configuration_json);
+    return row === undefined ? { reuseCloudModels: true, providers: [] } : configurationWithoutLegacyDefaults(row.configuration_json);
   }
 
   async write(value: LocalModelConfigurationInput): Promise<LocalModelConfigurationInput> {
@@ -139,7 +139,7 @@ export class LocalModelConfigurationStore {
 
   async resolve(): Promise<ResolvedLocalModelConfiguration> {
     const row = await this.row();
-    if (row === undefined) return { configured: false, reuseCloudModels: false, registryConfig: undefined, environment: {} };
+    if (row === undefined) return { configured: false, reuseCloudModels: true, registryConfig: undefined, environment: {} };
     const config = configurationWithoutLegacyDefaults(row.configuration_json);
     const environment = row.secret_storage_key === null ? {} : await this.secrets.read(row.secret_storage_key) ?? {};
     return {

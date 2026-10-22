@@ -7,12 +7,13 @@ import { createServer } from "node:net";
 import { existsSync } from "node:fs";
 import { colorizeTerminalLogLabel } from "@zhujun/agentloop";
 import { ensureLocalRuntimeTools, localRuntimeHostEnvironment } from "./local-runtime-tools.mjs";
+import { localAgentPort as resolveLocalAgentPort } from "../src/shared/local-agent-endpoint.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const runtimeCount = parseRuntimeCount(process.argv.slice(2));
 const routerPort = positiveInteger(process.env.PORT, 8788);
 const webPort = positiveInteger(process.env.WEB_PORT, 5174);
-const localAgentPort = positiveInteger(process.env.LOCAL_AGENT_PORT, 8790);
+const localAgentPort = resolveLocalAgentPort();
 const runtimePort = positiveInteger(process.env.RUNTIME_BASE_PORT, 8791);
 const runtimeHost = process.env.RUNTIME_HOST ?? "127.0.0.1";
 const routerHost = process.env.HOST ?? "127.0.0.1";

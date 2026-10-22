@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
+import { PACKAGED_LOCAL_AGENT_PORT } from "../src/shared/local-agent-endpoint.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(appRoot, "../..");
@@ -106,7 +107,7 @@ await writeFile(join(resources, "config/skill-directories.json"), JSON.stringify
 }, null, 2));
 await cp(join(appRoot, "config/step-execution-strategy.json"), join(resources, "config/step-execution-strategy.json"));
 await cp(join(appRoot, "config/practice-profiles.json"), join(resources, "config/practice-profiles.json"));
-await writeFile(join(resources, "agentloop-local-runtime.manifest.json"), `${JSON.stringify({ schema: "agentloop.localRuntimeRelease/v1", routerUrl, webOrigin }, null, 2)}\n`);
+await writeFile(join(resources, "agentloop-local-runtime.manifest.json"), `${JSON.stringify({ schema: "agentloop.localRuntimeRelease/v1", routerUrl, webOrigin, localAgentPort: PACKAGED_LOCAL_AGENT_PORT }, null, 2)}\n`);
 await cp(join(appRoot, "distribution/macos/com.agentloop.local-runtime-agent.plist"), join(resources, "com.agentloop.local-runtime-agent.plist"));
 await mkdir(macOS, { recursive: true });
 run("/usr/bin/swiftc", [

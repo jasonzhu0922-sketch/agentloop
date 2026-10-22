@@ -61,6 +61,7 @@ import json,sys
 r=Path(sys.argv[1])/'Contents/Resources'
 m=json.loads((r/'agentloop-local-runtime.manifest.json').read_text())
 assert m['routerUrl']==sys.argv[2] and m['webOrigin']==sys.argv[3], 'Wrong embedded production endpoints'
+assert m['localAgentPort']==18790, 'Wrong installed Local Agent port'
 for p in r.rglob('*'):
     assert p.name not in {'.env','agentloop.db','supervisor.db','device-identity.json','config.zip','custom-skills.zip'}, 'Unexpected private state in installer'
 PY
@@ -68,7 +69,7 @@ python3 - "$destination" "$sha" "$router" "$web" "$pkg" <<'PY'
 import hashlib,json,sys
 from pathlib import Path
 dest,sha,router,web,pkg=sys.argv[1:]; p=Path(pkg)
-d=dict(revision=sha,routerUrl=router,webOrigin=web,fileName=p.name,size=p.stat().st_size,sha256=hashlib.sha256(p.read_bytes()).hexdigest(),nativeInstallAndPairingVerified=False)
+d=dict(revision=sha,routerUrl=router,webOrigin=web,localAgentPort=18790,fileName=p.name,size=p.stat().st_size,sha256=hashlib.sha256(p.read_bytes()).hexdigest(),nativeInstallAndPairingVerified=False)
 Path(dest,'build-manifest.json').write_text(json.dumps(d,indent=2)+'\n')
 print(json.dumps(d,indent=2))
 PY

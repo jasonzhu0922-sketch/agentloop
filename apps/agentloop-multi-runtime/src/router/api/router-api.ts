@@ -38,6 +38,7 @@ interface RouterTaskApi {
     readonly turns: readonly {
       readonly clientMessageId: string;
       readonly input: string;
+      readonly requestedModelKey?: string;
       readonly createdAt: number;
       readonly updatedAt: number;
       readonly attachments: readonly { readonly id: string; readonly originalName: string; readonly mediaType: string; readonly byteSize: number }[];

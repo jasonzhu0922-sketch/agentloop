@@ -5,6 +5,7 @@ import { request as httpsRequest } from "node:https";
 import { resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serveInstaller } from "./installer-downloads.mjs";
+import { localAgentUrl as resolveLocalAgentUrl } from "../src/shared/local-agent-endpoint.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const sharedPreview = fileURLToPath(new URL("../../../packages/agentloop-artifact-preview/dist/index.js", import.meta.url));
@@ -17,10 +18,10 @@ const routerUrl = process.env.ROUTER_URL ?? "http://127.0.0.1:8788";
 // upstream: a container reaches `router` over its Compose network, whereas a
 // paired Local Runtime Agent must receive the externally routable URL.
 const routerPublicUrl = process.env.ROUTER_PUBLIC_URL ?? routerUrl;
-const localAgentUrl = process.env.LOCAL_AGENT_URL ?? "http://127.0.0.1:8790";
+const localAgentUrl = resolveLocalAgentUrl();
 const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
 
-export function runtimeConfigScript(apiUrl, agentUrl = "http://127.0.0.1:8790") {
+export function runtimeConfigScript(apiUrl, agentUrl = localAgentUrl) {
   // Browser traffic stays same-origin even when Web and Router are separate
   // processes. The configured Router URL is consumed by this server's proxy,
   // not copied into browser state where port/CORS drift can break live Runs.

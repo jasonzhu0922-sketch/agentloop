@@ -6,6 +6,7 @@ import { readLocalAgentBootstrapConfig, writeLocalAgentBootstrapConfig } from ".
 import { createLocalAgentServer } from "./api/local-agent-api.ts";
 import { localRuntimeTerminalLogLine } from "./observability/runtime-terminal-log.ts";
 import { ensureLocalAgentRuntimeConfiguration, localAgentRuntimeConfiguration, readLocalAgentIntegrationEnvironment } from "./config/runtime-configuration.ts";
+import { localAgentPort } from "../../src/shared/local-agent-endpoint.mjs";
 
 void main();
 
@@ -31,7 +32,7 @@ if (command.length > 0) throw new Error("Usage: agentloop-local-runtime-agent [-
 
 const bootstrap = await readLocalAgentBootstrapConfig(bootstrapConfigPath);
 const host = "127.0.0.1";
-const port = positiveInteger(process.env.LOCAL_AGENT_PORT, 8790);
+const port = localAgentPort(packaged);
 const routerUrl = process.env.ROUTER_URL ?? buildRouterUrl ?? bootstrap.routerUrl;
 const statePath = resolve(process.env.LOCAL_AGENT_STATE_PATH ?? join(dataRoot, "device-identity.json"));
 const databasePath = resolve(process.env.LOCAL_AGENT_DATABASE_PATH ?? join(dataRoot, "agentloop.db"));

@@ -87,7 +87,7 @@ test("restoring a local preference synchronizes the catalog after resolving the 
     isLocalExecution: () => toggle.checked,
     modelCatalogContext: () => ({ local: toggle.checked }),
     modelCatalog: { load: (context: { local: boolean }) => { loadedLocal = context.local; } },
-    syncAgentSettingsView() {}, syncLocalRuntimeManager() {}, renderLocalScopes() {},
+    syncAgentSettingsView() {}, syncLocalRuntimeManager() {}, renderLocalScopes() {}, syncModelSelection() {},
   };
   vm.runInNewContext(`${app.slice(start, end)}\nupdateLocalControls();`, sandbox);
   assert.equal(toggle.checked, true);

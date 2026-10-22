@@ -21,6 +21,7 @@ import { hasSelectedTextWithin } from "./ui/message-selection.js";
 import { createClientId } from "./ui/client-id.js";
 import { modelSelectionStatus } from "./ui/model-selection-status.js";
 import { createModelCatalog } from "./state/model-catalog.js";
+import { createModelSelection } from "./state/model-selection.js";
 import { observeAssignment } from "./api/assignment-stream.js";
 import { createRouterClient, routerProxyPath } from "./api/router-client.js";
 import { createLocalAgentClient } from "./local-runtime/local-agent-client.js";
@@ -65,6 +66,8 @@ let resizeState;
 let localSkillPackages = [];
 let mcpJsonImportTarget;
 let availableModels = [];
+let modelsLoading = false;
+const modelSelection = createModelSelection();
 const liveUpdates = createCoalescedUpdater({ render: renderPendingLiveAssistantMessages, persist: saveSessions });
 
 const nativeFetch = window.fetch.bind(window);
@@ -91,10 +94,10 @@ const modelCatalog = createModelCatalog({
   },
   onChange({ models, loading, error }) {
     availableModels = models;
+    modelsLoading = loading;
     const select = $("model-select");
-    const previousSelection = select.value;
     select.innerHTML = `<option value="">${loading ? "正在加载模型…" : "请选择模型"}</option>` + models.map((model) => `<option value="${escapeHtml(model.key)}">${escapeHtml(model.displayName || model.key)}</option>`).join("");
-    select.value = models.some((model) => model.key === previousSelection) ? previousSelection : "";
+    syncModelSelection();
     select.disabled = loading;
     setStatus(error ? `读取模型失败：${error instanceof Error ? error.message : String(error)}` : modelSelectionStatus(models, select.value), error ? "error" : "ok");
   },
@@ -117,7 +120,10 @@ $("theme-toggle")?.addEventListener("click", () => { document.documentElement.da
 $("new-chat").addEventListener("click", () => { conversationState.activeId = newConversation().id; resetArtifactWorkspace(); updateLocalControls(); render(); $("input").focus(); });
 $("composer").addEventListener("submit", (event) => { event.preventDefault(); void runComposerAction(); });
 $("submit").addEventListener("click", () => void runComposerAction());
-$("model-select").addEventListener("change", () => setStatus(modelSelectionStatus(availableModels, $("model-select").value), "ok"));
+$("model-select").addEventListener("change", () => {
+  modelSelection.choose($("model-select").value);
+  setStatus(modelSelectionStatus(availableModels, $("model-select").value), "ok");
+});
 $("messages").addEventListener("click", (event) => {
   const button = event.target instanceof Element ? event.target.closest("[data-copy-message]") : null;
   if (!(button instanceof HTMLButtonElement)) return;
@@ -623,6 +629,7 @@ function updateLocalControls() {
   syncLocalRuntimeManager();
   renderLocalScopes();
   void modelCatalog.load(modelCatalogContext());
+  syncModelSelection();
 }
 
 async function addDirectoryScope() {
@@ -1437,6 +1444,7 @@ async function selectConversation(conversationId) {
     await Promise.allSettled(assistants.map((assistant) => assistant.status === "running"
       ? hydratePersistedAssistant(assistant, tenantId, userId)
       : refreshArtifacts(assistant.assignmentId, assistant, tenantId, userId)));
+    syncModelSelection();
     const selected = selectedAssistantMessage(conversation);
     if (selected?.assignmentId) {
       conversation.selectedAssistantId = selected.id;
@@ -1653,6 +1661,15 @@ function modelCatalogContext() {
   return { local, key: JSON.stringify([sessionState.user?.id, local ? "local" : "cloud", local ? localRuntimeState.device?.id : undefined, local ? Boolean(sessionState.localSessionToken) : Boolean(sessionState.authToken)]) };
 }
 
+function syncModelSelection() {
+  $("model-select").value = modelSelection.resolve({
+    conversation: activeConversation(),
+    context: modelCatalogContext(),
+    models: availableModels,
+    loading: modelsLoading,
+  });
+}
+
 async function loadModels() {
   await modelCatalog.load(modelCatalogContext(), { force: true });
 }
@@ -1712,6 +1729,7 @@ async function submit() {
   const assistantMessage = {
     id: createClientId(), role: "assistant", text: "", reasoning: "", status: "running", events: [], plan: [], createdAt: submittedAt,
     executionLocation: executionTarget,
+    requestedModelKey,
     modelKey: requestedModelKey,
     modelDisplayName: availableModels.find((model) => model.key === requestedModelKey)?.displayName || requestedModelKey,
   };

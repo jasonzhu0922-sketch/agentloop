@@ -76,6 +76,8 @@ export interface StoredConversationPage {
 export interface StoredConversationTurn {
   readonly clientMessageId: string;
   readonly input: string;
+  /** The user's selection, independent from the model resolved by the Runtime. */
+  readonly requestedModelKey?: string;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly attachments: readonly ConversationAttachmentSnapshot[];

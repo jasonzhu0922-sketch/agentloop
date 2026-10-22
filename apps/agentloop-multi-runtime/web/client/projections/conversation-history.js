@@ -6,6 +6,7 @@ export function conversationMessagesFromTurns(turns, models = []) {
   return (Array.isArray(turns) ? turns : []).flatMap((turn) => {
     if (!turn || typeof turn.clientMessageId !== "string" || typeof turn.input !== "string") return [];
     const createdAt = finiteNumber(turn.createdAt, Date.now());
+    const selection = typeof turn.requestedModelKey === "string" ? { requestedModelKey: turn.requestedModelKey } : {};
     const user = {
       id: turn.clientMessageId,
       role: "user",
@@ -15,15 +16,15 @@ export function conversationMessagesFromTurns(turns, models = []) {
     };
     const assignment = turn.assignment;
     if (!assignment || typeof assignment.id !== "string") {
-      return [user, failedAssistant(`history-${turn.clientMessageId}`, createdAt, "未找到该轮对应的执行记录")];
+      return [user, { ...failedAssistant(`history-${turn.clientMessageId}`, createdAt, "未找到该轮对应的执行记录"), ...selection }];
     }
     if (assignment.hasRun !== true) {
-      return [user, failedAssistant(
+      return [user, { ...failedAssistant(
         `history-${assignment.id}`,
         createdAt,
         typeof assignment.errorMessage === "string" ? assignment.errorMessage : "该轮未成功创建 Runtime Run",
         assignment,
-      )];
+      ), ...selection }];
     }
     const finalTurn = turn.finalTurn;
     if (finalTurn && ["completed", "failed", "cancelled"].includes(finalTurn.status)) {
@@ -31,6 +32,7 @@ export function conversationMessagesFromTurns(turns, models = []) {
       return [user, {
         id: `history-${assignment.id}`,
         role: "assistant",
+        ...selection,
         text: output,
         ...(finalTurn.status === "failed" ? { error: output || finalTurn.errorCode || "执行失败" } : {}),
         reasoning: "",
@@ -55,6 +57,7 @@ export function conversationMessagesFromTurns(turns, models = []) {
     return [user, {
       id: `history-${assignment.id}`,
       role: "assistant",
+      ...selection,
       text: "",
       reasoning: "",
       status: "running",

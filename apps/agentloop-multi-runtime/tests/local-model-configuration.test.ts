@@ -24,6 +24,20 @@ const chat = { key: "chat", displayName: "Chat", providerModel: "upstream-chat",
   thinkingMode: "enabled" as const, thinkingEffort: "medium" as const, planningThinkingMode: "disabled" as const,
   chatTemplateKwargs: { enable_thinking: true }, temperature: 0.7, topP: 0.9 };
 
+test("unconfigured devices allow the cloud default while an explicit cloud opt-out remains durable", async (t) => {
+  const { store } = await fixture(t);
+  assert.deepEqual(await store.read(), { reuseCloudModels: true, providers: [] });
+  assert.equal((await store.resolve()).reuseCloudModels, true);
+  assert.equal(store.current().reuseCloudModels, true);
+  const snapshot = await store.snapshot();
+  await store.write({ reuseCloudModels: false, providers: [] });
+  assert.equal((await store.read()).reuseCloudModels, false);
+  assert.equal((await store.resolve()).reuseCloudModels, false);
+  assert.equal(store.current().reuseCloudModels, false);
+  await store.restore(snapshot);
+  assert.equal(store.current().reuseCloudModels, true);
+});
+
 test("Provider-only JSON persists without inventing an executable model", async (t) => {
   const { store } = await fixture(t);
   await store.write({ reuseCloudModels: false, providers: [{ ...connection, models: [] }] });

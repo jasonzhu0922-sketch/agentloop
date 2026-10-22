@@ -57,6 +57,7 @@ test("settings preserve the active tab across Agent refreshes and reopen on mode
     localRuntimeViewModel: () => ({ paired: state.agentStatus === "online", runtimeManagerHidden: state.agentStatus !== "online" }),
     localRuntimePreferenceKey: () => "", localStorage: {},
     modelCatalog: { load() {} }, modelCatalogContext: () => ({}),
+    syncModelSelection() {},
     syncLocalRuntimeManager() {}, renderLocalScopes() {}, renderLocalAgentConfig() {},
     loadLocalAgentConfig() {}, loadLocalRuntimes() {}, loadLocalModelConfiguration() {},
   });
