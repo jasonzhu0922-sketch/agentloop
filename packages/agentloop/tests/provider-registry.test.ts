@@ -624,15 +624,16 @@ function hasAppError(error: unknown, code: string, status: number): boolean {
     && (error as { status: unknown }).status === status;
 }
 
-test("sampling defaults, model overrides, zero values, and omission survive registry selection", async (t) => {
+test("Responses omit sampling controls while Chat Completions retain them", async (t) => {
   const provider = { kind: "openai-compatible", baseUrl: "https://models.example.test/v1", apiKeyEnv: "TEST_API_KEY", defaultModel: "upstream", maxAttempts: 1 };
   const registry = LlmProviderRegistry.fromConfigObject({
     defaultProvider: "configured", defaultModelKey: "inherited",
     providers: { configured: { ...provider, temperature: 0.5, topP: 0.8 }, plain: provider },
     models: {
       inherited: { providerKey: "configured", providerModel: "first", protocol: "responses" },
-      overridden: { providerKey: "configured", providerModel: "second", temperature: 0, topP: 0 },
+      overridden: { providerKey: "configured", providerModel: "second", protocol: "responses", temperature: 0, topP: 0 },
       omitted: { providerKey: "plain", providerModel: "third" },
+      chat: { providerKey: "configured", providerModel: "chat-model", protocol: "chat-completions" },
     },
   }, { TEST_API_KEY: "test-only-secret" });
   const bodies: Array<Record<string, unknown>> = [];
@@ -642,15 +643,19 @@ test("sampling defaults, model overrides, zero values, and omission survive regi
       ? { status: "completed", output_text: "ok", output: [] }
       : { choices: [{ finish_reason: "stop", message: { content: "ok" } }] }), { headers: { "content-type": "application/json" } });
   });
-  for (const key of ["inherited", "overridden", "omitted"]) {
+  for (const key of ["inherited", "overridden", "omitted", "chat"]) {
     await registry.create(key).complete({ runId: key, systemPrompt: "Test", phase: "execution", messages: [], tools: [] });
   }
-  assert.equal(bodies[0]?.temperature, 0.5);
-  assert.equal(bodies[0]?.top_p, 0.8);
-  assert.equal(bodies[1]?.temperature, 0);
-  assert.equal(bodies[1]?.top_p, 0);
+  // Responses does not accept sampling parameters, even when inherited from
+  // the provider or explicitly configured on the model.
+  assert.equal(Object.hasOwn(bodies[0]!, "temperature"), false);
+  assert.equal(Object.hasOwn(bodies[0]!, "top_p"), false);
+  assert.equal(Object.hasOwn(bodies[1]!, "temperature"), false);
+  assert.equal(Object.hasOwn(bodies[1]!, "top_p"), false);
   assert.equal(Object.hasOwn(bodies[2]!, "temperature"), false);
   assert.equal(Object.hasOwn(bodies[2]!, "top_p"), false);
+  assert.equal(bodies[3]?.temperature, 0.5);
+  assert.equal(bodies[3]?.top_p, 0.8);
   for (const invalid of [{ temperature: -1 }, { topP: 2 }, { temperature: NaN }, { topP: "0.5" }]) {
     assert.throws(() => LlmProviderRegistry.fromConfigObject({ defaultProvider: "test", providers: { test: { ...provider, ...invalid } } }, { TEST_API_KEY: "test-only-secret" }));
   }

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import type {
   ModelAdapter,
+  ModelProviderIdentity,
   ModelMessage,
   ModelInvocation,
   ModelRequestLogContext,
@@ -99,6 +100,7 @@ export class InMemoryResponsesReasoningContinuationStore implements ResponsesRea
 }
 
 interface CompatibleResponse {
+  id?: string;
   choices?: Array<{
     finish_reason?: string;
     message?: {
@@ -117,6 +119,7 @@ interface CompatibleResponse {
 }
 
 interface CompatibleStreamChunk {
+  id?: string;
   choices?: Array<{
     finish_reason?: string | null;
     delta?: {
@@ -142,6 +145,7 @@ interface ProviderRequest {
 }
 
 interface StreamFailureDiagnostics {
+  providerResponseId?: string;
   eventsSeen: number;
   hadSinkEmission: boolean;
   lastEvent?: StreamEventSummary;
@@ -212,7 +216,7 @@ function createStreamReceiptCollector(input: {
     },
     async build(anomalyReasons, forceTruncated = false) {
       const contentType = input.response.headers.get("content-type") ?? undefined;
-      const providerRequestId = input.response.headers.get("x-request-id") ?? undefined;
+      const identity = { ...providerRequestIdentity(input.response), ...providerResponseIdentity({ id: input.diagnostics.providerResponseId }) };
       const rawSha256 = rawHash.digest("hex");
       let rawCapture: ModelStreamReceipt["rawCapture"];
       let rawCaptureError: string | undefined;
@@ -225,7 +229,7 @@ function createStreamReceiptCollector(input: {
             response: {
               status: input.response.status,
               ...(contentType === undefined ? {} : { contentType }),
-              ...(providerRequestId === undefined ? {} : { providerRequestId }),
+              ...identity,
             },
             anomalyReasons,
             rawSse: Buffer.concat(rawCaptureChunks),
@@ -242,7 +246,7 @@ function createStreamReceiptCollector(input: {
         transport: "sse",
         httpStatus: input.response.status,
         ...(contentType === undefined ? {} : { contentType }),
-        ...(providerRequestId === undefined ? {} : { providerRequestId }),
+        ...identity,
         rawBytes,
         rawSha256,
         readChunkCount: input.diagnostics.readChunkCount,
@@ -450,7 +454,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
       if (!response.ok) {
         if (isRetryableStatus(response.status) && attempt < this.maxAttempts) {
           await response.body?.cancel().catch(() => undefined);
-          await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, response.status, request.logContext);
+          await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, response.status, request.logContext, providerRequestIdentity(response));
           continue;
         }
         throw await providerHttpError(response, request.logContext);
@@ -462,45 +466,52 @@ export class OpenAICompatibleModel implements ModelAdapter {
         payload = await readJsonResponseWithinLimit(response, budget) as CompatibleResponse;
         assertChatCompletionsPayload(payload);
       } catch (error) {
-        if (combinedSignal.aborted) throw modelRequestAborted();
-        if (error instanceof AppError) throw error;
+        if (combinedSignal.aborted) throw withProviderRequestIdentity(modelRequestAborted(), response);
+        if (error instanceof AppError) throw withProviderRequestIdentity(error, response);
         if (attempt < this.maxAttempts) {
-          await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, undefined, request.logContext);
+          await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, undefined, request.logContext, providerRequestIdentity(response));
           continue;
         }
         throw new AppError("MODEL_ERROR", "Model provider returned an unreadable response", 502, {
+          ...providerRequestIdentity(response),
           attempts: attempt,
           causeCode: transportCauseCode(error),
           request: request.logContext,
         });
       }
 
-      const choice = payload.choices?.[0];
-      const message = choice?.message;
-      if (message === undefined) throw new AppError("MODEL_ERROR", "Model provider returned no message", 502);
-      const toolCalls = (message.tool_calls ?? []).map((call, index) => parseToolCall(call, index));
-      if (requestRequiresToolCall(request.logContext.toolChoice) && toolCalls.length === 0 && attempt < this.maxAttempts) {
-        await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, undefined, request.logContext);
-        continue;
+      try {
+        const choice = payload.choices?.[0];
+        const message = choice?.message;
+        if (message === undefined) throw new AppError("MODEL_ERROR", "Model provider returned no message", 502);
+        const toolCalls = (message.tool_calls ?? []).map((call, index) => parseToolCall(call, index));
+        if (requestRequiresToolCall(request.logContext.toolChoice) && toolCalls.length === 0 && attempt < this.maxAttempts) {
+          await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, undefined, request.logContext, providerRequestIdentity(response));
+          continue;
+        }
+        const result: ModelResponse = {
+          ...providerRequestIdentity(response),
+          ...providerResponseIdentity(payload),
+          content: message.content ?? "",
+          toolCalls,
+          finishReason: normalizeFinishReason(choice?.finish_reason, toolCalls.length),
+          ...(typeof message.reasoning_content === "string" && message.reasoning_content.length > 0
+            ? { reasoningContent: message.reasoning_content }
+            : {}),
+          ...(payload.usage === undefined
+            ? {}
+            : {
+                usage: {
+                  inputTokens: payload.usage.prompt_tokens,
+                  outputTokens: payload.usage.completion_tokens,
+                },
+              }),
+        };
+        budget.assertResponse(result);
+        return result;
+      } catch (error) {
+        throw error instanceof AppError ? withProviderRequestIdentity(error, response) : error;
       }
-      const result: ModelResponse = {
-        content: message.content ?? "",
-        toolCalls,
-        finishReason: normalizeFinishReason(choice?.finish_reason, toolCalls.length),
-        ...(typeof message.reasoning_content === "string" && message.reasoning_content.length > 0
-          ? { reasoningContent: message.reasoning_content }
-          : {}),
-        ...(payload.usage === undefined
-          ? {}
-          : {
-              usage: {
-                inputTokens: payload.usage.prompt_tokens,
-                outputTokens: payload.usage.completion_tokens,
-              },
-            }),
-      };
-      budget.assertResponse(result);
-      return result;
     }
     throw new AppError("MODEL_ERROR", "Model request exhausted its attempts", 502);
   }
@@ -557,7 +568,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
         }
 
         try {
-          return await this.consumeStream(
+          const result = await this.consumeStream(
             response,
             sink,
             invocation,
@@ -565,22 +576,23 @@ export class OpenAICompatibleModel implements ModelAdapter {
             requestTimeout.recordActivity,
             createModelResponseBudget(invocation, this.limits),
           );
+          return { ...result, ...providerRequestIdentity(response) };
         } catch (error) {
           if (requestTimeout.aborted) {
             if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
-              await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
+              await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext, providerRequestIdentity(response));
               continue;
             }
-            throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
+            throw withProviderRequestIdentity(modelRequestAborted(requestTimeout.abortReason, requestTimeout.details()), response);
           }
           if (error instanceof StreamConsumptionError && !error.diagnostics.hadSinkEmission && attempt < this.maxAttempts) {
-            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
+            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext, providerRequestIdentity(response));
             continue;
           }
-          if (error instanceof AppError) throw error;
+          if (error instanceof AppError) throw withProviderRequestIdentity(error, response);
           // Partial deltas may already have been emitted to the sink, so a
           // mid-stream failure is never replayed through a second provider call.
-          throw unreadableStreamingResponse(error, attempt, request.logContext);
+          throw withProviderRequestIdentity(unreadableStreamingResponse(error, attempt, request.logContext), response);
         }
       } finally {
         requestTimeout.dispose();
@@ -706,6 +718,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
       }
       diagnostics.jsonEventCount += 1;
       assertChatCompletionsPayload(payload);
+      if (typeof payload?.id === "string") diagnostics.providerResponseId = payload.id;
       const choice = payload.choices?.[0];
       let recognized = false;
       for (const field of Object.keys(choice?.delta ?? {})) diagnostics.observedDeltaFields.add(field);
@@ -861,6 +874,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
       }
     }
     const resultWithoutReceipt: ModelResponse = {
+      ...providerResponseIdentity({ id: diagnostics.providerResponseId }),
       content,
       toolCalls,
       finishReason: finalFinishReason,
@@ -904,8 +918,6 @@ export class ResponsesModel implements ModelAdapter {
   private readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   private readonly runtimeContextPlacement: RuntimeContextPlacement;
   private readonly reasoningSummary?: "auto" | "detailed";
-  private readonly temperature?: number;
-  private readonly topP?: number;
   private readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   private readonly reasoningEncryptedContent: boolean;
   private readonly reasoningContinuationStore?: ResponsesReasoningContinuationStore;
@@ -949,8 +961,6 @@ export class ResponsesModel implements ModelAdapter {
         throw new TypeError(`LLM ${name} must be a number between 0 and ${max}`);
       }
     }
-    this.temperature = options.temperature;
-    this.topP = options.topP;
     this.reasoningEffort = options.reasoningEffort;
     this.reasoningEncryptedContent = options.reasoningEncryptedContent ?? false;
     this.reasoningContinuationStore = options.reasoningContinuationStore;
@@ -1057,26 +1067,27 @@ export class ResponsesModel implements ModelAdapter {
           if (isJsonResponse(response)) {
             const payload = await readJsonResponseWithinLimit(response, budget);
             assertResponsesPayload(payload);
-            const result = parseResponsesResponse(payload);
+            const result = { ...parseResponsesResponse(payload), ...providerRequestIdentity(response) };
             budget.assertResponse(result);
             this.rememberReasoningContinuation(invocation.runId, payload as Record<string, unknown>);
             return result;
           }
-          return await this.consumeStream(response, invocation.runId, sink, requestTimeout.recordActivity, budget, request.logContext);
+          const result = await this.consumeStream(response, invocation.runId, sink, requestTimeout.recordActivity, budget, request.logContext);
+          return { ...result, ...providerRequestIdentity(response) };
         } catch (error) {
           if (requestTimeout.aborted) {
             if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
-              await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
+              await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext, providerRequestIdentity(response));
               continue;
             }
-            throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
+            throw withProviderRequestIdentity(modelRequestAborted(requestTimeout.abortReason, requestTimeout.details()), response);
           }
           if (error instanceof StreamConsumptionError && !error.diagnostics.hadSinkEmission && attempt < this.maxAttempts) {
-            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
+            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext, providerRequestIdentity(response));
             continue;
           }
-          if (error instanceof AppError) throw error;
-          throw unreadableStreamingResponse(error, attempt, request.logContext);
+          if (error instanceof AppError) throw withProviderRequestIdentity(error, response);
+          throw withProviderRequestIdentity(unreadableStreamingResponse(error, attempt, request.logContext), response);
         }
       } finally {
         requestTimeout.dispose();
@@ -1110,10 +1121,11 @@ export class ResponsesModel implements ModelAdapter {
     const toolChoice = invocation.tools.length === 0
       ? undefined
       : toResponsesToolChoice(invocation.toolChoice ?? "auto", this.toolChoiceMode, invocation.tools.length);
+    // This Responses-compatible upstream rejects both sampling controls. Keep
+    // shared configuration parsing intact, but never put these fields on the
+    // wire for the Responses protocol.
     const body = JSON.stringify({
       model: this.model,
-      ...(this.temperature === undefined ? {} : { temperature: this.temperature }),
-      ...(this.topP === undefined ? {} : { top_p: this.topP }),
       ...(instructions.length === 0 ? {} : { instructions }),
       input,
       tools: providerTools,
@@ -1213,6 +1225,8 @@ export class ResponsesModel implements ModelAdapter {
       }
       diagnostics.jsonEventCount += 1;
       assertResponsesPayload(chunk);
+      const responseId = providerResponseIdentity(chunk.response).providerResponseId;
+      if (responseId !== undefined) diagnostics.providerResponseId = responseId;
       let recognized = true;
       switch (chunk.type) {
         case "error":
@@ -1431,6 +1445,7 @@ export class ResponsesModel implements ModelAdapter {
     }
     const toolCalls = streamedToolCalls;
     const resultWithoutReceipt: ModelResponse = {
+      ...providerResponseIdentity({ id: diagnostics.providerResponseId }),
       content,
       toolCalls,
       finishReason: normalizeFinishReason(undefined, toolCalls.length),
@@ -1571,6 +1586,7 @@ function parseResponsesResponse(payload: unknown, fallbackContent = ""): ModelRe
     : status === "incomplete" ? "length" as const : "error" as const;
   const usage = record.usage as Record<string, unknown> | undefined;
   return {
+    ...providerResponseIdentity(payload),
     content,
     toolCalls,
     finishReason,
@@ -1914,11 +1930,32 @@ function isJsonResponse(response: Response): boolean {
   return /\bapplication\/(?:[a-z0-9.+-]+\+)?json\b/u.test(contentType);
 }
 
+function providerRequestIdentity(response: Response): ModelProviderIdentity {
+  const providerRequestId = response.headers.get("x-request-id")?.trim();
+  const providerGatewayRequestId = response.headers.get("x-oneapi-request-id")?.trim();
+  return {
+    ...(providerRequestId ? { providerRequestId } : {}),
+    ...(providerGatewayRequestId ? { providerGatewayRequestId } : {}),
+  };
+}
+
+function providerResponseIdentity(payload: unknown): ModelProviderIdentity {
+  if (payload === null || typeof payload !== "object") return {};
+  const id = (payload as { id?: unknown }).id;
+  return typeof id === "string" && id.trim().length > 0 ? { providerResponseId: id } : {};
+}
+
+function withProviderRequestIdentity(error: AppError, response: Response): AppError {
+  const identity = providerRequestIdentity(response);
+  if (Object.keys(identity).length === 0) return error;
+  return new AppError(error.code, error.message, error.status, { ...error.details, ...identity });
+}
+
 async function providerHttpError(response: Response, request: ModelRequestLogContext): Promise<AppError> {
   const bodyText = await safeResponseBodyPreview(response);
   return new AppError("MODEL_ERROR", `Model provider returned HTTP ${response.status}`, 502, {
     status: response.status,
-    providerRequestId: response.headers.get("x-request-id") ?? undefined,
+    ...providerRequestIdentity(response),
     request,
     ...(bodyText === undefined ? {} : { providerErrorBody: bodyText }),
   });
@@ -2141,26 +2178,25 @@ async function retryAfter(
   signal: AbortSignal,
   status?: number,
   request?: ModelRequestLogContext,
-  providerFailure?: Readonly<{ providerRequestId?: string; providerErrorBody?: string }>,
+  providerFailure?: ModelProviderIdentity & Readonly<{ providerErrorBody?: string }>,
 ): Promise<void> {
   const delayMs = retryDelayMs * attempt;
   await onRetry?.({
     attempt,
     maxAttempts,
     ...(status === undefined ? {} : { status }),
-    ...(providerFailure?.providerRequestId === undefined ? {} : { providerRequestId: providerFailure.providerRequestId }),
-    ...(providerFailure?.providerErrorBody === undefined ? {} : { providerErrorBody: providerFailure.providerErrorBody }),
+    ...providerFailure,
     delayMs,
     ...(request === undefined ? {} : { request }),
   });
   await waitForRetry(delayMs, signal);
 }
 
-async function retryableProviderFailure(response: Response): Promise<Readonly<{ providerRequestId?: string; providerErrorBody?: string }>> {
-  const providerRequestId = response.headers.get("x-request-id") ?? undefined;
+async function retryableProviderFailure(response: Response): Promise<ModelProviderIdentity & Readonly<{ providerErrorBody?: string }>> {
+  const identity = providerRequestIdentity(response);
   const providerErrorBody = await safeResponseBodyPreview(response);
   return {
-    ...(providerRequestId === undefined ? {} : { providerRequestId }),
+    ...identity,
     ...(providerErrorBody === undefined ? {} : { providerErrorBody }),
   };
 }

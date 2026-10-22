@@ -3446,6 +3446,8 @@ export class RunService {
           maxAttempts: info.maxAttempts,
           ...(info.status === undefined ? {} : { status: info.status }),
           ...(info.providerRequestId === undefined ? {} : { providerRequestId: info.providerRequestId }),
+          ...(info.providerGatewayRequestId === undefined ? {} : { providerGatewayRequestId: info.providerGatewayRequestId }),
+          ...(info.providerResponseId === undefined ? {} : { providerResponseId: info.providerResponseId }),
           ...(info.providerErrorBody === undefined ? {} : { providerErrorBody: info.providerErrorBody }),
           delayMs: info.delayMs,
           ...(info.request === undefined ? {} : { request: info.request }),
@@ -3643,6 +3645,10 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
   addBoolean(details, "approved", data.approved);
   addString(details, "actionId", data.actionId);
   addString(details, "requestId", data.requestId);
+  for (const key of ["providerRequestId", "providerGatewayRequestId", "providerResponseId"]) {
+    const id = asString(data[key]);
+    if (id !== undefined && id.trim().length > 0) details.push(`${key}=${JSON.stringify(id)}`);
+  }
   addString(details, "reason", data.reason);
   addNumber(details, "attempt", data.attempt);
   addNumber(details, "maxAttempts", data.maxAttempts);

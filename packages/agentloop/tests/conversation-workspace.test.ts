@@ -868,10 +868,12 @@ test("a refresh-sources continuation retains an explicitly named ToolSource requ
 test("conversation resolver publishes Action-bound model lifecycle telemetry with its non-stream deadline", async () => {
   const database = new AppDatabase(":memory:");
   try {
+    const lines: string[] = [];
     const owner = testOwner();
     const model = new TimedConversationIntentModel();
     const runs = new RunService({
       database,
+      runEventLogSink: (line) => { lines.push(line); },
       skills: new SkillService(database),
       modelFactory: () => model,
       plannerFactory: () => ({
@@ -893,6 +895,8 @@ test("conversation resolver publishes Action-bound model lifecycle telemetry wit
     const completed = events.find((event) => event.type === "model.request.completed" && event.data.purpose === "conversation_turn_resolver");
     assert.ok(started);
     assert.ok(completed);
+    assert.equal(completed.data.providerRequestId, "resolver-provider-request");
+    assert.match(lines.find((line) => line.includes("event=model.request.completed")) ?? "", /providerRequestId="resolver-provider-request"/);
     assert.equal(started.data.request && typeof started.data.request === "object" && (started.data.request as { stream?: unknown }).stream, false);
     assert.equal(typeof started.data.actionId, "string");
     assert.equal(completed.data.actionId, started.data.actionId);
@@ -912,9 +916,11 @@ test("conversation resolver publishes Action-bound model lifecycle telemetry wit
 test("conversation resolver publishes an Action-bound failed model request before its Action fails", async () => {
   const database = new AppDatabase(":memory:");
   try {
+    const lines: string[] = [];
     const owner = testOwner();
     const runs = new RunService({
       database,
+      runEventLogSink: (line) => { lines.push(line); },
       skills: new SkillService(database),
       modelFactory: () => new FailingConversationResolverModel(),
     });
@@ -932,6 +938,8 @@ test("conversation resolver publishes an Action-bound failed model request befor
     const failed = events.find((event) => event.type === "model.request.failed" && event.data.purpose === "conversation_turn_resolver");
     assert.ok(failed);
     assert.equal(failed.data.code, "MODEL_ERROR");
+    assert.equal(failed.data.providerRequestId, "resolver-provider-failure");
+    assert.match(lines.find((line) => line.includes("event=model.request.failed")) ?? "", /providerRequestId="resolver-provider-failure"/);
     const actionFailed = events.find((event) => event.type === "action.failed" && event.data.actionId === failed.data.actionId);
     assert.ok(actionFailed);
     assert.ok((failed.seq ?? 0) < (actionFailed.seq ?? 0));
@@ -1738,6 +1746,10 @@ class GreetingTargetConversationModel implements ModelAdapter {
 class TimedConversationIntentModel extends ContextAwareConversationIntentModel {
   readonly completeTimeoutMs = 10_000;
   readonly operationTimeoutMs = 90_000;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    return { ...await super.complete(request), providerRequestId: "resolver-provider-request" };
+  }
 }
 
 class FailingConversationResolverModel implements ModelAdapter {
@@ -1747,7 +1759,9 @@ class FailingConversationResolverModel implements ModelAdapter {
 
   async complete(request: ModelInvocation): Promise<ModelResponse> {
     if (request.runId.startsWith("conversation-turn:")) {
-      throw new AppError("MODEL_ERROR", "Conversation resolver provider request timed out", 502);
+      throw new AppError("MODEL_ERROR", "Conversation resolver provider request timed out", 502, {
+        providerRequestId: "resolver-provider-failure",
+      });
     }
     return { content: "unused", finishReason: "stop", toolCalls: [] };
   }

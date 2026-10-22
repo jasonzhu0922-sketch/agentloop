@@ -1,6 +1,7 @@
 import { AppError } from "../shared/errors.ts";
 import type {
   ModelAdapter,
+  ModelProviderIdentity,
   ModelInvocation,
   ModelRequestLogContext,
   ModelResponse,
@@ -69,6 +70,7 @@ export async function completeWithRequestTelemetry(options: ModelRequestTelemetr
         finishReason: response.finishReason,
         contentLength: response.content.length,
         toolCallCount: response.toolCalls.length,
+        ...providerIdentity(response),
         ...(response.usage === undefined ? {} : { usage: response.usage }),
         ...(response.streamReceipt === undefined ? {} : { streamReceipt: response.streamReceipt }),
       },
@@ -76,6 +78,7 @@ export async function completeWithRequestTelemetry(options: ModelRequestTelemetr
     return response;
   } catch (error) {
     const streamReceipt = streamReceiptFromError(error);
+    const identity = error instanceof AppError ? providerIdentity(error.details) : {};
     await emit({
       type: "model.request.failed",
       data: {
@@ -84,6 +87,7 @@ export async function completeWithRequestTelemetry(options: ModelRequestTelemetr
         durationMs: Date.now() - startedAt,
         ...(typeof (error as { code?: unknown })?.code === "string" ? { code: (error as { code: string }).code } : {}),
         message: safeErrorMessage(error),
+        ...identity,
         ...(streamReceipt === undefined ? {} : { streamReceipt }),
       },
     });
@@ -120,6 +124,7 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
         finishReason: response.finishReason,
         contentLength: response.content.length,
         toolCallCount: response.toolCalls.length,
+        ...providerIdentity(response),
         ...(response.usage === undefined ? {} : { usage: response.usage }),
         ...(response.streamReceipt === undefined ? {} : { streamReceipt: response.streamReceipt }),
       },
@@ -128,6 +133,7 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
   };
   const failed = async (error: unknown): Promise<never> => {
     const streamReceipt = streamReceiptFromError(error);
+    const identity = error instanceof AppError ? providerIdentity(error.details) : {};
     await emit({
       type: "model.request.failed",
       data: {
@@ -137,6 +143,7 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
         ...(firstEventAt === undefined ? {} : { timeToFirstEventMs: firstEventAt - startedAt }),
         ...(typeof (error as { code?: unknown })?.code === "string" ? { code: (error as { code: string }).code } : {}),
         message: safeErrorMessage(error),
+        ...identity,
         ...(streamReceipt === undefined ? {} : { streamReceipt }),
       },
     });
@@ -268,4 +275,16 @@ function streamReceiptFromError(error: unknown): unknown | undefined {
   const details = error.details;
   if (typeof details !== "object" || details === null || !("streamReceipt" in details)) return undefined;
   return details.streamReceipt;
+}
+
+function providerIdentity(value: unknown): ModelProviderIdentity {
+  if (value === null || typeof value !== "object") return {};
+  const record = value as Record<string, unknown>;
+  const receipt = record.streamReceipt as Record<string, unknown> | undefined;
+  const identity: Record<string, string> = {};
+  for (const key of ["providerRequestId", "providerGatewayRequestId", "providerResponseId"]) {
+    const id = record[key] ?? receipt?.[key];
+    if (typeof id === "string" && id.trim().length > 0) identity[key] = id;
+  }
+  return identity;
 }

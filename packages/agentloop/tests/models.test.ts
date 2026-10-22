@@ -1,8 +1,81 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { InMemoryResponsesReasoningContinuationStore, OpenAICompatibleModel, ResponsesModel } from "../src/runtime/models.ts";
-import { completeWithStreaming } from "../src/runtime/model-streaming.ts";
+import { completeWithRequestTelemetry, completeWithStreaming } from "../src/runtime/model-streaming.ts";
 import type { ModelStreamRawCaptureInput } from "../src/runtime/contracts.ts";
+
+for (const Model of [OpenAICompatibleModel, ResponsesModel]) {
+  for (const scenario of ["json", "stream", "http-error", "invalid-json", "stream-error", "no-request-id", "gateway-only-json", "gateway-only-stream"] as const) {
+    test(`${Model.name} preserves provider request identity in ${scenario} lifecycle telemetry`, async () => {
+      const originalFetch = globalThis.fetch;
+      const responses = Model === ResponsesModel;
+      const streaming = scenario === "stream" || scenario === "stream-error" || scenario === "gateway-only-stream";
+      const failing = scenario.endsWith("error") || scenario === "invalid-json";
+      const providerGatewayRequestId = scenario === "no-request-id" ? undefined : `gateway-${Model.name}-${scenario}`;
+      const providerRequestId = scenario === "no-request-id" || scenario.startsWith("gateway-only-") ? undefined : `provider-${Model.name}-${scenario}`;
+      const payload = responses
+        ? { id: "body-response-id", status: "completed", output_text: "你好" }
+        : { id: "body-completion-id", choices: [{ finish_reason: "stop", message: { content: "你好" } }] };
+      const body = scenario === "invalid-json" ? "invalid json"
+        : scenario === "stream-error"
+          ? responses
+            ? 'data: {"type":"error","message":"upstream failed"}\n\n'
+            : 'data: {"type":"response.completed","response":{}}\n\n'
+          : streaming
+            ? responses
+              ? `data: ${JSON.stringify({ type: "response.completed", response: payload })}\n\n`
+              : 'data: {"id":"body-completion-id","choices":[{"delta":{"content":"你好"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+            : JSON.stringify(payload);
+      globalThis.fetch = async () => new Response(body, {
+        status: scenario === "http-error" ? 429 : 200,
+        headers: {
+          "content-type": streaming ? "text/event-stream" : "application/json",
+          ...(providerRequestId === undefined ? {} : { "x-request-id": providerRequestId }),
+          ...(providerGatewayRequestId === undefined ? {} : { "x-oneapi-request-id": providerGatewayRequestId }),
+        },
+      });
+      const events: Array<{ type: string; data: Readonly<Record<string, unknown>> }> = [];
+      try {
+        const model = new Model({
+          baseUrl: "https://models.example.test/v1",
+          apiKey: "server-secret",
+          model: "flash",
+          contextWindowTokens: 128_000,
+          maxOutputTokens: 8_192,
+          maxAttempts: 1,
+        });
+        const options = {
+          model,
+          invocation: { runId: "internal-run-id", systemPrompt: "System", phase: "planning" as const, messages: [], tools: [] },
+          emit: (event: { type: string; data: Readonly<Record<string, unknown>> }) => { events.push(event); },
+          base: { phase: "planning", purpose: "conversation_turn_resolver" },
+        };
+        const invoke = () => streaming ? completeWithStreaming(options) : completeWithRequestTelemetry(options);
+        if (failing) await assert.rejects(invoke);
+        else {
+          const result = await invoke();
+          assert.equal(result.content, "你好");
+          assert.equal(result.providerRequestId, providerRequestId);
+          assert.equal(result.providerGatewayRequestId, providerGatewayRequestId);
+          assert.equal(result.providerResponseId, payload.id);
+          if (streaming) {
+            assert.equal(result.streamReceipt?.providerGatewayRequestId, providerGatewayRequestId);
+            assert.equal(result.streamReceipt?.providerResponseId, payload.id);
+          }
+        }
+        const terminal = events.find((event) => event.type === (failing ? "model.request.failed" : "model.request.completed"));
+        assert.ok(terminal);
+        assert.equal(terminal.data.providerRequestId, providerRequestId);
+        assert.equal(terminal.data.providerGatewayRequestId, providerGatewayRequestId);
+        if (!failing) assert.equal(terminal.data.providerResponseId, payload.id);
+        assert.equal("providerRequestId" in terminal.data, providerRequestId !== undefined);
+        assert.equal(terminal.data.purpose, "conversation_turn_resolver");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  }
+}
 
 test("OpenAI-compatible adapter maps server-configured requests and tool calls", async () => {
   const originalFetch = globalThis.fetch;
@@ -118,6 +191,7 @@ test("OpenAI-compatible streaming persists an anomalous finish-only SSE capture 
     assert.equal(result.finishReason, "stop");
     assert.deepEqual(result.streamReceipt?.anomalyReasons, ["empty_stop_completion", "no_stream_delta"]);
     assert.equal(result.streamReceipt?.providerRequestId, "provider-empty-1");
+    assert.equal(result.providerRequestId, "provider-empty-1");
     assert.equal(result.streamReceipt?.jsonEventCount, 1);
     assert.equal(result.streamReceipt?.doneEventCount, 1);
     assert.equal(result.streamReceipt?.rawCapture?.ref, "test-capture:provider-empty-1");
@@ -125,6 +199,7 @@ test("OpenAI-compatible streaming persists an anomalous finish-only SSE capture 
     assert.equal(captured?.request.toolCount, 1);
     const completed = events.find((event) => event.type === "model.request.completed");
     assert.deepEqual(completed?.data.streamReceipt, result.streamReceipt);
+    assert.equal(completed?.data.providerRequestId, "provider-empty-1");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1140,11 +1215,12 @@ test("OpenAI-compatible adapter retries HTTP 400 within its attempt budget and r
   let attempts = 0;
   globalThis.fetch = async () => {
     attempts += 1;
-    if (attempts <= 2) return new Response("bad request", { status: 400 });
+    if (attempts <= 2) return new Response("bad request", { status: 400, headers: { "x-request-id": `retry-${attempts}` } });
     return new Response(JSON.stringify({
       choices: [{ finish_reason: "stop", message: { content: "recovered-400" } }],
-    }), { status: 200, headers: { "content-type": "application/json" } });
+    }), { status: 200, headers: { "content-type": "application/json", "x-request-id": "retry-success" } });
   };
+  const requestIds: Array<string | undefined> = [];
   const retries: Array<{ attempt: number; maxAttempts: number; status: number }> = [];
   try {
     const model = new OpenAICompatibleModel({
@@ -1156,12 +1232,15 @@ test("OpenAI-compatible adapter retries HTTP 400 within its attempt budget and r
       maxAttempts: 3,
       retryDelayMs: 0,
       onRetry: (info) => {
+        requestIds.push(info.providerRequestId);
         retries.push({ attempt: info.attempt, maxAttempts: info.maxAttempts, status: info.status ?? 0 });
       },
     });
     const result = await model.complete({ runId: "run-400-retry", systemPrompt: "System", phase: "execution", messages: [], tools: [] });
     assert.equal(attempts, 3);
     assert.equal(result.content, "recovered-400");
+    assert.equal(result.providerRequestId, "retry-success");
+    assert.deepEqual(requestIds, ["retry-1", "retry-2"]);
     assert.deepEqual(retries, [
       { attempt: 1, maxAttempts: 3, status: 400 },
       { attempt: 2, maxAttempts: 3, status: 400 },

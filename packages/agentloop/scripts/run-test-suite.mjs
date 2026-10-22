@@ -38,6 +38,7 @@ const suites = Object.freeze({
     "tests/human-loop.test.ts",
     "tests/kernel-boundary.test.ts",
     "tests/mcp-loader.test.ts",
+    "tests/model-request-logging.test.ts",
     "tests/multi-agent.test.ts",
     "tests/planning-extension.test.ts",
     "tests/planner-capability-recovery.test.ts",

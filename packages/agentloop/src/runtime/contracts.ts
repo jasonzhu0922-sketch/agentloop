@@ -135,7 +135,16 @@ export interface ModelInvocation {
   readonly maxOutputTokens?: number;
 }
 
-export interface ModelResponse {
+export interface ModelProviderIdentity {
+  /** HTTP x-request-id supplied by the provider. */
+  readonly providerRequestId?: string;
+  /** HTTP x-oneapi-request-id supplied by the provider gateway. */
+  readonly providerGatewayRequestId?: string;
+  /** Response body id (Chat completion / Responses response), separate from HTTP IDs. */
+  readonly providerResponseId?: string;
+}
+
+export interface ModelResponse extends ModelProviderIdentity {
   readonly content: string;
   readonly toolCalls: readonly ModelToolCall[];
   readonly finishReason: "stop" | "tool_calls" | "length" | "error";
@@ -175,12 +184,11 @@ export interface ModelStreamRawCaptureRef {
   readonly truncated: boolean;
 }
 
-export interface ModelStreamReceipt {
+export interface ModelStreamReceipt extends ModelProviderIdentity {
   readonly schema: "agentloop.modelStreamReceipt/v1";
   readonly transport: "sse";
   readonly httpStatus: number;
   readonly contentType?: string;
-  readonly providerRequestId?: string;
   readonly rawBytes: number;
   readonly rawSha256: string;
   readonly readChunkCount: number;
@@ -205,8 +213,7 @@ export interface ModelStreamRawCaptureInput {
   readonly response: Readonly<{
     status: number;
     contentType?: string;
-    providerRequestId?: string;
-  }>;
+  }> & ModelProviderIdentity;
   readonly anomalyReasons: readonly string[];
   readonly rawSse: Uint8Array;
   readonly rawBytes: number;
@@ -255,15 +262,13 @@ export type ModelStreamSink = (event: ModelStreamEvent) => void | Promise<void>;
  * inside the adapter. The Runtime persists it as a durable `model.retry` event
  * so the UI can surface a bounded retry instead of a silent hang or failure.
  */
-export interface ModelRetryInfo {
+export interface ModelRetryInfo extends ModelProviderIdentity {
   /** The 1-based attempt number that just failed. */
   readonly attempt: number;
   /** Total attempts allowed for one model request. */
   readonly maxAttempts: number;
   /** HTTP status that triggered the retry, when the failure was an HTTP response. */
   readonly status?: number;
-  /** Provider request identifier for a retryable HTTP response, when supplied. */
-  readonly providerRequestId?: string;
   /** Bounded upstream error body retained for diagnosing retryable HTTP responses. */
   readonly providerErrorBody?: string;
   /** Backoff delay in milliseconds before the next attempt. */
