@@ -17,20 +17,13 @@ const ROOT = resolve(import.meta.dirname, "..", "..", "agentloop-skills");
 const SKILL_DIRECTORY = resolve(ROOT, "skills");
 const CUSTOM_SKILL_DIRECTORY = resolve(import.meta.dirname, "..", "..", "..", "apps", "agentloop-app", "custom-skills");
 const EXPECTED_BUILTIN_SKILL_NAMES = [
-  "algorithmic-art",
-  "brand-guidelines",
   "build-dashboard",
-  "canvas-design",
   "docx",
   "frontend-design",
-  "internal-comms",
-  "mcp-builder",
   "pdf",
   "pptx",
   "skill-creator",
-  "slack-gif-creator",
   "theme-factory",
-  "web-artifacts-builder",
   "webapp-testing",
   "xlsx",
 ] as const;
@@ -72,19 +65,6 @@ test("every checked-in Skill package is discoverable, exact, and progressively d
       assert.match(entry.inspection.packageHash, /^[0-9a-f]{64}$/);
       assert.ok(entry.inspection.files.includes("SKILL.md"));
     }
-
-    const canvasDesign = discovered.find((entry) => entry.inspection.name === "canvas-design");
-    assert.notEqual(canvasDesign, undefined);
-    assert.match(canvasDesign!.inspection.instructions, /glyph coverage/i);
-    assert.match(canvasDesign!.inspection.instructions, /\bCJK\b/);
-    assert.match(canvasDesign!.inspection.instructions, /fail fast/i);
-    assert.match(canvasDesign!.inspection.instructions, /tofu|missing-glyph boxes/i);
-    assert.ok(canvasDesign!.inspection.files.includes("scripts/render_static_canvas.py"));
-    assert.match(canvasDesign!.inspection.instructions, /BOUNDED EXECUTION PATH/);
-    assert.match(canvasDesign!.inspection.instructions, /render_static_canvas\.py/);
-    assert.match(canvasDesign!.inspection.instructions, /--schema/);
-    assert.match(canvasDesign!.inspection.instructions, /Do not read the renderer source/);
-    assert.match(canvasDesign!.inspection.instructions, /Do not reread the philosophy or JSON spec/);
 
     const themeFactory = discovered.find((entry) => entry.inspection.name === "theme-factory");
     assert.notEqual(themeFactory, undefined);

@@ -5,16 +5,9 @@ import { discoverSkillDirectory } from "../src/skills/skill-directory.ts";
 
 const ROOT = resolve(import.meta.dirname, "..", "..", "agentloop-skills");
 const EXPECTED_SKILLS = [
-  "algorithmic-art",
-  "brand-guidelines",
-  "canvas-design",
   "frontend-design",
-  "internal-comms",
-  "mcp-builder",
   "skill-creator",
-  "slack-gif-creator",
   "theme-factory",
-  "web-artifacts-builder",
   "webapp-testing",
 ] as const;
 

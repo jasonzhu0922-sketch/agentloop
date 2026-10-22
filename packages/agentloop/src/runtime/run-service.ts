@@ -5313,7 +5313,7 @@ function explicitStylingRequested(signal: string): boolean {
 }
 
 function isHtmlArtifactBuilderSkill(text: string): boolean {
-  return /(?:web-artifacts-builder|html artifacts?|single html|frontend|react|vite|tailwind|网页|页面)/iu.test(text)
+  return /(?:html artifacts?|single html|frontend|react|vite|tailwind|网页|页面)/iu.test(text)
     && /(?:build|create|generate|produce|bundle|artifact|构建|创建|生成|产物)/iu.test(text);
 }
 

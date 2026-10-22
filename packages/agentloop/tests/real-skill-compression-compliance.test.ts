@@ -16,7 +16,7 @@ const SKILL_DIRECTORY = resolve(ROOT, "skills");
 const DELIVERY_TOOL = "test_generate_skill_delivery";
 
 interface SkillScenario {
-  readonly skillName: "frontend-design" | "canvas-design";
+  readonly skillName: "frontend-design";
   readonly task: string;
   readonly criterion: string;
   readonly instructionProbes: readonly string[];
@@ -57,35 +57,9 @@ const SCENARIOS: readonly SkillScenario[] = [
       ].join("\n"),
     }],
   },
-  {
-    skillName: "canvas-design",
-    task: "Create a one-page visual study of a lunar tide table.",
-    criterion: "Provide a visual-first canvas delivery with a design philosophy and restrained text.",
-    instructionProbes: [
-      "Output only .md files, .pdf files, and .png files",
-      "Text is always minimal and visual-first",
-      "nothing falls off the page and nothing overlaps",
-    ],
-    finalOutput: [
-      "Delivery: output/canvas-design/lunar-tide-philosophy.md and output/canvas-design/lunar-tide-study.png.",
-      "Visual philosophy: Chromatic Tides treats the tide table as measured light: repeated lunar marks form a precise field, with quiet space around a single orbital trace.",
-      "Canvas decision: the PNG is visual-first, uses only sparse clinical labels, keeps every mark within margin, and records a no-overlap review.",
-      "Typography decision: use the package's canvas-fonts catalogue for a thin label face and keep copy to essential coordinates.",
-    ].join("\n"),
-    deliveryFiles: [
-      {
-        path: "output/canvas-design/lunar-tide-philosophy.md",
-        content: "# Chromatic Tides\n\nA visual philosophy for an observational lunar tide study.\n",
-      },
-      {
-        path: "output/canvas-design/lunar-tide-study.png",
-        content: "PNG-DELIVERY-RECORDED-BY-CONTROLLED-TEST\n",
-      },
-    ],
-  },
 ];
 
-test("real frontend-design and canvas-design packages require exact Skill compliance after candidate repair", async (t) => {
+test("real frontend-design package requires exact Skill compliance after candidate repair", async (t) => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-real-skill-compression-"));
   const packageStore = join(workspace, ".agentloop", "skill-packages");
   const database = new AppDatabase(":memory:");

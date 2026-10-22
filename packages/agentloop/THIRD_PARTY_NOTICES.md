@@ -83,11 +83,9 @@ SOFTWARE.
 - Source: <https://github.com/anthropics/skills>
 - Commit: `f6656c1256d5a8adfa37db9110046ef20bac644c`
 - Included upstream paths: `skills/algorithmic-art`,
-  `skills/brand-guidelines`, `skills/canvas-design`,
-  `skills/frontend-design`, `skills/internal-comms`, `skills/mcp-builder`,
-  `skills/skill-creator`, `skills/slack-gif-creator`,
-  `skills/theme-factory`, `skills/web-artifacts-builder`, and
-  `skills/webapp-testing`
+  `skills/brand-guidelines`, `skills/frontend-design`, `skills/mcp-builder`,
+  `skills/skill-creator`, `skills/slack-gif-creator`, `skills/theme-factory`,
+  and `skills/webapp-testing`
 - Local paths: matching directories under `skills/`
 - Use: unmodified Apache-2.0 Skill Packages discovered by AgentLoop. Every
   included Package retains its upstream `LICENSE.txt`. Source locks, if
