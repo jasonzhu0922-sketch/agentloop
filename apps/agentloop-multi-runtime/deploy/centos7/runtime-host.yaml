@@ -1,0 +1,27 @@
+  runtime-general-__SUFFIX__:
+    image: *app_image
+    command: npm run start:runtime-host
+    restart: unless-stopped
+    env_file:
+      - ${RUNTIME_ENV_FILE:?set in deployment .env}
+    environment:
+      <<: *runtime_environment
+      RUNTIME_ID: general-__SUFFIX__
+      PORT: __PORT__
+      MAX_CONCURRENT_RUNS: __MAX_CONCURRENT_RUNS__
+      AGENTLOOP_RUNTIME_STATE_DRIVER: ${AGENTLOOP_RUNTIME_STATE_DRIVER:-${AGENTLOOP_STATE_DRIVER:-sqlite}}
+      AGENTLOOP_RUNTIME_STATE_SQLITE_PATH: ${AGENTLOOP_RUNTIME_STATE_SQLITE_PATH:-${AGENTLOOP_STATE_SQLITE_PATH:-./data/state/agentloop.db}}
+      AGENTLOOP_RUNTIME_STATE_DATABASE_URL: ${AGENTLOOP_RUNTIME_STATE_DATABASE_URL:-${AGENTLOOP_STATE_DATABASE_URL:-}}
+      AGENTLOOP_RUNTIME_STATE_POOL_SIZE: ${AGENTLOOP_RUNTIME_STATE_POOL_SIZE:-${AGENTLOOP_STATE_POOL_SIZE:-}}
+    depends_on:
+      router:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - runtime-general-__SUFFIX__-data:/app/apps/agentloop-multi-runtime/data
+      - runtime-state:/app/apps/agentloop-multi-runtime/data/state
+      - ${RUNTIME_WORKSPACE_HOST_PATH:?set in deployment .env}:/app/apps/agentloop-multi-runtime/workspace
+      - ${CUSTOM_SKILLS_HOST_PATH:?set in deployment .env}:/app/apps/agentloop-multi-runtime/custom-skills:ro
+      - ${LLM_PROVIDER_CONFIG_FILE:?set in deployment .env}:/run/config/llm-providers.json:ro
+

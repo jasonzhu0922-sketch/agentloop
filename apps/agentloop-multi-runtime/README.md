@@ -1,5 +1,7 @@
 # AgentLoop Multi Runtime
 
+生产部署维护见 [生产配置、容量与发布手册](deploy/production/OPERATIONS.md)；云端增量发布、macOS 独立打包和 LLM 配置提交命令见 [生产操作脚本](deploy/production/README.md)。
+
 ![AgentLoop Web 登录页：云端与本机统一 Runtime 工作台](../../docs/assets/multi-runtime-web-local-login.png)
 
 `agentloop-multi-runtime` 有三个独立发布、独立扩缩容的云端部署角色；本地启动器只是同时启动它们的开发便利工具：

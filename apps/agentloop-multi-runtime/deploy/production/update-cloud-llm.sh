@@ -33,7 +33,7 @@ if [ -n "$environment_file" ]; then
   [ -f "$environment_file" ] || exit 2
   echo 'The supplied --env-file replaces the COMPLETE Runtime env file; it is not a partial key patch.'
 fi
-printf 'Cloud LLM config: %s -> %s; only two Runtime containers will be recreated.\n' "$config" "$server"
+printf 'Cloud LLM config: %s -> %s; all currently deployed Runtime containers will be recreated.\n' "$config" "$server"
 if [ "$apply" = false ]; then echo 'Preview only. Add --apply to upload, validate, back up and activate.'; exit 0; fi
 remote_job=$(ssh "$server" 'umask 077; mktemp -d /tmp/agentloop-llm-config.XXXXXX')
 [[ "$remote_job" =~ ^/tmp/agentloop-llm-config\.[a-zA-Z0-9]+$ ]] || exit 1

@@ -2,7 +2,7 @@
 
 完整配置说明见 [生产配置、容量与发布手册](OPERATIONS.md)：模型与 Key 更新、两类 env 的职责和覆盖顺序、生效与回滚、Runtime 扩缩容、服务进程与 Run 并发、数据库连接池和端口冲突排查。
 
-从仓库根目录执行。默认服务器为 `root@47.101.178.145`，可用 `--server USER@HOST` 覆盖。云端脚本适配当前 `/opt/agentloop`、两个 PostgreSQL 库及四服务 Compose 部署；须具备 SSH、Docker 和 PostgreSQL 备份权限。脚本保留现有端口、Nginx、业务数据和配置。
+从仓库根目录执行。默认服务器为 `root@47.101.178.145`，可用 `--server USER@HOST` 覆盖。云端脚本适配当前 `/opt/agentloop`、两个 PostgreSQL 库及可配置 Runtime 数量的 Compose 部署；须具备 SSH、Docker 和 PostgreSQL 备份权限。脚本保留现有端口、Nginx、业务数据和配置。
 
 ## 1. 云端增量发布
 
@@ -16,7 +16,7 @@ bash apps/agentloop-multi-runtime/deploy/production/release-cloud.sh --ref HEAD 
 
 脚本使用 `git archive` 导出完整源码，在服务器复用上一版 manifest 的固定 Node 镜像摘要、依赖源、BuildKit builder 和缓存；增量指 Docker 层缓存，并非二进制差分。首次安装不适用此脚本，必须先有有效部署和固定基础镜像的发布记录。
 
-镜像构建完成后检查非终态 Run 数量；有任务时停止，待任务结束后重新执行。没有活动任务时备份部署配置、LLM 配置及两个 PostgreSQL 库，切换镜像，并等待 Router、Web、两个 Runtime **各自**就绪。失败恢复旧镜像选择。该单机流程会重建服务，操作期间应暂停新任务提交；活动任务检查本身不提供流量排空或跨库原子快照。
+镜像构建完成后检查非终态 Run 数量；有任务时停止，待任务结束后重新执行。没有活动任务时备份部署配置、LLM 配置及两个 PostgreSQL 库，切换镜像，并等待 Router、Web、所有已部署 Runtime **各自**就绪。失败恢复旧镜像选择。该单机流程会重建服务，操作期间应暂停新任务提交；活动任务检查本身不提供流量排空或跨库原子快照。
 
 配置和自定义 Skills 不随代码发布替换。已提交的 schema 迁移随新版本启动运行；自动回滚仅恢复代码/配置，不自动还原数据库。含破坏性迁移的发布需单独评审恢复方案。
 
@@ -61,16 +61,28 @@ bash apps/agentloop-multi-runtime/deploy/production/update-cloud-llm.sh \
 
 `--env-file` 是**完整文件替换**，不是几个变量的补丁。必须保留仍需使用的其他模型、Skill、MCP 环境变量。省略时密钥文件保留。不要把密钥放进 JSON、Git 或命令行参数；JSON 通过 `apiKeyEnv` 引用环境变量。提交表示上传到服务器并生效，不是执行 Git commit。
 
-仅换 Key 也要提供现有完整 JSON。`--apply` 已自动重建两个 Runtime 以加载新环境，无需再手动重启；只在服务器编辑文件则须执行 `up --force-recreate`，单纯 `restart` 不会重新读取 `env_file`。
+仅换 Key 也要提供现有完整 JSON。`--apply` 已自动重建所有已部署 Runtime 以加载新环境，无需再手动重启；只在服务器编辑文件则须执行 `up --force-recreate`，单纯 `restart` 不会重新读取 `env_file`。
 
 脚本先校验 JSON 引用，然后在当前运行镜像中验证候选配置的完整 schema 和**所有声明模型的凭据存在性**。缺少某个模型凭据会停止；应补齐凭据，或在候选配置中移除不再提供的模型。可选环境文件也参与校验。校验不调用上游模型，不证明 Key 有效或上游没有限流。
 
-验证通过且无活动任务后备份原文件，按当前容器挂载位置替换配置，仅重建 `runtime-general-01/02`，复查两者生效配置。失败自动恢复配置并重建 Runtime；不重建镜像，不重启 Router/Web。密钥上传临时文件在成功后删除；失败时可能保留在 root 私有临时目录，应在排查后清理。
+验证通过且无活动任务后备份原文件，按当前容器挂载位置替换配置，从实际 Compose 读取全部 Runtime 并重建，逐台复查生效配置。失败自动恢复配置并重建 Runtime；不重建镜像，不重启 Router/Web。密钥上传临时文件在成功后删除；失败时可能保留在 root 私有临时目录，应在排查后清理。
 
-上述两种云端写操作使用同一服务器锁，避免脚本之间并发修改。每次成功后会打印：
+上述云端写操作使用同一服务器锁，避免脚本之间并发修改。每次成功后会打印：
 
 ```text
-Applied cloud/llm. Rollback: bash /opt/agentloop/backups/.../rollback.sh
+Applied cloud/llm/topology. Rollback: bash /opt/agentloop/backups/.../rollback.sh
 ```
 
 回滚命令在服务器执行。回滚后仍需检查各服务就绪和代表性新任务。
+
+## 调整云端 Runtime 数量和并发（不构建镜像）
+
+先发布包含拓扑生成器的代码版本。数量保存于服务器 `.env` 的 `RUNTIME_COUNT`（默认 2，范围 1–256），并发保存于 `MAX_CONCURRENT_RUNS`（默认每台 20）。本机执行：
+
+```bash
+S="$PWD/apps/agentloop-multi-runtime/deploy/production"
+bash "$S/configure-cloud.sh" --runtime-count 4 --max-concurrent-runs 8 --dry-run
+bash "$S/configure-cloud.sh" --runtime-count 4 --max-concurrent-runs 8 --apply
+```
+
+只传其中一个参数时保留另一个。也可以在服务器编辑 `.env` 后运行新版本 `deploy/centos7/deploy.sh up`。部署自动生成匹配的 Compose 和 Router 清单，复用当前镜像，检查空闲、备份、切换并逐台探测；缩容保留卷，失败恢复旧拓扑。先暂停新任务入口，成功后按完整手册执行新 Run 验收。每个 Runtime 仍只有一个 Node 服务进程，并发参数控制 Run 数量。

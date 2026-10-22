@@ -4,7 +4,7 @@ set -Eeuo pipefail
 export LC_ALL=C
 operation=${1:?operation required}
 job=${2:?job directory required}
-root=/opt/agentloop
+root=${AGENTLOOP_DEPLOY_ROOT:-/opt/agentloop}
 test -d "$job"
 test "$(id -u)" = 0 || { echo 'Run as root on the production Docker host.' >&2; exit 1; }
 exec 9>"$root/.production-release.lock"
@@ -15,9 +15,36 @@ compose_file=$(docker inspect agentloop-router-1 --format '{{ index .Config.Labe
 test -f "$compose_file" || { echo 'Expected exactly one current Compose file.' >&2; exit 1; }
 previous_compose=$compose_file
 image=$(docker inspect agentloop-router-1 --format '{{.Config.Image}}')
-runtime_names=(agentloop-runtime-general-01-1 agentloop-runtime-general-02-1)
-all_names=(agentloop-router-1 agentloop-web-1 "${runtime_names[@]}")
 dc() { docker compose --project-directory "$root" --env-file "$root/.env" -f "$compose_file" "$@"; }
+load_services() {
+  local service services
+  services=$(dc config --services)
+  runtime_services=(); runtime_names=()
+  while IFS= read -r service; do
+    if [[ "$service" =~ ^runtime-general-[0-9]{2,3}$ ]]; then
+      runtime_services+=("$service")
+      runtime_names+=("agentloop-$service-1")
+    fi
+  done <<< "$services"
+  [ "${#runtime_services[@]}" -gt 0 ] || { echo 'No Runtime services in current deployment.' >&2; return 1; }
+  all_names=(agentloop-router-1 agentloop-web-1 "${runtime_names[@]}")
+}
+load_services
+previous_services=("${runtime_services[@]}")
+previous_names=("${all_names[@]}")
+# Generated Compose files point back to their release templates. Legacy
+# deployments keep their templates next to the active Compose file.
+template_dir=$(python3 - "$previous_compose" <<'TOPOLOGY_PY'
+from pathlib import Path
+import json,sys
+p=Path(sys.argv[1]).resolve(); m=p.parent/'topology.json'
+print(json.loads(m.read_text())['templateDirectory'] if m.is_file() else p.parent)
+TOPOLOGY_PY
+)
+render_topology() {
+  python3 "$1/render-topology.py" --root "$root" --env-file "$2"
+}
+
 idle() {
   local driver count
   driver=$(docker exec "${runtime_names[0]}" printenv AGENTLOOP_RUNTIME_STATE_DRIVER)
@@ -58,20 +85,36 @@ make_backup() {
   backup=$root/backups/$operation-$(date +%Y%m%d%H%M%S)-$$
   install -d -m 700 "$backup"
   cp -p "$root/.env" "$backup/deployment.env"
+  if [ "$operation" != llm ]; then
+    # The operator may already have edited the desired count. Rollback must
+    # restore the count actually running before this operation.
+    python3 - "$backup/deployment.env" "${#previous_services[@]}" <<'TOPOLOGY_PY'
+from pathlib import Path
+import re,sys
+p=Path(sys.argv[1]); lines=p.read_text().splitlines()
+lines=[l for l in lines if not re.match(r'^\s*RUNTIME_COUNT\s*=',l)]
+p.write_text('\n'.join(lines+['RUNTIME_COUNT='+sys.argv[2]])+'\n')
+TOPOLOGY_PY
+  fi
   cp -p "$config_path" "$backup/llm-providers.json"
   cp -p "$environment_path" "$backup/runtime.env"
   {
     echo '#!/usr/bin/env bash'
     echo 'set -euo pipefail'
     printf 'exec 9>%q\nflock -n 9\n' "$root/.production-release.lock"
-    if [ "$operation" = cloud ]; then
+    if [ "$operation" != llm ]; then
       printf 'cp -p %q %q\n' "$backup/deployment.env" "$root/.env"
     else
       printf 'cp -p %q %q\n' "$backup/llm-providers.json" "$config_path"
       printf 'cp -p %q %q\n' "$backup/runtime.env" "$environment_path"
     fi
     printf 'docker compose --project-directory %q --env-file %q -f %q up -d --no-build' "$root" "$root/.env" "$previous_compose"
-    if [ "$operation" = llm ]; then printf ' --no-deps --force-recreate runtime-general-01 runtime-general-02'; fi
+    if [ "$operation" = llm ]; then
+      printf ' --no-deps --force-recreate'
+      printf ' %q' "${previous_services[@]}"
+    else
+      printf ' --remove-orphans'
+    fi
     printf '\n'
   } > "$backup/rollback.sh"
   chmod 700 "$backup/rollback.sh"
@@ -87,7 +130,7 @@ rollback() {
     echo 'ROLLBACK FAILED; inspect production containers before further changes.' >&2
     exit "$status"
   fi
-  if ! ready "${all_names[@]}"; then echo 'ROLLBACK READINESS FAILED' >&2; fi
+  if ! ready "${previous_names[@]}"; then echo 'ROLLBACK READINESS FAILED' >&2; fi
   exit "$status"
 }
 if [ "$operation" = cloud ]; then
@@ -98,7 +141,7 @@ if [ "$operation" = cloud ]; then
   release=$root/releases/$sha
   source_dir=$release/source
   # Reuse the serving release's immutable build inputs, not a floating tag.
-  python3 - "$previous_compose" "$job/build-inputs.env" <<'PY'
+  python3 - "$template_dir/compose.yaml" "$job/build-inputs.env" <<'PY'
 from pathlib import Path
 import sys
 p=Path(sys.argv[1]).resolve()
@@ -135,7 +178,8 @@ PY
     touch "$release/BUILD_SUCCEEDED"
   fi
   docker image inspect "$image" >/dev/null
-  compose_file=$source_dir/apps/agentloop-multi-runtime/deploy/centos7/compose.yaml
+  template_dir=$source_dir/apps/agentloop-multi-runtime/deploy/centos7
+  compose_file=$(render_topology "$template_dir" "$root/.env")
   idle
   umask 077
   make_backup
@@ -154,12 +198,43 @@ t.write_text('\n'.join('MULTI_RUNTIME_IMAGE='+sys.argv[2] if l.startswith('MULTI
 t.chmod(0o600); t.replace(p)
 PY
   dc config -q
-  dc up -d --no-build
+  dc up -d --no-build --remove-orphans
+  load_services
   ready "${all_names[@]}"
   for name in "${all_names[@]}"; do test "$(docker inspect "$name" --format '{{.Config.Image}}')" = "$image"; done
-  bash "$source_dir/apps/agentloop-multi-runtime/deploy/centos7/deploy.sh" health
+  AGENTLOOP_DEPLOY_ROOT="$root" bash "$template_dir/deploy.sh" health
   printf '%s\n' "$backup" > "$release/backup-path.txt"
   touch "$release/DEPLOY_SUCCEEDED"
+elif [ "$operation" = topology ]; then
+  # Optional explicit values are applied to a private candidate env first.
+  # Without them, deploy.sh up applies the deployment-owned .env settings.
+  candidate=$job/deployment.env
+  cp -p "$root/.env" "$candidate"
+  python3 - "$candidate" "${3:-}" "${4:-}" <<'TOPOLOGY_PY'
+from pathlib import Path
+import re,sys
+p=Path(sys.argv[1]); lines=p.read_text().splitlines()
+for name,value,maximum in [('RUNTIME_COUNT',sys.argv[2],256),('MAX_CONCURRENT_RUNS',sys.argv[3],3600000)]:
+    if not value: continue
+    assert re.fullmatch('[0-9]+',value) and 1 <= int(value) <= maximum, 'Invalid '+name
+    lines=[l for l in lines if not re.match(r'^\s*'+name+r'\s*=',l)]
+    lines.append(name+'='+str(int(value)))
+p.write_text('\n'.join(lines)+'\n')
+TOPOLOGY_PY
+  template_dir=${5:-$template_dir}
+  compose_file=$(render_topology "$template_dir" "$candidate")
+  # Validate desired config without changing the live deployment env.
+  docker compose --project-directory "$root" --env-file "$candidate" -f "$compose_file" config -q
+  idle
+  umask 077
+  make_backup
+  trap rollback ERR
+  install -m 600 "$candidate" "$root/.env"
+  dc up -d --no-build --remove-orphans
+  load_services
+  ready "${all_names[@]}"
+  AGENTLOOP_DEPLOY_ROOT="$root" bash "$template_dir/deploy.sh" health
+  echo "Runtime count: ${#runtime_services[@]}; topology: $compose_file"
 elif [ "$operation" = llm ]; then
   # Validate against the serving image with candidate env contents in stdin.
   # Secrets never appear in command arguments or output.
@@ -188,9 +263,9 @@ PY
   install -m 600 "$job/llm-providers.json" "$config_path"
   if [ -f "$job/runtime.env" ]; then install -m 600 "$job/runtime.env" "$environment_path"; fi
   dc config -q
-  dc up -d --no-deps --no-build --force-recreate runtime-general-01 runtime-general-02
+  dc up -d --no-deps --no-build --force-recreate "${runtime_services[@]}"
   ready "${runtime_names[@]}"
-  # Recheck the effective environment loaded by BOTH recreated containers.
+  # Recheck the effective environment loaded by all recreated containers.
   for name in "${runtime_names[@]}"; do
     docker exec "$name" node --input-type=module -e '
       import {LlmProviderRegistry} from "@zhujun/agentloop";

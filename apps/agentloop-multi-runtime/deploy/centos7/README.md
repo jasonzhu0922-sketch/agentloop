@@ -1,6 +1,8 @@
 # CentOS 7 单机 Docker 部署
 
-本目录交付的是一台 CentOS 7 Docker 主机上的完整单机服务端拓扑：一个 Router、两个 Runtime Host 和一个 Web。浏览器经 Web 的同源 `/api` 访问 Router；已安装在用户电脑上的 Local Runtime Agent 则直接连接 `PUBLIC_ROUTER_URL`，所以 Router 也必须有一个可从用户设备访问的公网入口。模型和 Skill 密钥只注入 Runtime Host。
+已有生产部署的日常维护见 [生产配置、容量与发布手册](../production/OPERATIONS.md)，包括模型 Key / env 的更新和生效、Runtime 数量、Run 并发、服务进程、连接池与回滚；独立发布脚本见 [生产操作脚本](../production/README.md)。本页侧重首次部署与离线镜像流程。
+
+本目录交付的是一台 CentOS 7 Docker 主机上的完整单机服务端拓扑：一个 Router、可配置数量的 Runtime Host（默认两个）和一个 Web。浏览器经 Web 的同源 `/api` 访问 Router；已安装在用户电脑上的 Local Runtime Agent 则直接连接 `PUBLIC_ROUTER_URL`，所以 Router 也必须有一个可从用户设备访问的公网入口。模型和 Skill 密钥只注入 Runtime Host。
 
 它不是多机高可用方案：默认 SQLite 只能用于这台机器的本地 Docker 卷。要增加第二台 Router/Runtime 主机，先切换为独立的 Router/Runtime PostgreSQL 或 TiDB 数据库，并提供共享的附件、工作区和 Skill 存储；不能把 SQLite 放到 NFS/RWX。
 
@@ -39,7 +41,7 @@ AGENTLOOP_PUBLIC_HOST=47.101.178.145 \
   apps/agentloop-multi-runtime/deploy/centos7/deploy.sh init
 ```
 
-编辑 `/opt/agentloop/.env`：`AGENTLOOP_PUBLIC_HOST=47.101.178.145` 初始化后 Web 默认就是 `http://47.101.178.145:3001/`（宿主机端口 3001）。检查 `PUBLIC_WEB_ORIGIN` 和预留的 `PUBLIC_ROUTER_URL`；编辑 `/opt/agentloop/secrets/runtime.env`，填写 `llm-providers.json` 中引用的 API Key。两个文件应保持 `600` 权限，绝不能提交到 Git。
+编辑 `/opt/agentloop/.env`（`RUNTIME_COUNT=2` 控制实例数量，`MAX_CONCURRENT_RUNS=20` 控制每实例 Run 并发）：`AGENTLOOP_PUBLIC_HOST=47.101.178.145` 初始化后 Web 默认就是 `http://47.101.178.145:3001/`（宿主机端口 3001）。检查 `PUBLIC_WEB_ORIGIN` 和预留的 `PUBLIC_ROUTER_URL`；编辑 `/opt/agentloop/secrets/runtime.env`，填写 `llm-providers.json` 中引用的 API Key。两个文件应保持 `600` 权限，绝不能提交到 Git。
 
 ```bash
 apps/agentloop-multi-runtime/deploy/centos7/deploy.sh build
@@ -56,7 +58,7 @@ git -C /opt/agentloop/repo pull --ff-only
 /opt/agentloop/repo/apps/agentloop-multi-runtime/deploy/centos7/deploy.sh up
 ```
 
-若本版 `custom-skills.zip` 有更新，显式执行 `deploy.sh refresh-skills`。旧 Skills 会备份到 `/opt/agentloop/backups/`，然后使用当前 Compose 配置执行 `docker compose up -d --no-build --no-deps --force-recreate runtime-general-01 runtime-general-02`（带上对应的 `--project-directory`、`--env-file` 和 `-f` 参数，见生产手册）。普通 `up` 不保证 Runtime 重新加载 Skills。
+若本版 `custom-skills.zip` 有更新，显式执行 `deploy.sh refresh-skills`。旧 Skills 会备份到 `/opt/agentloop/backups/`，然后使用当前 Compose 配置执行 `docker compose up -d --no-build --no-deps --force-recreate <当前全部 Runtime 服务名>`（带上对应的 `--project-directory`、`--env-file` 和 `-f` 参数，见生产手册）。普通 `up` 不保证 Runtime 重新加载 Skills。
 
 ## 可重复的离线增量发布
 
@@ -148,3 +150,7 @@ node scripts/publish-local-agent.mjs \
 - `router-data` 保存 Router 附件与控制面数据，`runtime-state` 保存 Runtime 状态；升级前应由运维按卷进行备份。SQLite 方式的恢复是整组卷的一致性恢复。
 - 当前 Router 已通过 Bearer 会话认证识别用户；浏览器登录后提交认证请求。公网入口仍应使用 TLS 保护凭据，并按实际需要配置访问控制和审计。
 - `PUBLIC_WEB_ORIGIN` 与 `PUBLIC_ROUTER_URL` 若改成 HTTPS 域名，就填精确的 `https://domain`，不要保留 `SERVER_IP` 占位值。发布 macOS/Windows Local Agent 安装包时，将相同的 HTTPS Router 地址写入 `AGENTLOOP_ROUTER_URL_PRODUCTION`。
+
+### 配置 Runtime 数量
+
+修改服务器 `.env` 的 `RUNTIME_COUNT`（1–256，默认 2），再执行本版本 `deploy.sh validate` / `deploy.sh up`。部署会从 `compose.yaml` 和 `runtime-host.yaml` 生成不可变的 Compose 与 Router 节点清单；源 Compose 是模板，不可直接启动。`health` / `logs` 自动读取实际运行的 Compose。生产 PostgreSQL 部署的无构建扩缩容也可使用 `deploy/production/configure-cloud.sh`，支持预览、备份、失败恢复和逐台就绪检查；先暂停新提交并等待现有任务完成。缩容保留数据卷。详见生产手册第 6 节。

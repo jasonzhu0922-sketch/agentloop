@@ -10,7 +10,7 @@ readonly SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 readonly APP_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
 readonly REPOSITORY_ROOT="$(CDPATH= cd -- "$APP_ROOT/../.." && pwd)"
 readonly DEPLOY_ROOT="${AGENTLOOP_DEPLOY_ROOT:-/opt/agentloop}"
-readonly COMPOSE_FILE="$SCRIPT_DIR/compose.yaml"
+COMPOSE_FILE=
 readonly ENV_FILE="$DEPLOY_ROOT/.env"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -18,7 +18,20 @@ note() { printf '%s\n' "$*"; }
 
 require_command() { command -v "$1" >/dev/null 2>&1 || die "required command is unavailable: $1"; }
 
+active_compose() {
+  docker inspect agentloop-router-1 --format '{{ index .Config.Labels "com.docker.compose.project.config_files" }}' 2>/dev/null
+}
+
+render_topology() {
+  require_command python3
+  COMPOSE_FILE=$(python3 "$SCRIPT_DIR/render-topology.py" --root "$DEPLOY_ROOT" --env-file "$ENV_FILE") || return
+}
+
 compose() {
+  if [ -z "$COMPOSE_FILE" ]; then
+    COMPOSE_FILE=$(active_compose) || die "no active deployment; run validate or up first"
+    [ -f "$COMPOSE_FILE" ] || die "active Compose file is unavailable"
+  fi
   docker compose --project-directory "$DEPLOY_ROOT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
@@ -124,7 +137,7 @@ init() {
       printf 'CUSTOM_SKILLS_HOST_PATH=%s/config/custom-skills\n' "$DEPLOY_ROOT"
       printf 'RUNTIME_WORKSPACE_HOST_PATH=%s/data/workspace\n' "$DEPLOY_ROOT"
       printf 'AGENTLOOP_STATE_DRIVER=sqlite\nAGENTLOOP_STATE_SQLITE_PATH=./data/state/agentloop.db\n'
-      printf 'MAX_CONCURRENT_RUNS=20\nPLANNING_MAX_TURNS=4\nSTEP_MAX_TURNS=32\nHEARTBEAT_INTERVAL_MS=1000\nAGENTLOOP_LOG_COLOR=never\n'
+      printf 'RUNTIME_COUNT=2\nMAX_CONCURRENT_RUNS=20\nPLANNING_MAX_TURNS=4\nSTEP_MAX_TURNS=32\nHEARTBEAT_INTERVAL_MS=1000\nAGENTLOOP_LOG_COLOR=never\n'
     } > "$ENV_FILE"
     chmod 600 "$ENV_FILE"
     note "created deployment configuration: $ENV_FILE"
@@ -158,18 +171,20 @@ load_image() {
 release() {
   [ "$#" -eq 2 ] || die "usage: $0 release /absolute/path/agentloop-image.tar[.gz] /absolute/path/release-manifest.env"
   [ -f "$ENV_FILE" ] || die "run: $0 init"
-  local image backup
+  local image backup previous
+  previous=$(active_compose) || previous=
   image="$(release_image "$2")"
   load_image "$1"
   backup="$(select_image "$image")"
-  if up; then
+  if ( up ); then
     note "released: $image"
     return
   fi
   note "release failed; restoring prior deployment configuration"
   cp "$backup" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
-  compose up -d --no-build --remove-orphans || true
+  COMPOSE_FILE=$previous
+  if [ -n "$previous" ]; then compose up -d --no-build --remove-orphans || true; fi
   die "release failed; previous image selection was restored from $backup"
 }
 
@@ -182,20 +197,41 @@ validate() {
   image="$(dotenv_value MULTI_RUNTIME_IMAGE "$ENV_FILE")"
   [ -n "$image" ] || die "MULTI_RUNTIME_IMAGE is missing from $ENV_FILE"
   docker image inspect "$image" >/dev/null 2>&1 || die "image is not loaded locally: $image"
+  if [ -z "$COMPOSE_FILE" ]; then render_topology || return; fi
   compose config -q
 }
 
 up() {
   ensure_docker
-  validate
-  compose up -d --no-build --remove-orphans
-  health
+  local previous driver job
+  previous=$(active_compose) || previous=
+  if [ -n "$previous" ]; then
+    driver=$(docker exec agentloop-runtime-general-01-1 printenv AGENTLOOP_RUNTIME_STATE_DRIVER) || return
+    if [ "$driver" = postgres ]; then
+      job=$(mktemp -d "${TMPDIR:-/tmp}/agentloop-topology.XXXXXX")
+      AGENTLOOP_DEPLOY_ROOT="$DEPLOY_ROOT" bash "$SCRIPT_DIR/../production/server-operations.sh" topology "$job" '' '' "$SCRIPT_DIR" || return
+      COMPOSE_FILE=$(active_compose) || return
+      health
+      return
+    fi
+  fi
+  render_topology || return
+  validate || return
+  if compose up -d --no-build --remove-orphans && health; then return; fi
+  if [ -n "$previous" ]; then
+    COMPOSE_FILE=$previous
+    compose up -d --no-build --remove-orphans || return
+  fi
+  return 1
 }
 
 health() {
+  if [ -z "$COMPOSE_FILE" ]; then COMPOSE_FILE=$(active_compose) || return; fi
+  [ -f "$COMPOSE_FILE" ] || die "active Compose file is unavailable"
   validate
   # Verify the direct Agent route and the browser->Web->Router proxy route.
-  local router_port web_port public_web_origin attempt
+  local router_port web_port public_web_origin attempt service container services runtime_ready
+  services=$(compose config --services) || return
   router_port="$(dotenv_value ROUTER_PORT "$ENV_FILE")"
   web_port="$(dotenv_value WEB_PORT "$ENV_FILE")"
   public_web_origin="$(dotenv_value PUBLIC_WEB_ORIGIN "$ENV_FILE")"
@@ -206,6 +242,17 @@ health() {
     if curl --fail --silent --show-error "http://127.0.0.1:${router_port}/healthz" >/dev/null \
       && curl --fail --silent --show-error "http://127.0.0.1:${web_port}/" >/dev/null \
       && curl --fail --silent --show-error "http://127.0.0.1:${web_port}/api/healthz" >/dev/null; then
+      runtime_ready=true
+      while IFS= read -r service; do
+        if [[ "$service" =~ ^runtime-general-[0-9]{2,3}$ ]]; then
+          container=$(compose ps -q "$service") || return
+          if [ -z "$container" ] || ! docker exec "$container" node -e '
+            fetch(`http://127.0.0.1:${process.env.PORT}/healthz`, {signal:AbortSignal.timeout(2000)})
+              .then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+          '; then runtime_ready=false; break; fi
+        fi
+      done <<< "$services"
+      if [ "$runtime_ready" = false ]; then sleep 2; continue; fi
       compose ps
       note "healthy: ${public_web_origin}"
       return
@@ -214,7 +261,8 @@ health() {
   done
   compose ps
   compose logs --tail 100
-  die "services did not become healthy within 60 seconds"
+  note "services did not become healthy within 60 seconds" >&2
+  return 1
 }
 
 case "${1:-}" in
@@ -222,7 +270,7 @@ case "${1:-}" in
   build) [ "$#" -eq 1 ] || die "usage: $0 build"; build ;;
   load-image) shift; load_image "$@" ;;
   release) shift; release "$@" ;;
-  validate) [ "$#" -eq 1 ] || die "usage: $0 validate"; validate ;;
+  validate) [ "$#" -eq 1 ] || die "usage: $0 validate"; validate; note "rendered topology: $COMPOSE_FILE" ;;
   up) [ "$#" -eq 1 ] || die "usage: $0 up"; up ;;
   health) [ "$#" -eq 1 ] || die "usage: $0 health"; health ;;
   logs) shift; compose logs -f "$@" ;;

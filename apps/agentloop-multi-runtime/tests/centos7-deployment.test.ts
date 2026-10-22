@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 
 const compose = await readFile(new URL("../compose.yaml", import.meta.url), "utf8");
 const centosCompose = await readFile(new URL("../deploy/centos7/compose.yaml", import.meta.url), "utf8");
+const runtimeHost = await readFile(new URL("../deploy/centos7/runtime-host.yaml", import.meta.url), "utf8");
 const launcher = await readFile(new URL("../deploy/centos7/deploy.sh", import.meta.url), "utf8");
 const imageBuilder = await readFile(new URL("../deploy/centos7/build-image.sh", import.meta.url), "utf8");
 
@@ -19,7 +20,8 @@ test("CentOS deployment exposes an Agent-reachable Router URL and proves both ro
   assert.match(centosCompose, /PLANNING_MAX_TURNS: \$\{PLANNING_MAX_TURNS:-4\}/);
   assert.match(centosCompose, /STEP_MAX_TURNS: \$\{STEP_MAX_TURNS:-32\}/);
   assert.match(centosCompose, /ROUTER_PUBLIC_URL: \$\{PUBLIC_ROUTER_URL:\?set the externally routable Router URL\}/);
-  assert.equal((centosCompose.match(/host\.docker\.internal:host-gateway/g) ?? []).length, 3);
+  assert.match(centosCompose, /host\.docker\.internal:host-gateway/);
+  assert.match(runtimeHost, /host\.docker\.internal:host-gateway/);
   assert.match(centosCompose, /"\$\{WEB_BIND_ADDRESS:-0\.0\.0\.0\}:\$\{WEB_PORT:-3001\}:5174"/);
   assert.match(launcher, /PUBLIC_WEB_ORIGIN=http:\/\/%s:3001/);
   assert.match(launcher, /PUBLIC_ROUTER_URL=http:\/\/%s:5001/);

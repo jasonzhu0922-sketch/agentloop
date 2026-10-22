@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,36 +11,44 @@ const serverScript = await readFile(join(scripts, "server-operations.sh"), "utf8
 
 // Exercise the real server script and its file changes. Only external host
 // commands are replaced; no SSH connection or production directory is used.
-async function fixture(options: { invalid?: boolean; active?: boolean; failReady?: boolean } = {}) {
+async function fixture(options: { invalid?: boolean; active?: boolean; failReady?: boolean; count?: number; desiredCount?: number } = {}) {
   const root = await mkdtemp(join(tmpdir(), "agentloop-production-test-"));
   const job = join(root, "job");
   const bin = join(root, "bin");
   const previous = join(root, "releases", "old");
-  const compose = join(previous, "source/apps/agentloop-multi-runtime/deploy/centos7/compose.yaml");
-  await Promise.all([mkdir(job), mkdir(bin), mkdir(dirname(compose), { recursive: true }), mkdir(join(root, "config")), mkdir(join(root, "secrets"))]);
+  const compose = join(previous, "source/apps/agentloop-multi-runtime/deploy/centos7/active.yaml");
+  await Promise.all([mkdir(job), mkdir(bin), mkdir(dirname(compose), { recursive: true }), mkdir(join(root, "config"),{recursive:true}), mkdir(join(root, "secrets")), mkdir(join(root,"config/custom-skills"),{recursive:true})]);
   const config = join(root, "config/llm-providers.json");
   const envFile = join(root, "secrets/runtime.env");
-  await writeFile(compose, "services: {}\n");
+  await writeFile(compose, "services:\n  router: {}\n  web: {}\n" + Array.from({length: options.count ?? 2}, (_, i) => `  runtime-general-${String(i + 1).padStart(2, "0")}: {}\n`).join(""));
+  for (const name of ["compose.yaml", "runtime-host.yaml", "render-topology.py", "deploy.sh"]) {
+    await copyFile(join(scripts, "../centos7", name), join(dirname(compose), name));
+  }
   await writeFile(config, '{"marker":"original"}\n');
   await writeFile(envFile, "MODEL_KEY=original-secret\nSKILL_KEY=preserved-secret\n", { mode: 0o600 });
-  await writeFile(join(root, ".env"), `MULTI_RUNTIME_IMAGE=agentloop-multi-runtime:old\nRUNTIME_ENV_FILE=${envFile}\nWEB_PORT=13001\nROUTER_PORT=15001\n`);
+  await writeFile(join(root, ".env"), `RUNTIME_COUNT=${options.desiredCount ?? options.count ?? 2}\nMULTI_RUNTIME_IMAGE=agentloop-multi-runtime:old\nRUNTIME_ENV_FILE=${envFile}\nWEB_PORT=13001\nROUTER_PORT=15001\n`);
   await writeFile(join(job, "llm-providers.json"), '{"marker":"candidate"}\n');
   await writeFile(join(previous, "release-manifest.env"), "NODE_IMAGE=example/node@sha256:" + "a".repeat(64) + "\nAPT_MIRROR=https://apt.example\nPIP_INDEX_URL=https://pip.example\nPIP_FALLBACK_INDEX_URL=https://fallback.example\nPLAYWRIGHT_DOWNLOAD_HOST=https://browser.example\n");
   const helper = join(root, "helper.sh");
-  await writeFile(helper, serverScript.replace("root=/opt/agentloop", `root='${root}'`));
+  await writeFile(helper, serverScript);
   const docker = `#!${process.execPath}
 const fs=require('node:fs'),p=require('node:path');
 const a=process.argv.slice(2),root=process.env.FIXTURE_ROOT;
 fs.appendFileSync(p.join(root,'commands.jsonl'),JSON.stringify(a)+'\\n');
 if(a[0]==='inspect'){
  const f=a[a.indexOf('--format')+1];
- if(f.includes('config_files')) console.log(process.env.FIXTURE_COMPOSE);
+ if(f.includes('config_files')) console.log(fs.existsSync(p.join(root,'current-compose'))?fs.readFileSync(p.join(root,'current-compose'),'utf8'):process.env.FIXTURE_COMPOSE);
  else if(f.includes('/run/config/llm-providers.json')) console.log(p.join(root,'config/llm-providers.json'));
  else if(f.includes('.Config.Image')) console.log(fs.readFileSync(p.join(root,'.env'),'utf8').match(/^MULTI_RUNTIME_IMAGE=(.*)$/m)[1]);
 } else if(a[0]==='exec'){
  if(a.includes('printenv')) console.log('postgres');
  else if(a.includes('-i')){const input=JSON.parse(fs.readFileSync(0,'utf8')); if(!input.config)process.exit(2); if(process.env.INVALID_CONFIG==='1')process.exit(1);}
  else if(a.some(x=>x.includes('Container readiness timed out')) && process.env.FAIL_READY==='1' && !fs.existsSync(p.join(root,'readiness-failed'))){fs.writeFileSync(p.join(root,'readiness-failed'),'1'); process.exit(1);}
+} else if(a[0]==='compose'){
+ const file=a[a.indexOf('-f')+1];
+ if(a.includes('--services')){for(const m of fs.readFileSync(file,'utf8').matchAll(/^  (router|web|runtime-general-[0-9]+):/gm)) console.log(m[1]);}
+ if(a.includes('ps') && a.includes('-q')) console.log('agentloop-'+a[a.length-1]+'-1');
+ if(a.includes('up')) fs.writeFileSync(p.join(root,'current-compose'),file);
 } else if(a[0]==='buildx'){console.log('CACHED tool layers; rebuilt application');}
 `;
   const sudo = `#!${process.execPath}
@@ -50,14 +58,14 @@ if(a.includes('psql')) console.log(process.env.ACTIVE_RUNS==='1'?'1':'0');
 else if(a.includes('pg_dump')) process.stdout.write('fixture-database-dump');
 else if(a.includes('pg_restore')) fs.readFileSync(0);
 `;
-  for (const [name, content] of Object.entries({ docker, sudo, id: "#!/bin/sh\necho 0\n", flock: "#!/bin/sh\nexit 0\n" })) {
+  for (const [name, content] of Object.entries({ docker, sudo, id: "#!/bin/sh\necho 0\n", flock: "#!/bin/sh\nexit 0\n", curl: "#!/bin/sh\nexit 0\n" })) {
     await writeFile(join(bin, name), content);
     await chmod(join(bin, name), 0o755);
   }
-  const environment = { ...process.env, PATH: `${bin}:${process.env.PATH}`, FIXTURE_ROOT: root, FIXTURE_COMPOSE: compose, INVALID_CONFIG: options.invalid ? "1" : "0", ACTIVE_RUNS: options.active ? "1" : "0", FAIL_READY: options.failReady ? "1" : "0" };
+  const environment = { ...process.env, PATH: `${bin}:${process.env.PATH}`, AGENTLOOP_DEPLOY_ROOT: root, FIXTURE_ROOT: root, FIXTURE_COMPOSE: compose, INVALID_CONFIG: options.invalid ? "1" : "0", ACTIVE_RUNS: options.active ? "1" : "0", FAIL_READY: options.failReady ? "1" : "0" };
   const run = (operation = "llm", extra: string[] = []) => spawnSync("bash", [helper, operation, job, ...extra], { env: environment, encoding: "utf8" });
   const commands = async (): Promise<string[][]> => (await readFile(join(root, "commands.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
-  return { root, job, config, envFile, run, commands };
+  return { root, job, config, envFile, compose, environment, run, commands };
 }
 
 test("LLM config update preserves secrets and recreates only the two Runtime services", async () => {
@@ -99,12 +107,13 @@ test("Runtime readiness failure restores both config and complete env file", asy
   assert.doesNotMatch(result.stdout + result.stderr, /replacement-secret/);
 });
 
-test("cloud release reuses immutable build inputs and preserves deployed port config", async () => {
-  const f = await fixture();
+async function cloudArchive(f: Awaited<ReturnType<typeof fixture>>) {
   const source = join(f.root, "archive-source");
   const centos = join(source, "apps/agentloop-multi-runtime/deploy/centos7");
   await mkdir(centos, { recursive: true });
-  await writeFile(join(centos, "compose.yaml"), "services: {}\n");
+  for (const name of ["compose.yaml", "runtime-host.yaml", "render-topology.py", "deploy.sh"]) {
+    await copyFile(join(scripts, "../centos7", name), join(centos, name));
+  }
   await writeFile(join(centos, "deploy.sh"), "#!/bin/sh\nexit 0\n");
   await mkdir(join(f.root, ".docker-build-cache/multi-runtime-linux-amd64"), { recursive: true });
   await writeFile(join(f.root, ".docker-build-cache/multi-runtime-linux-amd64/index.json"), "{}");
@@ -113,6 +122,12 @@ test("cloud release reuses immutable build inputs and preserves deployed port co
   const { createHash } = await import("node:crypto");
   const digest = createHash("sha256").update(await readFile(archive)).digest("hex");
   const sha = "b".repeat(40);
+  return {sha, digest};
+}
+
+test("cloud release reuses immutable build inputs and preserves deployed port config", async () => {
+  const f = await fixture({desiredCount: 4});
+  const {sha, digest} = await cloudArchive(f);
   const result = f.run("cloud", [sha, digest]);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const build = (await f.commands()).find(a => a[0] === "buildx")!;
@@ -122,11 +137,13 @@ test("cloud release reuses immutable build inputs and preserves deployed port co
   assert.match(env, new RegExp(`MULTI_RUNTIME_IMAGE=agentloop-multi-runtime:${sha}`));
   assert.match(env, /WEB_PORT=13001\nROUTER_PORT=15001/);
   assert.equal(await readFile(f.config, "utf8"), '{"marker":"original"}\n');
+  const current = await readFile(join(f.root,"current-compose"),"utf8");
+  assert.equal(JSON.parse(await readFile(join(dirname(current),"topology.json"),"utf8")).runtimeCount,4);
   assert.match(result.stdout, /Rollback: bash/);
 });
 
 test("all public scripts support help; release preview needs no SSH", () => {
-  for (const script of ["release-cloud.sh", "update-cloud-llm.sh", "package-local-agent.sh"]) {
+  for (const script of ["release-cloud.sh", "update-cloud-llm.sh", "package-local-agent.sh", "configure-cloud.sh"]) {
     const result = spawnSync("bash", [join(scripts, script), "--help"], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Usage:/);
@@ -156,4 +173,104 @@ test("real registry preflight rejects missing credentials in a complete env repl
   assert.notEqual(missing.status, 0);
   assert.match(missing.stderr, /check its credential variable/);
   assert.doesNotMatch(valid.stdout + valid.stderr + missing.stdout + missing.stderr, /fixture-openai-key|fixture-other-key|replacement/);
+});
+
+for (const count of [1, 3, 12]) {
+  test(`LLM update uses all ${count} deployed nodes even if desired count differs`, async () => {
+    const f = await fixture({ count, desiredCount: 8 });
+    const result = f.run();
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const up = (await f.commands()).find(a => a[0] === "compose" && a.includes("up"))!;
+    assert.deepEqual(up.slice(up.indexOf("--force-recreate") + 1), Array.from({length: count}, (_, i) => `runtime-general-${String(i+1).padStart(2,"0")}`));
+  });
+}
+
+for (const [from, to] of [[2, 4], [4, 1]]) {
+  test(`topology change ${from} -> ${to} renders services/catalog and retains volumes`, async () => {
+    const f = await fixture({count: from});
+    const result = f.run("topology", [String(to), "8"]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const commands = await f.commands();
+    const up = commands.find(a => a[0] === "compose" && a.includes("up"))!;
+    assert.ok(up.includes("--no-build") && up.includes("--remove-orphans"));
+    assert.equal(commands.some(a => a[0] === "buildx" || a.includes("down") || a.includes("-v")), false);
+    const path = up[up.indexOf("-f")+1];
+    const catalog = JSON.parse(await readFile(join(dirname(path), "runtimes.json"), "utf8"));
+    assert.equal(catalog.runtimes.length, to);
+    assert.ok(catalog.runtimes.every((r: {maxConcurrentRuns: number}) => r.maxConcurrentRuns === 8));
+    assert.match(await readFile(join(f.root,".env"),"utf8"), new RegExp(`RUNTIME_COUNT=${to}\\n`));
+    for (let i = 1; i <= to; i++) assert.ok(commands.some(a => a[0] === "exec" && a.includes(`agentloop-runtime-general-${String(i).padStart(2,"0")}-1`) && a.some(v => v.includes("Container readiness timed out"))));
+  });
+}
+
+test("failed resize restores previous topology and active count after desired .env edit", async () => {
+  const f = await fixture({count: 2, desiredCount: 5, failReady: true});
+  const result = f.run("topology");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Restoring backup/);
+  assert.equal(await readFile(join(f.root,"current-compose"),"utf8"), f.compose);
+  assert.match(await readFile(join(f.root,".env"),"utf8"), /RUNTIME_COUNT=2\n/);
+  const ups = (await f.commands()).filter(a => a[0] === "compose" && a.includes("up"));
+  assert.equal(ups.length, 2);
+  assert.ok(ups[1].includes("--remove-orphans"));
+});
+
+test("active Runs and invalid counts leave topology untouched", async () => {
+  for (const options of [{active:true}, {}]) {
+    const f = await fixture(options);
+    const result = f.run("topology", [options.active ? "4" : "0"]);
+    assert.notEqual(result.status, 0);
+    assert.equal((await f.commands()).some(a => a.includes("up")), false);
+    assert.match(await readFile(join(f.root,".env"),"utf8"), /RUNTIME_COUNT=2\n/);
+  }
+});
+
+test("subsequent resize uses the generated deployment's original release templates", async () => {
+  const f = await fixture();
+  let result = f.run("topology", ["3"]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  result = f.run("topology", ["1"]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const path = await readFile(join(f.root,"current-compose"),"utf8");
+  const manifest = JSON.parse(await readFile(join(dirname(path),"topology.json"),"utf8"));
+  assert.equal(manifest.runtimeCount, 1);
+  assert.equal(manifest.templateDirectory, await realpath(dirname(f.compose)));
+});
+
+
+test("cloud failure restores old image and actual topology count", async () => {
+  const f = await fixture({desiredCount: 4, failReady: true});
+  const {sha,digest} = await cloudArchive(f);
+  const result = f.run("cloud",[sha,digest]);
+  assert.notEqual(result.status,0);
+  assert.equal(await readFile(join(f.root,"current-compose"),"utf8"),f.compose);
+  const env = await readFile(join(f.root,".env"),"utf8");
+  assert.match(env,/RUNTIME_COUNT=2\n/);
+  assert.match(env,/MULTI_RUNTIME_IMAGE=agentloop-multi-runtime:old\n/);
+});
+
+test("code release after resize finds serving release build manifest", async () => {
+  const f = await fixture();
+  let result = f.run("topology",["3"]);
+  assert.equal(result.status,0,result.stdout+result.stderr);
+  const {sha,digest} = await cloudArchive(f);
+  result = f.run("cloud",[sha,digest]);
+  assert.equal(result.status,0,result.stdout+result.stderr);
+  const current = await readFile(join(f.root,"current-compose"),"utf8");
+  assert.equal(JSON.parse(await readFile(join(dirname(current),"topology.json"),"utf8")).runtimeCount,3);
+});
+
+
+test("deploy.sh up applies configured count through production lifecycle; health reads active topology", async () => {
+  const f = await fixture({desiredCount: 3});
+  const launcher = join(scripts,"../centos7/deploy.sh");
+  let result = spawnSync("bash",[launcher,"up"],{env:f.environment,encoding:"utf8"});
+  assert.equal(result.status,0,result.stdout+result.stderr);
+  assert.match(result.stdout,/Runtime count: 3/);
+  const current = await readFile(join(f.root,"current-compose"),"utf8");
+  const env = await readFile(join(f.root,".env"),"utf8");
+  await writeFile(join(f.root,".env"),env.replace("RUNTIME_COUNT=3","RUNTIME_COUNT=invalid-desired"));
+  result = spawnSync("bash",[launcher,"health"],{env:f.environment,encoding:"utf8"});
+  assert.equal(result.status,0,result.stdout+result.stderr);
+  assert.equal(await readFile(join(f.root,"current-compose"),"utf8"),current);
 });
