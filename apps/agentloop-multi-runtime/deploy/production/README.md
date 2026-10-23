@@ -66,6 +66,8 @@ bash apps/agentloop-multi-runtime/deploy/production/update-cloud-llm.sh \
 
 仅换 Key 也要提供现有完整 JSON。`--apply` 已自动重建所有已部署 Runtime 以加载新环境，无需再手动重启；只在服务器编辑文件则须执行 `up --force-recreate`，单纯 `restart` 不会重新读取 `env_file`。
 
+也可以在 `/cloud-models` 页底部点击「重新加载 Runtime」，应用服务器上已经保存的配置。首次须在宿主机执行 `install-runtime-control.sh --apply`，部署新版 Web 及其控制 socket 挂载；之后使用独立运维凭证操作和查询状态。完整安装、生效与失败处理见 [操作手册第 3.3 节](OPERATIONS.md#33-网页重新加载-runtime)。
+
 脚本先校验 JSON 引用，然后在当前运行镜像中验证候选配置的完整 schema 和**所有声明模型的凭据存在性**。缺少某个模型凭据会停止；应补齐凭据，或在候选配置中移除不再提供的模型。可选环境文件也参与校验。校验不调用上游模型，不证明 Key 有效或上游没有限流。
 
 验证通过且无活动任务后备份原文件，按当前容器挂载位置替换配置，从实际 Compose 读取全部 Runtime 并重建，逐台复查生效配置。失败自动恢复配置并重建 Runtime；不重建镜像，不重启 Router/Web。密钥上传临时文件在成功后删除；失败时可能保留在 root 私有临时目录，应在排查后清理。

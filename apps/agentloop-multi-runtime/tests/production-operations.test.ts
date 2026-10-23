@@ -47,6 +47,8 @@ if(a[0]==='inspect'){
 } else if(a[0]==='compose'){
  const file=a[a.indexOf('-f')+1];
  if(a.includes('--services')){for(const m of fs.readFileSync(file,'utf8').matchAll(/^  (router|web|runtime-general-[0-9]+):/gm)) console.log(m[1]);}
+ if(a.includes('--format') && a.includes('json')){const services={};for(const m of fs.readFileSync(file,'utf8').matchAll(/^  (router|web|runtime-general-[0-9]+):/gm))services[m[1]]={image:'agentloop-multi-runtime:old'};console.log(JSON.stringify({services}));}
+ if(a.includes('run') && process.env.INVALID_CONFIG==='1'){console.error('Invalid model configuration or missing credential; no Runtime was reloaded.');process.exit(1);}
  if(a.includes('ps') && a.includes('-q')) console.log('agentloop-'+a[a.length-1]+'-1');
  if(a.includes('up')) fs.writeFileSync(p.join(root,'current-compose'),file);
 } else if(a[0]==='buildx'){console.log('CACHED tool layers; rebuilt application');}
@@ -96,6 +98,40 @@ test("nonterminal Runs block a config switch", async () => {
   assert.equal((await f.commands()).some(a => a.includes("up")), false);
 });
 
+test("Runtime reload validates fresh Compose environments on all deployed nodes before recreating only Runtimes", async () => {
+  const f = await fixture({ count: 3, desiredCount: 8 });
+  const result = f.run("reload");
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(await readFile(f.config, "utf8"), '{"marker":"original"}\n');
+  assert.equal(await readFile(f.envFile, "utf8"), "MODEL_KEY=original-secret\nSKILL_KEY=preserved-secret\n");
+  const commands = await f.commands();
+  const preflight = commands.filter(a => a[0] === "compose" && a.includes("run"));
+  assert.equal(preflight.length, 3);
+  for (const a of preflight) assert.ok(a.includes("--rm") && a.includes("--no-deps") && a.includes("--entrypoint"));
+  const up = commands.filter(a => a[0] === "compose" && a.includes("up"));
+  assert.equal(up.length, 1);
+  assert.deepEqual(up[0].slice(-3), ["runtime-general-01", "runtime-general-02", "runtime-general-03"]);
+  assert.ok(commands.indexOf(preflight[2]) < commands.indexOf(up[0]));
+  assert.equal(commands.filter(a => a[0] === "exec" && a.some(s => s.includes("Effective model configuration OK"))).length, 3);
+  assert.doesNotMatch(result.stdout + result.stderr, /original-secret|preserved-secret|Rollback:/);
+});
+
+for (const options of [{ invalid: true }, { active: true }]) {
+  test(`Runtime reload refuses before recreation: ${JSON.stringify(options)}`, async () => {
+    const f = await fixture(options);
+    const result = f.run("reload");
+    assert.notEqual(result.status, 0);
+    assert.equal((await f.commands()).some(a => a.includes("up")), false);
+  });
+}
+
+test("Runtime reload never reports success if any node fails readiness", async () => {
+  const f = await fixture({ failReady: true });
+  const result = f.run("reload");
+  assert.notEqual(result.status, 0);
+  assert.doesNotMatch(result.stdout, /Reloaded .*Runtime/);
+});
+
 test("Runtime readiness failure restores both config and complete env file", async () => {
   const f = await fixture({ failReady: true });
   await writeFile(join(f.job, "runtime.env"), "MODEL_KEY=replacement-secret\n");
@@ -143,7 +179,7 @@ test("cloud release reuses immutable build inputs and preserves deployed port co
 });
 
 test("all public scripts support help; release preview needs no SSH", () => {
-  for (const script of ["release-cloud.sh", "update-cloud-llm.sh", "package-local-agent.sh", "configure-cloud.sh"]) {
+  for (const script of ["release-cloud.sh", "update-cloud-llm.sh", "package-local-agent.sh", "configure-cloud.sh", "install-runtime-control.sh"]) {
     const result = spawnSync("bash", [join(scripts, script), "--help"], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Usage:/);

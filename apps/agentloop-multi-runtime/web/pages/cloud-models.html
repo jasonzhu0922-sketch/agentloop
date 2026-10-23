@@ -24,7 +24,16 @@
         <div class="action-bar"><span id="status" role="status">尚未载入配置</span><div><button id="download-env" type="button" disabled>下载 runtime.env</button><button id="download-config" class="primary" type="button" disabled>下载 llm-providers.json</button></div></div>
       </section>
       <p class="deployment-note">导出后按现有部署流程应用。配置文件本身不包含 Key；密钥只写入下载的 runtime.env。页面不会保存浏览器副本。</p>
+      <section class="config-section reload-section" aria-labelledby="reload-heading">
+        <div class="section-heading"><h2 id="reload-heading">重新加载云端 Runtime</h2><p>将服务器上已保存的配置应用到所有云端 Runtime。请先暂停新任务并等待现有任务结束；本页尚未部署的编辑内容不会应用。</p></div>
+        <form id="reload-form">
+          <label class="reload-credential">运维凭证<input id="operator-token" type="password" autocomplete="off" required placeholder="输入服务器上的运维凭证" /></label>
+          <div class="reload-actions"><button id="reload-runtime" type="submit" class="primary">重新加载 Runtime</button><button id="reload-status-refresh" type="button">查看状态</button></div>
+        </form>
+        <p id="reload-status" role="status" aria-live="polite">重新加载后将逐个检查 Runtime 就绪和有效模型配置。</p>
+      </section>
     </main>
     <script type="module" src="/pages/cloud-models.js"></script>
+    <script type="module" src="/pages/cloud-runtime-reload.js"></script>
   </body>
 </html>

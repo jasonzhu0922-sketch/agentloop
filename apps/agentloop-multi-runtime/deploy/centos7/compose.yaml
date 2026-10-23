@@ -83,8 +83,10 @@ services:
       # This is a browser-device loopback URL, not a cloud/container endpoint.
       LOCAL_AGENT_URL: ${LOCAL_AGENT_URL:-http://127.0.0.1:18790}
       LOCAL_AGENT_DOWNLOADS_DIR: /run/local-agent-installers
+      RUNTIME_CONTROL_SOCKET: /run/agentloop-control/control.sock
     volumes:
       - ${DEPLOY_ROOT:-/opt/agentloop}/downloads/installers:/run/local-agent-installers:ro
+      - /run/agentloop-control:/run/agentloop-control:ro
     ports:
       - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-3001}:5174"
     depends_on:

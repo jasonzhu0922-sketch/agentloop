@@ -5,6 +5,7 @@ import { request as httpsRequest } from "node:https";
 import { resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serveInstaller } from "./installer-downloads.mjs";
+import { proxyRuntimeControl } from "./runtime-control-proxy.mjs";
 import { localAgentUrl as resolveLocalAgentUrl } from "../src/shared/local-agent-endpoint.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)));
@@ -40,13 +41,18 @@ export function staticFilePath(pathname) {
   return file === root || file.startsWith(`${root}${sep}`) ? file : undefined;
 }
 
-export function createWebServer({ installerDirectory = process.env.LOCAL_AGENT_DOWNLOADS_DIR } = {}) {
+export function createWebServer({ installerDirectory = process.env.LOCAL_AGENT_DOWNLOADS_DIR,
+  runtimeControlSocket = process.env.RUNTIME_CONTROL_SOCKET } = {}) {
   return createServer(async (request, response) => {
     // This is the local control-plane UI.  Its browser state and Router
     // protocol evolve together, so a cached app.js can otherwise keep an old
     // SSE/recovery implementation alive after the Router has been restarted.
     response.setHeader("cache-control", "no-store");
     const pathname = new URL(request.url ?? "/", "http://web.local").pathname;
+    if (pathname === "/api/operations/runtime-reload") {
+      proxyRuntimeControl(request, response, runtimeControlSocket);
+      return;
+    }
     if (pathname.startsWith("/downloads/local-agent/")) {
       await serveInstaller(request, response, pathname, installerDirectory);
       return;

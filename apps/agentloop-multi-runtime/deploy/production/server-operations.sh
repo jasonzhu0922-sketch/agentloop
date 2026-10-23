@@ -235,6 +235,43 @@ TOPOLOGY_PY
   ready "${all_names[@]}"
   AGENTLOOP_DEPLOY_ROOT="$root" bash "$template_dir/deploy.sh" health
   echo "Runtime count: ${#runtime_services[@]}; topology: $compose_file"
+elif [ "$operation" = reload ]; then
+  # Use Compose's effective env_file/environment and fresh bind mounts, rather
+  # than validating against the old environment of a running container.
+  dc config -q
+  dc config --format json > "$job/effective-compose.json"
+  for service in "${runtime_services[@]}"; do
+    expected_image=$(python3 - "$job/effective-compose.json" "$service" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))['services'][sys.argv[2]]['image'])
+PY
+)
+    actual_image=$(docker inspect "agentloop-$service-1" --format '{{.Config.Image}}')
+    test "$expected_image" = "$actual_image" || { echo 'Runtime image selection changed; use the code release procedure instead of reload.' >&2; exit 1; }
+  done
+  idle
+  for service in "${runtime_services[@]}"; do
+    dc run --rm --no-deps -T --entrypoint node "$service" --input-type=module -e '
+      import {LlmProviderRegistry} from "@zhujun/agentloop";
+      try{const p=await LlmProviderRegistry.fromConfigFile(process.env.LLM_PROVIDER_CONFIG_PATH);for(const key of p.modelKeys()) p.create(key);console.log("Runtime configuration validated");}
+      catch{console.error("Invalid model configuration or missing credential; no Runtime was reloaded.");process.exit(1);}
+    '
+  done
+  idle
+  # No config files are overwritten here. An operator who already replaced
+  # them must retain their previous files for rollback.
+  dc up -d --no-deps --no-build --force-recreate "${runtime_services[@]}"
+  ready "${runtime_names[@]}"
+  for name in "${runtime_names[@]}"; do
+    docker exec "$name" node --input-type=module -e '
+      import {LlmProviderRegistry} from "@zhujun/agentloop";
+      try{const p=await LlmProviderRegistry.fromConfigFile(process.env.LLM_PROVIDER_CONFIG_PATH);for(const key of p.modelKeys()) p.create(key);console.log("Effective model configuration OK");}
+      catch{console.error("Effective model configuration invalid");process.exit(1);}
+    '
+  done
+  echo "Reloaded ${#runtime_services[@]} Runtime(s); readiness and effective model configuration checks passed."
+  echo 'A fresh model-backed Run is a separate acceptance check.'
+  exit 0
 elif [ "$operation" = llm ]; then
   # Validate against the serving image with candidate env contents in stdin.
   # Secrets never appear in command arguments or output.

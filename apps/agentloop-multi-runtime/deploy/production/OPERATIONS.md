@@ -163,6 +163,31 @@ dc up -d --no-deps --no-build --force-recreate "${RUNTIME_SERVICES[@]}"
 
 成功输出包含 `Rollback: bash /opt/agentloop/backups/.../rollback.sh`，在服务器执行该完整命令恢复。候选目录包含密钥，完成后按本地密钥文件管理方式处理；失败上传可能留在服务器 root 私有临时目录，排查后清理。
 
+### 3.3 网页重新加载 Runtime
+
+生产 `/cloud-models` 页底部提供「重新加载 Runtime」和「查看状态」。它读取**服务器上已保存的文件**，不会上传当前浏览器里的编辑内容。先上传完整配置、暂停新任务并等待已有任务结束，再输入运维凭证并点击按钮。凭证仅保留在当前页面输入框，不写入浏览器存储。
+
+首次启用需要发布包含此功能的 Web 代码，并在 Docker 宿主机安装控制服务。在新版本源码目录执行一次：
+
+```bash
+sudo bash apps/agentloop-multi-runtime/deploy/production/install-runtime-control.sh --apply
+```
+
+该步骤安装 `agentloop-runtime-control.service`，不重启应用服务。服务只监听 `/run/agentloop-control/control.sock`，不开放网络端口。新 Compose 模板已为 Web 配置这个目录的只读挂载和 `RUNTIME_CONTROL_SOCKET`；当前已部署的不可变 Compose 须通过正常部署流程更新后重建 Web 一次。不要向 Web 挂载 Docker socket。后续页面操作只重建 Runtime。
+
+运维凭证位于宿主机 `/opt/agentloop/runtime-control/operator-token`，仅 root 可读；由管理员通过私有终端读取并粘贴到页面的「运维凭证」输入框。不要把它填写到模型 API Key 或 JSON 中。安装脚本再次运行会保留已有凭证。控制服务代码升级须重新执行安装脚本；发布容器镜像不会自动替换宿主机服务。
+
+按钮复用当前生产操作锁，读取正在部署的 Compose 中的全部 Runtime；逐个用 Compose 实际解析的环境及新挂载文件校验完整模型 schema 和凭据存在性。配置无效、有未结束任务、其他部署占锁或镜像选择变化时停止。随后强制重建 Runtime，逐个检查就绪及有效模型配置，全部通过才报告成功。校验不调用上游，仍需新建真实任务验证模型可用。
+
+操作状态保存在 `/opt/agentloop/control/runtime-reload.json`。刷新页面后重新填写凭证，点击「查看状态」可继续跟踪；控制服务中断时记录为结果未确认，不报告成功。该入口不会修改配置文件，也无法恢复操作者上传前的旧文件；上传前须自行保留原文件。重建失败时检查容器状态，恢复旧配置后再重新加载。服务日志：
+
+```bash
+systemctl status agentloop-runtime-control.service
+journalctl -u agentloop-runtime-control.service --since '10 minutes ago'
+```
+
+未结束任务检查并不提供原子流量排空；操作期间须保持新任务入口暂停。
+
 ## 4. 修改部署 env、端口和数据库
 
 先暂停新任务并确认现有任务结束。在服务器备份并编辑，配置备份也包含秘密：
