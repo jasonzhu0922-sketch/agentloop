@@ -8,16 +8,21 @@ const messages = {
   readiness_failed: "Runtime 未全部就绪，请检查服务器容器状态和日志。",
   reload_interrupted: "控制服务在操作期间中断，结果未确认。请先检查服务器 Runtime 状态。",
   reload_failed: "重新加载失败，请检查服务器配置和 Runtime 状态。",
+  invalid_configuration_request: "提交的配置格式无效，请检查 JSON、Provider 引用和 Key 变量。",
+  configuration_read_failed: "无法读取生产配置，服务器可能正在执行部署操作，请稍后再试。",
+  configuration_too_large: "配置超过 1 MB，请检查文件内容。",
 };
 
 // Injectable browser dependencies allow the actual request/polling workflow to
 // be exercised without a production Docker host.
-export function mountRuntimeReload({ document, fetch, confirm, setTimeout, clearTimeout }) {
+export function mountRuntimeReload({ document, fetch, confirm, setTimeout, clearTimeout, configurationInput, onConfiguration }) {
   const form = document.getElementById("reload-form");
   const token = document.getElementById("operator-token");
   const button = document.getElementById("reload-runtime");
   const refresh = document.getElementById("reload-status-refresh");
   const status = document.getElementById("reload-status");
+  const apply = document.getElementById("apply-production-config");
+  const load = document.getElementById("load-production-config");
   let timer;
   let busy = false;
   let operationId;
@@ -27,18 +32,21 @@ export function mountRuntimeReload({ document, fetch, confirm, setTimeout, clear
     status.dataset.state = error ? "error" : "";
   }
   function schedule() { timer = setTimeout(() => { void request("GET"); }, 2000); }
-  async function request(method) {
+  async function request(method, payload) {
     if (busy) return;
     if (!token.value.trim()) { show("请输入运维凭证。", true); return; }
     clearTimeout(timer);
     busy = true;
     button.disabled = true;
     refresh.disabled = true;
+    if (apply) apply.disabled = true;
+    if (load) load.disabled = true;
     let running = false;
     let uncertain = true;
     try {
-      const response = await fetch("/api/operations/runtime-reload", {
-        method, headers: { authorization: `Bearer ${token.value.trim()}` }, cache: "no-store",
+      const response = await fetch(payload ? "/api/operations/model-configuration" : "/api/operations/runtime-reload", {
+        method, headers: { authorization: `Bearer ${token.value.trim()}`, ...(payload ? { "content-type": "application/json" } : {}) },
+        ...(payload ? { body: JSON.stringify(payload) } : {}), cache: "no-store",
         signal: AbortSignal.timeout(10000),
       });
       const state = await response.json();
@@ -56,7 +64,8 @@ export function mountRuntimeReload({ document, fetch, confirm, setTimeout, clear
         schedule();
       } else if (state.status === "succeeded") {
         const at = state.finishedAt ? `（${new Date(state.finishedAt * 1000).toLocaleString()}）` : "";
-        show(`重新加载完成${at}：所有云端 Runtime 已就绪，有效模型配置检查通过。刷新工作区后选择模型发起新任务验证。`);
+        const catalog = Array.isArray(state.models) ? `当前 ${state.models.length} 个模型：${state.models.map((model) => model.displayName || model.key).join("、")}。` : "";
+        show(`${state.operation === "apply" ? "已保存并应用到生产" : "重新加载完成"}${at}：所有云端 Runtime 已就绪，实际模型列表核对通过。${catalog}返回工作区后模型列表会重新读取。`);
       } else if (state.status === "failed") {
         show(messages[state.phase] ?? messages.reload_failed, true);
       } else { show("当前没有重新加载记录。"); }
@@ -66,6 +75,8 @@ export function mountRuntimeReload({ document, fetch, confirm, setTimeout, clear
       busy = false;
       button.disabled = running;
       refresh.disabled = false;
+      if (apply) apply.disabled = running;
+      if (load) load.disabled = running;
     }
   }
   form.addEventListener("submit", (event) => {
@@ -76,8 +87,29 @@ export function mountRuntimeReload({ document, fetch, confirm, setTimeout, clear
     void request("POST");
   });
   refresh.addEventListener("click", () => { operationId = undefined; void request("GET"); });
+  apply?.addEventListener("click", () => {
+    if (busy || !configurationInput) return;
+    if (!token.value.trim()) { show("请输入运维凭证。", true); token.focus(); return; }
+    let payload;
+    try { payload = configurationInput(); } catch (error) { show(error.message, true); return; }
+    const models = Object.keys(payload.configuration.models);
+    if (!confirm(`将生产模型列表替换为当前 JSON 中的 ${models.length} 个模型：${models.join("、")}。${payload.environment === undefined ? "保留其他服务器环境变量。" : "将完整替换 runtime.env。"}确认已暂停新任务并等待已有任务结束？`)) return;
+    operationId = undefined;
+    void request("POST", payload);
+  });
+  load?.addEventListener("click", async () => {
+    if (busy || !onConfiguration) return;
+    if (!token.value.trim()) { show("请输入运维凭证。", true); token.focus(); return; }
+    if (!confirm("读取生产配置将替换当前 JSON 编辑内容和未保存的 Key 输入，是否继续？")) return;
+    busy = true; load.disabled = true;
+    try {
+      const response = await fetch("/api/operations/model-configuration", { headers: { authorization: `Bearer ${token.value.trim()}` }, cache: "no-store", signal: AbortSignal.timeout(10000) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(messages[body.error] ?? "读取生产配置失败。");
+      onConfiguration(body.configuration);
+      show("已读取服务器当前配置；API Key 不会回传，留空即可保留。编辑后点击保存并应用到生产。");
+    } catch (error) { show(error.message, true); }
+    finally { busy = false; load.disabled = false; }
+  });
   // Credentials stay only in this input; no cookies, URL parameters or storage.
 }
-
-if (typeof document !== "undefined") mountRuntimeReload({ document, fetch: globalThis.fetch.bind(globalThis),
-  confirm: globalThis.confirm.bind(globalThis), setTimeout, clearTimeout });

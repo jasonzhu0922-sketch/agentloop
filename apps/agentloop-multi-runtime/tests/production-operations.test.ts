@@ -11,7 +11,7 @@ const serverScript = await readFile(join(scripts, "server-operations.sh"), "utf8
 
 // Exercise the real server script and its file changes. Only external host
 // commands are replaced; no SSH connection or production directory is used.
-async function fixture(options: { invalid?: boolean; active?: boolean; failReady?: boolean; count?: number; desiredCount?: number } = {}) {
+async function fixture(options: { invalid?: boolean; active?: boolean; failReady?: boolean; mismatchCatalog?: boolean; count?: number; desiredCount?: number } = {}) {
   const root = await mkdtemp(join(tmpdir(), "agentloop-production-test-"));
   const job = join(root, "job");
   const bin = join(root, "bin");
@@ -24,10 +24,10 @@ async function fixture(options: { invalid?: boolean; active?: boolean; failReady
   for (const name of ["compose.yaml", "runtime-host.yaml", "render-topology.py", "deploy.sh"]) {
     await copyFile(join(scripts, "../centos7", name), join(dirname(compose), name));
   }
-  await writeFile(config, '{"marker":"original"}\n');
+  await writeFile(config, '{"marker":"original","models":{"fixture":{"displayName":"Fixture","providerModel":"fixture"}}}\n');
   await writeFile(envFile, "MODEL_KEY=original-secret\nSKILL_KEY=preserved-secret\n", { mode: 0o600 });
   await writeFile(join(root, ".env"), `RUNTIME_COUNT=${options.desiredCount ?? options.count ?? 2}\nMULTI_RUNTIME_IMAGE=agentloop-multi-runtime:old\nRUNTIME_ENV_FILE=${envFile}\nWEB_PORT=13001\nROUTER_PORT=15001\n`);
-  await writeFile(join(job, "llm-providers.json"), '{"marker":"candidate"}\n');
+  await writeFile(join(job, "llm-providers.json"), '{"marker":"candidate","models":{"fixture":{"displayName":"Fixture","providerModel":"fixture"}}}\n');
   await writeFile(join(previous, "release-manifest.env"), "NODE_IMAGE=example/node@sha256:" + "a".repeat(64) + "\nAPT_MIRROR=https://apt.example\nPIP_INDEX_URL=https://pip.example\nPIP_FALLBACK_INDEX_URL=https://fallback.example\nPLAYWRIGHT_DOWNLOAD_HOST=https://browser.example\n");
   const helper = join(root, "helper.sh");
   await writeFile(helper, serverScript);
@@ -42,8 +42,9 @@ if(a[0]==='inspect'){
  else if(f.includes('.Config.Image')) console.log(fs.readFileSync(p.join(root,'.env'),'utf8').match(/^MULTI_RUNTIME_IMAGE=(.*)$/m)[1]);
 } else if(a[0]==='exec'){
  if(a.includes('printenv')) console.log('postgres');
- else if(a.includes('-i')){const input=JSON.parse(fs.readFileSync(0,'utf8')); if(!input.config)process.exit(2); if(process.env.INVALID_CONFIG==='1')process.exit(1);}
+ else if(a.includes('-i')){const input=JSON.parse(fs.readFileSync(0,'utf8'));if(input.updates){import(process.env.MERGE_MODULE).then(m=>process.stdout.write(m.mergeEnvLines(input.environment.split(/\\r?\\n/),Object.entries(input.updates)).join('\\n')+'\\n'));}else{if(!input.config)process.exit(2); if(process.env.INVALID_CONFIG==='1')process.exit(1);}}
  else if(a.some(x=>x.includes('Container readiness timed out')) && process.env.FAIL_READY==='1' && !fs.existsSync(p.join(root,'readiness-failed'))){fs.writeFileSync(p.join(root,'readiness-failed'),'1'); process.exit(1);}
+ else if(a.some(x=>x.includes('Live Runtime model catalog does not match')) && process.env.MISMATCH_CATALOG==='1')process.exit(1);
 } else if(a[0]==='compose'){
  const file=a[a.indexOf('-f')+1];
  if(a.includes('--services')){for(const m of fs.readFileSync(file,'utf8').matchAll(/^  (router|web|runtime-general-[0-9]+):/gm)) console.log(m[1]);}
@@ -64,7 +65,7 @@ else if(a.includes('pg_restore')) fs.readFileSync(0);
     await writeFile(join(bin, name), content);
     await chmod(join(bin, name), 0o755);
   }
-  const environment = { ...process.env, PATH: `${bin}:${process.env.PATH}`, AGENTLOOP_DEPLOY_ROOT: root, FIXTURE_ROOT: root, FIXTURE_COMPOSE: compose, INVALID_CONFIG: options.invalid ? "1" : "0", ACTIVE_RUNS: options.active ? "1" : "0", FAIL_READY: options.failReady ? "1" : "0" };
+  const environment = { ...process.env, PATH: `${bin}:${process.env.PATH}`, AGENTLOOP_DEPLOY_ROOT: root, FIXTURE_ROOT: root, FIXTURE_COMPOSE: compose, INVALID_CONFIG: options.invalid ? "1" : "0", ACTIVE_RUNS: options.active ? "1" : "0", FAIL_READY: options.failReady ? "1" : "0", MISMATCH_CATALOG: options.mismatchCatalog ? "1" : "0", MERGE_MODULE: new URL("../web/pages/cloud-model-config.js", import.meta.url).href };
   const run = (operation = "llm", extra: string[] = []) => spawnSync("bash", [helper, operation, job, ...extra], { env: environment, encoding: "utf8" });
   const commands = async (): Promise<string[][]> => (await readFile(join(root, "commands.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
   return { root, job, config, envFile, compose, environment, run, commands };
@@ -74,7 +75,7 @@ test("LLM config update preserves secrets and recreates only the two Runtime ser
   const f = await fixture();
   const result = f.run();
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.equal(await readFile(f.config, "utf8"), '{"marker":"candidate"}\n');
+  assert.equal(await readFile(f.config, "utf8"), '{"marker":"candidate","models":{"fixture":{"displayName":"Fixture","providerModel":"fixture"}}}\n');
   assert.match(await readFile(f.envFile, "utf8"), /SKILL_KEY=preserved-secret/);
   const up = (await f.commands()).filter(a => a[0] === "compose" && a.includes("up"));
   assert.equal(up.length, 1);
@@ -85,7 +86,7 @@ test("LLM config update preserves secrets and recreates only the two Runtime ser
 test("LLM config rejects invalid candidate before replacing files or restarting services", async () => {
   const f = await fixture({ invalid: true });
   assert.notEqual(f.run().status, 0);
-  assert.equal(await readFile(f.config, "utf8"), '{"marker":"original"}\n');
+  assert.equal(await readFile(f.config, "utf8"), '{"marker":"original","models":{"fixture":{"displayName":"Fixture","providerModel":"fixture"}}}\n');
   assert.equal((await f.commands()).some(a => a.includes("up")), false);
 });
 
@@ -94,15 +95,35 @@ test("nonterminal Runs block a config switch", async () => {
   const result = f.run();
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Active\/nonterminal Runs: 1/);
-  assert.equal(await readFile(f.config, "utf8"), '{"marker":"original"}\n');
+  assert.equal(await readFile(f.config, "utf8"), '{"marker":"original","models":{"fixture":{"displayName":"Fixture","providerModel":"fixture"}}}\n');
   assert.equal((await f.commands()).some(a => a.includes("up")), false);
+});
+
+test("page credential edits merge into the complete server environment without discarding integration variables", async () => {
+  const f = await fixture();
+  await writeFile(join(f.job, "credential-updates.json"), JSON.stringify({ MODEL_KEY: "replacement-secret" }));
+  const result = f.run();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const env = await readFile(f.envFile, "utf8");
+  assert.match(env, /MODEL_KEY='replacement-secret'/);
+  assert.match(env, /SKILL_KEY=preserved-secret/);
+  assert.doesNotMatch(result.stdout + result.stderr, /replacement-secret|preserved-secret/);
+});
+
+test("a healthy Runtime with the wrong live catalog fails apply and restores the old configuration", async () => {
+  const f = await fixture({ mismatchCatalog: true });
+  const result = f.run();
+  assert.notEqual(result.status, 0);
+  assert.match(await readFile(f.config, "utf8"), /original/);
+  assert.doesNotMatch(result.stdout, /Applied llm/);
+  assert.equal((await f.commands()).filter(a => a.includes("up")).length, 2);
 });
 
 test("Runtime reload validates fresh Compose environments on all deployed nodes before recreating only Runtimes", async () => {
   const f = await fixture({ count: 3, desiredCount: 8 });
   const result = f.run("reload");
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.equal(await readFile(f.config, "utf8"), '{"marker":"original"}\n');
+  assert.equal(await readFile(f.config, "utf8"), '{"marker":"original","models":{"fixture":{"displayName":"Fixture","providerModel":"fixture"}}}\n');
   assert.equal(await readFile(f.envFile, "utf8"), "MODEL_KEY=original-secret\nSKILL_KEY=preserved-secret\n");
   const commands = await f.commands();
   const preflight = commands.filter(a => a[0] === "compose" && a.includes("run"));
@@ -137,7 +158,7 @@ test("Runtime readiness failure restores both config and complete env file", asy
   await writeFile(join(f.job, "runtime.env"), "MODEL_KEY=replacement-secret\n");
   const result = f.run();
   assert.notEqual(result.status, 0);
-  assert.equal(await readFile(f.config, "utf8"), '{"marker":"original"}\n');
+  assert.equal(await readFile(f.config, "utf8"), '{"marker":"original","models":{"fixture":{"displayName":"Fixture","providerModel":"fixture"}}}\n');
   assert.match(await readFile(f.envFile, "utf8"), /SKILL_KEY=preserved-secret/);
   assert.equal((await f.commands()).filter(a => a[0] === "compose" && a.includes("up")).length, 2);
   assert.doesNotMatch(result.stdout + result.stderr, /replacement-secret/);
@@ -172,7 +193,7 @@ test("cloud release reuses immutable build inputs and preserves deployed port co
   const env = await readFile(join(f.root, ".env"), "utf8");
   assert.match(env, new RegExp(`MULTI_RUNTIME_IMAGE=agentloop-multi-runtime:${sha}`));
   assert.match(env, /WEB_PORT=13001\nROUTER_PORT=15001/);
-  assert.equal(await readFile(f.config, "utf8"), '{"marker":"original"}\n');
+  assert.equal(await readFile(f.config, "utf8"), '{"marker":"original","models":{"fixture":{"displayName":"Fixture","providerModel":"fixture"}}}\n');
   const current = await readFile(join(f.root,"current-compose"),"utf8");
   assert.equal(JSON.parse(await readFile(join(dirname(current),"topology.json"),"utf8")).runtimeCount,4);
   assert.match(result.stdout, /Rollback: bash/);

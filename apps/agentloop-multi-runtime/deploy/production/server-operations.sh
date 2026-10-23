@@ -80,6 +80,30 @@ print(values[0])
 PY
 )
 test -f "$environment_path"
+verify_models() {
+  local name
+  for name in "${runtime_names[@]}"; do
+    docker exec "$name" node --input-type=module -e '
+      import {LlmProviderRegistry} from "@zhujun/agentloop";
+      try {
+        const p=await LlmProviderRegistry.fromConfigFile(process.env.LLM_PROVIDER_CONFIG_PATH);
+        for(const key of p.modelKeys()) p.create(key);
+        const expected=p.modelCatalog().map(({key,displayName})=>({key,displayName})).sort((a,b)=>a.key.localeCompare(b.key));
+        const r=await fetch(`http://127.0.0.1:${process.env.PORT}/v1/models`,{signal:AbortSignal.timeout(5000)});
+        if(!r.ok) throw Error();
+        const actual=(await r.json()).models.sort((a,b)=>a.key.localeCompare(b.key));
+        if(JSON.stringify(actual)!==JSON.stringify(expected)) throw Error();
+        console.log("Effective model configuration OK; live Runtime catalog matches saved configuration");
+      } catch {console.error("Live Runtime model catalog does not match saved configuration");process.exit(1);}
+    '
+  done
+  python3 - "$config_path" "$job/applied-models.json" <<'PY'
+import json,sys
+c=json.load(open(sys.argv[1]))
+models=[dict(key=k,displayName=v.get('displayName',v['providerModel'])) for k,v in c['models'].items()]
+with open(sys.argv[2],'w') as f: json.dump(sorted(models,key=lambda m:m['key']),f)
+PY
+}
 backup=
 make_backup() {
   backup=$root/backups/$operation-$(date +%Y%m%d%H%M%S)-$$
@@ -235,6 +259,9 @@ TOPOLOGY_PY
   ready "${all_names[@]}"
   AGENTLOOP_DEPLOY_ROOT="$root" bash "$template_dir/deploy.sh" health
   echo "Runtime count: ${#runtime_services[@]}; topology: $compose_file"
+elif [ "$operation" = configuration ]; then
+  cat "$config_path"
+  exit 0
 elif [ "$operation" = reload ]; then
   # Use Compose's effective env_file/environment and fresh bind mounts, rather
   # than validating against the old environment of a running container.
@@ -262,17 +289,29 @@ PY
   # them must retain their previous files for rollback.
   dc up -d --no-deps --no-build --force-recreate "${runtime_services[@]}"
   ready "${runtime_names[@]}"
-  for name in "${runtime_names[@]}"; do
-    docker exec "$name" node --input-type=module -e '
-      import {LlmProviderRegistry} from "@zhujun/agentloop";
-      try{const p=await LlmProviderRegistry.fromConfigFile(process.env.LLM_PROVIDER_CONFIG_PATH);for(const key of p.modelKeys()) p.create(key);console.log("Effective model configuration OK");}
-      catch{console.error("Effective model configuration invalid");process.exit(1);}
-    '
-  done
+  verify_models
   echo "Reloaded ${#runtime_services[@]} Runtime(s); readiness and effective model configuration checks passed."
   echo 'A fresh model-backed Run is a separate acceptance check.'
   exit 0
 elif [ "$operation" = llm ]; then
+  if [ -f "$job/credential-updates.json" ]; then
+    # Merge only explicitly entered Provider keys, under the production lock.
+    # Preserve all other model, Skill and MCP variables on the server.
+    umask 077
+    source_env=$environment_path
+    if [ -f "$job/runtime.env" ]; then source_env=$job/runtime.env; fi
+    python3 - "$source_env" "$job/credential-updates.json" <<'PY' | docker exec -i "${runtime_names[0]}" node --input-type=module -e '
+      import fs from "node:fs";
+      import {mergeEnvLines} from "./web/pages/cloud-model-config.js";
+      const input=JSON.parse(fs.readFileSync(0,"utf8"));
+      process.stdout.write(mergeEnvLines(input.environment.split(/\r?\n/),Object.entries(input.updates)).join("\n")+"\n");
+    ' > "$job/merged-runtime.env"
+from pathlib import Path
+import json,sys
+print(json.dumps(dict(environment=Path(sys.argv[1]).read_text(),updates=json.loads(Path(sys.argv[2]).read_text()))))
+PY
+    mv "$job/merged-runtime.env" "$job/runtime.env"
+  fi
   # Validate against the serving image with candidate env contents in stdin.
   # Secrets never appear in command arguments or output.
   python3 - "$job" "$environment_path" <<'PY' | docker exec -i "${runtime_names[0]}" node --input-type=module -e '
@@ -302,14 +341,7 @@ PY
   dc config -q
   dc up -d --no-deps --no-build --force-recreate "${runtime_services[@]}"
   ready "${runtime_names[@]}"
-  # Recheck the effective environment loaded by all recreated containers.
-  for name in "${runtime_names[@]}"; do
-    docker exec "$name" node --input-type=module -e '
-      import {LlmProviderRegistry} from "@zhujun/agentloop";
-      try{const p=await LlmProviderRegistry.fromConfigFile(process.env.LLM_PROVIDER_CONFIG_PATH);for(const key of p.modelKeys()) p.create(key);console.log("Effective model configuration OK");}
-      catch{console.error("Effective model configuration invalid");process.exit(1);}
-    '
-  done
+  verify_models
   if [ -f "$job/runtime.env" ]; then rm -- "$job/runtime.env"; fi
 else
   echo "Unsupported operation: $operation" >&2; exit 2

@@ -245,6 +245,7 @@ document.addEventListener("visibilitychange", () => {
 
 function reconcileRunsAfterPageReturn() {
   void reconcilePersistedRuns();
+  if (sessionState.authToken) void loadModels();
 }
 
 function newConversation() {

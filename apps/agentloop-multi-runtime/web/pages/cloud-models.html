@@ -10,30 +10,29 @@
   <body>
     <header class="page-header"><a class="brand" href="/" aria-label="AgentLoop 工作区"><span class="brand-icon">A</span>AgentLoop</a><a class="back-link" href="/">返回工作区 <span aria-hidden="true">↗</span></a></header>
     <main>
-      <section class="intro"><p class="eyebrow">CLOUD RUNTIME</p><h1>云端模型配置</h1><p class="intro-copy">编辑 Provider、模型参数和 API Key，导出配置文件后按服务器部署流程应用。</p></section>
+      <section class="intro"><p class="eyebrow">CLOUD RUNTIME</p><h1>云端模型配置</h1><p class="intro-copy">读取生产配置，编辑 Provider、模型参数和 API Key，保存并应用到云端 Runtime。</p></section>
+      <section class="config-section credential-section"><label class="reload-credential">运维凭证<input id="operator-token" type="password" autocomplete="off" placeholder="读取、保存和重新加载时使用" /></label></section>
       <section class="config-section">
-        <div class="section-heading"><div><h2>导入现有配置</h2><p>文件只在当前浏览器中读取，不会上传。</p></div></div>
+        <div class="section-heading"><div><h2>Provider 与模型配置</h2><p>可读取生产配置或导入文件。编辑后点击「保存并应用到生产」才会更新服务器。</p></div><button id="load-production-config" type="button">读取生产配置</button></div>
         <div class="file-inputs">
           <label>模型配置 JSON<input id="config-file" type="file" accept="application/json,.json" /></label>
           <label>Runtime 环境文件<input id="env-file" type="file" accept="text/plain,.env" /></label>
         </div>
         <div class="editor-heading"><label for="config-json"><strong>Provider 与模型</strong></label><button id="format-json" type="button" title="格式化 JSON">格式化</button></div>
         <textarea id="config-json" spellcheck="false" autocomplete="off" autocapitalize="off" rows="20" aria-label="云端 Provider 与模型 JSON" placeholder="导入 llm-providers.json，或粘贴完整 JSON 配置"></textarea>
-        <div class="editor-heading key-heading"><div><strong>API Keys</strong><small>按 Provider 的 apiKeyEnv 写入 runtime.env</small></div><button id="add-key" type="button">添加变量</button></div>
+        <div class="editor-heading key-heading"><div><strong>API Keys</strong><small>留空保留服务器原 Key；填写只替换对应变量，其他环境变量保留。</small></div><button id="add-key" type="button">添加变量</button></div>
         <div id="key-list" class="key-list"></div>
-        <div class="action-bar"><span id="status" role="status">尚未载入配置</span><div><button id="download-env" type="button" disabled>下载 runtime.env</button><button id="download-config" class="primary" type="button" disabled>下载 llm-providers.json</button></div></div>
+        <div class="action-bar"><span id="status" role="status">尚未载入配置</span><div><button id="download-env" type="button" disabled>下载 runtime.env</button><button id="download-config" type="button" disabled>下载 llm-providers.json</button><button id="apply-production-config" class="primary" type="button">保存并应用到生产</button></div></div>
       </section>
-      <p class="deployment-note">导出后按现有部署流程应用。配置文件本身不包含 Key；密钥只写入下载的 runtime.env。页面不会保存浏览器副本。</p>
+      <p class="deployment-note">保存时会校验、备份并重建云端 Runtime。请先暂停新任务并等待已有任务结束。导入 runtime.env 表示完整替换环境文件，必须保留仍需使用的其他变量；不导入则保留服务器文件并合并填写的 Key。</p>
       <section class="config-section reload-section" aria-labelledby="reload-heading">
         <div class="section-heading"><h2 id="reload-heading">重新加载云端 Runtime</h2><p>将服务器上已保存的配置应用到所有云端 Runtime。请先暂停新任务并等待现有任务结束；本页尚未部署的编辑内容不会应用。</p></div>
         <form id="reload-form">
-          <label class="reload-credential">运维凭证<input id="operator-token" type="password" autocomplete="off" required placeholder="输入服务器上的运维凭证" /></label>
           <div class="reload-actions"><button id="reload-runtime" type="submit" class="primary">重新加载 Runtime</button><button id="reload-status-refresh" type="button">查看状态</button></div>
         </form>
         <p id="reload-status" role="status" aria-live="polite">重新加载后将逐个检查 Runtime 就绪和有效模型配置。</p>
       </section>
     </main>
     <script type="module" src="/pages/cloud-models.js"></script>
-    <script type="module" src="/pages/cloud-runtime-reload.js"></script>
   </body>
 </html>

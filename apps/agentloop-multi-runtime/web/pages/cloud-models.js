@@ -1,4 +1,5 @@
-import { mergeEnvLines, providerKeyNames, readEnvValue } from "./cloud-model-config.js";
+import { configurationForApply, mergeEnvLines, providerKeyNames, readEnvValue } from "./cloud-model-config.js";
+import { mountRuntimeReload } from "./cloud-runtime-reload.js";
 
 const $ = (id) => document.getElementById(id);
 const jsonEditor = $("config-json");
@@ -70,7 +71,7 @@ function addKeyRow(name, value) {
   const env = document.createElement("input");
   env.name = "env"; env.value = name; env.autocomplete = "off"; env.setAttribute("aria-label", "API Key 环境变量名");
   const key = document.createElement("input");
-  key.name = "key"; key.type = "password"; key.value = value; key.autocomplete = "new-password"; key.placeholder = "输入或更换 API Key"; key.setAttribute("aria-label", `API Key ${name || "环境变量"}`);
+  key.name = "key"; key.type = "password"; key.value = value; key.autocomplete = "new-password"; key.placeholder = "留空保留服务器原 Key；填写则替换"; key.setAttribute("aria-label", `API Key ${name || "环境变量"}`);
   const remove = document.createElement("button");
   remove.type = "button"; remove.className = "remove-key"; remove.textContent = "×"; remove.title = "移除此变量"; remove.setAttribute("aria-label", "移除此变量");
   row.append(env, key, remove); keyList.append(row);
@@ -102,3 +103,14 @@ function download(filename, content, type) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 function setError(message) { status.textContent = message; status.dataset.state = message ? "error" : ""; }
+
+mountRuntimeReload({ document, fetch: globalThis.fetch.bind(globalThis), confirm: globalThis.confirm.bind(globalThis), setTimeout, clearTimeout,
+  configurationInput: () => configurationForApply(jsonEditor.value, envLoaded ? envLines : undefined,
+    [...keyList.querySelectorAll(".key-row")].map((row) => [row.querySelector("[name=env]").value, row.querySelector("[name=key]").value])),
+  onConfiguration: (configuration) => {
+    jsonEditor.value = JSON.stringify(configuration, null, 2);
+    envLines = []; envLoaded = false; keyList.replaceChildren();
+    $("env-file").value = "";
+    refreshKeys(); validate();
+  },
+});

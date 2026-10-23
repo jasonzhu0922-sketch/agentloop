@@ -2,14 +2,27 @@ import { request as httpRequest } from "node:http";
 
 // Fixed host operation over a dedicated socket. Neither a Docker socket nor
 // the host credential is exposed to the Web container or browser bundle.
-export function proxyRuntimeControl(request, response, socketPath) {
+export async function proxyRuntimeControl(request, response, socketPath, path = "/runtime-reload") {
+  if (!["/runtime-reload", "/model-configuration"].includes(path)) return reply(response, 404, "not_found");
   if (!["GET", "POST"].includes(request.method)) return reply(response, 405, "method_not_allowed");
   if (!socketPath) return reply(response, 503, "runtime_control_not_configured");
   const authorization = request.headers.authorization;
   if (typeof authorization !== "string" || !authorization.startsWith("Bearer ")) return reply(response, 401, "operator_unauthorized");
-  if (request.headers["transfer-encoding"] || Number(request.headers["content-length"] ?? 0) !== 0) return reply(response, 400, "body_not_allowed");
-  const upstream = httpRequest({ socketPath, path: "/runtime-reload", method: request.method,
-    headers: { authorization, "content-length": "0" } }, (result) => {
+  const acceptsBody = path === "/model-configuration" && request.method === "POST";
+  if (!acceptsBody && (request.headers["transfer-encoding"] || Number(request.headers["content-length"] ?? 0) !== 0)) return reply(response, 400, "body_not_allowed");
+  const chunks = [];
+  let size = 0;
+  if (acceptsBody) {
+    try {
+      for await (const chunk of request) {
+        size += chunk.length;
+        if (size > 1024 * 1024) return reply(response, 413, "configuration_too_large");
+        chunks.push(chunk);
+      }
+    } catch { return reply(response, 400, "invalid_configuration_request"); }
+  }
+  const upstream = httpRequest({ socketPath, path, method: request.method,
+    headers: { authorization, "content-type": "application/json", "content-length": String(size) } }, (result) => {
     response.writeHead(result.statusCode ?? 502, { "content-type": "application/json", "cache-control": "no-store" });
     result.pipe(response);
   });
@@ -18,7 +31,7 @@ export function proxyRuntimeControl(request, response, socketPath) {
     if (response.headersSent) response.destroy();
     else reply(response, 503, "runtime_control_unavailable");
   });
-  upstream.end();
+  upstream.end(Buffer.concat(chunks));
 }
 
 function reply(response, status, error) {

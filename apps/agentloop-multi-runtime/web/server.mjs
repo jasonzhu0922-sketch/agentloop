@@ -49,8 +49,8 @@ export function createWebServer({ installerDirectory = process.env.LOCAL_AGENT_D
     // SSE/recovery implementation alive after the Router has been restarted.
     response.setHeader("cache-control", "no-store");
     const pathname = new URL(request.url ?? "/", "http://web.local").pathname;
-    if (pathname === "/api/operations/runtime-reload") {
-      proxyRuntimeControl(request, response, runtimeControlSocket);
+    if (pathname === "/api/operations/runtime-reload" || pathname === "/api/operations/model-configuration") {
+      await proxyRuntimeControl(request, response, runtimeControlSocket, pathname.slice("/api/operations".length));
       return;
     }
     if (pathname.startsWith("/downloads/local-agent/")) {
