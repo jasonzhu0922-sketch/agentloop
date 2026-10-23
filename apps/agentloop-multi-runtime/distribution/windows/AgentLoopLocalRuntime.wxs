@@ -4,13 +4,14 @@
            Version="$(var.Version)"
            UpgradeCode="$(var.UpgradeCode)"
            Scope="perMachine">
-    <MajorUpgrade DowngradeErrorMessage="A newer version of AgentLoop Local Runtime is already installed." />
+    <!-- Deferred shutdown executes before InstallFiles. Remove the old product
+         only after that script executes, so legacy uninstall cannot race it. -->
+    <MajorUpgrade Schedule="afterInstallExecute" DowngradeErrorMessage="A newer version of AgentLoop Local Runtime is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="AgentLoop Local Runtime">
         <Component Id="RuntimeFiles" Bitness="always64">
-          <Files Include="$(var.PayloadDir)\**" />
           <RegistryValue Root="HKLM" Key="Software\AgentLoop\LocalRuntime" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
         </Component>
         <Component Id="ProtocolRegistration" Bitness="always64">
@@ -31,6 +32,25 @@
     <Feature Id="Complete" Title="AgentLoop Local Runtime" Level="1">
       <ComponentRef Id="RuntimeFiles" />
       <ComponentRef Id="ProtocolRegistration" />
+      <ComponentGroupRef Id="RuntimePayload" />
     </Feature>
+
+    <Binary Id="InstallerProcessControl" SourceFile="$(var.PayloadDir)\AgentLoop Local Runtime.exe" />
+    <CustomAction Id="StopInstalledProcesses"
+                  BinaryRef="InstallerProcessControl"
+                  ExeCommand="--stop-for-install &quot;[INSTALLFOLDER].&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+    <CustomAction Id="LaunchTrayAfterInstall"
+                  FileRef="TrayExecutable"
+                  ExeCommand=""
+                  Execute="immediate"
+                  Impersonate="yes"
+                  Return="asyncNoWait" />
+    <InstallExecuteSequence>
+      <Custom Action="StopInstalledProcesses" Before="RemoveFiles" Condition="NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="LaunchTrayAfterInstall" After="InstallFinalize" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
   </Package>
 </Wix>

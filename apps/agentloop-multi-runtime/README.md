@@ -382,11 +382,13 @@ npm run package:local-agent:mac --workspace agentloop-multi-runtime
 
 安装后 Agent 通过 macOS LaunchAgent 登录启动；托盘只提供在线状态、重连、打开 Web、查看日志和退出，业务配置仍由 Web 管理。Router 地址作为固定构建配置嵌入 Agent；Agent 的 bootstrap 文件仅作为安装器/运维迁移用途保留。
 
-macOS PKG 支持直接覆盖安装，无需先卸载。安装前停止当前桌面用户的旧 LaunchAgent 和旧托盘进程，确认退出后再替换应用；安装后移除旧 plist，并以该用户身份打开新版 App，由它重新注册后台服务。无法停止旧服务时安装中止并显示原因。没有登录桌面用户时不启动 App，登录后手动打开一次。升级保留 `~/Library/Application Support/AgentLoop Local Runtime/` 中的 SQLite、设备身份、配置和工作区。此流程处理当前桌面用户；其他系统账户下的服务不在此次清理范围内。
+macOS PKG 支持直接覆盖安装，无需先卸载。安装前卸载所有登录会话中的旧 LaunchAgent，停止安装路径下的旧托盘和 Agent（包括随包 Node）；先发送 TERM，等待超时后发送 KILL，确认退出后才替换应用。安装后移除当前桌面用户的旧 plist，以该用户身份打开新版 App，并等待新版 LaunchAgent 注册。无法停止旧服务或无法启动新版服务时报告失败。没有登录桌面用户时不启动 App，登录后手动打开一次。升级保留 `~/Library/Application Support/AgentLoop Local Runtime/` 中的 SQLite、设备身份、模型/MCP 配置及密钥、Runtime 定义、Skill 包和工作区。安装器第三个参数用于判断目标卷，向其他卷安装时不会操作本机服务。
 
 ### 打包 Local Runtime Agent（Windows x64 MSI）
 
 Windows 使用 WiX 生成 per-machine `.msi`，安装到 `Program Files`，注册 `agentloop-local-runtime://` 协议。协议唤起的原生 .NET 托盘壳会启动本机 Agent，并在首次运行时写入当前用户的登录自启项；业务配置仍只存在于 Web。它同样优先使用 Node SEA，无法注入时携带 Node fallback，不包含 Electron。
+
+Windows MSI 的安装事务在替换文件前，以提升权限运行 MSI 内嵌的进程清理程序：按完整安装路径终止旧托盘、SEA Agent 和随包 Node 的进程树，包含旧版托盘遗留的孤立 Agent；无法清理时中止安装。同名但来自其他安装路径的程序不会被终止。文件替换及旧产品移除成功后，以安装发起用户身份启动新版托盘和 Agent。安装器只管理 `Program Files/AgentLoop Local Runtime/`，保留 `%LOCALAPPDATA%/AgentLoop Local Runtime/` 下的设备身份、SQLite、模型/MCP 配置及密钥、Runtime 定义、Skill 包和工作区。Windows 打包前会执行原生进程清理回归，MSI 文件组件使用稳定路径标识并包含托盘依赖、Resources 和根目录 assets。服务账户下的无人值守安装没有交互桌面，需在目标用户会话中启动托盘。
 
 必须在 64 位 Windows 构建机上执行，并准备：Node 26、.NET 8 SDK、WiX Toolset v4（`wix` 在 `PATH` 中）。
 

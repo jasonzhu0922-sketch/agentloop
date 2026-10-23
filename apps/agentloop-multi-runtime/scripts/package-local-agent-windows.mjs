@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { PACKAGED_LOCAL_AGENT_PORT } from "../src/shared/local-agent-endpoint.mjs";
+import { windowsMsiPayload } from "./windows-msi-payload.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(appRoot, "../..");
@@ -39,6 +40,10 @@ if (process.platform !== "win32" || process.arch !== "x64") throw new Error("pac
 await rm(releaseRoot, { recursive: true, force: true });
 await mkdir(resources, { recursive: true });
 
+// Execute the real process replacement regression on the native build host.
+const lifecycleTests = join(releaseRoot, "installer-tests");
+run("dotnet", ["publish", join(appRoot, "tests/windows-installer/InstallerLifecycleTests.csproj"), "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-o", lifecycleTests]);
+run(join(lifecycleTests, "InstallerLifecycleTests.exe"), []);
 await buildAgentBundles();
 await writeFile(seaConfig, JSON.stringify({ main: seaBundle, output: seaBlob }, null, 2));
 run(process.execPath, ["--experimental-sea-config", seaConfig]);
@@ -56,7 +61,9 @@ await writeLauncher(seaInjected);
 await copyRuntimePayload();
 run("dotnet", ["publish", join(appRoot, "distribution/windows/AgentLoopLocalRuntimeTray.csproj"), "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:DebugType=None", "-o", trayOutput]);
 await cp(trayOutput, payloadRoot, { recursive: true });
-run("wix", ["build", "-arch", "x64", "-d", `PayloadDir=${payloadRoot}`, "-d", `Version=${version}`, "-d", `UpgradeCode=${upgradeCode}`, "-out", msi, join(appRoot, "distribution/windows/AgentLoopLocalRuntime.wxs")]);
+const payloadSource = join(stagingRoot, "payload.wxs");
+await writeFile(payloadSource, await windowsMsiPayload(payloadRoot));
+run("wix", ["build", "-arch", "x64", "-d", `PayloadDir=${payloadRoot}`, "-d", `Version=${version}`, "-d", `UpgradeCode=${upgradeCode}`, "-out", msi, join(appRoot, "distribution/windows/AgentLoopLocalRuntime.wxs"), payloadSource]);
 process.stdout.write(`Built ${msi} (${seaInjected ? "Node SEA" : "bundled Node fallback"})\n`);
 
 async function buildAgentBundles() {

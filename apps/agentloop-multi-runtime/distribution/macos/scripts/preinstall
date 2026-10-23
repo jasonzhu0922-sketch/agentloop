@@ -2,41 +2,35 @@
 set -u
 
 # Installer may target a different volume; never stop this Mac's services then.
-[ "${1:-/}" = "/" ] || exit 0
+[ "${3:-/}" = "/" ] || exit 0
 
-# Stop the prior per-user Agent before the package replaces its executable.
+# The bundle is shared by all login sessions. Unload every matching per-user
+# service before stopping its executable so KeepAlive cannot respawn old code.
 readonly LABEL="com.agentloop.local-runtime-agent"
-readonly CONSOLE_USER="$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || true)"
-
-case "$CONSOLE_USER" in
-  ""|root|loginwindow)
-    exit 0
-    ;;
-esac
-
-USER_UID="$(/usr/bin/id -u "$CONSOLE_USER" 2>/dev/null || true)"
-case "$USER_UID" in
-  ''|*[!0-9]*)
-    exit 0
-    ;;
-esac
-
-/bin/launchctl bootout "gui/$USER_UID/$LABEL" >/dev/null 2>&1 || true
-if /bin/launchctl print "gui/$USER_UID/$LABEL" >/dev/null 2>&1; then
-  echo "Unable to unload the old AgentLoop LaunchAgent; update aborted." >&2
-  exit 1
-fi
-readonly AGENT_PATTERN='/Applications/AgentLoop Local Runtime\.app/Contents/Resources/agentloop-local-runtime-agent(\.mjs)?($| )'
-readonly TRAY_PATTERN='/Applications/AgentLoop Local Runtime\.app/Contents/MacOS/AgentLoop Local Runtime($| )'
-/usr/bin/pkill -TERM -u "$USER_UID" -f "$AGENT_PATTERN" >/dev/null 2>&1 || true
-/usr/bin/pkill -TERM -u "$USER_UID" -f "$TRAY_PATTERN" >/dev/null 2>&1 || true
+readonly AGENT_PATTERN='(^| )/Applications/AgentLoop Local Runtime\.app/Contents/Resources/agentloop-local-runtime-(agent(\.mjs)?|node)($| )'
+readonly TRAY_PATTERN='^/Applications/AgentLoop Local Runtime\.app/Contents/MacOS/AgentLoop Local Runtime($| )'
+/usr/bin/pkill -TERM -f "$TRAY_PATTERN" >/dev/null 2>&1 || true
+for USER_UID in $(/bin/ps -axo uid= | /usr/bin/sort -nu); do
+  if /bin/launchctl print "gui/$USER_UID/$LABEL" >/dev/null 2>&1; then
+    /bin/launchctl bootout "gui/$USER_UID/$LABEL" >/dev/null 2>&1 || true
+    if /bin/launchctl print "gui/$USER_UID/$LABEL" >/dev/null 2>&1; then
+      echo "Unable to unload the old AgentLoop LaunchAgent for UID $USER_UID; update aborted." >&2
+      exit 1
+    fi
+  fi
+done
+/usr/bin/pkill -TERM -f "$AGENT_PATTERN" >/dev/null 2>&1 || true
 
 # Do not replace an executable while a previous copy is still running.
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
-  if ! /usr/bin/pgrep -u "$USER_UID" -f "$AGENT_PATTERN" >/dev/null 2>&1 && ! /usr/bin/pgrep -u "$USER_UID" -f "$TRAY_PATTERN" >/dev/null 2>&1; then
-    exit 0
-  fi
-  /bin/sleep 1
+for signal in TERM KILL; do
+  /usr/bin/pkill -"$signal" -f "$TRAY_PATTERN" >/dev/null 2>&1 || true
+  /usr/bin/pkill -"$signal" -f "$AGENT_PATTERN" >/dev/null 2>&1 || true
+  for attempt in 1 2 3 4 5; do
+    if ! /usr/bin/pgrep -f "$AGENT_PATTERN" >/dev/null 2>&1 && ! /usr/bin/pgrep -f "$TRAY_PATTERN" >/dev/null 2>&1; then
+      exit 0
+    fi
+    /bin/sleep 1
+  done
 done
-echo "AgentLoop Local Runtime is still running; quit it and retry the update." >&2
+echo "Unable to terminate the old AgentLoop Local Runtime; update aborted." >&2
 exit 1

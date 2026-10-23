@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-[ "${1:-/}" = "/" ] || exit 0
+[ "${3:-/}" = "/" ] || exit 0
 
 # The preinstall hook stops the old service. Remove only its per-user plist so
 # the new tray app can write a definition with the new bundle's resource paths.
@@ -32,6 +32,14 @@ esac
 
 /bin/rm -f "$USER_HOME/Library/LaunchAgents/$LABEL.plist"
 if ! /bin/launchctl asuser "$USER_UID" /usr/bin/sudo -u "$CONSOLE_USER" /usr/bin/open -a "/Applications/AgentLoop Local Runtime.app"; then
-  echo "AgentLoop updated. Open /Applications/AgentLoop Local Runtime.app to start it." >&2
+  echo "Unable to start the newly installed AgentLoop Local Runtime." >&2
+  exit 1
 fi
-exit 0
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if /bin/launchctl print "gui/$USER_UID/$LABEL" >/dev/null 2>&1; then
+    exit 0
+  fi
+  /bin/sleep 1
+done
+echo "The newly installed AgentLoop LaunchAgent did not register." >&2
+exit 1

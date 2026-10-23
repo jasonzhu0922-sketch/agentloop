@@ -7,12 +7,20 @@ namespace AgentLoop.LocalRuntime;
 internal static class Program
 {
     [STAThread]
-    private static void Main(string[] args)
+    private static int Main(string[] args)
     {
+        // MSI runs its embedded copy before touching installed files, including
+        // when the installed tray predates the shutdown protocol.
+        if (args.Length == 2 && args[0] == "--stop-for-install")
+        {
+            try { InstallerLifecycle.Stop(args[1]); return 0; }
+            catch (Exception error) { Console.Error.WriteLine(error); return 1; }
+        }
         using var singleton = new Mutex(true, "Global\\AgentLoop.LocalRuntime.Tray", out var isFirstInstance);
-        if (!isFirstInstance) return;
+        if (!isFirstInstance) return 0;
         ApplicationConfiguration.Initialize();
         Application.Run(new TrayContext(args));
+        return 0;
     }
 }
 
@@ -26,6 +34,7 @@ internal sealed class TrayContext : ApplicationContext
     private readonly string agentCommand;
     private readonly string logRoot;
     private readonly string webOrigin;
+    private Process? agentProcess;
 
     internal TrayContext(string[] args)
     {
@@ -60,20 +69,40 @@ internal sealed class TrayContext : ApplicationContext
     {
         try
         {
+            if (agentProcess is { HasExited: false }) return;
+            agentProcess?.Dispose();
+            agentProcess = null;
             Directory.CreateDirectory(logRoot);
-            Process.Start(new ProcessStartInfo
+            var process = Process.Start(new ProcessStartInfo
             {
-                FileName = agentCommand,
+                FileName = Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+                Arguments = $"/d /s /c \"\"{agentCommand}\"\"",
                 WorkingDirectory = resourceRoot,
                 UseShellExecute = false,
                 CreateNoWindow = true,
             });
+            if (process is null) throw new InvalidOperationException("Local Runtime Agent did not start");
+            agentProcess = process;
             icon.Text = "AgentLoop Local Runtime";
         }
         catch
         {
             icon.Text = "AgentLoop Local Runtime - 未能启动";
         }
+    }
+
+    private void StopAgent()
+    {
+        var process = agentProcess;
+        agentProcess = null;
+        if (process is null) return;
+        try
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            process.WaitForExit(5_000);
+        }
+        catch { }
+        finally { process.Dispose(); }
     }
 
     private void EnsureStartup()
@@ -101,6 +130,7 @@ internal sealed class TrayContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
+        StopAgent();
         icon.Visible = false;
         icon.Dispose();
         base.ExitThreadCore();

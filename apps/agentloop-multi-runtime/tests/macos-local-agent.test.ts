@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,17 +55,23 @@ test("macOS PKG includes an upgrade cleanup script without deleting runtime stat
     readFile(new URL("../distribution/macos/scripts/postinstall", import.meta.url), "utf8"),
   ]);
   assert.match(preinstall, /launchctl bootout/);
-  assert.match(preinstall, /\$\{1:-\/\}/);
+  assert.match(preinstall, /\$\{3:-\/\}/);
   assert.match(preinstall, /launchctl print/);
-  assert.match(preinstall, /pkill -TERM -u .* -f/);
-  assert.match(preinstall, /pgrep -u .* -f/);
-  assert.match(preinstall, /AgentLoop Local Runtime is still running/);
+  assert.match(preinstall, /for signal in TERM KILL/);
+  assert.match(preinstall, /pgrep -f/);
+  assert.match(preinstall, /Unable to terminate the old AgentLoop Local Runtime/);
   assert.match(preinstall, /exit 1/);
-  assert.match(preinstall, /agentloop-local-runtime-agent/);
+  const agentPattern = new RegExp(preinstall.match(/readonly AGENT_PATTERN='([^']+)'/)![1]!);
+  for (const command of [
+    "/Applications/AgentLoop Local Runtime.app/Contents/Resources/agentloop-local-runtime-agent",
+    "/Applications/AgentLoop Local Runtime.app/Contents/Resources/agentloop-local-runtime-node /Applications/AgentLoop Local Runtime.app/Contents/Resources/agentloop-local-runtime-agent.mjs",
+  ]) assert.ok(agentPattern.test(command), command);
+  assert.equal(agentPattern.test("/tmp/other/agentloop-local-runtime-agent"), false);
+  assert.equal(agentPattern.test("/Applications/AgentLoop Local Runtime.app/Contents/Resources/agentloop-local-runtime-agent-other"), false);
   assert.match(preinstall, /\\\.mjs/);
   assert.match(preinstall, /Contents\/MacOS\/AgentLoop Local Runtime/);
   assert.match(postinstall, /LaunchAgents/);
-  assert.match(postinstall, /\$\{1:-\/\}/);
+  assert.match(postinstall, /\$\{3:-\/\}/);
   assert.match(postinstall, /rm -f/);
   assert.match(postinstall, /launchctl asuser/);
   assert.match(postinstall, /sudo -u/);
@@ -75,6 +81,84 @@ test("macOS PKG includes an upgrade cleanup script without deleting runtime stat
   const packager = await readFile(new URL("../scripts/package-local-agent-macos.mjs", import.meta.url), "utf8");
   assert.match(packager, /["']--scripts["']/);
   assert.match(packager, /distribution\/macos\/scripts/);
-  assert.equal(execFileSync("/bin/sh", [new URL("../distribution/macos/scripts/preinstall", import.meta.url).pathname, "/Volumes/Other", "unused", "unused"], { encoding: "utf8" }), "");
-  assert.equal(execFileSync("/bin/sh", [new URL("../distribution/macos/scripts/postinstall", import.meta.url).pathname, "/Volumes/Other", "unused", "unused"], { encoding: "utf8" }), "");
+  for (const name of ["preinstall", "postinstall"]) {
+    assert.equal(execFileSync("/bin/sh", [new URL(`../distribution/macos/scripts/${name}`, import.meta.url).pathname, "/tmp/AgentLoop.pkg", "/Applications", "/Volumes/Other"], { encoding: "utf8" }), "");
+  }
+});
+
+test("macOS installer stops legacy processes across sessions, escalates to KILL, and preserves device data", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-pkg-upgrade-"));
+  try {
+    const home = join(root, "user");
+    const plist = join(home, "Library/LaunchAgents/com.agentloop.local-runtime-agent.plist");
+    const data = join(home, "Library/Application Support/AgentLoop Local Runtime");
+    await mkdir(data, { recursive: true });
+    await mkdir(join(home, "Library/LaunchAgents"), { recursive: true });
+    await writeFile(plist, "obsolete service");
+    const sentinels = ["agentloop.db", "supervisor.db", "models.json", "mcp.json", "device-identity.json", "runtime-secrets"];
+    for (const name of sentinels) await writeFile(join(data, name), `preserved ${name}`);
+    const statePath = join(root, "state.json");
+    const initial = { loaded: { "501": true, "502": true }, agent: true, tray: true, stubborn: true, home, calls: [] };
+    const shim = join(root, "command");
+    await writeFile(shim, `#!${process.execPath}
+const fs = require('node:fs');
+const command = process.argv[2], args = process.argv.slice(3);
+const file = ${JSON.stringify(statePath)};
+const state = JSON.parse(fs.readFileSync(file));
+state.calls.push([command, ...args]);
+let status = 0;
+if (command === 'ps') console.log('501\\n502');
+if (command === 'stat') console.log('fixture-user');
+if (command === 'id') console.log('501');
+if (command === 'dscl') console.log('NFSHomeDirectory: ' + state.home);
+if (command === 'launchctl') {
+  const uid = args[1]?.split('/')[1];
+  if (args[0] === 'print') status = state.loaded[uid] ? 0 : 1;
+  if (args[0] === 'bootout' && !state.failBootout) state.loaded[uid] = false;
+  if (args[0] === 'asuser') {
+    status = state.failOpen ? 1 : 0;
+    if (!status && !state.failRegister) state.loaded['501'] = true;
+  }
+}
+if (command === 'pkill' || command === 'pgrep') {
+  const target = args.at(-1).includes('Contents/MacOS') ? 'tray' : 'agent';
+  if (command === 'pgrep') status = state[target] ? 0 : 1;
+  else if (!state.unstoppable && (!state.stubborn || args[0] === '-KILL')) state[target] = false;
+}
+fs.writeFileSync(file, JSON.stringify(state));
+process.exit(status);
+`);
+    await chmod(shim, 0o755);
+    const scripts: Record<string, string> = {};
+    for (const name of ["preinstall", "postinstall"]) {
+      const source = await readFile(new URL(`../distribution/macos/scripts/${name}`, import.meta.url), "utf8");
+      scripts[name] = join(root, name);
+      await writeFile(scripts[name]!, source.replace(/\/(?:usr\/bin|bin)\/(ps|stat|id|dscl|launchctl|pkill|pgrep|sleep)\b/g, (_, command) => `"${shim}" ${command}`));
+    }
+    const run = (name: string) => spawnSync("/bin/sh", [scripts[name]!, "/tmp/AgentLoop.pkg", "/Applications", "/"], { encoding: "utf8" });
+    const state = async () => JSON.parse(await readFile(statePath, "utf8"));
+    await writeFile(statePath, JSON.stringify(initial));
+    assert.equal(run("preinstall").status, 0);
+    let actual = await state();
+    assert.deepEqual(actual.loaded, { "501": false, "502": false });
+    assert.equal(actual.agent, false);
+    assert.equal(actual.tray, false);
+    assert.ok(actual.calls.some((call: string[]) => call[0] === "pkill" && call[1] === "-KILL"));
+    assert.equal(run("postinstall").status, 0);
+    actual = await state();
+    assert.equal(actual.loaded["501"], true);
+    await assert.rejects(readFile(plist), { code: "ENOENT" });
+    for (const name of sentinels) assert.equal(await readFile(join(data, name), "utf8"), `preserved ${name}`);
+
+    for (const failure of ["failBootout", "unstoppable"]) {
+      await writeFile(statePath, JSON.stringify({ ...initial, [failure]: true }));
+      assert.equal(run("preinstall").status, 1, failure);
+    }
+    for (const failure of ["failOpen", "failRegister"]) {
+      await writeFile(statePath, JSON.stringify({ ...initial, loaded: {}, [failure]: true }));
+      assert.equal(run("postinstall").status, 1, failure);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
