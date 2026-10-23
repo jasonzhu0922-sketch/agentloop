@@ -7,7 +7,7 @@ type Environment = Readonly<Record<string, string | undefined>>;
 export interface LocalAgentRuntimeConfiguration {
   /** A device-owned deployment directory, intentionally outside Skill packages. */
   readonly root: string;
-  /** The only database-configuration path exposed to Skill commands. */
+  /** The deployment configuration file used by device-owned integrations. */
   readonly environmentFile: string;
   readonly providerConfigPath: string;
   readonly computerCommandEnvironment: Readonly<Record<string, string>>;
@@ -34,11 +34,7 @@ export function localAgentRuntimeConfiguration(
     root,
     environmentFile,
     providerConfigPath: resolve(environment.LOCAL_AGENT_PROVIDER_CONFIG_PATH ?? join(root, "config", "llm-providers.json")),
-    computerCommandEnvironment: {
-      DAM_TEST_ENV_FILE: environmentFile,
-      ENTERPRISE_INFO_ENV_FILE: environmentFile,
-      STEEL_MARKET_DB_ENV_FILE: environmentFile,
-    },
+    computerCommandEnvironment: {},
   };
 }
 

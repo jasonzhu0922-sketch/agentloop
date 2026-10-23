@@ -923,6 +923,8 @@ test("Web static entry aliases resolve after the modular directory migration", (
   assert.equal(staticFilePath("/app")?.endsWith("/web/pages/app.html"), true);
   assert.equal(staticFilePath("/login")?.endsWith("/web/pages/login.html"), true);
   assert.equal(staticFilePath("/login.html")?.endsWith("/web/pages/login.html"), true);
+  assert.equal(staticFilePath("/cloud-models")?.endsWith("/web/pages/cloud-models.html"), true);
+  assert.equal(staticFilePath("/cloud-models/")?.endsWith("/web/pages/cloud-models.html"), true);
   assert.equal(staticFilePath("/%2e%2e/package.json"), undefined);
 });
 

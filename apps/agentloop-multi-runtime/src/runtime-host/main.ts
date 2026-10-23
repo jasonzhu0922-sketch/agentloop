@@ -21,26 +21,6 @@ import { migrateRuntimeState } from "./persistence/state-migrations.ts";
 import { loadOptionalPlanTemplateObserver } from "./plan-template-observer.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
-// This non-sensitive path is the only Enterprise Info setting passed to
-// Skill-owned commands. The script reads credentials from the deployment file.
-const enterpriseInfoEnvironmentFile = resolve(
-  appRoot,
-  process.env.ENTERPRISE_INFO_ENV_FILE ?? "./.env",
-);
-// data-platform-query receives only its deployment-file path; its wrapper
-// reads the DAM_TEST_* values without exposing them to Planner, model context,
-// or command-line arguments.
-const damTestEnvironmentFile = resolve(
-  appRoot,
-  process.env.DAM_TEST_ENV_FILE ?? "./.env",
-);
-// Like other Skill-owned integrations, pass only the deployment configuration
-// path. The mysql Skill reads credentials itself; neither Planner nor model
-// context ever receives them.
-const steelMarketDatabaseEnvironmentFile = resolve(
-  appRoot,
-  process.env.STEEL_MARKET_DB_ENV_FILE ?? "./.env",
-);
 const host = process.env.HOST ?? "127.0.0.1";
 const port = integer(process.env.PORT, 8791);
 const runtimeId = requiredEnv("RUNTIME_ID");
@@ -134,11 +114,6 @@ const runs = new RunService({
   stepExecutionStrategy,
   practiceProfileCatalog,
   tools: [...integrationTools, ...mcpIntegration.tools],
-  computerCommandEnvironment: {
-    ENTERPRISE_INFO_ENV_FILE: enterpriseInfoEnvironmentFile,
-    DAM_TEST_ENV_FILE: damTestEnvironmentFile,
-    STEEL_MARKET_DB_ENV_FILE: steelMarketDatabaseEnvironmentFile,
-  },
   ...(planTemplateObserver === undefined ? {} : { planningExtensions: [planTemplateObserver.extension()] }),
   runEventLogSink: (line) => process.stdout.write(`${runtimeLogLabel} ${colorizeTerminalLogLine(line, logColorOptions)}\n`),
 });

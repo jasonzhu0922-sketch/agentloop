@@ -34,7 +34,8 @@ export function staticFilePath(pathname) {
     ? "pages/app.html"
     : (decodedPathname === "/login" || decodedPathname === "/register" || decodedPathname === "/login.html"
       ? "pages/login.html"
-      : decodedPathname === "/downloads" || decodedPathname === "/downloads/" ? "pages/downloads.html" : decodedPathname.slice(1));
+      : decodedPathname === "/downloads" || decodedPathname === "/downloads/" ? "pages/downloads.html"
+        : decodedPathname === "/cloud-models" || decodedPathname === "/cloud-models/" ? "pages/cloud-models.html" : decodedPathname.slice(1));
   const file = resolve(root, requested);
   return file === root || file.startsWith(`${root}${sep}`) ? file : undefined;
 }

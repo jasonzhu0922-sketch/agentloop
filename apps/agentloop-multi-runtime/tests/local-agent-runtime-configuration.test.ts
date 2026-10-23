@@ -10,11 +10,7 @@ test("Local Agent uses its top-level source configuration in development and dev
   assert.equal(configuration.root, "/application/local-agent-runtime");
   assert.equal(configuration.environmentFile, "/application/local-agent-runtime/.env");
   assert.equal(configuration.providerConfigPath, "/application/local-agent-runtime/config/llm-providers.json");
-  assert.deepEqual(configuration.computerCommandEnvironment, {
-    DAM_TEST_ENV_FILE: "/application/local-agent-runtime/.env",
-    ENTERPRISE_INFO_ENV_FILE: "/application/local-agent-runtime/.env",
-    STEEL_MARKET_DB_ENV_FILE: "/application/local-agent-runtime/.env",
-  });
+  assert.deepEqual(configuration.computerCommandEnvironment, {});
 
   const packaged = localAgentRuntimeConfiguration("/application", "/device-data", { AGENTLOOP_AGENT_PACKAGED: "1" });
   assert.equal(packaged.environmentFile, "/device-data/agent-loop-runtime/.env");

@@ -43,7 +43,7 @@ Runtime 的有效环境中，Compose `environment` 中的同名字段覆盖 `env
 
 Router 未使用 Runtime 的 `env_file`。例如要调整 `RUNTIME_HEARTBEAT_TTL_MS`，须在 Compose 的 Router `environment` 中增加映射，再设置部署 `.env` 并重建 Router；只在 `.env` 增加名字不会生效。
 
-模型和 MCP 的环境变量与 Skill 自行读取的文件也有区别：部分 Skill 通过 `DAM_TEST_ENV_FILE`、`ENTERPRISE_INFO_ENV_FILE`、`STEEL_MARKET_DB_ENV_FILE` 读取部署文件。当前 Compose 的 `env_file` 只注入环境，不会把宿主机 `runtime.env` 作为文件挂载。对这类集成，应按 Skill 合约添加只读文件挂载，并把相应路径变量指向容器内路径，再验证真实工具调用；不能仅检查环境变量存在。
+模型和 MCP 的环境变量与 Skill 自行读取的文件也有区别：`mysql-steel-data`、`data-platform-query` 和 `enterprise-info` 分别固定读取各自 Skill 根目录的 `.env`。部署时在实际执行的 Skill 目录配置；云端自定义 Skills 只读挂载时，在宿主机对应 Skill 目录维护此文件。Compose 的 Runtime `env_file` 不提供这些 Skill 的配置。分发 ZIP 只提供 `.env.example`，不携带真实 `.env`，仍须验证真实工具调用。
 
 不要 `source` dotenv 文件。Compose 支持单引号字面量，例如 `MY_LLM_API_KEY='REPLACE_WITH_REAL_KEY'`；保留已有格式，特殊字符以 Compose 解析结果为准。本机预览只检查 JSON 基本引用，完整环境解析和凭据存在性检查在 `--apply` 的服务器预检执行；最后仍以重建后的有效配置和新任务验收为准。
 

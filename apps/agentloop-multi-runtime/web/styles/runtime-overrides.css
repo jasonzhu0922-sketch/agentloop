@@ -1255,3 +1255,4 @@ body.workspace-resizing * {
 @keyframes app-toast-enter{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
 @media(prefers-reduced-motion:reduce){.app-toast{animation:none}}
 @media(max-width:560px){.app-notifications{top:20px;right:20px;width:calc(100vw - 40px)}}
+.cloud-model-settings-link{color:var(--text-2);font-size:11px;text-decoration:none}.cloud-model-settings-link:hover{color:var(--brand);text-decoration:underline}
