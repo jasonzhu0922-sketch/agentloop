@@ -1,6 +1,5 @@
-import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import JSZip from "jszip";
 import { copySkillPackage, inspectSkillPackage, type SkillPackageInspection } from "@zhujun/agentloop";
 
@@ -9,9 +8,6 @@ const MAX_FILES = 2_000;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_COMPRESSION_RATIO = 100;
-const FORBIDDEN_NAMES = new Set([
-  ".env", ".npmrc", ".pypirc", "credentials", "credentials.json", "id_rsa", "id_ed25519",
-]);
 
 export interface InstalledLocalSkillPackage {
   readonly storageKey: string;
@@ -19,7 +15,7 @@ export interface InstalledLocalSkillPackage {
   readonly inspection: SkillPackageInspection;
 }
 
-/** Installs one ZIP as an immutable package without granting it to any Runtime. */
+/** Installs a user-owned ZIP on this device, including its private configuration. */
 export class LocalSkillPackageInstaller {
   private readonly packageRoot: string;
 
@@ -49,7 +45,6 @@ export class LocalSkillPackageInstaller {
         if (totalBytes > MAX_TOTAL_BYTES || totalBytes > Math.max(content.length * MAX_COMPRESSION_RATIO, 1024 * 1024)) {
           throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
         }
-        assertNonSensitivePackagePath(packagePath);
         const target = resolve(staging, ...packagePath.split("/"));
         assertInside(staging, target);
         await mkdir(dirname(target), { recursive: true, mode: 0o700 });
@@ -96,14 +91,6 @@ function assertRegularZipEntry(entry: JSZip.JSZipObject): void {
   if (fileType !== 0 && fileType !== 0o100000) throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
 }
 
-function assertNonSensitivePackagePath(path: string): void {
-  const segments = path.toLowerCase().split("/");
-  const name = basename(path).toLowerCase();
-  if (segments.includes(".git") || segments.includes(".ssh") || FORBIDDEN_NAMES.has(name) || name.endsWith(".pem") || name.endsWith(".key")) {
-    throw new LocalSkillPackageInstallError(400, "skill_upload_contains_sensitive_file");
-  }
-}
-
 function assertInside(root: string, target: string): void {
   if (target === root || target.startsWith(`${root}${sep}`)) return;
   throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
@@ -113,5 +100,5 @@ async function packageSourceRoot(staging: string): Promise<string> {
   const entries = (await readdir(staging, { withFileTypes: true })).filter((entry) => entry.name !== "__MACOSX");
   if (entries.some((entry) => entry.isFile() && entry.name === "SKILL.md")) return staging;
   if (entries.length === 1 && entries[0]!.isDirectory()) return join(staging, entries[0]!.name);
-  throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
+  throw new LocalSkillPackageInstallError(400, "skill_upload_package_layout_invalid");
 }

@@ -36,6 +36,13 @@ test("loopback Runtime configuration supports empty extensions and redacts encry
       schema: "agentloop.skillDirectories/v1",
       customSkillDirectories: [],
     }));
+    const providerConfigPath = join(root, "llm-providers.json");
+    await writeFile(providerConfigPath, JSON.stringify({
+      defaultProvider: "test",
+      providers: {
+        test: { kind: "openai-compatible", baseUrl: "http://127.0.0.1:9/v1", apiKeyEnv: "TEST_LOCAL_API_KEY", defaultModel: "test-model" },
+      },
+    }));
     const appRoot = join(process.cwd(), "apps", "agentloop-multi-runtime");
     const supervisorDatabasePath = join(root, "supervisor.db");
     agent = await createLocalAgentServer({
@@ -47,11 +54,11 @@ test("loopback Runtime configuration supports empty extensions and redacts encry
       skillPackageStoreRoot: join(root, "skill-packages"),
       runtimeDataRoot: join(root, "runtimes"),
       supervisorDatabasePath,
-      providerConfigPath: join(appRoot, "config", "llm-providers.json"),
+      providerConfigPath,
       skillDirectoriesConfigPath: join(root, "skill-directories.json"),
       stepExecutionStrategyConfigPath: join(appRoot, "config", "step-execution-strategy.json"),
       webOrigin: "http://web.test",
-      environment: { WEB_SEARCH_DISABLED: "1", AGENTLOOP_BUNDLED_SKILL_DIRECTORIES: join(root, "empty-skills") },
+      environment: { WEB_SEARCH_DISABLED: "1", TEST_LOCAL_API_KEY: "test-key", AGENTLOOP_BUNDLED_SKILL_DIRECTORIES: join(root, "empty-skills") },
     });
     agent.listen(0, "127.0.0.1");
     await once(agent, "listening");
@@ -71,6 +78,13 @@ test("loopback Runtime configuration supports empty extensions and redacts encry
       "",
       "Review the supplied content.",
     ].join("\n"));
+    const privateFiles = {
+      ".env": "OA_DOC_URL=http://intranet.test/search\nOA_DOC_TOKEN=local-only-test-token\n",
+      "credentials.json": '{"token":"local-only-test-token"}',
+      "certificates/client.pem": "local-only-test-certificate",
+      ".ssh/id_ed25519": "local-only-test-key",
+    };
+    for (const [path, content] of Object.entries(privateFiles)) skillZip.file(`uploaded-review/${path}`, content);
     const skillArchive = await skillZip.generateAsync({ type: "nodebuffer" });
     const unsafeZip = new JSZip();
     unsafeZip.file("../escaped/SKILL.md", "---\nname: escaped\ndescription: invalid\n---\n");
@@ -91,6 +105,31 @@ test("loopback Runtime configuration supports empty extensions and redacts encry
     assert.equal(uploadResponse.status, 201);
     const uploaded = await uploadResponse.json() as { skill: { packageId: string; sourceKind: string } };
     assert.equal(uploaded.skill.sourceKind, "uploaded");
+    assert.equal(JSON.stringify(uploaded).includes("local-only-test-token"), false);
+    const uploadedRoot = join(root, "skill-packages", "uploaded");
+    const installedName = (await readdir(uploadedRoot)).find((name) => name.startsWith("uploaded-"));
+    assert.ok(installedName);
+    for (const [path, content] of Object.entries(privateFiles)) {
+      assert.equal(await readFile(join(uploadedRoot, installedName, path), "utf8"), content);
+    }
+
+    const symlinkZip = new JSZip();
+    symlinkZip.file("linked/SKILL.md", "../../outside", { unixPermissions: 0o120777 });
+    const symlinkResponse = await request("/v1/local-skill-package-uploads", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ originalName: "linked.zip", contentBase64: (await symlinkZip.generateAsync({ type: "nodebuffer", platform: "UNIX" })).toString("base64") }),
+    });
+    assert.equal(symlinkResponse.status, 400);
+    assert.deepEqual(await symlinkResponse.json(), { error: "skill_upload_invalid" });
+
+    const multipleZip = new JSZip();
+    for (const name of ["first", "second"]) multipleZip.file(`${name}/SKILL.md`, `---\nname: ${name}\ndescription: Test skill\n---\n`);
+    const multipleResponse = await request("/v1/local-skill-package-uploads", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ originalName: "multiple.zip", contentBase64: (await multipleZip.generateAsync({ type: "nodebuffer" })).toString("base64") }),
+    });
+    assert.equal(multipleResponse.status, 400);
+    assert.deepEqual(await multipleResponse.json(), { error: "skill_upload_package_layout_invalid" });
 
     const mcpTestResponse = await request("/v1/local-mcp-servers/test", {
       method: "POST",

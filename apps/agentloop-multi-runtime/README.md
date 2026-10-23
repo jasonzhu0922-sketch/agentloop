@@ -171,6 +171,8 @@ Local Runtime Agent 的模型、联网搜索和 Skill 集成配置属于设备�
 
 Local Agent 的源码也作为独立部署单元位于 `local-agent-runtime/src/`；它只依赖共享内核包及 Multi Runtime 的中立配置/契约，Router 和云端 Runtime Host 入口仍保留在 `src/`。`start:local-agent`、本地启动器和 macOS/Windows 打包器都以此目录的 `main.ts` 为唯一入口。
 
+Runtime 配置窗口的“上传 Skill”直接请求浏览器所在设备的 Local Agent，ZIP 内容保存在该设备数据目录的 `skill-packages/uploaded/`，不经 Router 或云端转存。本地上传允许携带 Skill 自己的 `.env`、凭据和证书文件，仍校验 ZIP 路径、普通文件类型和解包大小。每次上传一个 Skill：ZIP 根目录包含 `SKILL.md`，或只包含一个有 `SKILL.md` 的 Skill 文件夹。上传完成后需点击“保存”（新建时点击“创建”）应用到当前 Runtime。
+
 ### TiDB role databases
 
 TiDB 中的 schema 即 database。生产或真实联调可将 Router 与云端 Runtime Host

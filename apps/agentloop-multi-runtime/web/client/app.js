@@ -681,6 +681,7 @@ async function revokeLocalScope(scopeId) {
 
 async function openCreateLocalRuntime() {
   $("runtime-create-name").value = "";
+  $("runtime-create-skill-upload-status").textContent = "";
   $("runtime-create-mcp-json").value = "[]";
   $("runtime-create-mcp-error").textContent = "";
   $("runtime-create-mcp-test-result").textContent = "";
@@ -722,6 +723,7 @@ async function openConfigureLocalRuntime(runtimeId = localRuntimeState.runtimeId
   $("runtime-config-name").value = runtime.displayName;
   $("runtime-config-id").textContent = runtime.id;
   $("runtime-config-status").textContent = runtimeStatusLabel(runtime.status);
+  $("runtime-config-skill-upload-status").textContent = "";
   try {
     const response = await localAgentFetch(`/v1/local-runtimes/${encodeURIComponent(runtime.id)}/configuration`);
     const body = await response.json().catch(() => ({}));
@@ -832,9 +834,15 @@ async function loadRuntimeSkillOptions(containerId, selectedPackageIds) {
 
 async function uploadRuntimeSkill(prefix) {
   const input = $(`${prefix}-skill-file`);
+  const button = $(`${prefix}-skill-upload`);
+  const status = $(`${prefix}-skill-upload-status`);
+  if (button.disabled) return;
   const file = input.files?.[0];
   input.value = "";
   if (!file) return;
+  button.disabled = true;
+  status.textContent = `正在上传到本机：${file.name}…`;
+  status.dataset.tone = "running";
   try {
     const contentBase64 = await fileAsBase64(file);
     const response = await localAgentFetch("/v1/local-skill-package-uploads", {
@@ -843,12 +851,22 @@ async function uploadRuntimeSkill(prefix) {
       body: JSON.stringify({ originalName: file.name, contentBase64 }),
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+    if (!response.ok) {
+      const messages = {
+        skill_upload_invalid: "压缩包无效：请检查 ZIP 完整性、SKILL.md 格式和解包大小限制。",
+        skill_upload_package_layout_invalid: "每次上传一个 Skill：ZIP 根目录应有 SKILL.md，或只包含一个 Skill 文件夹。请将多个 Skill 分别压缩上传。",
+      };
+      throw new Error(messages[body.error] || body.error || `Local Agent HTTP ${response.status}`);
+    }
     const selected = [...$(`${prefix}-skills`).querySelectorAll('input[type="checkbox"]:checked')].map((item) => item.value);
     selected.push(body.skill.packageId);
     await loadRuntimeSkillOptions(`${prefix}-skills`, selected);
-    setStatus(`已安装 Skill：${body.skill.displayName}`, "ok");
-  } catch (error) { setStatus(`上传 Skill 失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
+    status.textContent = `已安装到本机：${body.skill.displayName}。点击${prefix === "runtime-create" ? "创建" : "保存"}后应用到此 Runtime。`;
+    status.dataset.tone = "ok";
+  } catch (error) {
+    status.textContent = `上传 Skill 失败：${error instanceof Error ? error.message : String(error)}`;
+    status.dataset.tone = "error";
+  } finally { button.disabled = false; }
 }
 
 function fileAsBase64(file) {
