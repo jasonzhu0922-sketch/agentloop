@@ -351,6 +351,30 @@ dc logs --since 10m --tail 100 router runtime-general-01 runtime-general-02
 
 Node 的 `EADDRINUSE` 则核对是宿主机进程启动重复，还是容器内重复监听。直接在同一宿主机启动多个非容器 Host 时必须使用不同 `PORT`、不同 `RUNTIME_ID` 并同步 Router 端点。调整 `MAX_CONCURRENT_RUNS` 不会解决监听端口冲突。
 
+### HTTP 自动跳转到 HTTPS
+
+生产 Nginx 配置由宿主机 `/etc/nginx/conf.d/agentloop-tls.conf` 管理。明文 HTTP 直接访问 `listen ... ssl` 的端口时，Nginx 默认返回 400；在对应 TLS `server` 块中处理内部状态 497，使用 308 保留请求方法、路径与查询参数：
+
+```nginx
+# Web 的 3001 TLS server 块
+error_page 497 =308 https://47.101.178.145:3001$request_uri;
+# Router 的 5001 TLS server 块
+error_page 497 =308 https://47.101.178.145:5001$request_uri;
+```
+
+不带端口访问该生产 IP 时，由独立的 HTTP server 块转入 Web：
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name 47.101.178.145;
+    return 308 https://47.101.178.145:3001$request_uri;
+}
+```
+
+修改前备份宿主机配置；执行 `nginx -t` 成功后再执行 `systemctl reload nginx`，无需重建应用容器。验证 HTTP 响应为 308、`Location` 保留目标端口和完整 URI，并确认 HTTPS 首页与配置页仍返回 200。域名或公开端口变更时同步修改跳转目标。
+
 ## 8. 云端代码发布与 macOS 独立打包
 
 本机仓库根目录执行，`S` 沿用第 3 节：
