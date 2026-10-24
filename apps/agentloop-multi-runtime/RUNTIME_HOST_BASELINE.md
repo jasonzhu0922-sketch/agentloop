@@ -10,7 +10,6 @@ Runtime Host 只能在声明的工具、Python 模块、Node 模块均已可用�
 | Office Open XML | `markitdown[pptx]`、`openpyxl`、`pandas`、`Pillow`、`lxml`、`defusedxml`、`pandoc` |
 | 数据/数据库 | `numpy`、`PyMySQL` |
 | 图像/OCR/GIF | `imageio`、`imageio-ffmpeg`、`Pillow`、`pytesseract`、`pdf2image`、Tesseract、FFmpeg |
-| Web QA | Python `playwright` 和 Chromium |
 | MCP/模型适配 | `mcp`、`anthropic` |
 
 ## Docker 预装
@@ -22,7 +21,6 @@ apt-get install -y ffmpeg fonts-noto-cjk ghostscript pandoc poppler-utils \
   python3 python3-venv qpdf tesseract-ocr unzip zip
 python3 -m venv /opt/agentloop-runtime-tools
 /opt/agentloop-runtime-tools/bin/pip install -r requirements.txt
-/opt/agentloop-runtime-tools/bin/python -m playwright install --with-deps chromium
 ```
 
 默认使用镜像基础层的 Debian 源。若该源在部署网络中不可达，可在构建时显式提供合规镜像，而不是让构建无限等待：
@@ -43,7 +41,7 @@ npm rebuild sharp --workspace agentloop-multi-runtime --foreground-scripts
 
 ## 本地 Host
 
-`npm run start:local --workspace agentloop-multi-runtime` 创建或更新 `data/local/runtime-tools` 虚拟环境，按同一 `requirements.txt` 安装，并仅在 Chromium 不存在时下载它。系统命令仍由宿主机包管理器提供；启动时将逐个验证，缺任一项即拒绝注册 Host。
+`npm run start:local --workspace agentloop-multi-runtime` 创建或更新 `data/local/runtime-tools` 虚拟环境，按同一 `requirements.txt` 安装。系统命令仍由宿主机包管理器提供；启动时将逐个验证，缺任一项即拒绝注册 Host。
 
 ## LibreOffice 不是基线
 
@@ -51,4 +49,4 @@ npm rebuild sharp --workspace agentloop-multi-runtime --foreground-scripts
 
 ## 准入证据
 
-镜像构建验证 Python imports、MarkItDown 版本、Playwright Chromium 安装和 `sharp` 原生重建。Host 启动再验证：系统命令、Python imports/Chromium 可执行文件、Node 模块实际加载。任何一项失败，Host 在建状态库和监听端口前退出，因此不会再接受一个必然因为缺工具而进入 recovery 的 Run。
+镜像构建验证 Python imports、MarkItDown 版本和 `sharp` 原生重建。Host 启动再验证：系统命令、Python imports、Node 模块实际加载。任何一项失败，Host 在建状态库和监听端口前退出，因此不会再接受一个必然因为缺工具而进入 recovery 的 Run。

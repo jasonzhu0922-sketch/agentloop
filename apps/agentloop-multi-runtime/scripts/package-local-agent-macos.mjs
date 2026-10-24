@@ -1,4 +1,4 @@
-import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { PACKAGED_LOCAL_AGENT_PORT } from "../src/shared/local-agent-endpoint.mjs";
+import { copyPackagedNodeModules, PACKAGED_NODE_MAJOR, preparePackagedPythonRuntime } from "./package-local-agent-runtime.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(appRoot, "../..");
@@ -23,6 +24,7 @@ const seaBundle = join(buildRoot, "agentloop-local-runtime-agent-sea.cjs");
 const seaConfig = join(buildRoot, "sea-config.json");
 const seaBlob = join(buildRoot, "sea-prep.blob");
 const executable = join(resources, "agentloop-local-runtime-agent");
+const packagedPythonRoot = requiredPackagedPythonRoot();
 const pkg = join(releaseRoot, `AgentLoop-Local-Runtime-${version}-macos-arm64.pkg`);
 const releaseEnvironment = process.env.AGENTLOOP_RELEASE_ENV ?? "development";
 const routerUrl = process.env.AGENTLOOP_ROUTER_URL ?? ({
@@ -38,6 +40,7 @@ const webOrigin = process.env.AGENTLOOP_WEB_ORIGIN ?? ({
 if (typeof routerUrl !== "string" || typeof webOrigin !== "string") throw new Error(`Missing fixed Router/Web URL for release environment: ${releaseEnvironment}`);
 
 if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error("package-local-agent-macos must run on an Apple Silicon Mac");
+if (Number(process.versions.node.split(".")[0]) !== PACKAGED_NODE_MAJOR) throw new Error(`Node ${PACKAGED_NODE_MAJOR}.x is required; got ${process.versions.node}`);
 await mkdir(releaseRoot, { recursive: true });
 await mkdir(resources, { recursive: true });
 await mkdir(swiftModuleCache, { recursive: true });
@@ -96,8 +99,23 @@ try {
   await writeFile(executable, `#!/bin/sh\nset -eu\nRESOURCE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexport AGENTLOOP_AGENT_PACKAGED=1\nexport AGENTLOOP_AGENT_APP_ROOT="$RESOURCE_ROOT"\nexport AGENTLOOP_BUNDLED_SKILL_DIRECTORIES="$RESOURCE_ROOT/skills"\nexec "$RESOURCE_ROOT/agentloop-local-runtime-node" "$RESOURCE_ROOT/agentloop-local-runtime-agent.mjs" "$@"\n`, { mode: 0o755 });
   await chmod(executable, 0o755);
 }
+const runtimeNode = join(resources, "agentloop-local-runtime-node");
+if (!existsSync(runtimeNode)) {
+  await cp(process.execPath, runtimeNode);
+  await chmod(runtimeNode, 0o755);
+  run("/usr/bin/codesign", ["--remove-signature", runtimeNode], true);
+  await bundleMacRuntimeLibraries(process.execPath, runtimeNode, join(resources, "lib"));
+}
+if (!existsSync(join(resources, "node"))) await symlink("agentloop-local-runtime-node", join(resources, "node"));
 await cp(join(repositoryRoot, "packages/agentloop-skills/skills"), join(resources, "skills"), { recursive: true });
 await cp(join(appRoot, "local-agent-runtime"), join(resources, "agent-loop-runtime"), { recursive: true });
+await preparePackagedPythonRuntime({
+  sourceRoot: packagedPythonRoot,
+  destinationRoot: join(resources, "runtime-python"),
+  requirementsPath: join(appRoot, "requirements.txt"),
+});
+await copyPackagedNodeModules({ repositoryRoot, destinationRoot: resources });
+await cp(join(appRoot, "requirements.txt"), join(resources, "requirements.txt"));
 await cp(join(repositoryRoot, "packages/agentloop/src/assets"), join(contents, "assets"), { recursive: true });
 await mkdir(join(resources, "config"), { recursive: true });
 await cp(join(appRoot, "config/llm-providers.example.json"), join(resources, "config/llm-providers.json"));
@@ -107,7 +125,7 @@ await writeFile(join(resources, "config/skill-directories.json"), JSON.stringify
 }, null, 2));
 await cp(join(appRoot, "config/step-execution-strategy.json"), join(resources, "config/step-execution-strategy.json"));
 await cp(join(appRoot, "config/practice-profiles.json"), join(resources, "config/practice-profiles.json"));
-await writeFile(join(resources, "agentloop-local-runtime.manifest.json"), `${JSON.stringify({ schema: "agentloop.localRuntimeRelease/v1", routerUrl, webOrigin, localAgentPort: PACKAGED_LOCAL_AGENT_PORT }, null, 2)}\n`);
+await writeFile(join(resources, "agentloop-local-runtime.manifest.json"), `${JSON.stringify({ schema: "agentloop.localRuntimeRelease/v1", routerUrl, webOrigin, localAgentPort: PACKAGED_LOCAL_AGENT_PORT, nodeVersion: process.versions.node, pythonVersion: "3.12", runtimeNode: "agentloop-local-runtime-node", runtimePython: "runtime-python/bin/python3.12", nodeModules: "node_modules" }, null, 2)}\n`);
 await cp(join(appRoot, "distribution/macos/com.agentloop.local-runtime-agent.plist"), join(resources, "com.agentloop.local-runtime-agent.plist"));
 await mkdir(macOS, { recursive: true });
 run("/usr/bin/swiftc", [
@@ -137,6 +155,21 @@ process.stdout.write(`Built ${pkg} (${seaInjected ? "Node SEA" : "bundled Node f
 function run(command, args, allowFailure = false) {
   const result = spawnSync(command, args, { stdio: "inherit" });
   if (!allowFailure && result.status !== 0) throw new Error(`${command} failed with ${result.status ?? "signal"}`);
+}
+
+function requiredPackagedPythonRoot() {
+  const root = process.env.AGENTLOOP_PACKAGED_PYTHON_ROOT;
+  if (root === undefined || root.trim() === "") {
+    throw new Error("AGENTLOOP_PACKAGED_PYTHON_ROOT must point to a relocatable Python 3.12 runtime directory");
+  }
+  const candidate = join(resolve(root), "bin", "python3.12");
+  if (!existsSync(candidate)) throw new Error(`Packaged Python 3.12 executable is missing: ${candidate}`);
+  const result = spawnSync(candidate, ["--version"], { encoding: "utf8" });
+  const versionOutput = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+  if (result.status !== 0 || !/^Python 3\.12(?:\.|$)/m.test(versionOutput)) {
+    throw new Error(`AGENTLOOP_PACKAGED_PYTHON_ROOT must contain Python 3.12; got ${versionOutput.trim() || "unknown"}`);
+  }
+  return resolve(root);
 }
 
 async function bundleMacRuntimeLibraries(sourceBinary, packagedBinary, destination) {
