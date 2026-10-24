@@ -7,6 +7,7 @@ version=
 router=https://47.101.178.145:5001
 web=https://47.101.178.145:3001
 output=$repo/apps/agentloop-multi-runtime/release/local-agent
+python_runtime_root=${AGENTLOOP_PACKAGED_PYTHON_ROOT:-}
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --ref) ref=$2; shift 2 ;;
@@ -14,12 +15,15 @@ while [ "$#" -gt 0 ]; do
     --router-url) router=$2; shift 2 ;;
     --web-origin) web=$2; shift 2 ;;
     --output) output=$2; shift 2 ;;
-    -h|--help) echo "Usage: bash $0 [--ref COMMIT] [--version X.Y.Z] [--router-url HTTPS_URL] [--web-origin HTTPS_URL] [--output DIR]"; exit 0 ;;
+    --python-runtime-root) python_runtime_root=$2; shift 2 ;;
+    -h|--help) echo "Usage: bash $0 [--ref COMMIT] [--version X.Y.Z] [--router-url HTTPS_URL] [--web-origin HTTPS_URL] [--python-runtime-root DIR] [--output DIR]"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
 [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || { echo 'This script builds macOS arm64 PKG on Apple Silicon.' >&2; exit 1; }
-node -e 'if(Number(process.versions.node.split(".")[0])<26) throw Error("Node 26 or newer is required")'
+[ -n "$python_runtime_root" ] || { echo 'Python 3.12 runtime required: pass --python-runtime-root DIR or set AGENTLOOP_PACKAGED_PYTHON_ROOT.' >&2; exit 1; }
+[ -x "$python_runtime_root/bin/python3.12" ] || { echo "Python 3.12 executable missing: $python_runtime_root/bin/python3.12" >&2; exit 1; }
+node -e 'if(Number(process.versions.node.split(".")[0])!==26) throw Error("Node 26.x is required")'
 output=$(python3 - "$output" <<'PY'
 from pathlib import Path
 import sys
@@ -45,7 +49,7 @@ if v:
 PY
 cd "$job/source"
 npm ci --no-audit --no-fund
-AGENTLOOP_RELEASE_ENV=production AGENTLOOP_ROUTER_URL="$router" AGENTLOOP_WEB_ORIGIN="$web" npm run package:local-agent:mac
+AGENTLOOP_RELEASE_ENV=production AGENTLOOP_ROUTER_URL="$router" AGENTLOOP_WEB_ORIGIN="$web" AGENTLOOP_PACKAGED_PYTHON_ROOT="$python_runtime_root" npm run package:local-agent:mac
 pkg=$(find apps/agentloop-multi-runtime/release/local-agent/macos-arm64 -maxdepth 1 -name '*.pkg' -type f)
 [ -n "$pkg" ] || exit 1
 version=$(node -p "JSON.parse(require('node:fs').readFileSync('apps/agentloop-multi-runtime/package.json')).version")

@@ -14,7 +14,6 @@ readonly NODE_IMAGE="${NODE_IMAGE:-node:26-bookworm}"
 readonly APT_MIRROR="${APT_MIRROR:-}"
 readonly PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
 readonly PIP_FALLBACK_INDEX_URL="${PIP_FALLBACK_INDEX_URL:-https://pypi.org/simple/}"
-readonly PLAYWRIGHT_DOWNLOAD_HOST="${PLAYWRIGHT_DOWNLOAD_HOST:-}"
 readonly OUTPUT="${1:-$REPOSITORY_ROOT/agentloop-multi-runtime-${RELEASE_SHORT_SHA}.tar.gz}"
 readonly BUNDLE_OUTPUT="${2:-${OUTPUT%.tar.gz}-deployment.tar.gz}"
 readonly CACHE_DIRECTORY="${AGENTLOOP_BUILD_CACHE_DIR:-$REPOSITORY_ROOT/.docker-build-cache/multi-runtime-${PLATFORM//\//-}}"
@@ -40,7 +39,6 @@ docker buildx build --platform "$PLATFORM" --target local-runtime --tag "$IMAGE"
   --build-arg "APT_MIRROR=$APT_MIRROR" \
   --build-arg "PIP_INDEX_URL=$PIP_INDEX_URL" \
   --build-arg "PIP_FALLBACK_INDEX_URL=$PIP_FALLBACK_INDEX_URL" \
-  --build-arg "PLAYWRIGHT_DOWNLOAD_HOST=$PLAYWRIGHT_DOWNLOAD_HOST" \
   "${cache_arguments[@]}" \
   -f "$source_root/apps/agentloop-multi-runtime/Dockerfile" "$source_root"
 docker save "$IMAGE" | gzip -1 > "$OUTPUT"
@@ -68,7 +66,6 @@ NODE_IMAGE=$NODE_IMAGE
 APT_MIRROR=$APT_MIRROR
 PIP_INDEX_URL=$PIP_INDEX_URL
 PIP_FALLBACK_INDEX_URL=$PIP_FALLBACK_INDEX_URL
-PLAYWRIGHT_DOWNLOAD_HOST=$PLAYWRIGHT_DOWNLOAD_HOST
 EOF
 tar -C "$bundle_root" -czf "$BUNDLE_OUTPUT" agentloop-centos7-release
 printf 'created release %s: image %s and deployment bundle %s for %s (%s)\n' "$RELEASE_REVISION" "$OUTPUT" "$BUNDLE_OUTPUT" "$IMAGE" "$PLATFORM"

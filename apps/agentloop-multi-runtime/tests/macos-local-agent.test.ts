@@ -81,6 +81,12 @@ test("macOS PKG includes an upgrade cleanup script without deleting runtime stat
   const packager = await readFile(new URL("../scripts/package-local-agent-macos.mjs", import.meta.url), "utf8");
   assert.match(packager, /["']--scripts["']/);
   assert.match(packager, /distribution\/macos\/scripts/);
+  assert.match(packager, /AGENTLOOP_PACKAGED_PYTHON_ROOT/);
+  assert.match(packager, /runtime-python/);
+  assert.match(packager, /preparePackagedPythonRuntime/);
+  assert.match(packager, /copyPackagedNodeModules/);
+  assert.match(packager, /agentloop-local-runtime-node/);
+  assert.match(packager, /nodeModules/);
   for (const name of ["preinstall", "postinstall"]) {
     assert.equal(execFileSync("/bin/sh", [new URL(`../distribution/macos/scripts/${name}`, import.meta.url).pathname, "/tmp/AgentLoop.pkg", "/Applications", "/Volumes/Other"], { encoding: "utf8" }), "");
   }

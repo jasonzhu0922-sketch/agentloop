@@ -365,9 +365,10 @@ Router 提供可断线续读的事件查询以及 `GET /v1/assignments/:assignme
 
 ### 打包 Local Runtime Agent（macOS Apple Silicon）
 
-Local Runtime Agent 优先使用 Node SEA 打包为后台可执行程序，配合一个很小的 Swift 托盘壳，不包含 Electron/Chromium。若构建机的 Node 二进制没有 SEA fuse（例如当前 Homebrew Node 26），打包器会自动改为随包携带 Node runtime 及其 macOS 动态库依赖；两种产物使用同一个 Agent bundle 和协议。打包命令会先构建 kernel 和 bundled Skills：
+Local Runtime Agent 优先使用 Node SEA 打包为后台可执行程序，配合一个很小的 Swift 托盘壳，不包含 Electron/Chromium。若构建机的 Node 二进制没有 SEA fuse（例如当前 Homebrew Node 26），打包器会自动改为随包携带 Node runtime 及其 macOS 动态库依赖；两种产物使用同一个 Agent bundle 和协议。生产包还必须显式提供可重定位的 Python 3.12 runtime 目录；打包器会把 requirements.txt 安装进随包 Python 前缀并验证 Runtime 模块，避免安装后回退到用户的 `python3` 或联网建 venv。包内还带有同版本 Node runtime、Skill 脚本需要的 Node 模块，启动时通过 `PATH` 和 `NODE_PATH` 交给 Local Runtime，并设置 `PYTHONNOUSERSITE=1` 隔离用户级 Python 包。`pandoc`、`qpdf`、`tesseract` 等系统工具仍由目标设备提供，安装包不会伪装成已包含它们。打包命令会先构建 kernel 和 bundled Skills：
 
 ```bash
+AGENTLOOP_PACKAGED_PYTHON_ROOT=/path/to/python-3.12-standalone \
 npm run package:local-agent:mac --workspace agentloop-multi-runtime
 ```
 
@@ -380,7 +381,7 @@ AGENTLOOP_WEB_ORIGIN_TEST=https://app.test.example.com \
 npm run package:local-agent:mac --workspace agentloop-multi-runtime
 ```
 
-生产包使用 `AGENTLOOP_RELEASE_ENV=production`、`AGENTLOOP_ROUTER_URL_PRODUCTION` 和 `AGENTLOOP_WEB_ORIGIN_PRODUCTION`。变量模板见 `distribution/macos/environments.example.env`。产物位于 `release/local-agent/macos-arm64/AgentLoop-Local-Runtime-<version>-macos-arm64.pkg`。未设置签名身份时，`.app` 使用 ad-hoc 签名且 `.pkg` 不签名，只适用于本地开发。正式分发应分别使用 Developer ID Application 和 Developer ID Installer 身份签名，并完成 notarize/staple；当前脚本中的 `APPLE_CODESIGN_IDENTITY` 只负责 app 内代码签名，尚未替代 installer 签名流程。
+生产包使用 `AGENTLOOP_RELEASE_ENV=production`、`AGENTLOOP_ROUTER_URL_PRODUCTION`、`AGENTLOOP_WEB_ORIGIN_PRODUCTION` 和 `AGENTLOOP_PACKAGED_PYTHON_ROOT`。变量模板见 `distribution/macos/environments.example.env`。`AGENTLOOP_PACKAGED_PYTHON_ROOT` 必须包含 `bin/python3.12`，且该解释器执行 `--version` 必须返回 Python 3.12；它应来自 python-build-standalone 等可重定位发行版，不能是构建机的 venv 或系统 Python。产物位于 `release/local-agent/macos-arm64/AgentLoop-Local-Runtime-<version>-macos-arm64.pkg`。未设置签名身份时，`.app` 使用 ad-hoc 签名且 `.pkg` 不签名，只适用于本地开发。正式分发应分别使用 Developer ID Application 和 Developer ID Installer 身份签名，并完成 notarize/staple；当前脚本中的 `APPLE_CODESIGN_IDENTITY` 只负责 app 内代码签名，尚未替代 installer 签名流程。
 
 安装后 Agent 通过 macOS LaunchAgent 登录启动；托盘只提供在线状态、重连、打开 Web、查看日志和退出，业务配置仍由 Web 管理。Router 地址作为固定构建配置嵌入 Agent；Agent 的 bootstrap 文件仅作为安装器/运维迁移用途保留。
 
@@ -392,7 +393,7 @@ Windows 使用 WiX 生成 per-machine `.msi`，安装到 `Program Files`，注�
 
 Windows MSI 的安装事务在替换文件前，以提升权限运行 MSI 内嵌的进程清理程序：按完整安装路径终止旧托盘、SEA Agent 和随包 Node 的进程树，包含旧版托盘遗留的孤立 Agent；无法清理时中止安装。同名但来自其他安装路径的程序不会被终止。文件替换及旧产品移除成功后，以安装发起用户身份启动新版托盘和 Agent。安装器只管理 `Program Files/AgentLoop Local Runtime/`，保留 `%LOCALAPPDATA%/AgentLoop Local Runtime/` 下的设备身份、SQLite、模型/MCP 配置及密钥、Runtime 定义、Skill 包和工作区。Windows 打包前会执行原生进程清理回归，MSI 文件组件使用稳定路径标识并包含托盘依赖、Resources 和根目录 assets。服务账户下的无人值守安装没有交互桌面，需在目标用户会话中启动托盘。
 
-必须在 64 位 Windows 构建机上执行，并准备：Node 26、.NET 8 SDK、WiX Toolset v4（`wix` 在 `PATH` 中）。
+必须在 64 位 Windows 构建机上执行，并准备：Node 26、.NET 8 SDK、WiX Toolset v4（`wix` 在 `PATH` 中），以及包含 `python.exe` 的可重定位 Python 3.12 runtime 目录，并通过 `AGENTLOOP_PACKAGED_PYTHON_ROOT` 传入。
 
 ```powershell
 npm run package:local-agent:win

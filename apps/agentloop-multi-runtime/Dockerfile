@@ -56,7 +56,6 @@ FROM node-base AS runtime-host-tools
 ARG APT_MIRROR
 ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ARG PIP_FALLBACK_INDEX_URL=https://pypi.org/simple/
-ARG PLAYWRIGHT_DOWNLOAD_HOST
 COPY apps/agentloop-multi-runtime/requirements.txt /tmp/requirements.txt
 RUN if [ -n "${APT_MIRROR}" ]; then sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; fi \
   && apt-get update \
@@ -68,10 +67,8 @@ RUN if [ -n "${APT_MIRROR}" ]; then sed -i "s|http://deb.debian.org/debian|${APT
   # A mirror can retain an index entry after its cached wheel disappeared.
   && ( /opt/agentloop-runtime-tools/bin/pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" -r /tmp/requirements.txt \
     || /opt/agentloop-runtime-tools/bin/pip install --no-cache-dir --index-url "${PIP_FALLBACK_INDEX_URL}" -r /tmp/requirements.txt ) \
-  && if [ -n "${PLAYWRIGHT_DOWNLOAD_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST="${PLAYWRIGHT_DOWNLOAD_HOST}"; fi \
-  && /opt/agentloop-runtime-tools/bin/python -m playwright install --with-deps chromium \
   && /opt/agentloop-runtime-tools/bin/markitdown --version \
-  && /opt/agentloop-runtime-tools/bin/python -c 'import anthropic, defusedxml, imageio, lxml, mcp, numpy, openpyxl, pandas, pdf2image, pdfplumber, PIL, playwright, pymysql, pypdf, pytesseract, reportlab'
+  && /opt/agentloop-runtime-tools/bin/python -c 'import anthropic, defusedxml, imageio, lxml, mcp, numpy, openpyxl, pandas, pdf2image, pdfplumber, PIL, pymysql, pypdf, pytesseract, reportlab'
 
 ENV PATH="/opt/agentloop-runtime-tools/bin:${PATH}"
 
@@ -79,7 +76,7 @@ FROM runtime-host-tools AS runtime-host
 COPY --from=application /app /app
 WORKDIR /app/apps/agentloop-multi-runtime
 ENV RUNTIME_REQUIRED_COMMANDS=markitdown,pandoc,pdftoppm,pdftotext,pdfinfo,qpdf,gs,tesseract,ffmpeg,unzip,zip
-ENV RUNTIME_REQUIRED_PYTHON_MODULES=anthropic,defusedxml,imageio,lxml,mcp,numpy,openpyxl,pandas,pdf2image,pdfplumber,PIL,playwright,pymysql,pypdf,pytesseract,reportlab
+ENV RUNTIME_REQUIRED_PYTHON_MODULES=anthropic,defusedxml,imageio,lxml,mcp,numpy,openpyxl,pandas,pdf2image,pdfplumber,PIL,pymysql,pypdf,pytesseract,reportlab
 ENV RUNTIME_REQUIRED_NODE_MODULES=docx,pptxgenjs,react,react-dom,react-icons,sharp,@zhujun/agentloop-plan-template
 CMD ["npm", "run", "start:runtime-host"]
 

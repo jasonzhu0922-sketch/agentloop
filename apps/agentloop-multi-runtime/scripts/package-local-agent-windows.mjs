@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { PACKAGED_LOCAL_AGENT_PORT } from "../src/shared/local-agent-endpoint.mjs";
 import { windowsMsiPayload } from "./windows-msi-payload.mjs";
+import { copyPackagedNodeModules, PACKAGED_NODE_MAJOR, preparePackagedPythonRuntime } from "./package-local-agent-runtime.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(appRoot, "../..");
@@ -21,6 +22,7 @@ const seaConfig = join(releaseRoot, "sea-config.json");
 const seaBlob = join(releaseRoot, "sea-prep.blob");
 const seaExecutable = join(resources, "agentloop-local-runtime-agent.exe");
 const launcher = join(resources, "agentloop-local-runtime-agent.cmd");
+const packagedPythonRoot = requiredPackagedPythonRoot();
 const msi = join(releaseRoot, `AgentLoop-Local-Runtime-${version}-windows-x64.msi`);
 const releaseEnvironment = process.env.AGENTLOOP_RELEASE_ENV ?? "development";
 const routerUrl = process.env.AGENTLOOP_ROUTER_URL ?? ({
@@ -36,6 +38,7 @@ const webOrigin = process.env.AGENTLOOP_WEB_ORIGIN ?? ({
 const upgradeCode = process.env.AGENTLOOP_WINDOWS_MSI_UPGRADE_CODE ?? "A0B2C948-5B16-4CB4-9F58-6520892D0A01";
 if (typeof routerUrl !== "string" || typeof webOrigin !== "string") throw new Error(`Missing fixed Router/Web URL for release environment: ${releaseEnvironment}`);
 if (process.platform !== "win32" || process.arch !== "x64") throw new Error("package-local-agent-windows must run on 64-bit Windows");
+if (Number(process.versions.node.split(".")[0]) !== PACKAGED_NODE_MAJOR) throw new Error(`Node ${PACKAGED_NODE_MAJOR}.x is required; got ${process.versions.node}`);
 
 await rm(releaseRoot, { recursive: true, force: true });
 await mkdir(resources, { recursive: true });
@@ -103,13 +106,23 @@ async function writeLauncher(seaInjected) {
 async function copyRuntimePayload() {
   await cp(join(repositoryRoot, "packages/agentloop-skills/skills"), join(resources, "skills"), { recursive: true });
   await cp(join(appRoot, "local-agent-runtime"), join(resources, "agent-loop-runtime"), { recursive: true });
+  const runtimeNode = join(resources, "agentloop-local-runtime-node.exe");
+  if (!existsSync(runtimeNode)) await cp(process.execPath, runtimeNode);
+  await cp(runtimeNode, join(resources, "node.exe"));
+  await preparePackagedPythonRuntime({
+    sourceRoot: packagedPythonRoot,
+    destinationRoot: join(resources, "runtime-python"),
+    requirementsPath: join(appRoot, "requirements.txt"),
+  });
+  await copyPackagedNodeModules({ repositoryRoot, destinationRoot: resources });
+  await cp(join(appRoot, "requirements.txt"), join(resources, "requirements.txt"));
   await cp(join(repositoryRoot, "packages/agentloop/src/assets"), join(payloadRoot, "assets"), { recursive: true });
   await mkdir(join(resources, "config"), { recursive: true });
   await cp(join(appRoot, "config/llm-providers.example.json"), join(resources, "config/llm-providers.json"));
   await writeFile(join(resources, "config/skill-directories.json"), JSON.stringify({ schema: "agentloop.skillDirectories/v1", customSkillDirectories: [] }, null, 2));
   await cp(join(appRoot, "config/step-execution-strategy.json"), join(resources, "config/step-execution-strategy.json"));
   await cp(join(appRoot, "config/practice-profiles.json"), join(resources, "config/practice-profiles.json"));
-  await writeFile(join(resources, "agentloop-local-runtime.manifest.json"), `${JSON.stringify({ schema: "agentloop.localRuntimeRelease/v1", routerUrl, webOrigin, localAgentPort: PACKAGED_LOCAL_AGENT_PORT }, null, 2)}\n`);
+  await writeFile(join(resources, "agentloop-local-runtime.manifest.json"), `${JSON.stringify({ schema: "agentloop.localRuntimeRelease/v1", routerUrl, webOrigin, localAgentPort: PACKAGED_LOCAL_AGENT_PORT, nodeVersion: process.versions.node, pythonVersion: "3.12", runtimeNode: "agentloop-local-runtime-node.exe", runtimePython: "runtime-python/python.exe", nodeModules: "node_modules" }, null, 2)}\n`);
 }
 
 function postjectPath() {
@@ -117,6 +130,21 @@ function postjectPath() {
   const path = join(repositoryRoot, "node_modules/.bin", `postject${extension}`);
   if (!existsSync(path)) throw new Error("postject is not installed; run npm install from the repository root");
   return path;
+}
+
+function requiredPackagedPythonRoot() {
+  const root = process.env.AGENTLOOP_PACKAGED_PYTHON_ROOT;
+  if (root === undefined || root.trim() === "") {
+    throw new Error("AGENTLOOP_PACKAGED_PYTHON_ROOT must point to a relocatable Python 3.12 runtime directory");
+  }
+  const candidate = join(resolve(root), "python.exe");
+  if (!existsSync(candidate)) throw new Error(`Packaged Python 3.12 executable is missing: ${candidate}`);
+  const result = spawnSync(candidate, ["--version"], { encoding: "utf8" });
+  const versionOutput = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+  if (result.status !== 0 || !/^Python 3\.12(?:\.|$)/m.test(versionOutput)) {
+    throw new Error(`AGENTLOOP_PACKAGED_PYTHON_ROOT must contain Python 3.12; got ${versionOutput.trim() || "unknown"}`);
+  }
+  return resolve(root);
 }
 
 function run(command, args) {

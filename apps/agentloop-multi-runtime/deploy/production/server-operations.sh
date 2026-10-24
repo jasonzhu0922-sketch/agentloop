@@ -171,7 +171,7 @@ import sys
 p=Path(sys.argv[1]).resolve()
 manifest=next((a/'release-manifest.env' for a in p.parents if (a/'release-manifest.env').is_file()),None)
 assert manifest, 'Previous release manifest required'
-allowed=['NODE_IMAGE','APT_MIRROR','PIP_INDEX_URL','PIP_FALLBACK_INDEX_URL','PLAYWRIGHT_DOWNLOAD_HOST']
+allowed=['NODE_IMAGE','APT_MIRROR','PIP_INDEX_URL','PIP_FALLBACK_INDEX_URL']
 values=dict(l.split('=',1) for l in manifest.read_text().splitlines() if '=' in l)
 assert '@sha256:' in values.get('NODE_IMAGE',''), 'Previous NODE_IMAGE must be pinned to a digest'
 assert all(k in values for k in allowed), 'Incomplete build inputs'

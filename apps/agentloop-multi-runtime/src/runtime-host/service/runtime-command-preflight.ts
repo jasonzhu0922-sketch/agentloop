@@ -19,11 +19,6 @@ export function runtimeCommandProbeArguments(command: string): readonly string[]
   return COMMAND_VERSION_ARGUMENTS[command] ?? ["--version"];
 }
 
-/** `playwright install --list` reports installed browsers as absolute paths. */
-export function hasRuntimePlaywrightChromium(output: string): boolean {
-  return /(?:^|\n)\s*\S*chromium(?:[-_ ]|$)/.test(output);
-}
-
 export function requiredRuntimeCommands(raw: string | undefined): string[] {
   if (raw === undefined || raw.trim().length === 0) return [];
   const commands = raw.split(",").map((value) => value.trim()).filter((value) => value.length > 0);
@@ -69,16 +64,6 @@ export function assertRequiredRuntimePythonModules(modules: readonly string[], p
     if (result.error !== undefined || result.status !== 0) {
       const detail = result.error?.message ?? (result.stderr.trim() || `exit status ${result.status ?? "unknown"}`);
       throw new Error(`Required Runtime Python module is unavailable: ${module} (${detail})`);
-    }
-  }
-  if (modules.includes("playwright")) {
-    const result = spawnSync(python, ["-m", "playwright", "install", "--list"], {
-      encoding: "utf8",
-      timeout: 10_000,
-    });
-    if (result.error !== undefined || result.status !== 0 || !hasRuntimePlaywrightChromium(result.stdout)) {
-      const detail = result.error?.message ?? (result.stderr.trim() || result.stdout.trim() || `exit status ${result.status ?? "unknown"}`);
-      throw new Error(`Required Runtime Playwright Chromium is unavailable (${detail})`);
     }
   }
 }

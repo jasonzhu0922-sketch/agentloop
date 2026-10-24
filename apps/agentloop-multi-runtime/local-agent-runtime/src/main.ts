@@ -1,12 +1,17 @@
 import { homedir, platform } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { DEFAULT_MAX_PLANNING_TURNS, DEFAULT_MAX_STEPS, MAX_SUPPORTED_PLANNING_TURNS, MAX_SUPPORTED_STEP_TURNS } from "@zhujun/agentloop";
 import { readLocalAgentBootstrapConfig, writeLocalAgentBootstrapConfig } from "./config/bootstrap-config.ts";
 import { createLocalAgentServer } from "./api/local-agent-api.ts";
 import { localRuntimeTerminalLogLine } from "./observability/runtime-terminal-log.ts";
 import { ensureLocalAgentRuntimeConfiguration, localAgentRuntimeConfiguration, readLocalAgentIntegrationEnvironment } from "./config/runtime-configuration.ts";
 import { localAgentPort } from "../../src/shared/local-agent-endpoint.mjs";
+import { ensureLocalRuntimeTools, localRuntimeToolsBin, localRuntimeToolsEnvironment } from "../../scripts/local-runtime-tools.mjs";
+import { normalizePackagedNodeVersion, packagedRuntimePythonManifestPath, PACKAGED_NODE_MAJOR, PACKAGED_PYTHON_MAJOR_MINOR } from "../../scripts/package-local-agent-runtime.mjs";
 
 void main();
 
@@ -62,6 +67,9 @@ const skillDirectoriesConfigPath = resolve(process.env.SKILL_DIRECTORIES_CONFIG_
 const stepExecutionStrategyConfigPath = resolve(process.env.STEP_EXECUTION_STRATEGY_CONFIG_PATH ?? join(appRoot, "config", "step-execution-strategy.json"));
 const practiceProfileConfigPath = resolve(process.env.PRACTICE_PROFILE_CONFIG_PATH ?? join(appRoot, "config", "practice-profiles.json"));
 const webOrigin = process.env.WEB_ORIGIN ?? buildWebOrigin ?? bootstrap.webOrigin;
+const computerCommandEnvironment = packaged
+  ? await preparePackagedRuntimeTools(appRoot)
+  : runtimeConfiguration.computerCommandEnvironment;
 const logColorOptions = {
   colorMode: process.env.AGENTLOOP_LOG_COLOR,
   isTTY: process.stdout.isTTY,
@@ -71,7 +79,7 @@ const server = await createLocalAgentServer({
   appRoot, routerUrl, statePath, databasePath, workspaceRoot, skillPackageStoreRoot, runtimeDataRoot, supervisorDatabasePath, maxConcurrentRuns, planningMaxTurns, stepMaxTurns,
   providerConfigPath, skillDirectoriesConfigPath, stepExecutionStrategyConfigPath, practiceProfileConfigPath,
   mcpServersConfigPath,
-  computerCommandEnvironment: runtimeConfiguration.computerCommandEnvironment,
+  computerCommandEnvironment,
   integrationEnvironment,
   runEventLogSink: (runtime, line) => process.stdout.write(`${localRuntimeTerminalLogLine(runtime.id, line, logColorOptions)}\n`),
   ...(webOrigin === undefined ? {} : { webOrigin }), environment: process.env,
@@ -98,4 +106,71 @@ function packagedDataRoot(): string {
   if (platform() === "win32") return join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "AgentLoop Local Runtime");
   if (platform() === "darwin") return join(homedir(), "Library", "Application Support", "AgentLoop Local Runtime");
   return join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "AgentLoop Local Runtime");
+}
+
+async function preparePackagedRuntimeTools(appRoot: string): Promise<Readonly<Record<string, string>>> {
+  const packagedPythonRoot = join(appRoot, "runtime-python");
+  const marker = join(packagedPythonRoot, "agentloop-runtime-python.json");
+  if (!existsSync(marker)) throw new Error(`Packaged Python ${PACKAGED_PYTHON_MAJOR_MINOR} baseline is missing: ${marker}`);
+  const pythonMarker = JSON.parse(await readFile(marker, "utf8")) as {
+    schema?: unknown;
+    pythonVersion?: unknown;
+    pythonExecutable?: unknown;
+    toolsDirectory?: unknown;
+  };
+  const expectedPythonExecutable = platform() === "win32" ? "python.exe" : "bin/python3.12";
+  if (pythonMarker.schema !== "agentloop.packagedRuntimePython/v1"
+      || pythonMarker.pythonVersion !== PACKAGED_PYTHON_MAJOR_MINOR
+      || pythonMarker.pythonExecutable !== expectedPythonExecutable
+      || pythonMarker.toolsDirectory !== (platform() === "win32" ? "Scripts" : "bin")) {
+    throw new Error(`Packaged Python marker is incompatible: ${marker}`);
+  }
+  const python = platform() === "win32" ? join(packagedPythonRoot, "python.exe") : join(packagedPythonRoot, "bin", "python3.12");
+  if (!existsSync(python)) throw new Error(`Packaged Python 3.12 runtime is missing: ${python}`);
+  const node = platform() === "win32" ? join(appRoot, "node.exe") : join(appRoot, "node");
+  if (!existsSync(node)) throw new Error(`Packaged Node ${PACKAGED_NODE_MAJOR} runtime is missing: ${node}`);
+  const nodeVersionOutput = `${spawnSync(node, ["--version"], { encoding: "utf8" }).stdout ?? ""}`.trim();
+  const nodeVersion = normalizePackagedNodeVersion(nodeVersionOutput);
+  if (!new RegExp(`^${PACKAGED_NODE_MAJOR}\\.`).test(nodeVersion)) throw new Error(`Packaged Node must be ${PACKAGED_NODE_MAJOR}.x; got ${nodeVersionOutput || "unknown"}`);
+  const releaseManifest = join(appRoot, "agentloop-local-runtime.manifest.json");
+  if (!existsSync(releaseManifest)) throw new Error(`Packaged Local Runtime manifest is missing: ${releaseManifest}`);
+  const manifest = JSON.parse(await readFile(releaseManifest, "utf8")) as {
+    schema?: unknown;
+    nodeVersion?: unknown;
+    pythonVersion?: unknown;
+    runtimeNode?: unknown;
+    runtimePython?: unknown;
+    nodeModules?: unknown;
+  };
+  const expectedNode = platform() === "win32" ? "agentloop-local-runtime-node.exe" : "agentloop-local-runtime-node";
+  if (manifest.schema !== "agentloop.localRuntimeRelease/v1"
+      || manifest.nodeVersion !== nodeVersion
+      || manifest.pythonVersion !== PACKAGED_PYTHON_MAJOR_MINOR
+      || manifest.runtimeNode !== expectedNode
+      || manifest.runtimePython !== packagedRuntimePythonManifestPath(platform())
+      || manifest.nodeModules !== "node_modules") {
+    throw new Error(`Packaged Local Runtime manifest is incompatible: ${releaseManifest}`);
+  }
+  const toolsRoot = packagedPythonRoot;
+  const toolsBin = await ensureLocalRuntimeTools({
+    appRoot,
+    environment: {
+      ...process.env,
+      RUNTIME_PYTHON: python,
+      RUNTIME_TOOLS_ROOT: toolsRoot,
+      RUNTIME_PACKAGED_PYTHON_ROOT: packagedPythonRoot,
+      PYTHONNOUSERSITE: "1",
+    },
+  });
+  const separator = platform() === "win32" ? ";" : ":";
+  const environment = localRuntimeToolsEnvironment({
+    ...process.env,
+    PATH: [appRoot, process.env.PATH].filter((value) => value?.length > 0).join(separator),
+    NODE_PATH: join(appRoot, "node_modules"),
+  }, toolsBin, toolsRoot);
+  return {
+    PATH: environment.PATH ?? "",
+    NODE_PATH: environment.NODE_PATH ?? join(appRoot, "node_modules"),
+    PYTHONNOUSERSITE: "1",
+  };
 }

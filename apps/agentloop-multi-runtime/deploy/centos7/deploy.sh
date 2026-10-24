@@ -153,7 +153,7 @@ build() {
   image="$(dotenv_value MULTI_RUNTIME_IMAGE "$ENV_FILE")"
   [ -n "$image" ] || die "MULTI_RUNTIME_IMAGE is missing from $ENV_FILE"
   [ -f "$REPOSITORY_ROOT/package.json" ] || die "this is an offline deployment bundle; load a prebuilt image instead of running build"
-  for name in NODE_IMAGE APT_MIRROR PIP_INDEX_URL PIP_FALLBACK_INDEX_URL PLAYWRIGHT_DOWNLOAD_HOST; do
+  for name in NODE_IMAGE APT_MIRROR PIP_INDEX_URL PIP_FALLBACK_INDEX_URL; do
     if [ -n "${!name:-}" ]; then
       build_arguments+=(--build-arg "$name=${!name}")
     fi

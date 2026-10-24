@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { FileAttachmentBroker } from "../src/router/attachments/attachment-broker.ts";
 import { SharedFilesystemAttachmentBroker } from "../src/router/attachments/shared-filesystem-attachment-broker.ts";
@@ -14,7 +15,6 @@ import {
   assertRequiredRuntimeCommands,
   assertRequiredRuntimeNodeModules,
   assertRequiredRuntimePythonModules,
-  hasRuntimePlaywrightChromium,
   requiredRuntimeCommands,
   requiredRuntimeNodeModules,
   requiredRuntimePythonModules,
@@ -50,6 +50,7 @@ import { migrateRouterState } from "../src/router/persistence/state-migrations.t
 import { migrateRuntimeState } from "../src/runtime-host/persistence/state-migrations.ts";
 import type { RuntimeArtifact, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeInstance } from "../src/shared/contracts.ts";
 import { hasIncompleteCompletedPlan, liveProgressForEvent, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "../web/client/projections/assistant-event-projection.js";
+import { normalizePackagedNodeVersion } from "../scripts/package-local-agent-runtime.mjs";
 import { createCoalescedUpdater } from "../web/client/state/live-update-scheduler.js";
 import { persistSessions } from "../web/client/state/session-persistence.js";
 import { renderMarkdown } from "@zhujun/agentloop-artifact-preview";
@@ -65,10 +66,12 @@ import { hasSelectedTextWithin } from "../web/client/ui/message-selection.js";
 import {
   LOCAL_MARKITDOWN_VERSION,
   localRuntimeHostEnvironment,
+  localRuntimePythonExecutable,
   localRuntimeToolsBin,
   localRuntimeToolsRoot,
   requiredLocalRuntimePythonModules,
 } from "../scripts/local-runtime-tools.mjs";
+import { copyPackagedNodeModules, packagedRuntimePythonManifestPath } from "../scripts/package-local-agent-runtime.mjs";
 import { runtimeConfigScript, staticFilePath } from "../web/server.mjs";
 
 function runtime(id: string, overrides: Partial<RuntimeInstance> = {}): RuntimeInstance {
@@ -363,13 +366,15 @@ test("PostgreSQL Runtime Hosts acquire the migration lock before creating the sh
 });
 
 test("Runtime Host validates deployment-required commands before accepting Runs", () => {
+  assert.equal(normalizePackagedNodeVersion("v26.0.0\n"), "26.0.0");
+  assert.equal(normalizePackagedNodeVersion("26.0.0"), "26.0.0");
+  assert.equal(packagedRuntimePythonManifestPath("darwin"), "runtime-python/bin/python3.12");
+  assert.equal(packagedRuntimePythonManifestPath("win32"), "runtime-python/python.exe");
   assert.deepEqual(requiredRuntimeCommands(undefined), []);
   assert.deepEqual(requiredRuntimeCommands(" markitdown, markitdown , python3 "), ["markitdown", "python3"]);
   assert.throws(() => requiredRuntimeCommands("markitdown;curl"), /Invalid required Runtime command/);
   assert.deepEqual(runtimeCommandProbeArguments("pdftoppm"), ["-v"]);
   assert.deepEqual(runtimeCommandProbeArguments("qpdf"), ["--version"]);
-  assert.equal(hasRuntimePlaywrightChromium("Browsers:\n  /root/.cache/ms-playwright/chromium-1234"), true);
-  assert.equal(hasRuntimePlaywrightChromium("Browsers:\n  /root/.cache/ms-playwright/firefox-1500"), false);
   assert.doesNotThrow(() => assertRequiredRuntimeCommands([process.execPath]));
   assert.throws(() => assertRequiredRuntimeCommands(["agentloop-command-that-does-not-exist"]), /Required Runtime command is unavailable/);
   assert.deepEqual(requiredRuntimePythonModules(" pymysql, pymysql "), ["pymysql"]);
@@ -386,19 +391,37 @@ test("local launcher provisions a fixed MarkItDown contract and exposes it to Ru
   const toolsRoot = localRuntimeToolsRoot("/application", { RUNTIME_TOOLS_ROOT: "./data/dev-tools" });
   const toolsBin = localRuntimeToolsBin(toolsRoot);
   assert.equal(toolsRoot, "/application/data/dev-tools");
+  assert.equal(localRuntimePythonExecutable(toolsRoot), `${toolsBin}/python`);
+  assert.equal(localRuntimePythonExecutable(toolsRoot, { RUNTIME_PYTHON: "/custom/python" }), "/custom/python");
   assert.equal(LOCAL_MARKITDOWN_VERSION, "0.1.7");
   assert.deepEqual(localRuntimeHostEnvironment({ PATH: "/usr/bin" }, toolsBin), {
-    PATH: `${toolsBin}:/usr/bin`,
+    PATH: `${toolsBin}:/application/data/dev-tools:/usr/bin`,
     RUNTIME_REQUIRED_COMMANDS: "markitdown,pandoc,pdftoppm,pdftotext,pdfinfo,qpdf,gs,tesseract,ffmpeg,unzip,zip",
-    RUNTIME_REQUIRED_PYTHON_MODULES: "anthropic,defusedxml,imageio,lxml,mcp,numpy,openpyxl,pandas,pdf2image,pdfplumber,PIL,playwright,pymysql,pypdf,pytesseract,reportlab",
+    RUNTIME_REQUIRED_PYTHON_MODULES: "anthropic,defusedxml,imageio,lxml,mcp,numpy,openpyxl,pandas,pdf2image,pdfplumber,PIL,pymysql,pypdf,pytesseract,reportlab",
     RUNTIME_REQUIRED_NODE_MODULES: "docx,pptxgenjs,react,react-dom,react-icons,sharp,@zhujun/agentloop-plan-template",
   });
   assert.equal(localRuntimeHostEnvironment({ PATH: "/usr/bin", RUNTIME_REQUIRED_COMMANDS: "markitdown,soffice" }, toolsBin).RUNTIME_REQUIRED_COMMANDS, "markitdown,soffice");
   assert.deepEqual(requiredLocalRuntimePythonModules(), [
     "anthropic", "defusedxml", "imageio", "lxml", "mcp", "numpy", "openpyxl", "pandas",
-    "pdf2image", "pdfplumber", "PIL", "playwright", "pymysql", "pypdf", "pytesseract", "reportlab",
+    "pdf2image", "pdfplumber", "PIL", "pymysql", "pypdf", "pytesseract", "reportlab",
   ]);
   assert.deepEqual(requiredLocalRuntimePythonModules({ RUNTIME_REQUIRED_PYTHON_MODULES: "anthropic, anthropic ,pymysql" }), ["anthropic", "pymysql"]);
+});
+
+test("packaged Local Runtime can invoke Skill-owned Node scripts without host node_modules", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-packaged-node-runtime-"));
+  try {
+    const modules = await copyPackagedNodeModules({ repositoryRoot: resolve(fileURLToPath(new URL("../../..", import.meta.url))), destinationRoot: root });
+    assert.ok(modules.includes("docx"));
+    assert.ok(modules.includes("pptxgenjs"));
+    const probe = join(root, "probe.cjs");
+    await writeFile(probe, "require('docx'); require('pptxgenjs'); process.stdout.write('runtime-node-ok\\n');\n", "utf8");
+    const result = spawnSync(process.execPath, [probe], { encoding: "utf8", env: { ...process.env, NODE_PATH: join(root, "node_modules") } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), "runtime-node-ok");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Router conversation index paginates newest conversations in stable pages of 30", async () => {
@@ -862,9 +885,10 @@ test("Web runtime config keeps browser API traffic same-origin while the server 
 });
 
 test("Windows Local Runtime MSI owns protocol activation, tray startup, and fixed release configuration", async () => {
-  const [packager, macPackager, preflight, tray, wix, rootPackage, workspacePackage] = await Promise.all([
+  const [packager, macPackager, runtimePackager, preflight, tray, wix, rootPackage, workspacePackage] = await Promise.all([
     readFile(new URL("../scripts/package-local-agent-windows.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/package-local-agent-macos.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/package-local-agent-runtime.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/assert-windows-local-agent-build.mjs", import.meta.url), "utf8"),
     readFile(new URL("../distribution/windows/Program.cs", import.meta.url), "utf8"),
     readFile(new URL("../distribution/windows/AgentLoopLocalRuntime.wxs", import.meta.url), "utf8"),
@@ -881,6 +905,14 @@ test("Windows Local Runtime MSI owns protocol activation, tray startup, and fixe
   assert.match(packager, /agent\.err\.log/);
   assert.match(packager, /local-agent-runtime[\s\S]*agent-loop-runtime/);
   assert.match(macPackager, /local-agent-runtime[\s\S]*agent-loop-runtime/);
+  assert.match(packager, /preparePackagedPythonRuntime/);
+  assert.match(packager, /copyPackagedNodeModules/);
+  assert.match(macPackager, /preparePackagedPythonRuntime/);
+  assert.match(macPackager, /copyPackagedNodeModules/);
+  assert.match(runtimePackager, /markitdown-script\.py/);
+  assert.match(runtimePackager, /Scripts", "python\.exe/);
+  assert.match(packager, /node\.exe/);
+  assert.match(macPackager, /join\(resources, "node"\)/);
   assert.match(preflight, /Windows MSI must be built on Windows x64/);
   assert.match(preflight, /\.NET 8 SDK is required/);
   assert.match(preflight, /WiX Toolset v4 CLI is required/);
