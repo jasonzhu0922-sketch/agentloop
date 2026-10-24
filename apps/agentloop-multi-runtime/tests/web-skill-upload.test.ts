@@ -57,8 +57,33 @@ for (const prefix of ["runtime-create", "runtime-config"]) {
     });
     await upload(prefix);
     assert.equal(status.dataset.tone, "error");
-    assert.match(status.textContent, /多个 Skill 分别压缩上传/);
+    assert.match(status.textContent, /压缩包布局无效/);
+    assert.match(status.textContent, /每个文件只能属于一个 Skill/);
     assert.equal(button.disabled, false);
     assert.equal(input.value, "");
+  });
+
+  test(`${prefix} selects every Skill returned by a multi-Skill upload`, async () => {
+    const input = { files: [{ name: "multiple.zip" }], value: "multiple.zip" };
+    const button = { disabled: false };
+    const status = { textContent: "", dataset: { tone: "" } };
+    const elements = {
+      [`${prefix}-skill-file`]: input, [`${prefix}-skill-upload`]: button,
+      [`${prefix}-skill-upload-status`]: status,
+      [`${prefix}-skills`]: { querySelectorAll: () => [{ value: "existing" }] },
+    };
+    let loaded: unknown[] = [];
+    const upload = vm.runInNewContext(`${uploadSource}\nuploadRuntimeSkill`, {
+      Error, $: (id: string) => elements[id as keyof typeof elements],
+      fileAsBase64: async () => "encoded-zip",
+      localAgentFetch: async () => Response.json({ skills: [
+        { packageId: "first", displayName: "First Skill" },
+        { packageId: "second", displayName: "Second Skill" },
+      ] }, { status: 201 }),
+      loadRuntimeSkillOptions: async (id: string, selected: string[]) => { loaded = [id, ...selected]; },
+    });
+    await upload(prefix);
+    assert.deepEqual(loaded, [`${prefix}-skills`, "existing", "first", "second"]);
+    assert.match(status.textContent, /已安装到本机（2 个）：First Skill、Second Skill/);
   });
 }

@@ -199,7 +199,11 @@ export class LocalAgentService {
 
   async installLocalSkillPackage(originalName: string, content: Buffer): Promise<unknown> {
     const installed = await this.skillPackageInstaller.installZip(content, originalName);
-    return { skill: await this.configurations.registerUploadedPackage(installed) };
+    const skills = await Promise.all(installed.map((packageInfo) => this.configurations.registerUploadedPackage(packageInfo)));
+    return {
+      skills,
+      ...(skills.length === 1 ? { skill: skills[0] } : {}),
+    };
   }
 
   async testLocalMcpServer(server: LocalRuntimeMcpServerInput): Promise<unknown> {

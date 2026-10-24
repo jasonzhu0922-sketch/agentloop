@@ -854,14 +854,19 @@ async function uploadRuntimeSkill(prefix) {
     if (!response.ok) {
       const messages = {
         skill_upload_invalid: "压缩包无效：请检查 ZIP 完整性、SKILL.md 格式和解包大小限制。",
-        skill_upload_package_layout_invalid: "每次上传一个 Skill：ZIP 根目录应有 SKILL.md，或只包含一个 Skill 文件夹。请将多个 Skill 分别压缩上传。",
+        skill_upload_package_layout_invalid: "压缩包布局无效：根目录或各 Skill 文件夹中应包含 SKILL.md，且每个文件只能属于一个 Skill。",
       };
       throw new Error(messages[body.error] || body.error || `Local Agent HTTP ${response.status}`);
     }
     const selected = [...$(`${prefix}-skills`).querySelectorAll('input[type="checkbox"]:checked')].map((item) => item.value);
-    selected.push(body.skill.packageId);
+    const skills = Array.isArray(body.skills) ? body.skills : (body.skill === undefined ? [] : [body.skill]);
+    if (skills.length === 0) throw new Error("上传结果中没有可用 Skill");
+    selected.push(...skills.map((skill) => skill.packageId));
     await loadRuntimeSkillOptions(`${prefix}-skills`, selected);
-    status.textContent = `已安装到本机：${body.skill.displayName}。点击${prefix === "runtime-create" ? "创建" : "保存"}后应用到此 Runtime。`;
+    const names = skills.map((skill) => skill.displayName).join("、");
+    status.textContent = skills.length === 1
+      ? `已安装到本机：${names}。点击${prefix === "runtime-create" ? "创建" : "保存"}后应用到此 Runtime。`
+      : `已安装到本机（${skills.length} 个）：${names}。点击${prefix === "runtime-create" ? "创建" : "保存"}后应用到此 Runtime。`;
     status.dataset.tone = "ok";
   } catch (error) {
     status.textContent = `上传 Skill 失败：${error instanceof Error ? error.message : String(error)}`;

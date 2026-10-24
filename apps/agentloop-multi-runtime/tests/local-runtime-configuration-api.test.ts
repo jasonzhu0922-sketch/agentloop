@@ -103,7 +103,12 @@ test("loopback Runtime configuration supports empty extensions and redacts encry
       body: JSON.stringify({ originalName: "uploaded-review.zip", contentBase64: skillArchive.toString("base64") }),
     });
     assert.equal(uploadResponse.status, 201);
-    const uploaded = await uploadResponse.json() as { skill: { packageId: string; sourceKind: string } };
+    const uploaded = await uploadResponse.json() as {
+      skills: Array<{ packageId: string; sourceKind: string }>;
+      skill: { packageId: string; sourceKind: string };
+    };
+    assert.equal(uploaded.skills.length, 1);
+    assert.equal(uploaded.skills[0]!.packageId, uploaded.skill.packageId);
     assert.equal(uploaded.skill.sourceKind, "uploaded");
     assert.equal(JSON.stringify(uploaded).includes("local-only-test-token"), false);
     const uploadedRoot = join(root, "skill-packages", "uploaded");
@@ -128,8 +133,10 @@ test("loopback Runtime configuration supports empty extensions and redacts encry
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ originalName: "multiple.zip", contentBase64: (await multipleZip.generateAsync({ type: "nodebuffer" })).toString("base64") }),
     });
-    assert.equal(multipleResponse.status, 400);
-    assert.deepEqual(await multipleResponse.json(), { error: "skill_upload_package_layout_invalid" });
+    assert.equal(multipleResponse.status, 201);
+    const multipleUploaded = await multipleResponse.json() as { skills: Array<{ packageId: string; displayName: string }> };
+    assert.deepEqual(multipleUploaded.skills.map((skill) => skill.displayName).sort(), ["first", "second"]);
+    assert.equal(multipleUploaded.skills.length, 2);
 
     const mcpTestResponse = await request("/v1/local-mcp-servers/test", {
       method: "POST",

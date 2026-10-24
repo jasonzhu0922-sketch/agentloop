@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import JSZip from "jszip";
 import { copySkillPackage, inspectSkillPackage, type SkillPackageInspection } from "@zhujun/agentloop";
 
@@ -21,7 +21,7 @@ export class LocalSkillPackageInstaller {
 
   constructor(packageRoot: string) { this.packageRoot = packageRoot; }
 
-  async installZip(content: Buffer, originalName: string): Promise<InstalledLocalSkillPackage> {
+  async installZip(content: Buffer, originalName: string): Promise<readonly InstalledLocalSkillPackage[]> {
     if (content.length < 1 || content.length > MAX_ARCHIVE_BYTES || !originalName.toLowerCase().endsWith(".zip")) {
       throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
     }
@@ -50,19 +50,33 @@ export class LocalSkillPackageInstaller {
         await mkdir(dirname(target), { recursive: true, mode: 0o700 });
         await writeFile(target, data, { mode: 0o600, flag: "wx" });
       }
-      const sourceRoot = await packageSourceRoot(staging);
-      const inspection = await inspectSkillPackage(sourceRoot).catch(() => {
+      const sourceRoots = await packageSourceRoots(staging);
+      const inspections = await Promise.all(sourceRoots.map(async (sourceRoot) => await inspectSkillPackage(sourceRoot).catch(() => {
         throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
-      });
-      const storageKey = `uploaded-${inspection.packageHash}`;
-      const target = join(this.packageRoot, storageKey);
-      const installed = await inspectSkillPackage(target).catch(() => undefined);
-      if (installed !== undefined) {
-        if (installed.packageHash !== inspection.packageHash) throw new LocalSkillPackageInstallError(409, "skill_package_storage_conflict");
-        return { storageKey, root: installed.root, inspection: installed };
+      })));
+      const storageKeys = new Set<string>();
+      for (const inspection of inspections) {
+        const storageKey = `uploaded-${inspection.packageHash}`;
+        if (!storageKeys.add(storageKey)) throw new LocalSkillPackageInstallError(409, "skill_package_storage_conflict");
+        const target = join(this.packageRoot, storageKey);
+        const installed = await inspectSkillPackage(target).catch(() => undefined);
+        if (installed !== undefined && installed.packageHash !== inspection.packageHash) {
+          throw new LocalSkillPackageInstallError(409, "skill_package_storage_conflict");
+        }
       }
-      const copied = await copySkillPackage(inspection, target);
-      return { storageKey, root: copied.root, inspection: copied };
+      const installedPackages: InstalledLocalSkillPackage[] = [];
+      for (const inspection of inspections) {
+        const storageKey = `uploaded-${inspection.packageHash}`;
+        const target = join(this.packageRoot, storageKey);
+        const installed = await inspectSkillPackage(target).catch(() => undefined);
+        if (installed !== undefined) {
+          installedPackages.push({ storageKey, root: installed.root, inspection: installed });
+          continue;
+        }
+        const copied = await copySkillPackage(inspection, target);
+        installedPackages.push({ storageKey, root: copied.root, inspection: copied });
+      }
+      return installedPackages;
     } finally {
       await rm(staging, { recursive: true, force: true });
     }
@@ -96,9 +110,51 @@ function assertInside(root: string, target: string): void {
   throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
 }
 
-async function packageSourceRoot(staging: string): Promise<string> {
-  const entries = (await readdir(staging, { withFileTypes: true })).filter((entry) => entry.name !== "__MACOSX");
-  if (entries.some((entry) => entry.isFile() && entry.name === "SKILL.md")) return staging;
-  if (entries.length === 1 && entries[0]!.isDirectory()) return join(staging, entries[0]!.name);
-  throw new LocalSkillPackageInstallError(400, "skill_upload_package_layout_invalid");
+async function packageSourceRoots(staging: string): Promise<readonly string[]> {
+  const skillFiles = await findSkillEntrypoints(staging);
+  if (skillFiles.length === 0) throw new LocalSkillPackageInstallError(400, "skill_upload_package_layout_invalid");
+  const roots = skillFiles.map((path) => dirname(path));
+  if (roots.some((root, index) => roots.some((other, otherIndex) => index !== otherIndex && isPathInside(root, other)))) {
+    throw new LocalSkillPackageInstallError(400, "skill_upload_package_layout_invalid");
+  }
+  if (roots.length > 1) {
+    const files = await listStagedFiles(staging);
+    if (files.some((file) => !roots.some((root) => isPathInside(root, file)))) {
+      throw new LocalSkillPackageInstallError(400, "skill_upload_package_layout_invalid");
+    }
+  }
+  return roots;
+}
+
+async function findSkillEntrypoints(root: string): Promise<readonly string[]> {
+  const found: string[] = [];
+  async function visit(directory: string): Promise<void> {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.name === "__MACOSX") continue;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile() && entry.name === "SKILL.md") found.push(path);
+    }
+  }
+  await visit(root);
+  return found;
+}
+
+async function listStagedFiles(root: string): Promise<readonly string[]> {
+  const found: string[] = [];
+  async function visit(directory: string): Promise<void> {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.name === "__MACOSX") continue;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile()) found.push(path);
+    }
+  }
+  await visit(root);
+  return found;
+}
+
+function isPathInside(root: string, candidate: string): boolean {
+  const value = relative(root, candidate);
+  return value === "" || (value !== ".." && !value.startsWith(`..${sep}`) && !isAbsolute(value));
 }

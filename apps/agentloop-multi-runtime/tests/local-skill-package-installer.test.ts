@@ -6,7 +6,7 @@ import test from "node:test";
 import JSZip from "jszip";
 import { LocalSkillPackageInstaller } from "../local-agent-runtime/src/service/local-skill-package-installer.ts";
 
-test("local Skill upload preserves user-owned private files and rejects multi-Skill layouts", async () => {
+test("local Skill upload preserves user-owned private files and installs multiple Skills", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-skill-upload-"));
   try {
     const store = join(root, "packages");
@@ -18,15 +18,26 @@ test("local Skill upload preserves user-owned private files and rejects multi-Sk
     zip.file("private-skill/credentials.json", '{"token":"local-only-token"}');
     zip.file("private-skill/certs/client.pem", "local-only-certificate");
     const installed = await installer.installZip(await zip.generateAsync({ type: "nodebuffer" }), "private-skill.zip");
-    assert.equal(await readFile(join(installed.root, ".env"), "utf8"), "OA_DOC_TOKEN=local-only-token\n");
-    assert.equal(await readFile(join(installed.root, "credentials.json"), "utf8"), '{"token":"local-only-token"}');
-    assert.equal(await readFile(join(installed.root, "certs", "client.pem"), "utf8"), "local-only-certificate");
+    assert.equal(installed.length, 1);
+    assert.equal(await readFile(join(installed[0]!.root, ".env"), "utf8"), "OA_DOC_TOKEN=local-only-token\n");
+    assert.equal(await readFile(join(installed[0]!.root, "credentials.json"), "utf8"), '{"token":"local-only-token"}');
+    assert.equal(await readFile(join(installed[0]!.root, "certs", "client.pem"), "utf8"), "local-only-certificate");
 
     const multiple = new JSZip();
     multiple.file("first/SKILL.md", "---\nname: first\ndescription: first\n---\n");
     multiple.file("second/SKILL.md", "---\nname: second\ndescription: second\n---\n");
+    const multipleArchive = await multiple.generateAsync({ type: "nodebuffer" });
+    const installedMultiple = await installer.installZip(multipleArchive, "multiple.zip");
+    assert.deepEqual(installedMultiple.map((item) => item.inspection.name).sort(), ["first", "second"]);
+    const installedAgain = await installer.installZip(multipleArchive, "multiple-again.zip");
+    assert.deepEqual(installedAgain.map((item) => item.root), installedMultiple.map((item) => item.root));
+
+    const invalidMixed = new JSZip();
+    invalidMixed.file("first/SKILL.md", "---\nname: first\ndescription: first\n---\n");
+    invalidMixed.file("second/SKILL.md", "---\nname: second\ndescription: second\n---\n");
+    invalidMixed.file("README.txt", "must belong to a Skill");
     await assert.rejects(
-      installer.installZip(await multiple.generateAsync({ type: "nodebuffer" }), "multiple.zip"),
+      installer.installZip(await invalidMixed.generateAsync({ type: "nodebuffer" }), "invalid-mixed.zip"),
       (error: unknown) => error instanceof Error && error.message === "skill_upload_package_layout_invalid",
     );
   } finally {
