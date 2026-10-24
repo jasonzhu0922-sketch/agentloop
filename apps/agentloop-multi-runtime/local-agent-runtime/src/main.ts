@@ -4,11 +4,11 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { DEFAULT_MAX_PLANNING_TURNS, DEFAULT_MAX_STEPS, MAX_SUPPORTED_PLANNING_TURNS, MAX_SUPPORTED_STEP_TURNS } from "@zhujun/agentloop";
 import { readLocalAgentBootstrapConfig, writeLocalAgentBootstrapConfig } from "./config/bootstrap-config.ts";
 import { createLocalAgentServer } from "./api/local-agent-api.ts";
 import { localRuntimeTerminalLogLine } from "./observability/runtime-terminal-log.ts";
 import { ensureLocalAgentRuntimeConfiguration, localAgentRuntimeConfiguration, readLocalAgentIntegrationEnvironment } from "./config/runtime-configuration.ts";
+import { localAgentTurnLimits } from "./config/turn-limits.ts";
 import { localAgentPort } from "../../src/shared/local-agent-endpoint.mjs";
 import { ensureLocalRuntimeTools, localRuntimeToolsBin, localRuntimeToolsEnvironment } from "../../scripts/local-runtime-tools.mjs";
 import { normalizePackagedNodeVersion, packagedRuntimePythonManifestPath, PACKAGED_NODE_MAJOR, PACKAGED_PYTHON_MAJOR_MINOR } from "../../scripts/package-local-agent-runtime.mjs";
@@ -49,18 +49,10 @@ const maxConcurrentRuns = positiveInteger(process.env.LOCAL_RUNTIME_MAX_CONCURRE
 const runtimeConfiguration = localAgentRuntimeConfiguration(appRoot, dataRoot, process.env);
 await ensureLocalAgentRuntimeConfiguration(appRoot, runtimeConfiguration);
 const integrationEnvironment = await readLocalAgentIntegrationEnvironment(runtimeConfiguration);
-const planningMaxTurns = boundedPositiveInteger(
-  process.env.PLANNING_MAX_TURNS ?? integrationEnvironment.PLANNING_MAX_TURNS,
-  DEFAULT_MAX_PLANNING_TURNS,
-  MAX_SUPPORTED_PLANNING_TURNS,
-  "PLANNING_MAX_TURNS",
-);
-const stepMaxTurns = boundedPositiveInteger(
-  process.env.STEP_MAX_TURNS ?? integrationEnvironment.STEP_MAX_TURNS,
-  DEFAULT_MAX_STEPS,
-  MAX_SUPPORTED_STEP_TURNS,
-  "STEP_MAX_TURNS",
-);
+const { planningMaxTurns, stepMaxTurns } = localAgentTurnLimits({
+  ...integrationEnvironment,
+  ...process.env,
+});
 const mcpServersConfigPath = resolve(process.env.LOCAL_AGENT_MCP_SERVERS_CONFIG_PATH ?? join(runtimeConfiguration.root, "config", "mcp-servers.json"));
 const providerConfigPath = runtimeConfiguration.providerConfigPath;
 const skillDirectoriesConfigPath = resolve(process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? join(appRoot, "config", "skill-directories.json"));
@@ -93,13 +85,6 @@ function positiveInteger(value: string | undefined, fallback: number, name = "LO
   return result;
 }
 
-function boundedPositiveInteger(value: string | undefined, fallback: number, maximum: number, name: string): number {
-  const result = Number(value ?? fallback);
-  if (!Number.isSafeInteger(result) || result < 1 || result > maximum) {
-    throw new Error(`${name} must be a positive integer no greater than ${maximum}`);
-  }
-  return result;
-}
 function requiredArgument(value: string | undefined, flag: string): string { if (value === undefined || value.trim() === "") throw new Error(`${flag} requires a value`); return value; }
 
 function packagedDataRoot(): string {
