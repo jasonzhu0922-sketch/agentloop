@@ -259,23 +259,31 @@ export class LlmProviderRegistry {
 function parseProviderDocument(value: unknown, label: string): ParsedProviderDocument {
   const document = requireObject(value, label);
   assertExactKeys(document, ["defaultProvider", "defaultModelKey", "providers", "models"], label);
-  const defaultProvider = requireProviderKey(document.defaultProvider, `${label}.defaultProvider`);
+  // `defaultProvider` was part of the legacy server configuration contract.
+  // Model selection is now explicit at the Run boundary, so newer documents
+  // may omit it; when omitted we derive it from the selected default model.
+  const configuredDefaultProvider = document.defaultProvider === undefined
+    ? undefined
+    : requireProviderKey(document.defaultProvider, `${label}.defaultProvider`);
   const providersRecord = requireObject(document.providers, `${label}.providers`);
   const entries = Object.entries(providersRecord);
   if (entries.length === 0) throw new Error(`${label}.providers must contain at least one provider`);
   const providers = entries.map(([key, config]) => parseProvider(key, config, label));
-  if (!providers.some((provider) => provider.key === defaultProvider)) {
+  if (configuredDefaultProvider !== undefined && !providers.some((provider) => provider.key === configuredDefaultProvider)) {
     throw new Error(`${label}.defaultProvider must name a configured provider`);
   }
   const models = document.models === undefined
     ? legacyModelsFromProviders(providers)
     : parseModels(document.models, providers, label);
   const defaultModelKey = document.defaultModelKey === undefined
-    ? legacyModelKeyForProvider(providers.find((provider) => provider.key === defaultProvider)!)
+    ? configuredDefaultProvider === undefined
+      ? models[0]?.key
+      : legacyModelKeyForProvider(providers.find((provider) => provider.key === configuredDefaultProvider)!)
     : requireModelKey(document.defaultModelKey, `${label}.defaultModelKey`);
-  if (!models.some((model) => model.key === defaultModelKey)) {
+  if (defaultModelKey === undefined || !models.some((model) => model.key === defaultModelKey)) {
     throw new Error(`${label}.defaultModelKey must name a configured model`);
   }
+  const defaultProvider = configuredDefaultProvider ?? models.find((model) => model.key === defaultModelKey)!.providerKey;
   return { defaultProvider, defaultModelKey, providers, models };
 }
 

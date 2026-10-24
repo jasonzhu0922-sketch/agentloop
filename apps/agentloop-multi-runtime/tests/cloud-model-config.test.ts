@@ -36,6 +36,12 @@ test("save payload sends the edited catalog and explicit credentials, preserving
   assert.equal(updated.environment, undefined);
   const imported = configurationForApply(JSON.stringify(config), ["MCP_KEY=retained"], []);
   assert.equal(imported.environment, "MCP_KEY=retained");
+  const withoutLegacyDefault = { ...config };
+  delete withoutLegacyDefault.defaultProvider;
+  assert.deepEqual(
+    configurationForApply(JSON.stringify(withoutLegacyDefault), undefined, []).configuration,
+    withoutLegacyDefault,
+  );
   assert.throws(() => configurationForApply(JSON.stringify({ ...config, defaultProvider: "absent" }), undefined, []), /defaultProvider/);
   assert.throws(() => configurationForApply(JSON.stringify(config), undefined, [["UNRELATED_KEY", "value"]]), /未被 Provider 引用/);
 });

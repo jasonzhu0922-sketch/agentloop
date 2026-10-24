@@ -11,7 +11,7 @@ export function providerKeyNames(config) {
 export function configurationForApply(text, envLines, entries) {
   const configuration = JSON.parse(text);
   const allowed = providerKeyNames(configuration);
-  if (!configuration.providers[configuration.defaultProvider]) throw new Error("defaultProvider 必须引用 providers 中已配置的 Provider");
+  if (configuration.defaultProvider !== undefined && !configuration.providers[configuration.defaultProvider]) throw new Error("defaultProvider 必须引用 providers 中已配置的 Provider");
   if (!configuration.models[configuration.defaultModelKey]) throw new Error("defaultModelKey 必须引用 models 中已配置的模型");
   for (const [key, model] of Object.entries(configuration.models)) {
     if (!configuration.providers[model.providerKey]) throw new Error(`模型 ${key} 引用了不存在的 Provider`);

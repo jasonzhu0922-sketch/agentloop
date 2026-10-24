@@ -29,6 +29,26 @@ test("fromConfigObject resolves secrets from the injected environment lookup", (
   assert.throws(() => registry.create(), /not configured/);
 });
 
+test("fromConfigObject derives the legacy default provider when defaultProvider is omitted", () => {
+  const registry = LlmProviderRegistry.fromConfigObject({
+    defaultModelKey: "demo-chat",
+    providers: {
+      deepseek: {
+        kind: "openai-compatible",
+        baseUrl: "https://api.example.com",
+        apiKeyEnv: "SMOKE_MODEL_KEY",
+        defaultModel: "demo-chat",
+      },
+    },
+    models: {
+      "demo-chat": { providerKey: "deepseek", providerModel: "demo-chat", displayName: "Demo Chat" },
+    },
+  }, { SMOKE_MODEL_KEY: "secret" });
+
+  assert.equal(registry.defaultProviderKey, "deepseek");
+  assert.equal(registry.defaultModelKey, "demo-chat");
+});
+
 test("fromConfigObject rejects invalid documents with a labeled error", () => {
   assert.throws(
     () => LlmProviderRegistry.fromConfigObject({ unexpected: true }),
