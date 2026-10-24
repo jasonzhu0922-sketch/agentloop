@@ -1341,6 +1341,8 @@ test("Web projects durable Plan transitions, formats final Markdown, and preserv
     readFile(new URL("../web/client/projections/execution-detail-projection.js", import.meta.url), "utf8"),
   ]);
   assert.match(app, /replayPersistedRunEvents/);
+  assert.match(app, /\/v1\/assignments\/\$\{encodeURIComponent\(assistant\.assignmentId\)\}\/events\/latest/);
+  assert.doesNotMatch(app, /replayPersistedRunEvents[\s\S]{0,500}\/events`/);
   assert.match(app, /function projectPlanStatuses\(plan, events, runStatus\)/);
   assert.match(app, /projectAssistantEvent\(assistant, event\)/);
   assert.match(app, /mergeRuntimeEvents\(assistant\.events, \[event\]\)/);

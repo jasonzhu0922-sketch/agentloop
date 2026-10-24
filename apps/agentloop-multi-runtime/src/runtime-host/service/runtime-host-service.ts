@@ -105,6 +105,14 @@ export class RuntimeHostService implements RuntimeControlPort {
       .map((event) => projectTerminalEvent(event));
   }
 
+  async latestEvent(remoteRunId: string): Promise<RuntimeRunEvent | undefined> {
+    const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
+    if (ownerUserId === undefined) throw new TypeError("runtime run not found");
+    if (this.runs.latestEvent === undefined) throw new TypeError("runtime event query is not configured");
+    const event = await this.runs.latestEvent(ownerUserId, remoteRunId);
+    return event === undefined ? undefined : projectTerminalEvent(event);
+  }
+
   async commandOutput(remoteRunId: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<RuntimeCommandOutput> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");

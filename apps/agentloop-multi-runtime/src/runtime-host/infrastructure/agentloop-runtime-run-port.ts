@@ -44,6 +44,10 @@ export class AgentLoopRuntimeRunPort implements RuntimeHostRunPort {
     return await this.runs.events(actorUserId, runId);
   }
 
+  async latestEvent(actorUserId: string, runId: string): Promise<RuntimeRunEvent | undefined> {
+    return await this.runs.latestEvent(actorUserId, runId);
+  }
+
   async processArtifacts(actorUserId: string, runId: string): Promise<readonly RuntimeArtifact[]> {
     return await this.runs.processArtifacts(actorUserId, runId);
   }

@@ -120,6 +120,16 @@ export class HttpRuntimeControl implements RuntimeControlPort {
     return body.events;
   }
 
+  async latestEvent(remoteRunId: string): Promise<RuntimeRunEvent | undefined> {
+    const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/events/latest`, `${this.endpoint.replace(/\/$/, "")}/`), {
+      headers: this.authorization === undefined ? {} : { authorization: this.authorization },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const body = await response.json() as { event?: RuntimeRunEvent; error?: string };
+    if (!response.ok) throw new Error(body.error ?? `runtime latest event failed with HTTP ${response.status}`);
+    return body.event;
+  }
+
   async commandOutput(remoteRunId: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<RuntimeCommandOutput> {
     const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/commands/${encodeURIComponent(toolCallId)}/${stream}`, `${this.endpoint.replace(/\/$/, "")}/`), {
       headers: this.authorization === undefined ? {} : { authorization: this.authorization },

@@ -899,6 +899,10 @@ export class RunService {
     return await this.eventQueries.list(actorUserId, runId);
   }
 
+  async latestEvent(actorUserId: string, runId: string): Promise<StoredRunEvent | undefined> {
+    return await this.eventQueries.latest(actorUserId, runId);
+  }
+
   private async runtimeEvents(runId: string): Promise<StoredRunEvent[]> {
     return await this.eventQueries.storedForRun(runId);
   }

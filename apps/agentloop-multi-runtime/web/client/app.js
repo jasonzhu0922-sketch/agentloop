@@ -1543,14 +1543,14 @@ function recoveredFailureMessage(run) {
 
 async function replayPersistedRunEvents(assistant, tenantId, userId) {
   try {
-    const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/events`, { headers: { "x-tenant-id": tenantId, "x-user-id": userId } });
+    const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/events/latest`, { headers: { "x-tenant-id": tenantId, "x-user-id": userId } });
     if (!response.ok) return false;
     const body = await response.json();
-    const events = Array.isArray(body?.events) ? body.events : [];
-    if (events.length === 0) return false;
-    setVolatile(assistant, "detailEvents", events);
-    const terminal = replayAssistantEvents(assistant, events);
-    if (terminal) completeAssistantMessage(assistant, events.at(-1));
+    const event = body?.event;
+    if (!event || !Number.isSafeInteger(event.seq) || typeof event.type !== "string") return false;
+    const terminal = replayAssistantEvents(assistant, [event]);
+    setVolatile(assistant, "detailEvents", mergeDetailEvents(assistant.detailEvents, [event]));
+    if (terminal) completeAssistantMessage(assistant, event);
     return true;
   } catch {
     return false;

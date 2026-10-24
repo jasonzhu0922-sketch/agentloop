@@ -142,6 +142,9 @@ export class RuntimeConnectionClient {
       const afterSeq = Number.isSafeInteger(payload.afterSeq) ? Number(payload.afterSeq) : 0;
       return (await runtime.runs.events(ownerUserId, remoteRunId)).filter((event) => event.seq > afterSeq);
     }
+    if (method === "latestEvent") {
+      return await runtime.runs.latestEvent(ownerUserId, remoteRunId);
+    }
     if (method === "cancelRun") {
       const run = await runtime.runs.cancel(ownerUserId, remoteRunId);
       await this.supervisor.runSettled(runtime.id, remoteRunId);

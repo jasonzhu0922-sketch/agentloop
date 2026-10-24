@@ -61,6 +61,7 @@ interface RouterTaskApi {
   heartbeat?(input: { readonly runtimeId: string; readonly status: "ready" | "draining" | "offline"; readonly activeRunCount: number; readonly queuedRunCount: number; readonly maxConcurrentRuns?: number; readonly observedAt: number }): Promise<void>;
   cancel?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly run: RuntimeRunStatus }>;
   events?(id: string, afterSeq: number): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly events: readonly RuntimeRunEvent[] } | undefined>;
+  latestEvent?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly event?: RuntimeRunEvent } | undefined>;
   commandOutput?(id: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly output: RuntimeCommandOutput } | undefined>;
   toolArguments?(id: string, toolCallId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly arguments: RuntimeToolArguments } | undefined>;
   advanceRecovery?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly recovery: RuntimeRecoveryDetail } | undefined>;
@@ -430,6 +431,7 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
         return json(response, 200, { response: projection.response });
       }
       const eventsMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/events$/);
+      const latestEventMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/events\/latest$/);
       const eventsStreamMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/events\/stream$/);
       const commandOutputMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/commands\/([^/]+)\/(stdout|stderr)$/);
       if (request.method === "GET" && commandOutputMatch !== null) {
@@ -457,6 +459,15 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
         }
         return streamEvents(request, response, bindRouterEvents(router), assignmentId, initial.events,
           Number(url.searchParams.get("afterSeq") ?? 0), async (id) => (await router.assignment(id))?.run);
+      }
+      if (request.method === "GET" && latestEventMatch !== null) {
+        if (router.latestEvent === undefined) return json(response, 501, { error: "latest_event_not_configured" });
+        const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
+        const projection = await router.latestEvent(decodeURIComponent(latestEventMatch[1]));
+        if (projection === undefined || projection.assignment.tenantId !== identity.tenantId || projection.assignment.ownerUserId !== identity.ownerUserId) {
+          return json(response, 404, { error: "assignment_not_found" });
+        }
+        return json(response, 200, { event: projection.event });
       }
       if (request.method === "GET" && eventsMatch !== null) {
         if (router.events === undefined) return json(response, 501, { error: "events_not_configured" });

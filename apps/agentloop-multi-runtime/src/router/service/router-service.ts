@@ -235,6 +235,14 @@ export class RouterService {
     return { assignment: (await this.store.assignment(id)) ?? assignment, events };
   }
 
+  async latestEvent(id: string): Promise<{ readonly assignment: StoredAssignment; readonly event?: RuntimeRunEvent } | undefined> {
+    const assignment = await this.store.assignment(id);
+    if (assignment === undefined) return undefined;
+    if (assignment.remoteRunId.length === 0) return { assignment };
+    const event = await this.endpointFactory(assignment.runtimeEndpoint).latestEvent?.(assignment.remoteRunId);
+    return { assignment, ...(event === undefined ? {} : { event }) };
+  }
+
   async commandOutput(id: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<{ readonly assignment: StoredAssignment; readonly output: RuntimeCommandOutput } | undefined> {
     const assignment = await this.store.assignment(id);
     if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;

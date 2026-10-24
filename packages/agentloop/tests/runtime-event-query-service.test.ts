@@ -23,3 +23,18 @@ test("public event reads authorize first and remove provider-private reasoning",
   const storedEvents = await queries.storedForRun("run-1");
   assert.equal(storedEvents[0]?.data.privateReasoningContent, "provider-state");
 });
+
+test("latest event reads one durable row without requesting the full ledger", async () => {
+  let fullReads = 0;
+  let latestReads = 0;
+  const queries = new RuntimeEventQueryService({
+    runs: {
+      eventsByRun: async () => { fullReads++; return []; },
+      latestEventByRun: async () => { latestReads++; return { seq: 9, type: "run.completed", payload_json: JSON.stringify({ output: "done" }), created_at: 90 }; },
+    },
+    authorizeRun: async () => {},
+  });
+  assert.deepEqual(await queries.latest("owner", "run-1"), { seq: 9, type: "run.completed", data: { output: "done" }, createdAt: 90 });
+  assert.equal(latestReads, 1);
+  assert.equal(fullReads, 0);
+});

@@ -27,6 +27,7 @@ export interface RuntimeHostRunPort {
   get(actorUserId: string, runId: string): Promise<RuntimeHostRun>;
   cancel?(actorUserId: string, runId: string): Promise<RuntimeHostRun>;
   events?(actorUserId: string, runId: string): Promise<readonly RuntimeRunEvent[]>;
+  latestEvent?(actorUserId: string, runId: string): Promise<RuntimeRunEvent | undefined>;
   processArtifacts?(actorUserId: string, runId: string): Promise<readonly RuntimeArtifact[]>;
   readProcessArtifact?(actorUserId: string, runId: string, artifactId: string): Promise<{
     readonly artifact: RuntimeArtifact;

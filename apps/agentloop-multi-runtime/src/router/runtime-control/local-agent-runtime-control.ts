@@ -58,6 +58,7 @@ export class LocalAgentRuntimeControl {
       models: () => rpc("models", {}),
       getRun: (remoteRunId) => rpc("getRun", { remoteRunId }),
       events: (remoteRunId, afterSeq) => rpc("events", { remoteRunId, afterSeq }),
+      latestEvent: (remoteRunId) => rpc("latestEvent", { remoteRunId }),
       cancelRun: (remoteRunId) => rpc("cancelRun", { remoteRunId }),
       artifacts: (remoteRunId) => rpc("artifacts", { remoteRunId }),
       readArtifact: async (remoteRunId, artifactId) => {

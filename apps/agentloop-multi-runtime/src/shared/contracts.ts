@@ -227,6 +227,7 @@ export interface RuntimeControlPort {
   previewArtifact?(remoteRunId: string, artifactId: string): Promise<RuntimeArtifactPreview>;
   cancelRun?(remoteRunId: string): Promise<RuntimeRunStatus>;
   events?(remoteRunId: string, afterSeq: number): Promise<readonly RuntimeRunEvent[]>;
+  latestEvent?(remoteRunId: string): Promise<RuntimeRunEvent | undefined>;
   commandOutput?(remoteRunId: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<RuntimeCommandOutput>;
   toolArguments?(remoteRunId: string, toolCallId: string): Promise<RuntimeToolArguments>;
   /** Advances the Host-owned recovery planner for a paused Run. */

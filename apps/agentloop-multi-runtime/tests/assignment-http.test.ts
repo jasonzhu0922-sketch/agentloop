@@ -10,6 +10,35 @@ import { IdentityService } from "../src/router/identity/service.ts";
 import { observeAssignment } from "../web/client/api/assignment-stream.js";
 import { projectAssistantEvent } from "../web/client/projections/assistant-event-projection.js";
 
+test("HTTP Router latest-event recovery returns one event without reading the full event ledger", async () => {
+  const database = new AppDatabase(":memory:"); const store = new ControlPlaneStore(database);
+  await store.ready();
+  const identity = new IdentityService(database);
+  const session = await identity.register("latest-event@example.test", "long-test-password-123");
+  await store.seedRuntimes([{ id: "host", endpoint: "http://fixture-host", profile: "general", capabilities: [], maxConcurrentRuns: 2, activeRunCount: 0, status: "ready" }]);
+  await store.heartbeat({ runtimeId: "host", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: Date.now() });
+  let fullReads = 0; let latestReads = 0;
+  const router = new RouterService({ store, endpointFactory: () => ({
+    dispatch: async () => ({ remoteRunId: "run-latest" }),
+    events: async () => { fullReads++; return []; },
+    latestEvent: async () => { latestReads++; return { seq: 42, type: "assistant.streaming", data: { content: "latest" }, createdAt: 42 }; },
+  }) });
+  const assignment = await router.submit({ tenantId: session.principal.tenantId, ownerUserId: session.principal.userId, conversationId: "latest-c", clientMessageId: "latest-m", input: "fixture" });
+  const server = createRouterHttpServer(router, { identity });
+  try {
+    server.listen(0, "127.0.0.1"); await once(server, "listening");
+    const address = server.address(); assert.ok(address && typeof address !== "string");
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/assignments/${assignment.id}/events/latest`, {
+      headers: { authorization: `Bearer ${session.token}`, "x-tenant-id": session.principal.tenantId, "x-user-id": session.principal.userId },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).event, { seq: 42, type: "assistant.streaming", data: { content: "latest" }, createdAt: 42 });
+    assert.equal(latestReads, 1); assert.equal(fullReads, 0);
+  } finally {
+    server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await database.close();
+  }
+});
+
 test("HTTP Router returns a durable failed Assignment when a Runtime rejects dispatch before Run admission", async () => {
   const database = new AppDatabase(":memory:"); const store = new ControlPlaneStore(database);
   await store.ready();
