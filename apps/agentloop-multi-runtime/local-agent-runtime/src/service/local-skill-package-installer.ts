@@ -15,7 +15,12 @@ export interface InstalledLocalSkillPackage {
   readonly inspection: SkillPackageInspection;
 }
 
-/** Installs a user-owned ZIP on this device, including its private configuration. */
+export interface LocalSkillUploadFile {
+  readonly path: string;
+  readonly content: Buffer;
+}
+
+/** Installs user-owned Skill archives or selected directories on this device, including private configuration. */
 export class LocalSkillPackageInstaller {
   private readonly packageRoot: string;
 
@@ -30,19 +35,34 @@ export class LocalSkillPackageInstaller {
     });
     const files = Object.values(zip.files).filter((entry) => !entry.dir);
     if (files.length < 1 || files.length > MAX_FILES) throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
+    return await this.installFiles(files.map((entry) => ({
+      path: entry.unsafeOriginalName ?? entry.name,
+      content: entry.async("nodebuffer"),
+      zipEntry: entry,
+    })), content.length);
+  }
+
+  async installDirectory(files: readonly LocalSkillUploadFile[]): Promise<readonly InstalledLocalSkillPackage[]> {
+    if (files.length < 1 || files.length > MAX_FILES) throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
+    return await this.installFiles(files.map((file) => ({ path: file.path, content: file.content })));
+  }
+
+  private async installFiles(files: readonly { readonly path: string; readonly content: Buffer | Promise<Buffer>; readonly zipEntry?: JSZip.JSZipObject }[], compressedSize?: number): Promise<readonly InstalledLocalSkillPackage[]> {
     await mkdir(this.packageRoot, { recursive: true, mode: 0o700 });
     const stagingParent = join(this.packageRoot, ".staging");
     await mkdir(stagingParent, { recursive: true, mode: 0o700 });
     const staging = await mkdtemp(join(stagingParent, "upload-"));
     try {
       let totalBytes = 0;
+      const stagedPaths = new Set<string>();
       for (const entry of files) {
-        const packagePath = safePackagePath(entry.unsafeOriginalName ?? entry.name);
-        assertRegularZipEntry(entry);
-        const data = await entry.async("nodebuffer");
+        const packagePath = safePackagePath(entry.path);
+        if (!stagedPaths.add(packagePath)) throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
+        if (entry.zipEntry !== undefined) assertRegularZipEntry(entry.zipEntry);
+        const data = await entry.content;
         if (data.length > MAX_FILE_BYTES) throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
         totalBytes += data.length;
-        if (totalBytes > MAX_TOTAL_BYTES || totalBytes > Math.max(content.length * MAX_COMPRESSION_RATIO, 1024 * 1024)) {
+        if (totalBytes > MAX_TOTAL_BYTES || (compressedSize !== undefined && totalBytes > Math.max(compressedSize * MAX_COMPRESSION_RATIO, 1024 * 1024))) {
           throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
         }
         const target = resolve(staging, ...packagePath.split("/"));

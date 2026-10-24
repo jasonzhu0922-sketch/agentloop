@@ -118,6 +118,25 @@ test("loopback Runtime configuration supports empty extensions and redacts encry
       assert.equal(await readFile(join(uploadedRoot, installedName, path), "utf8"), content);
     }
 
+    const directoryFiles = [
+      { path: "directory-review/SKILL.md", contentBase64: Buffer.from("---\nname: directory-review\ndescription: Directory review workflow.\n---\n").toString("base64") },
+      { path: "directory-review/scripts/check.py", contentBase64: Buffer.from("print('directory')\n").toString("base64") },
+    ];
+    const directoryResponse = await request("/v1/local-skill-package-uploads", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ files: directoryFiles }),
+    });
+    assert.equal(directoryResponse.status, 201);
+    const directoryUploaded = await directoryResponse.json() as { skills: Array<{ displayName: string }> };
+    assert.deepEqual(directoryUploaded.skills.map((skill) => skill.displayName), ["directory-review"]);
+
+    const unsafeDirectoryResponse = await request("/v1/local-skill-package-uploads", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ files: [{ path: "../escaped/SKILL.md", contentBase64: Buffer.from("invalid").toString("base64") }] }),
+    });
+    assert.equal(unsafeDirectoryResponse.status, 400);
+    assert.deepEqual(await unsafeDirectoryResponse.json(), { error: "skill_upload_invalid" });
+
     const symlinkZip = new JSZip();
     symlinkZip.file("linked/SKILL.md", "../../outside", { unixPermissions: 0o120777 });
     const symlinkResponse = await request("/v1/local-skill-package-uploads", {

@@ -32,6 +32,19 @@ test("local Skill upload preserves user-owned private files and installs multipl
     const installedAgain = await installer.installZip(multipleArchive, "multiple-again.zip");
     assert.deepEqual(installedAgain.map((item) => item.root), installedMultiple.map((item) => item.root));
 
+    const directoryInstalled = await installer.installDirectory([
+      { path: "directory-skill/SKILL.md", content: Buffer.from("---\nname: directory-skill\ndescription: directory\n---\n") },
+      { path: "directory-skill/.env", content: Buffer.from("DIRECTORY_SECRET=local-only\n") },
+      { path: "directory-skill/scripts/run.py", content: Buffer.from("print('ok')\n") },
+    ]);
+    assert.equal(directoryInstalled.length, 1);
+    assert.equal(await readFile(join(directoryInstalled[0]!.root, ".env"), "utf8"), "DIRECTORY_SECRET=local-only\n");
+    assert.equal(await readFile(join(directoryInstalled[0]!.root, "scripts", "run.py"), "utf8"), "print('ok')\n");
+    await assert.rejects(
+      installer.installDirectory([{ path: "../escaped/SKILL.md", content: Buffer.from("invalid") }]),
+      (error: unknown) => error instanceof Error && error.message === "skill_upload_invalid",
+    );
+
     const invalidMixed = new JSZip();
     invalidMixed.file("first/SKILL.md", "---\nname: first\ndescription: first\n---\n");
     invalidMixed.file("second/SKILL.md", "---\nname: second\ndescription: second\n---\n");

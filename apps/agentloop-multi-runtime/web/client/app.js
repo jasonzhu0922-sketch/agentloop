@@ -166,8 +166,12 @@ for (const prefix of ["runtime-create", "runtime-config"]) {
 }
 $("runtime-create-skill-upload").addEventListener("click", () => $("runtime-create-skill-file").click());
 $("runtime-config-skill-upload").addEventListener("click", () => $("runtime-config-skill-file").click());
+$("runtime-create-skill-directory-upload").addEventListener("click", () => $("runtime-create-skill-directory").click());
+$("runtime-config-skill-directory-upload").addEventListener("click", () => $("runtime-config-skill-directory").click());
 $("runtime-create-skill-file").addEventListener("change", () => void uploadRuntimeSkill("runtime-create"));
 $("runtime-config-skill-file").addEventListener("change", () => void uploadRuntimeSkill("runtime-config"));
+$("runtime-create-skill-directory").addEventListener("change", () => void uploadRuntimeSkill("runtime-create", "directory"));
+$("runtime-config-skill-directory").addEventListener("change", () => void uploadRuntimeSkill("runtime-config", "directory"));
 document.querySelectorAll("[data-runtime-capability-tab]").forEach((button) => {
   button.addEventListener("click", () => activateRuntimeCapabilityTab(button.closest(".runtime-capability-card"), button.dataset.runtimeCapabilityTab));
   button.addEventListener("keydown", (event) => {
@@ -832,29 +836,33 @@ async function loadRuntimeSkillOptions(containerId, selectedPackageIds) {
     : localSkillPackages.map((skill) => `<label class="runtime-skill-option"><input type="checkbox" value="${escapeHtml(skill.packageId)}" ${selected.has(skill.packageId) ? "checked" : ""}/><span>${escapeHtml(skill.displayName)}<small>${escapeHtml(skill.description || skill.sourceKind || "")}</small></span></label>`).join("");
 }
 
-async function uploadRuntimeSkill(prefix) {
-  const input = $(`${prefix}-skill-file`);
-  const button = $(`${prefix}-skill-upload`);
+async function uploadRuntimeSkill(prefix, mode = "zip") {
+  const input = $(`${prefix}-skill-${mode === "directory" ? "directory" : "file"}`);
+  const button = $(`${prefix}-skill-${mode === "directory" ? "directory-upload" : "upload"}`);
   const status = $(`${prefix}-skill-upload-status`);
   if (button.disabled) return;
-  const file = input.files?.[0];
+  const files = [...(input.files || [])];
   input.value = "";
-  if (!file) return;
+  if (files.length === 0) return;
+  const isDirectory = mode === "directory" || files.length > 1 || files.some((file) => file.webkitRelativePath);
+  const file = files[0];
   button.disabled = true;
-  status.textContent = `正在上传到本机：${file.name}…`;
+  status.textContent = `正在上传到本机：${isDirectory ? (file.webkitRelativePath?.split("/")[0] || "Skill 目录") : file.name}…`;
   status.dataset.tone = "running";
   try {
-    const contentBase64 = await fileAsBase64(file);
+    const payload = isDirectory
+      ? { files: await Promise.all(files.map(async (entry) => ({ path: entry.webkitRelativePath || entry.name, contentBase64: await fileAsBase64(entry) }))) }
+      : { originalName: file.name, contentBase64: await fileAsBase64(file) };
     const response = await localAgentFetch("/v1/local-skill-package-uploads", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ originalName: file.name, contentBase64 }),
+      body: JSON.stringify(payload),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       const messages = {
-        skill_upload_invalid: "压缩包无效：请检查 ZIP 完整性、SKILL.md 格式和解包大小限制。",
-        skill_upload_package_layout_invalid: "压缩包布局无效：根目录或各 Skill 文件夹中应包含 SKILL.md，且每个文件只能属于一个 Skill。",
+        skill_upload_invalid: "Skill 文件无效：请检查 ZIP/目录中的 SKILL.md、文件路径和大小限制。",
+        skill_upload_package_layout_invalid: "压缩包布局无效：ZIP 或目录的根目录/各 Skill 文件夹中应包含 SKILL.md，且每个文件只能属于一个 Skill。",
       };
       throw new Error(messages[body.error] || body.error || `Local Agent HTTP ${response.status}`);
     }
@@ -878,7 +886,7 @@ function fileAsBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.addEventListener("load", () => resolve(String(reader.result).split(",", 2)[1] || ""), { once: true });
-    reader.addEventListener("error", () => reject(reader.error || new Error("读取 Skill 压缩包失败")), { once: true });
+    reader.addEventListener("error", () => reject(reader.error || new Error("读取 Skill 文件失败")), { once: true });
     reader.readAsDataURL(file);
   });
 }

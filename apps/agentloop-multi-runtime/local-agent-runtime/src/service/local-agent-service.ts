@@ -12,7 +12,7 @@ import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, ty
 import { LocalModelConfigurationStore, type LocalModelConfigurationInput } from "../persistence/local-model-configuration-store.ts";
 import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local-runtime-secret-store.ts";
 import { loadSkillDirectoriesConfig } from "../../../src/shared/config.ts";
-import { LocalSkillPackageInstaller } from "./local-skill-package-installer.ts";
+import { LocalSkillPackageInstaller, type LocalSkillUploadFile } from "./local-skill-package-installer.ts";
 import { LOCAL_AGENT_VERSION } from "../config/local-agent-version.ts";
 
 export { LOCAL_AGENT_VERSION };
@@ -199,6 +199,15 @@ export class LocalAgentService {
 
   async installLocalSkillPackage(originalName: string, content: Buffer): Promise<unknown> {
     const installed = await this.skillPackageInstaller.installZip(content, originalName);
+    const skills = await Promise.all(installed.map((packageInfo) => this.configurations.registerUploadedPackage(packageInfo)));
+    return {
+      skills,
+      ...(skills.length === 1 ? { skill: skills[0] } : {}),
+    };
+  }
+
+  async installLocalSkillDirectory(files: readonly LocalSkillUploadFile[]): Promise<unknown> {
+    const installed = await this.skillPackageInstaller.installDirectory(files);
     const skills = await Promise.all(installed.map((packageInfo) => this.configurations.registerUploadedPackage(packageInfo)));
     return {
       skills,

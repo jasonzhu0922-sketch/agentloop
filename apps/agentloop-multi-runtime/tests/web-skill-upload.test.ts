@@ -30,6 +30,8 @@ for (const prefix of ["runtime-create", "runtime-config"]) {
       loadRuntimeSkillOptions: async (id: string, selected: string[]) => { loaded = [id, ...selected]; },
     });
     assert.ok(html.includes(`id="${prefix}-skill-upload-status"`));
+    assert.ok(html.includes(`id="${prefix}-skill-directory-upload"`));
+    assert.ok(html.includes(`id="${prefix}-skill-directory"`));
     const pending = upload(prefix);
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(button.disabled, true);
@@ -85,5 +87,36 @@ for (const prefix of ["runtime-create", "runtime-config"]) {
     await upload(prefix);
     assert.deepEqual(loaded, [`${prefix}-skills`, "existing", "first", "second"]);
     assert.match(status.textContent, /已安装到本机（2 个）：First Skill、Second Skill/);
+  });
+
+  test(`${prefix} uploads a selected directory with relative paths`, async () => {
+    const input = { files: [
+      { name: "SKILL.md", webkitRelativePath: "directory-skill/SKILL.md" },
+      { name: "run.py", webkitRelativePath: "directory-skill/scripts/run.py" },
+    ], value: "directory-skill" };
+    const button = { disabled: false };
+    const status = { textContent: "", dataset: { tone: "" } };
+    const elements = {
+      [`${prefix}-skill-directory`]: input, [`${prefix}-skill-directory-upload`]: button,
+      [`${prefix}-skill-upload-status`]: status,
+      [`${prefix}-skills`]: { querySelectorAll: () => [] },
+    };
+    let request: Record<string, unknown> | undefined;
+    const upload = vm.runInNewContext(`${uploadSource}\nuploadRuntimeSkill`, {
+      Error, $: (id: string) => elements[id as keyof typeof elements],
+      fileAsBase64: async (file: { name: string }) => `encoded-${file.name}`,
+      localAgentFetch: async (_path: string, init: RequestInit) => {
+        request = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return Response.json({ skill: { packageId: "directory", displayName: "Directory Skill" } }, { status: 201 });
+      },
+      loadRuntimeSkillOptions: async () => undefined,
+    });
+    await upload(prefix, "directory");
+    assert.deepEqual(request, { files: [
+      { path: "directory-skill/SKILL.md", contentBase64: "encoded-SKILL.md" },
+      { path: "directory-skill/scripts/run.py", contentBase64: "encoded-run.py" },
+    ] });
+    assert.equal(status.dataset.tone, "ok");
+    assert.equal(button.disabled, false);
   });
 }

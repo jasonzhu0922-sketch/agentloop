@@ -3,6 +3,7 @@ import { LocalAgentService } from "../service/local-agent-service.ts";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
 import type { LocalRuntimeConfigurationInput, LocalRuntimeMcpServerInput } from "../persistence/local-runtime-configuration-store.ts";
 import type { ToolSourceCapability } from "@zhujun/agentloop";
+import type { LocalSkillUploadFile } from "../service/local-skill-package-installer.ts";
 
 export type LocalAgentServerOptions = LocalAgentOptions;
 
@@ -41,7 +42,11 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
       }
       if (request.method === "POST" && url.pathname === "/v1/local-skill-package-uploads") {
         await session(request, service);
-        const value = await body(request, 36 * 1024 * 1024);
+        const value = await body(request, 90 * 1024 * 1024);
+        if (value.files !== undefined) {
+          if (value.contentBase64 !== undefined) throw new Error("skill_upload_input_ambiguous");
+          return json(response, 201, await service.installLocalSkillDirectory(directoryFiles(value.files)));
+        }
         return json(response, 201, await service.installLocalSkillPackage(
           stringValue(value.originalName, "originalName"),
           base64Content(value.contentBase64),
@@ -146,7 +151,14 @@ async function body(request: IncomingMessage, maxBytes = 26 * 1024 * 1024): Prom
 function queryRuntimeId(url: URL): string { const runtimeId = url.searchParams.get("runtimeId"); if (runtimeId === null) throw new Error("runtimeId_required"); return runtimeId; }
 function stringValue(value: unknown, name: string): string { if (typeof value !== "string" || value.length === 0 || value.length > 200_000) throw new Error(`${name}_invalid`); return value; }
 function stringArray(value: unknown, name: string): readonly string[] { if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.length === 0)) throw new Error(`${name}_invalid`); return value as string[]; }
-function base64Content(value: unknown): Buffer { const max = Math.ceil((25 * 1024 * 1024) / 3) * 4; if (typeof value !== "string" || value.length === 0 || value.length > max || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) throw new Error("contentBase64_invalid"); const content = Buffer.from(value, "base64"); if (content.length === 0 || content.length > 25 * 1024 * 1024) throw new Error("contentBase64_invalid"); return content; }
+function base64Content(value: unknown, maxBytes = 25 * 1024 * 1024): Buffer { const max = Math.ceil(maxBytes / 3) * 4; if (typeof value !== "string" || value.length === 0 || value.length > max || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) throw new Error("contentBase64_invalid"); const content = Buffer.from(value, "base64"); if (content.length === 0 || content.length > maxBytes) throw new Error("contentBase64_invalid"); return content; }
+function directoryFiles(value: unknown): readonly LocalSkillUploadFile[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 2_000) throw new Error("skill_upload_files_invalid");
+  return value.map((item, index) => {
+    const entry = recordValue(item, `files[${index}]`);
+    return { path: stringValue(entry.path, `files[${index}].path`), content: base64Content(entry.contentBase64, 16 * 1024 * 1024) };
+  });
+}
 function json(response: ServerResponse, status: number, value: unknown): void { response.statusCode = status; response.setHeader("content-type", "application/json; charset=utf-8"); response.end(value === undefined ? "" : JSON.stringify(value)); }
 function originAllowed(origin: string | undefined, configured: string | undefined): boolean { return origin !== undefined && configured !== undefined && configured.split(",").map((value) => value.trim()).includes(origin); }
 function errorStatus(error: unknown): number { return typeof error === "object" && error !== null && "status" in error && typeof error.status === "number" ? error.status : 400; }
