@@ -34,6 +34,32 @@ EffectiveStepCapabilities
 
 研发完成的判断标准是：所有运行边界只消费统一的 `ResolvedSkillContract`，而不是“增加一套 custom Skill 配置并保留 bundled 特例”。
 
+## 1.1 首要设计决策：metadata 不再写入 `SKILL.md`
+
+本分支先固定存储边界，再开始编译器和上传功能。`SKILL.md` 只保留正文以及兼容性的 `name`/`description` 头部；AgentLoop 的角色、artifact/source/QA、召回提示、required Skill 和执行证据不再写入其中。
+
+```text
+Skill Package（不可变）
+  SKILL.md + agentloop.skill.json + agentloop.executors.json
+
+Package/Runtime 外部存储（可审计、可版本化）
+  SkillMetadataDraft
+  SkillDeclarationAdaptation（准确绑定 packageSha256）
+  SkillBinding（部署/Runtime 批准和环境引用）
+```
+
+三类 Skill 的落点：
+
+| 形式 | declaration | draft/binding | 备注 |
+|---|---|---|---|
+| 内核 Bundled | 随 `@zhujun/agentloop-skills` 发布的 `agentloop.skill.json` | 官方默认 Binding + Host/Runtime 收紧配置 | 默认启用不等于绕过 readiness/grant |
+| 云端 Custom Skills | 有维护者时放入 custom package sidecar；历史包由 Cloud Declaration Store 保存 hash-bound adaptation | Cloud Control Plane 的 Declaration/Binding Store | 不把部署策略写回包或 `SKILL.md` |
+| 用户上传 Skill | 原始包只读；没有 sidecar 时由用户编辑产生外部 adaptation | Local Agent SQLite 或 Cloud Control Plane 的 Draft/Binding Store | 上传先是 `catalog-only`/`needs-binding`，明确激活后才进入 Runtime |
+
+包内 declaration 是发布者声明的上限；外部 adaptation 只为没有原生 declaration 的准确 hash 提供适配，Binding 只能收紧。任何 native declaration 与外部 metadata 的冲突都 fail-closed，不设“以用户编辑为准”的隐式优先级。
+
+`name`、`description` 是 package identity，metadata editor 只读展示；用户若要修改它们，必须生成新的 package revision/hash。列表可以保存外部 `displayLabel`，但不把它作为 Planner identity 或语义输入。
+
 ## 2. 当前基线
 
 当前代码已经具备可复用的基础：
@@ -41,8 +67,10 @@ EffectiveStepCapabilities
 - `@zhujun/agentloop-skills` 通过 `bundledSkillDirectories()` 提供独立发布的 Bundled Skill；
 - Runtime Host 将 bundled 目录和配置的 Custom 目录合并后调用 `SkillService.syncSkillDirectories()`；
 - `packages/agentloop/src/skills/skill-package.ts` 负责包检查、hash、复制和旧 `agentloop:` frontmatter 解析；
+- 当前 `skill-package.ts` 仍从 `SKILL.md` 读取 `agentloop:`，这只是迁移输入，不是目标存储方案；
 - `packages/agentloop/src/skills/agentloop-metadata.ts` 定义当前角色、artifact、source、QA 和 evidence vocabulary；
 - `agentloop.executors.json` 已经描述 package-owned action，但它目前与顶层 Skill metadata 存在 evidence 声明重复；
+- `discovered_skills.agent_loop_json` 和 `SkillSummary.agentLoop` 仍是旧 projection，迁移期只能用于诊断/等价性快照，不能成为用户编辑 metadata 的存储；
 - Planner、Admission 和 Runtime Service 已经消费 `skill.agentLoop`，但没有统一的编译产物；
 - Custom Skill 目录和已发布 `custom-skills.zip` 的同步、重启和部署验证仍然是独立操作。
 
@@ -104,13 +132,15 @@ packages/agentloop/src/skills/skill-contract-errors.ts
 工作项：
 
 1. 实现 `agentloop.skillDeclaration/v1` 解析和结构校验。
-2. 实现 `agentloop.skillBinding/v1` 解析和结构校验。
-3. 约束 binding 只能收紧 declaration，不得新增 role、artifact/source kind 或不存在的 action。
-4. 绑定 package name、package hash 和 publisher provenance。
-5. 对 required Skill 建立名称解析和依赖环检测。
-6. 统一稳定排序、规范化和错误码。
+2. 规定 `SKILL.md` 只保留兼容性的 `name`/`description`，并校验它们与 declaration identity 一致。
+3. 实现 Declaration/Adaptation Store：包内 declaration、cloud/user adaptation、legacy migration 必须有不同来源和状态。
+4. 实现 `agentloop.skillBinding/v1` 解析和结构校验。
+5. 约束 binding 只能收紧 declaration，不得新增 role、artifact/source kind 或不存在的 action。
+6. 绑定 package name、package hash、declaration hash 和 publisher provenance。
+7. 对 required Skill 建立名称解析和依赖环检测。
+8. 统一稳定排序、规范化和错误码。
 
-退出条件：缺少 declaration、hash 不匹配、action 不存在、binding 扩权和依赖环都在编译前得到稳定错误；声明相同的输入产生相同 hash。
+退出条件：缺少 declaration、hash 不匹配、action 不存在、binding 扩权、native/external metadata 冲突和依赖环都在编译前得到稳定错误；声明相同的输入产生相同 hash。
 
 ### P2：实现 ResolvedSkillContract 编译器
 
@@ -162,7 +192,7 @@ packages/agentloop/tests/skill-contract-compiler.test.ts
 
 自动识别分成两层：
 
-1. 确定性识别：读取 `SKILL.md` frontmatter、`agentloop.skill.json`、`agentloop.executors.json`、文件结构和 package scripts，生成可验证字段；
+1. 确定性识别：优先读取 `agentloop.skill.json`、`agentloop.executors.json`、文件结构和 package scripts，再读取 `SKILL.md` 兼容头部；只有没有 native declaration 时才读取旧 `agentloop:` frontmatter；
 2. 语义建议：根据 Skill 名称、description、正文标题和示例提出 roles、artifact/source/QA、semantic tags 和 intent examples 候选，并保留置信度和推导依据。
 
 编辑器至少支持：
@@ -183,8 +213,12 @@ packages/agentloop/tests/skill-contract-compiler.test.ts
 ```ts
 interface SkillMetadataDraft {
   readonly schema: "agentloop.skillMetadataDraft/v1";
+  readonly packageId: string;
   readonly packageName: string;
   readonly packageSha256: string;
+  readonly ownerScope: string;
+  readonly revision: number;
+  readonly baseDeclarationSha256?: string;
   readonly status: "draft" | "needs_user_review" | "invalid" | "ready_to_validate";
   readonly fields: Readonly<Record<string, {
     readonly value: unknown;
@@ -197,9 +231,9 @@ interface SkillMetadataDraft {
 }
 ```
 
-产物：上传 API、草稿持久化、metadata editor、字段级校验、编辑后 contract preview 和脱敏诊断。用户取消编辑时只保留 `catalog-only` 包，不进入任何 Runtime 的可用 Skill 集合。
+产物：上传 API、不可变原始包存储、草稿持久化、metadata editor、字段级校验、编辑后 contract preview 和脱敏诊断。编辑器只写外部 Draft/Adaptation，不回写 `SKILL.md`；用户取消编辑时只保留 `catalog-only` 包，不进入任何 Runtime 的可用 Skill 集合。
 
-退出条件：一个只有 `SKILL.md` 的上传包能够生成草稿；用户可以修改角色、来源和 action；系统能清楚显示哪些字段是自动识别、哪些字段需要人工确认；草稿未激活前不进入 Planner。
+退出条件：一个只有 `SKILL.md` 的上传包能够生成外部草稿；用户可以修改角色、来源和 action；系统能清楚显示哪些字段是自动识别、哪些字段需要人工确认；草稿未激活前不进入 Planner，且原始包 hash 不因编辑而改变。
 
 ### P4：接入 SkillService 和 Runtime Catalog
 
@@ -216,11 +250,12 @@ interface SkillMetadataDraft {
 工作项：
 
 1. `inspectSkillPackage()` 同时发现 native declaration、legacy frontmatter 和 executor manifest。
-2. 将 `catalog-only`、`needs-binding`、`needs-runtime`、`ready`、`rejected` 写入 discovery projection。
-3. 仅 `ready` contract 进入 Planner catalog；其他状态保留脱敏诊断。
-4. 保存 package hash、binding hash、contract hash 和 catalog revision。
-5. bundled 和 custom 继续走相同的 `syncSkillDirectories()`，来源只作为 provenance 保存。
-6. 任何 package hash 变化都使旧 binding/readiness 失效。
+2. 将 package record 与 Declaration/Adaptation Store 的引用关联起来，不把用户编辑后的字段塞回 `discovered_skills.agent_loop_json`。
+3. 将 `catalog-only`、`needs-binding`、`needs-runtime`、`ready`、`rejected` 写入 discovery projection。
+4. 仅 `ready` contract 进入 Planner catalog；其他状态保留脱敏诊断。
+5. 保存 package hash、declaration hash、binding hash、contract hash 和 catalog revision。
+6. bundled 和 custom 继续走相同的 `syncSkillDirectories()`，来源只作为 provenance 保存。
+7. 任何 package hash 或 declaration hash 变化都使旧 binding/readiness 失效。
 
 退出条件：Runtime 启动能够明确报告每个 Skill 的状态和原因；未绑定或未 ready Skill 不会出现在 Planner candidates。
 
@@ -286,6 +321,7 @@ agentloop.executors.json（需要时）
 工作项：
 
 - 删除 Planner、Admission、Executor 对旧 metadata 的直接读取；
+- 删除向 `SKILL.md` 回写 AgentLoop metadata 的路径；
 - 删除顶层 `producesEvidenceKinds` 与 action-level evidence 的重复事实源；
 - 删除 legacy frontmatter 的长期 fallback，只保留明确迁移工具；
 - 更新 Skill creator、包检查、部署脚本、README 和发布归档流程；
@@ -296,15 +332,17 @@ agentloop.executors.json（需要时）
 
 ## 5. 第一开发迭代
 
-第一迭代做 P0、P1、P2 和 P3 的最小闭环，目标是让用户上传后可以看到并编辑 metadata 草稿：
+第一迭代做 P0、P1、P2 和 P3 的最小闭环，目标是先固定 metadata 存储边界，再让用户上传后可以看到并编辑外部 metadata 草稿：
 
 1. 定义 declaration、binding、readiness attestation 和 resolved contract 类型；
-2. 完成 legacy frontmatter adapter；
-3. 完成 executor action 与 evidence producer 的单一汇总逻辑；
-4. 编译一个 bundled builder、一个 source provider、一个无脚本 reference fixture；
-5. 为错误边界补充单元测试；
-6. 增加最小上传 API、草稿持久化和 metadata editor；
-7. 不让草稿进入 Planner，不改 Runtime 启动产品流程。
+2. 定义包内 `agentloop.skill.json` 与 `SKILL.md` 兼容头部的一致性校验；
+3. 建立 Declaration/Adaptation Store 和 `SkillMetadataDraft` 外部持久化；
+4. 完成 legacy frontmatter adapter；
+5. 完成 executor action 与 evidence producer 的单一汇总逻辑；
+6. 编译一个 bundled builder、一个云端 custom source provider、一个用户上传无脚本 reference fixture；
+7. 为 package hash、declaration hash、metadata 冲突和错误边界补充单元测试；
+8. 增加最小上传 API、草稿持久化和 metadata editor；
+9. 不让草稿进入 Planner，不改 Runtime 启动产品流程。
 
 第一迭代的结果是一个可由后续消费者逐步接入的纯函数编译器，而不是一次性重写整个 Skill 系统。
 

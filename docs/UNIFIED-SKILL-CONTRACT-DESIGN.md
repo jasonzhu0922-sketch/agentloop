@@ -2,7 +2,7 @@
 
 版本：v1.0-draft
 
-日期：2026-10-20
+日期：2026-10-24
 
 状态：设计方案，尚未实现
 
@@ -38,6 +38,34 @@ ResolvedSkillContract
 4. 自动分析只能生成草稿，不能直接生成执行授权；
 5. Runtime 只消费编译后的 `ResolvedSkillContract`，不在 Planner、Admission 和 Executor 中重复解释源文件。
 
+### 1.1 元数据存储决策
+
+`SKILL.md` 不再是 AgentLoop 运行元数据的权威存储。它只保留跨生态兼容所需的最小人类可读头部（`name`、`description`）和 Skill 正文；`agentloop:` 规划/执行块在迁移期只作为 legacy 输入，迁移完成后删除。
+
+权威数据拆成三层，并且分别存储：
+
+```text
+不可变 Skill Package
+  ├── SKILL.md                         # 正文；name/description 仅作兼容镜像
+  ├── agentloop.skill.json             # Package Declaration（包内、发布者拥有）
+  └── agentloop.executors.json         # Executor Manifest（包内、发布者拥有）
+
+Package/Runtime 外部存储
+  ├── SkillMetadataDraft               # 自动识别与用户编辑的草稿
+  ├── SkillDeclarationAdaptation       # 无原生 declaration 时的 hash-bound 适配
+  └── SkillBinding                     # 部署/Runtime 的批准、收紧和环境引用
+```
+
+三条不可变规则：
+
+1. 包内 declaration 是发布者对 Skill 能力上限的声明；Binding 只能收紧，不能回写包或扩大声明。
+2. 用户上传、云端管理和部署编辑都写入包外草稿/适配/Binding，不通过修改 `SKILL.md` 注入元数据；原始上传包保持字节不变、可重新计算 hash。
+3. Planner、Admission、Executor 和 Assessment 只读取编译后的 `ResolvedSkillContract`；它们不能直接读 `SKILL.md`、草稿或单独的 Binding。
+
+`name`、`description` 属于 package identity，不是用户上传后的可变字段：编辑器以 `editable=false` 展示它们。若用户确实要改身份或正文说明，必须生成新的 package revision/新 package hash；应用可以另存一个仅用于列表展示的 `displayLabel`，但它不能替代 declaration identity，也不能参与 Planner 语义。
+
+如果同一 package hash 同时存在包内 declaration 与包外 adaptation，只有“包外内容是明确的审阅投影且与包内声明等价”才允许发布；任何冲突都 `fail-closed`，不能使用“以用户编辑为准”或“以内置为准”的隐式优先级。
+
 ## 2. 当前问题
 
 ### 2.1 一个 frontmatter 承担了三种职责
@@ -55,6 +83,8 @@ ResolvedSkillContract
 - 同一个声明在 frontmatter 和 executor action 中重复，可能发生漂移；
 - 错误往往到 Plan Admission 或执行后才暴露，接入反馈过晚；
 - Bundled 和 Custom 容易逐渐形成两套特例。
+
+因此本设计不再扩展 `SKILL.md` frontmatter。`name` 和 `description` 在迁移期仍保留为兼容镜像，但必须与 `agentloop.skill.json.identity` 一致；规划、执行、证据和召回字段全部迁移到 sidecar declaration 或包外 hash-bound adaptation。
 
 ### 2.2 发现、适配、授权和就绪没有被明确分开
 
@@ -133,9 +163,22 @@ skills/pptx/
 ```
 
 - `SKILL.md`：模型使用说明、领域流程和按需参考入口；
-- `agentloop.skill.json`：版本化 Package Declaration；
-- `agentloop.executors.json`：现有 package-owned executor action 接口；
+- `agentloop.skill.json`：版本化 Package Declaration，是 package metadata 的唯一包内权威来源；
+- `agentloop.executors.json`：现有 package-owned executor action 接口，是 action/evidence 的唯一包内权威来源；
 - 包内所有文件继续参与 `agentloop.skillPackage/v1` hash。
+
+`SKILL.md` 的兼容头部只允许：
+
+```yaml
+---
+name: data-platform-query
+description: 查询数据表结构和血缘信息。
+---
+```
+
+它不是运行时 declaration。包检查器必须验证这两个字段与 `agentloop.skill.json.identity` 相等；缺少 sidecar 时只能进入 legacy/adaptation 流程，不能把 frontmatter 当作长期事实源。
+
+现有 `discovered_skills.agent_loop_json`、`SkillSummary.agentLoop` 等字段在迁移期只能作为 legacy projection/诊断输出；它们不能承载用户编辑后的 declaration，也不能被 Planner、Admission 或 Executor 作为权威输入。
 
 ### 5.2 未修改第三方 Skill
 
@@ -145,16 +188,18 @@ team-skills/
 │   ├── SKILL.md
 │   └── scripts/
 ├── third-party-ocr.source.json
-└── third-party-ocr.agentloop.json
+└── third-party-ocr.binding.json
 ```
 
-`third-party-ocr.agentloop.json` 是部署方拥有的包外 Binding：
+`third-party-ocr.binding.json` 是部署方拥有的包外 Binding；如果第三方包没有原生 declaration，Binding 中可以携带 hash-bound `adaptation`：
 
 - 必须绑定准确的 package name 和 `packageSha256`；
 - 可以在 `adaptation` 中补充缺失的 Package Declaration；
 - 可以批准该包的运行模式和 action；
 - 不改变第三方包字节，因此不会伪装成上游内容；
 - package hash 变化后立即失效，必须重新检查和批准。
+
+这个文件属于部署配置，不会复制回第三方包，也不会修改第三方 `SKILL.md`。如果第三方包已经带有 `agentloop.skill.json`，Binding 只允许选择 action、收紧 policy 和补充环境引用，不能改写 declaration。
 
 ### 5.3 Bundled Skill 的默认绑定
 
@@ -180,6 +225,16 @@ Bundled binding 由官方包发布者签发或通过发布包完整性建立信�
 
 “默认绑定”不是“绕过绑定”。
 
+### 5.4 三类 Skill 的存储矩阵
+
+| Skill 形式 | Package 内容存储 | Declaration 权威存储 | Binding/草稿存储 | 激活范围 |
+|---|---|---|---|---|
+| 内核 Bundled | `@zhujun/agentloop-skills` 发布包，内容不可变 | 包内 `agentloop.skill.json`，随源码/版本发布 | 官方默认 Binding 随发布包；Host/Runtime 只保存收紧后的生效 Binding | 默认每个 Runtime，但仍需 readiness 和 Run/Step grant |
+| 云端 Custom Skills | 云端部署目录或 release object，package hash 固定 | 有维护者时包内 sidecar；无 sidecar 时云端 `SkillDeclarationAdaptation`，必须绑定准确 package hash | Cloud Control Plane 的 Binding Store；按 workspace/deployment/Runtime 作用域保存 | 被部署配置明确选中的 Runtime/Host |
+| 用户上传 Skill | Local Agent package store 或云端对象存储，原始包只读 | 用户编辑产生的 declaration/adaptation 存外部 `SkillMetadataDraft`/`SkillDeclarationAdaptation`；不改原始包 | Local Agent SQLite 或 Cloud Control Plane 保存草稿、Binding 和激活 revision | 用户明确激活的 Runtime/Workspace |
+
+三类形式都先产生同一份 `PackageRecord`，再通过同一 `DeclarationResolver` 得到有效 declaration。来源（`bundled`、`cloud-custom`、`user-upload`）只作为 provenance 和默认策略，不改变 declaration、Binding、readiness 或 grant 的语义。
+
 ## 6. Package Declaration
 
 ### 6.1 Schema 草案
@@ -190,7 +245,8 @@ Bundled binding 由官方包发布者签发或通过发布包完整性建立信�
 {
   "schema": "agentloop.skillDeclaration/v1",
   "identity": {
-    "name": "data-platform-query"
+    "name": "data-platform-query",
+    "description": "查询数据表字段、主键和上下游表级血缘"
   },
   "activation": {
     "semanticTags": ["data-platform", "metadata-query", "data-governance"],
@@ -215,9 +271,11 @@ Bundled binding 由官方包发布者签发或通过发布包完整性建立信�
 
 #### `identity`
 
-- `name` 必须与 `SKILL.md` frontmatter name 和目录发现名称一致；
-- v1 不引入独立可变 display name；展示名称可以由应用投影；
+- `name` 和 `description` 是 package identity 的权威字段，必须与 `SKILL.md` 兼容头部和目录发现名称一致；
+- v1 不引入独立可变 display name；展示名称可以由应用投影，但不能覆盖 declaration identity；
 - declaration 不声明 package hash，避免包内容对自身 hash 形成循环依赖。
+
+当 package 没有 `agentloop.skill.json` 时，`SkillDeclarationAdaptation` 可以在包外提供同样的 `identity`，但必须绑定完整 package hash。它是该 hash 的部署/用户适配，不是对原始 package 内容的修改；同一 hash 只能有一个当前生效的 declaration revision。
 
 #### `activation`
 
@@ -502,7 +560,7 @@ interface ResolvedSkillContract {
     readonly attestationId: string;
   };
   readonly provenance: {
-    readonly declarationSource: "package" | "legacy-frontmatter" | "binding-adaptation";
+    readonly declarationSource: "package" | "cloud-adaptation" | "user-adaptation" | "legacy-frontmatter";
     readonly bindingPublisher: string;
   };
 }
@@ -656,8 +714,12 @@ Router 不接收：
 ```ts
 interface SkillMetadataDraft {
   readonly schema: "agentloop.skillMetadataDraft/v1";
+  readonly packageId: string;
   readonly packageName: string;
   readonly packageSha256: string;
+  readonly ownerScope: string;
+  readonly revision: number;
+  readonly baseDeclarationSha256?: string;
   readonly status: "draft" | "needs_user_review" | "invalid" | "ready_to_validate";
   readonly fields: Readonly<Record<string, {
     readonly value: unknown;
@@ -672,7 +734,7 @@ interface SkillMetadataDraft {
 
 识别器按两层工作：
 
-1. 确定性识别读取 `SKILL.md`、`agentloop.skill.json`、`agentloop.executors.json`、包文件结构和 scripts，生成可校验字段；
+1. 确定性识别优先读取 `agentloop.skill.json` 和 `agentloop.executors.json`，再读取 `SKILL.md` 的兼容头部、包文件结构和 scripts，生成可校验字段；没有 native declaration 时才把旧 `agentloop:` frontmatter 作为 legacy 输入；
 2. 语义建议根据名称、description、正文标题和示例提出角色、artifact/source/QA、semantic tags 和 intent examples，并记录置信度。
 
 编辑器至少允许用户修改：
@@ -683,12 +745,13 @@ interface SkillMetadataDraft {
 - executor action 的选择；
 - configuration refs、MCP source refs 和非 secret 依赖；
 - `reference|builder|source|support|qa` 模式。
+- `name`、`description` 只读展示；需要修改时创建新的 package revision，不在 Draft 中覆盖 package identity；
 
 编辑器必须逐字段显示来源、推导证据、当前值和校验错误。用户修改后的内容先保存为 Draft；Draft 不进入 Planner，也不形成 Runtime capability grant。
 
 自动识别不能直接确认命令执行、网络访问、写入范围、secret、MCP 凭据或 evidence producer 的最终批准。高风险字段需要用户或部署策略明确确认，之后还要通过 Binding、doctor 和 Host readiness。
 
-用户取消编辑时，包可以保留在本地 catalog 作为 `catalog-only`，但不能被 Runtime 自动加载，也不能成为 Planner candidate。package hash 变化后，草稿和已保存 binding 都必须重新校验。
+编辑器保存的不是被注入 metadata 的新 `SKILL.md`，而是以 `packageSha256` 为外键的 `SkillMetadataDraft`；用户确认后生成 `SkillDeclarationAdaptation` 和 Binding revision。用户取消编辑时，原始包可以保留在本地 catalog 作为 `catalog-only`，但不能被 Runtime 自动加载，也不能成为 Planner candidate。package hash 变化后，草稿、adaptation 和已保存 binding 都必须重新校验；旧 hash 的记录只能用于审计，不能自动迁移到新包。
 
 ### 13.2 CLI 与自动化入口
 
@@ -715,10 +778,11 @@ agentloop skill activate <package-dir> --binding <binding-file>
 
 ### 13.4 `adapt`
 
-- 从 `SKILL.md` 和 manifest 生成 Binding 草稿；
+- 从 native declaration、兼容头部、legacy frontmatter 和 manifest 生成外部 Binding/Declaration 草稿；
 - 对 `semanticTags`、`intentExamples` 和角色给出候选；
 - 不能自动确认 action、网络、命令、配置或写入授权；
 - 输出文件默认未激活；
+- 不回写 `SKILL.md`，也不修改原始上传包；
 - 显示每个字段的推导依据和待确认项。
 
 ### 13.5 `doctor`
@@ -754,12 +818,41 @@ agentloop skill activate <package-dir> --binding <binding-file>
 
 - package name/hash；
 - 文件 inventory；
-- `SKILL.md` hash；
-- native declaration hash；
+- `SKILL.md` 正文 hash 和兼容头部 hash；
+- `agentloop.skill.json` 的 native declaration hash（如有）；
 - executor manifest hash；
 - verified upstream source lock（如有）。
 
-### 14.2 Binding Store
+Package Store 不保存“把用户编辑写回包”的副本。包对象一旦入库即只读；任何 metadata 修订都产生新的外部 declaration/adaptation revision，而不是修改 package bytes。
+
+### 14.2 Declaration / Adaptation Store
+
+Declaration Store 保存包内 declaration 的索引和包外适配，不把二者混成一个可覆盖的 JSON：
+
+```ts
+interface SkillDeclarationRecord {
+  readonly packageId: string;
+  readonly packageSha256: string;
+  readonly source: "package" | "cloud-adaptation" | "user-adaptation" | "legacy-migration";
+  readonly declarationJson: string;
+  readonly declarationSha256: string;
+  readonly baseDeclarationSha256?: string;
+  readonly status: "detected" | "reviewed" | "active" | "superseded" | "rejected";
+  readonly ownerScope: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+```
+
+规则：
+
+- `source=package` 只能来自包内 `agentloop.skill.json`，用于审计和 hash 校验；
+- `source=cloud-adaptation|user-adaptation` 只能引用准确 package hash，适用于没有 native declaration 的包；
+- `source=legacy-migration` 只用于一次性迁移和等价性测试，不能作为长期 Runtime 输入；
+- native declaration 存在时，外部记录只能是等价投影或收紧适配；发现语义冲突必须拒绝激活；
+- Local Agent 使用本地 SQLite/文件存储，Cloud 使用 Control Plane 数据库/对象存储，但字段和状态机相同。
+
+### 14.3 Binding Store
 
 Binding 是部署/Runtime 配置，不写回 package。建议保存：
 
@@ -768,6 +861,7 @@ interface SkillBindingRecord {
   readonly runtimeId: string;
   readonly skillName: string;
   readonly packageSha256: string;
+  readonly declarationSha256: string;
   readonly bindingJson: string;
   readonly bindingSha256: string;
   readonly publisherKind: "bundled" | "deployment" | "user";
@@ -779,7 +873,7 @@ interface SkillBindingRecord {
 
 Local Runtime 使用 Runtime 私有 binding；Cloud Runtime 可以使用部署级 binding 集合，但每个 Host 必须发布实际解析结果。现有目录发现配置继续只负责“可以检查哪些包”，不得等同于“哪些包已经授权”。
 
-### 14.3 Contract Snapshot
+### 14.4 Contract Snapshot
 
 Run 创建时记录：
 
@@ -793,11 +887,11 @@ Run 创建时记录：
 ## 15. 安全规则
 
 1. Skill Package、Binding、readiness 和 Run grant 分层存储，不能互相代替。
-2. 包内 `.env`、私钥、credential 文件和设备配置覆盖文件拒绝接入。
-3. Binding 只保存配置引用，不保存 secret value。
+2. `SKILL.md` 不能作为用户编辑 metadata 的回写目标；包内 `.env`、私钥、credential 文件和设备配置覆盖文件拒绝接入。
+3. Binding、Declaration/Adaptation Store 只保存配置引用，不保存 secret value。
 4. Skill scripts 默认在只读 package root、受控 task workspace 和 Host 生成 sandbox manifest 下执行。
 5. 包外 adapter 不得引用包外 script。
-6. package hash 或 binding hash 变化使旧 readiness 和 contract 立即失效。
+6. package hash、declaration hash 或 binding hash 变化使旧 readiness 和 contract 立即失效。
 7. 自动生成的 adaptation 必须经过明确批准。
 8. Bundled publisher trust 只证明声明来源，不替代 Host policy。
 9. Runtime 不根据 Skill 文本中的命令、业务关键词或供应商名称动态加权授权。
@@ -861,6 +955,7 @@ Skill action evidence 继续进入正式 Runtime Result/Evidence 链路。统一
 ### 阶段 0：建立行为基线
 
 - 枚举 bundled、Custom 和测试 fixture 的当前 metadata；
+- 记录每个包当前是否把 `agentloop:` 写在 `SKILL.md`、是否有 sidecar、是否存在云端/本地外部 metadata；
 - 记录每个 Skill 的 Planner role、artifact/source/QA、required Skill 和 capability 行为；
 - 检查顶层 evidence 与 executor action evidence 的一致性；
 - 为当前 bundled Skills 建立 selection/Admission 快照测试。
@@ -868,9 +963,11 @@ Skill action evidence 继续进入正式 Runtime Result/Evidence 链路。统一
 ### 阶段 1：引入统一编译器
 
 - 新增 declaration、binding、readiness 和 resolved contract 类型；
-- 让现有 `agentloop:` frontmatter 编译为 legacy Package Declaration；
+- 新增 package-sidecar `agentloop.skill.json` 解析和 Declaration/Adaptation Store；
+- 让现有 `agentloop:` frontmatter 编译为带 package hash 的一次性 legacy Package Declaration；
 - 让现有 executor manifest 进入同一编译过程；
 - `PrivateSkill` 暂时同时保留旧字段和 resolved contract，但新消费者优先迁移；
+- 保留 `SKILL.md` 的 `name`/`description` 兼容头部，但禁止新增 AgentLoop 字段；
 - 增加相同输入产生稳定 contract hash 的测试。
 
 本阶段不改变现有 Skill 行为。
@@ -893,6 +990,7 @@ Skill action evidence 继续进入正式 Runtime Result/Evidence 链路。统一
 ### 阶段 3：迁移 bundled Skills
 
 - 为 `@zhujun/agentloop-skills` 中每个包新增 `agentloop.skill.json`；
+- 将内核 Skill 的声明作为发布包内不可变文件发布；默认 Binding 作为独立发布配置维护，不写入 `SKILL.md`；
 - 为需要 package action 的 Skill 补齐或校正 executor manifest；
 - 发布 bundled default bindings；
 - 对每个 Skill运行“legacy frontmatter 与 declaration 编译等价”测试；
@@ -903,14 +1001,16 @@ Bundled Skills 先迁移，用来验证 schema 是否足够通用。不得为了
 ### 阶段 4：接入 Custom 与第三方 Skill
 
 - 实现 package 外 Binding；
+- 云端 `custom-skills` 优先补齐包内 declaration；历史无 sidecar 的包只允许通过 Cloud Declaration Store 的 hash-bound adaptation 接入；
 - 提供五种模板和 CLI；
 - Local Agent 创建/编辑 Runtime 时保存明确 binding；
-- 上传 Skill 默认进入 `catalog-only` 或 `needs-binding`，不能自动 ready；
+- 用户上传的原始包进入不可变 Package Store，metadata 草稿与用户编辑保存到 Local Agent/Cloud Declaration Store；上传默认进入 `catalog-only` 或 `needs-binding`，不能自动 ready；
 - Cloud Host 使用部署配置管理 binding。
 
 ### 阶段 5：删除旧路径
 
 - 停止从 `SKILL.md` 读取 `agentloop:`；
+- 停止向 `SKILL.md` 写入或回写 AgentLoop metadata；
 - 删除 `SkillAgentLoopMetadata` 在 Planner/Admission 中的直接消费；
 - 删除顶层 `producesEvidenceKinds` 重复声明；
 - 删除迁移期 dual-read 和等价性适配器；
@@ -924,12 +1024,14 @@ Bundled Skills 先迁移，用来验证 schema 是否足够通用。不得为了
 
 1. native declaration 正常编译；
 2. 无 native declaration 的第三方包可通过 hash-bound adaptation 编译；
-3. package hash 变化后 Binding 失效；
-4. Binding 试图扩大 roles、source/artifact kinds 或 action 时拒绝；
-5. action evidence 与未知 evidence kind 不一致时拒绝；
-6. required Skill 缺失或形成环时拒绝；
-7. 输入顺序不同但语义相同产生相同 contract hash；
-8. package/binding/Host capability 任一变化产生不同 contract hash。
+3. `SKILL.md` 只含兼容头部时可以发现；头部与 sidecar identity 不一致时拒绝；
+4. 用户编辑 Draft 不改变原始 package bytes/hash，且能生成外部 adaptation；
+5. package hash 或 declaration hash 变化后 Binding 失效；
+6. Binding 试图扩大 roles、source/artifact kinds 或 action 时拒绝；
+7. action evidence 与未知 evidence kind 不一致时拒绝；
+8. required Skill 缺失或形成环时拒绝；
+9. 输入顺序不同但语义相同产生相同 contract hash；
+10. package/declaration/binding/Host capability 任一变化产生不同 contract hash。
 
 ### 18.2 Bundled 与 Custom 等价性
 
@@ -999,22 +1101,24 @@ package/binding inspection
 6. Bundled Skill 不享有绕过 readiness 或 Run/Step grant 的特殊路径。
 7. 第三方包可保持字节不变，并通过 hash-bound Binding 接入。
 8. Custom Skill 可以通过模板、doctor 和 smoke test 快速完成接入。
-9. package、binding 和 contract hash 可以稳定审计并用于 Multi Runtime drift 检测。
-10. 旧 frontmatter 路径在迁移完成后被删除，而不是长期保留 fallback。
+9. 内核、云端 Custom 和用户上传 Skill 的 package/declaration/draft/binding 存储边界明确，且不通过修改 `SKILL.md` 交换元数据。
+10. package、declaration、binding 和 contract hash 可以稳定审计并用于 Multi Runtime drift 检测。
+11. 旧 frontmatter 路径在迁移完成后被删除，而不是长期保留 fallback。
 
 ## 20. 推荐实施顺序
 
 建议先实现以下最小闭环：
 
-1. `agentloop.skillDeclaration/v1`；
-2. `agentloop.skillBinding/v1`；
-3. `ResolvedSkillContract` 编译器与稳定 hash；
-4. legacy frontmatter 到 declaration 的一次性迁移适配；
-5. bundled Skill 等价性测试；
-6. Planner 和 Admission 改为消费 resolved contract；
-7. readiness/doctor；
-8. Custom/第三方 Binding 与 CLI；
-9. Multi Runtime contract hash 发布；
-10. 删除 legacy metadata 读取。
+1. `agentloop.skillDeclaration/v1` 与包内 sidecar 解析；
+2. Declaration/Adaptation Store 和 `SkillMetadataDraft` 持久化边界；
+3. `agentloop.skillBinding/v1`；
+4. `ResolvedSkillContract` 编译器与稳定 hash；
+5. legacy frontmatter 到 declaration 的一次性迁移适配；
+6. bundled Skill 等价性测试；
+7. Planner 和 Admission 改为消费 resolved contract；
+8. readiness/doctor；
+9. Custom/第三方 Binding 与 CLI；
+10. Multi Runtime contract hash 发布；
+11. 删除 legacy metadata 读取和向 `SKILL.md` 回写的路径。
 
 这个顺序先统一权威边界，再改善扩展体验。不能先做一个只服务 Custom Skill 的上传或 metadata 向导，然后让 bundled Skill 继续走旧路径；那会把临时接入方案固化成第二套运行时语义。
