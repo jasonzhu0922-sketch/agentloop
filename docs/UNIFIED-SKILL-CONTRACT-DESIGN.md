@@ -633,7 +633,66 @@ Router 不接收：
 
 ## 13. 快速接入工具
 
-第一期提供 CLI，不先依赖管理 UI：
+用户上传和 metadata 编辑是第一条产品接入路径，CLI 作为批量导入、诊断和自动化入口，与编辑器使用同一套识别器和契约编译器。
+
+### 13.1 用户上传与 metadata 编辑
+
+用户上传 Skill 后，系统按以下顺序处理：
+
+```text
+上传包
+  -> 包安全检查、解包和 package hash
+  -> 确定性 metadata 识别
+  -> 语义 metadata 建议
+  -> 生成 SkillMetadataDraft
+  -> 用户编辑并查看字段来源
+  -> contract preview
+  -> doctor / smoke-test
+  -> 用户明确激活
+```
+
+自动识别必须保留字段来源和证据，不能只返回一份无法解释的合并 JSON：
+
+```ts
+interface SkillMetadataDraft {
+  readonly schema: "agentloop.skillMetadataDraft/v1";
+  readonly packageName: string;
+  readonly packageSha256: string;
+  readonly status: "draft" | "needs_user_review" | "invalid" | "ready_to_validate";
+  readonly fields: Readonly<Record<string, {
+    readonly value: unknown;
+    readonly origin: "package" | "detected" | "suggested" | "user" | "deployment";
+    readonly confidence?: "high" | "medium" | "low";
+    readonly editable: boolean;
+    readonly evidence: readonly string[];
+  }>>;
+  readonly unresolved: readonly string[];
+}
+```
+
+识别器按两层工作：
+
+1. 确定性识别读取 `SKILL.md`、`agentloop.skill.json`、`agentloop.executors.json`、包文件结构和 scripts，生成可校验字段；
+2. 语义建议根据名称、description、正文标题和示例提出角色、artifact/source/QA、semantic tags 和 intent examples，并记录置信度。
+
+编辑器至少允许用户修改：
+
+- `roles`、`artifactKinds`、`sourceKinds`、`qaKinds`；
+- `semanticTags`、`intentExamples`；
+- required Skill；
+- executor action 的选择；
+- configuration refs、MCP source refs 和非 secret 依赖；
+- `reference|builder|source|support|qa` 模式。
+
+编辑器必须逐字段显示来源、推导证据、当前值和校验错误。用户修改后的内容先保存为 Draft；Draft 不进入 Planner，也不形成 Runtime capability grant。
+
+自动识别不能直接确认命令执行、网络访问、写入范围、secret、MCP 凭据或 evidence producer 的最终批准。高风险字段需要用户或部署策略明确确认，之后还要通过 Binding、doctor 和 Host readiness。
+
+用户取消编辑时，包可以保留在本地 catalog 作为 `catalog-only`，但不能被 Runtime 自动加载，也不能成为 Planner candidate。package hash 变化后，草稿和已保存 binding 都必须重新校验。
+
+### 13.2 CLI 与自动化入口
+
+CLI 和编辑器共用同一识别、校验和编译服务：
 
 ```bash
 agentloop skill inspect <package-dir>
@@ -643,7 +702,7 @@ agentloop skill smoke-test <package-dir> --binding <binding-file>
 agentloop skill activate <package-dir> --binding <binding-file>
 ```
 
-### 13.1 `inspect`
+### 13.3 `inspect`
 
 输出：
 
@@ -654,7 +713,7 @@ agentloop skill activate <package-dir> --binding <binding-file>
 - 推荐模板；
 - 不产生或修改 Binding。
 
-### 13.2 `adapt`
+### 13.4 `adapt`
 
 - 从 `SKILL.md` 和 manifest 生成 Binding 草稿；
 - 对 `semanticTags`、`intentExamples` 和角色给出候选；
@@ -662,7 +721,7 @@ agentloop skill activate <package-dir> --binding <binding-file>
 - 输出文件默认未激活；
 - 显示每个字段的推导依据和待确认项。
 
-### 13.3 `doctor`
+### 13.5 `doctor`
 
 - 执行完整静态校验和 Host readiness；
 - 输出稳定错误码；
@@ -671,14 +730,14 @@ agentloop skill activate <package-dir> --binding <binding-file>
 - MCP 检查执行完整 initialize/session/`tools/list`；
 - 结果可供本地 UI 展示，但不是运行授权。
 
-### 13.4 `smoke-test`
+### 13.6 `smoke-test`
 
 - 只运行 Binding 明确批准且声明为可 smoke test 的 action；
 - 使用隔离工作区和非生产 fixture；
 - 验证 result schema、evidence kinds、输入回指和敏感信息泄漏；
 - 不将 smoke test 成功当作真实外部数据、生产连通性或业务结果证明。
 
-### 13.5 `activate`
+### 13.7 `activate`
 
 - 校验 package hash 和 Binding；
 - 要求 doctor 通过；
