@@ -1122,7 +1122,27 @@ async function pickUploadStorage() {
 
 function setLocalRuntimeLifecycleStatus(runtimeId, message = "", tone = "", pending = false) {
   if (!runtimeId) return;
+  const clearTimers = setLocalRuntimeLifecycleStatus.clearTimers || (setLocalRuntimeLifecycleStatus.clearTimers = new Map());
+  const previousTimer = clearTimers.get(runtimeId);
+  if (previousTimer !== undefined) clearTimeout(previousTimer);
+  clearTimers.delete(runtimeId);
+  if (!message) {
+    delete localRuntimeState.lifecycleOperations[runtimeId];
+    syncLocalRuntimeManager();
+    return;
+  }
   localRuntimeState.lifecycleOperations[runtimeId] = { message, tone, pending };
+  if (!pending && tone === "ok") {
+    const timer = setTimeout(() => {
+      const current = localRuntimeState.lifecycleOperations[runtimeId];
+      if (current?.message === message && current.tone === tone && !current.pending) {
+        delete localRuntimeState.lifecycleOperations[runtimeId];
+        syncLocalRuntimeManager();
+      }
+      clearTimers.delete(runtimeId);
+    }, 3_000);
+    clearTimers.set(runtimeId, timer);
+  }
   syncLocalRuntimeManager();
 }
 
