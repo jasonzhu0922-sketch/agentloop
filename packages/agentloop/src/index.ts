@@ -248,8 +248,18 @@ export type {
 } from "./skills/skill-service.ts";
 export { discoverSkillDirectory, discoverSkillPackageRoot } from "./skills/skill-directory.ts";
 export type { SkillDirectoryEntry } from "./skills/skill-directory.ts";
-export { copySkillPackage, inspectSkillPackage } from "./skills/skill-package.ts";
+export { copySkillPackage, inspectSkillPackage, makeSkillPackageReadOnly, removeSkillPackage } from "./skills/skill-package.ts";
 export type { SkillPackageInspection } from "./skills/skill-package.ts";
+export {
+  SKILL_DECLARATION_SCHEMA,
+  declarationFromLegacyMetadata,
+  detectSkillDeclaration,
+  parseSkillDeclaration,
+  parseSkillDeclarationJson,
+  projectSkillAgentLoopMetadata,
+  serializeSkillDeclaration,
+} from "./skills/skill-declaration.ts";
+export type { SkillDeclaration, SkillDeclarationSource } from "./skills/skill-declaration.ts";
 export {
   SKILL_AGENT_LOOP_ARTIFACT_KIND_VALUES,
   SKILL_AGENT_LOOP_EXECUTION_PROFILE_VALUES,
