@@ -1,0 +1,32 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "shutu-ods-analysis",
+    "description": "ODS 单表建模分析技能。对 DB2 ODS 层数据表进行面向 DDM（数据域模型）建模的结构化分析，输出 Markdown 报告。当用户要求分析 ODS 表、生成建模分析报告、查看表结构和业务对象关系、判断表是否适合建模时，应使用此技能。触发场景包括：分析某张 ODS 表、生成建模报告、看下某张表的业务对象和关系、判断表是主表/明细表/维表、批量分析多张 ODS 表等。"
+  },
+  "activation": {
+    "semanticTags": [
+      "ods",
+      "db2",
+      "data-modeling"
+    ],
+    "intentExamples": [
+      "分析指定 ODS 表的粒度、主键、关联关系和建模价值"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "primary_builder"
+    ],
+    "artifactKinds": [
+      "document"
+    ],
+    "sourceKinds": [
+      "database"
+    ],
+    "qaKinds": [
+      "content"
+    ],
+    "requiredSkills": []
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "oa-doc-data",
+    "description": "通过部署配置的 OA 文档搜索接口，按用户明确提供的工号检索公文、证照、因公护照文件及其正文或附件原始内容。用于 oa-doc-analysis 的取数委派，或用户明确只要文件列表、原始内容、数量、查询条件和预览链接；缺少工号时先澄清，不生成摘要、比较或业务结论。"
+  },
+  "activation": {
+    "semanticTags": [
+      "oa-doc-data",
+      "document-search",
+      "document-api",
+      "license-archive"
+    ],
+    "intentExamples": [
+      "查找工号 001234 上月收到的 OA 文件原始列表",
+      "查询工号 001234 收到的安全管理部通报及正文和附件",
+      "找到工号 001234 的因公护照文件和预览链接",
+      "查看工号 001234 在某个时间段内的 OA 文件总数和原始记录"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "source_provider"
+    ],
+    "artifactKinds": [
+      "none"
+    ],
+    "sourceKinds": [
+      "api"
+    ],
+    "qaKinds": [],
+    "requiredSkills": []
+  },
+  "execution": {
+    "manifest": "agentloop.executors.json"
+  },
+  "compatibility": {
+    "executionProfiles": [
+      "local_script"
+    ],
+    "producesEvidenceKinds": [
+      "source_summary",
+      "source_urls",
+      "record_counts",
+      "structured_extraction_artifact",
+      "explicit_caveats"
+    ]
+  }
+}

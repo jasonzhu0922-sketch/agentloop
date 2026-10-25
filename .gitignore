@@ -7,8 +7,7 @@ apps/*/.env.before-*
 apps/agentloop-app/config/llm-providers.json
 apps/agentloop-multi-runtime/config/llm-providers.json
 apps/agentloop-app/custom-skills/
-apps/agentloop-multi-runtime/custom-skills/*
-!apps/agentloop-multi-runtime/custom-skills/.gitkeep
+apps/agentloop-multi-runtime/custom-skills/**/.env
 apps/agentloop-multi-runtime/release/
 apps/agentloop-app/data/
 apps/agentloop-app/conversations/

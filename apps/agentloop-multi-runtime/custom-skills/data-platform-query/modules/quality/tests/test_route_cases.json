@@ -1,0 +1,14 @@
+{
+  "positive": [
+    {"input": "查一下空值质量规则", "expect_primary": "quality-query"},
+    {"input": "这个质量规则挂在哪个质量任务上", "expect_primary": "quality-query"},
+    {"input": "查询科研域 CDM 的质量任务", "expect_primary": "quality-query"}
+  ],
+  "negative": [
+    {"input": "创建一个空值质量规则", "expect_not": ["quality-query"]},
+    {"input": "修改质量任务的调度时间", "expect_not": ["quality-query"]},
+    {"input": "提交质量任务上线审核", "expect_not": ["quality-query"]}
+  ],
+  "boundary": [{"input": "把质量规则和关联任务整理成 Excel", "expect_primary": "quality-query", "expect_support": ["xlsx-materializer"]}],
+  "conflict": [{"input": "创建并提交质量任务上线", "expect_not": ["quality-query"], "expect_primary": "quality-task-maintenance"}]
+}

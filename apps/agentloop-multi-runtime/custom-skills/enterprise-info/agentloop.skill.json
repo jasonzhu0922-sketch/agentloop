@@ -1,0 +1,44 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "enterprise-info",
+    "description": "读取中国大陆企业工商登记事实，识别企业主体，查询法定代表人、注册资本、经营范围、股东和登记主要人员。人员接口提供登记姓名与职务，不能独立证明现任管理层或未登记的职务；这些问题需结合官网或任免披露。返回来源材料，由当前任务决定答案范围。"
+  },
+  "activation": {
+    "semanticTags": [
+      "enterprise-registration",
+      "corporate-officers",
+      "key-personnel"
+    ],
+    "intentExamples": [
+      "查询某公司的法定代表人、董事、经理、财务负责人或工商登记主要人员",
+      "列出某公司的工商登记主要人员及登记职务",
+      "查询某公司的登记经营范围和注册信息"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "source_provider"
+    ],
+    "artifactKinds": [
+      "none"
+    ],
+    "sourceKinds": [
+      "api"
+    ],
+    "qaKinds": [],
+    "requiredSkills": []
+  },
+  "execution": {
+    "manifest": "agentloop.executors.json"
+  },
+  "compatibility": {
+    "executionProfiles": [
+      "local_script"
+    ],
+    "producesEvidenceKinds": [
+      "source_summary",
+      "explicit_caveats"
+    ]
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "aihot",
+    "description": "作为 Skill-owned source provider 查询 AIHOT 的中文 AI 资讯、精选、当前热点和日报。用户询问今天或最近的 AI 新闻、AI 圈动态、大模型或产品发布、OpenAI／Anthropic／Google 最新消息、AI 论文、AI 日报、AIHOT 精选、当前最热事件，或需要同步当前全部精选时使用。Skill 自己通过 aihot.news 的匿名只读 API 获取当前数据；这不是 Host 注册的 ToolSource，不需要 sourceConstraint.tool_source 绑定，也不需要 API Key 或 MCP server。"
+  },
+  "activation": {
+    "semanticTags": [],
+    "intentExamples": []
+  },
+  "workflow": {
+    "roles": [
+      "source_provider"
+    ],
+    "artifactKinds": [
+      "none"
+    ],
+    "sourceKinds": [
+      "api"
+    ],
+    "qaKinds": [],
+    "requiredSkills": []
+  },
+  "execution": {
+    "manifest": "agentloop.executors.json"
+  },
+  "compatibility": {
+    "executionProfiles": [
+      "local_script"
+    ],
+    "producesEvidenceKinds": [
+      "source_summary",
+      "source_urls",
+      "explicit_caveats"
+    ]
+  }
+}

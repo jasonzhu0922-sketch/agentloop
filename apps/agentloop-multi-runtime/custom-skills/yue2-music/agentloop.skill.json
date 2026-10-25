@@ -1,0 +1,43 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "yue2-music",
+    "description": "Generate instrumental music and songs, cover, transcribe, and edit with YuE2 and SheetSage2/MERT2. Use for text-to-instrumental generation, instrumental covers, YuE2 full/melody/off generation, audio-to-ABC covers, style or lyric changes, score editing, agentic reharmonization, melody preservation, singable lyric adaptation, and reproducible listening comparisons; also for YuE2 纯音乐生成、器乐翻奏、翻唱、改编、改谱、换词和智能体编辑."
+  },
+  "activation": {
+    "semanticTags": [
+      "music-generation",
+      "instrumental",
+      "music-cover",
+      "music-transcription",
+      "score-editing",
+      "audio-to-abc"
+    ],
+    "intentExamples": [
+      "生成一首无歌词的钢琴纯音乐",
+      "根据这段音频做器乐翻奏",
+      "保留旋律，把这首歌改成爵士编曲",
+      "将歌词改写得更适合演唱并重新生成歌曲",
+      "把录音转成 ABC 曲谱后制作 cover"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "primary_builder"
+    ],
+    "artifactKinds": [
+      "audio"
+    ],
+    "sourceKinds": [],
+    "qaKinds": [
+      "content",
+      "openability"
+    ],
+    "requiredSkills": []
+  },
+  "compatibility": {
+    "executionProfiles": [
+      "local_script"
+    ]
+  }
+}

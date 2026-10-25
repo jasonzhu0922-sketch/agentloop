@@ -1,0 +1,32 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "shutu-ontology-ba-financial-mgmt",
+    "description": "集团财务管理业务架构技能，用于管理集团财务管理的业务规则、业务流程、业务动作及其对应的 MCP 工具。Invoke when user asks to analyze group finance domain business architecture, identify business rules or business processes, or define MCP tools for group finance domain operations."
+  },
+  "activation": {
+    "semanticTags": [
+      "finance",
+      "data-governance",
+      "business-architecture"
+    ],
+    "intentExamples": [
+      "解释集团财务业务规则、流程和数据核对口径"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "support"
+    ],
+    "artifactKinds": [
+      "none"
+    ],
+    "sourceKinds": [
+      "document"
+    ],
+    "qaKinds": [
+      "content"
+    ],
+    "requiredSkills": []
+  }
+}

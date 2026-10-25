@@ -1,0 +1,39 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "oa-doc-analysis",
+    "description": "基于用户明确提供工号后取得且可核验的 OA 公文、证照和文件内容，完成摘要、内容问答、多文档归纳、差异比较、主题梳理或时间线整理。用于“总结某工号的这些公文”“文件里写了什么”“对比几份通知”“汇总某工号在某时间段的 OA 文件”等请求；委派 oa-doc-data 检索原始证据。只要文件列表、原始内容、数量或预览链接时使用 oa-doc-data。"
+  },
+  "activation": {
+    "semanticTags": [
+      "oa-doc-analysis",
+      "document-summary",
+      "document-qa",
+      "multi-document-synthesis"
+    ],
+    "intentExamples": [
+      "总结工号 001234 上月收到的 OA 文件并列出重点事项",
+      "工号 001234 的因公护照文件里面写了什么",
+      "对比工号 001234 收到的这几份通知的要求和适用范围",
+      "按时间整理工号 001234 今年第一季度的人事任免通知",
+      "汇总安全管理部发给工号 001234 的文件并指出共同主题"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "primary_builder"
+    ],
+    "artifactKinds": [
+      "none"
+    ],
+    "sourceKinds": [
+      "api"
+    ],
+    "qaKinds": [
+      "content"
+    ],
+    "requiredSkills": [
+      "oa-doc-data"
+    ]
+  }
+}

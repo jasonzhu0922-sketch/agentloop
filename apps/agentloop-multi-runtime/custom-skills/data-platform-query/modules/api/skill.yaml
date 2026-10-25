@@ -1,0 +1,162 @@
+id: api-query
+name: api-query
+version: 1.0.0
+status: pilot
+category: domain
+owner:
+  team: "待确认"
+  contact: "待确认"
+source: internal
+risk: medium
+data_classification: internal
+
+description: >
+  检索宝武数据中台（数智域通用 SQL API）的 API 目录信息，回答某 API 的用途、
+  入参、出参（字段中文名）以及关联的数据表。
+
+tags:
+  - api
+  - api-catalog
+  - 数智域
+  - 数据中台
+
+routing:
+  role: primary
+  specificity: 80
+  capability_statement: >
+    对宝武数据中台的 API 目录对象，在业务人员检索 API 用途、入参、出参与关联数据表
+    的场景下，完成 API 元数据检索、字段汉化与血缘相似分析，产生带来源和查询时间的
+    API 目录查询结果。
+  consumes:
+    - type: text
+      object: api-query-request
+      formats:
+        - plain-text
+      required: true
+  produces:
+    - type: data
+      object: api-catalog-entry
+      formats:
+        - text
+        - json
+      authoritative: true
+  intents:
+    - api-catalog-search
+    - api-detail-query
+    - api-lineage-similarity
+  domains:
+    - api-catalog
+    - data-middle-platform
+  triggers:
+    strong:
+      - 查API
+      - 查接口
+      - API入参出参
+      - API目录检索
+      - 接口涉及哪些表
+      - 这个接口是干啥的
+    weak:
+      - 接口
+      - 服务
+      - 入参
+      - 出参
+      - 数据表
+    exclude:
+      - 创建API
+      - 修改API
+      - 调用API执行查询
+  supersedes: []
+  conflicts_with: []
+  composes_with: []
+  fallback_to: []
+  decision_rules:
+    - when: "用户要求了解某 API 的用途、入参、出参或涉及的数据表"
+      priority: 100
+    - when: "用户要求创建或修改 API 定义"
+      action: exclude
+
+inputs:
+  - name: keyword
+    type: string
+    required: true
+    description: "检索关键词（API 中文描述/英文名/API_ID），或 detail/similar 模式下的 API_ID"
+
+outputs:
+  - name: api_catalog_result
+    type: text
+    description: "API 目录检索结果（含基本信息、入参、出参、关联表、血缘）"
+
+tools:
+  - run_skill_script
+
+connectors: []
+
+scripts:
+  - path: scripts/api_query.py
+    entrypoint: true
+    writes_artifacts: false
+
+artifacts:
+  produces:
+    - .json
+  final_product: false
+
+sandbox_contract:
+  reads: []
+  writes: []
+  temp: []
+  forbidden:
+    - SESSION_SANDBOX_ROOT_DERIVATION
+    - _meta
+
+security:
+  credential_policy: direct_test_api
+  pii: false
+  audit_required: true
+  approval_required: false
+
+business_governance:
+  data_source: "宝武数据中台测试 SQL API / ODS 元数据"
+  data_owner: "数智域（待确认）"
+  glossary_version: "待确认"
+  output_disclaimer: "查询结果以接口实时返回为准，不替代正式数据审批或变更依据。"
+
+tests:
+  smoke:
+    - "search 关键词检索"
+    - "detail API 详情"
+    - "similar 血缘相似"
+    - "直接 HTTP 请求体包含 clientId/clientSecret/showCount/offset/limit"
+  route_evals:
+    positive:
+      - input: "查一下这个 API 有哪些入参出参"
+        expect_primary: api-query
+      - input: "这个接口是干什么的"
+        expect_primary: api-query
+      - input: "检索数据中台的 API 目录，找采购相关的接口"
+        expect_primary: api-query
+    negative:
+      - input: "帮我创建一个新的 API"
+        expect_not:
+          - api-query
+      - input: "修改这个接口的入参定义"
+        expect_not:
+          - api-query
+      - input: "帮我写一份企业宣传文案"
+        expect_not:
+          - api-query
+    boundary:
+      - input: "把 API 目录查询结果整理成 Excel"
+        expect_primary: api-query
+        expect_support:
+          - xlsx-materializer
+    conflict:
+      - input: "修改这个 API 的注册地址"
+        expect_not:
+          - api-query
+        expect_primary: api-maintenance
+
+release:
+  changelog: CHANGELOG.md
+  approved_by: ""
+  approved_at: ""

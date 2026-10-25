@@ -1,0 +1,108 @@
+id: standard-query
+name: standard-query
+version: 1.0.0
+status: pilot
+category: domain
+owner:
+  team: "数智域（待确认）"
+  contact: "待确认"
+source: internal
+risk: medium
+data_classification: internal
+description: >
+  融合查询数据分类、业务对象和数据元，返回三类标准对象及其已登记的关联关系。
+tags: [data-standard, data-classification, business-object, data-element, 数智域]
+routing:
+  role: primary
+  specificity: 92
+  capability_statement: >
+    对宝武数据中台的数据分类、业务对象和数据元标准对象，在标准检索与关联追溯场景下，
+    完成标准对象查询和关系融合，产生带来源口径的标准详情结果。
+  consumes:
+    - type: text
+      object: data-standard-query-request
+      formats: [plain-text]
+      required: true
+  produces:
+    - type: data
+      object: data-standard-profile
+      formats: [json, text]
+      authoritative: true
+  intents: [data-classification-query, business-object-query, data-element-query]
+  domains: [data-standard, data-governance]
+  triggers:
+    strong: [数据分类, 业务对象, 数据元, 查标准, 数据元落标]
+    weak: [标准, 分类, 对象, 字段, 查询]
+    exclude: [创建数据元, 修改数据标准, 发布标准, 删除标准]
+  supersedes: []
+  conflicts_with: []
+  composes_with: []
+  fallback_to: []
+  decision_rules:
+    - when: "用户查询数据分类、业务对象或数据元及其已登记关系"
+      priority: 100
+    - when: "用户请求创建、修改、发布或删除标准"
+      action: exclude
+inputs:
+  - name: kind
+    type: string
+    required: true
+    description: "classification、business-object 或 data-element"
+  - name: keyword_or_uuid
+    type: string
+    required: true
+    description: "检索关键词或标准对象 UUID"
+outputs:
+  - name: standard_detail
+    type: json
+    description: "分类、业务对象、数据元及精确登记的字段映射"
+tools: [run_skill_script]
+connectors: []
+scripts:
+  - path: scripts/standard_query.py
+    entrypoint: true
+    writes_artifacts: false
+artifacts:
+  produces: [.json]
+  final_product: false
+sandbox_contract:
+  reads: []
+  writes: []
+  temp: []
+  forbidden: [SESSION_SANDBOX_ROOT_DERIVATION, _meta]
+security:
+  credential_policy: direct_test_api
+  pii: false
+  audit_required: true
+  approval_required: false
+business_governance:
+  data_source: "宝武数据中台测试 SQL API / ODS 元数据"
+  data_owner: "数智域（待确认）"
+  glossary_version: "待确认"
+  output_disclaimer: "查询结果以接口实时返回为准，不代替标准审批、发布或变更依据。"
+tests:
+  unit: [tests/test_script_smoke.py]
+  smoke: ["分类、对象和数据元检索", "数据元详情含精确字段映射", "HTTP 错误返回"]
+  route_evals:
+    positive:
+      - input: "查询采购相关的数据分类"
+        expect_primary: standard-query
+      - input: "物流合同属于哪个业务对象"
+        expect_primary: standard-query
+      - input: "查指标 ID 数据元的值域和落标字段"
+        expect_primary: standard-query
+    negative:
+      - input: "创建一个新的数据元"
+        expect_not: [standard-query]
+      - input: "修改物流合同业务对象定义"
+        expect_not: [standard-query]
+      - input: "发布这条数据标准"
+        expect_not: [standard-query]
+    boundary:
+      - input: "把数据元及其字段映射导出为 Excel"
+        expect_primary: standard-query
+        expect_support: [xlsx-materializer]
+    conflict:
+      - input: "新建并发布数据分类"
+        expect_not: [standard-query]
+        expect_primary: standard-maintenance

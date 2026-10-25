@@ -1,0 +1,14 @@
+{
+  "positive": [
+    {"input": "查 T_DWD_FACT_ORDER 的字段", "expect_primary": "table-query"},
+    {"input": "这个数据表的上游和下游是什么", "expect_primary": "table-query"},
+    {"input": "查询采购订单表详情", "expect_primary": "table-query"}
+  ],
+  "negative": [
+    {"input": "创建一张采购订单表", "expect_not": ["table-query"]},
+    {"input": "给这张表增加一个字段", "expect_not": ["table-query"]},
+    {"input": "查询这张表昨天的订单数据", "expect_not": ["table-query"]}
+  ],
+  "boundary": [{"input": "把数据表详情整理成 Excel", "expect_primary": "table-query", "expect_support": ["xlsx-materializer"]}],
+  "conflict": [{"input": "修改采购订单表字段类型", "expect_not": ["table-query"], "expect_primary": "table-maintenance"}]
+}

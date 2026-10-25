@@ -1,0 +1,28 @@
+{
+  "schema": "agentloop.skillExecutors/v1",
+  "executors": [
+    {
+      "id": "data-platform-query",
+      "description": "Run one read-only data-platform metadata query from an immutable request document.",
+      "command": "python3",
+      "script": "scripts/data_platform_query.py",
+      "actions": [
+        {
+          "id": "query",
+          "description": "Query API, model, table, standard, or quality metadata through one package-owned route.",
+          "inputs": [
+            {
+              "name": "request",
+              "description": "Immutable agentloop.dataPlatformQuery/v1 JSON request with family, operation, and required query values.",
+              "required": true,
+              "evidenceInput": "immutable_workspace_artifact"
+            }
+          ],
+          "args": ["--request", "{{request}}"],
+          "result": "Structured metadata query result with a source-summary evidence receipt.",
+          "producesEvidenceKinds": ["source_summary"]
+        }
+      ]
+    }
+  ]
+}

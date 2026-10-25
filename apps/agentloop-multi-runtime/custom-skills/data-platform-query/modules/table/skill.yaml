@@ -1,0 +1,104 @@
+id: table-query
+name: table-query
+version: 1.0.0
+status: pilot
+category: domain
+owner:
+  team: "数智域（待确认）"
+  contact: "待确认"
+source: internal
+risk: medium
+data_classification: internal
+description: >
+  查询宝武数据中台的数据表元数据，返回表详情、字段定义与已登记的上下游表血缘。
+tags: [data-table, table-field, lineage, 数智域]
+routing:
+  role: primary
+  specificity: 91
+  capability_statement: >
+    对宝武数据中台的数据表对象，在表元数据、字段定义和上下游血缘查询场景下，
+    完成表资产检索与血缘解析，产生带来源口径的表详情查询结果。
+  consumes:
+    - type: text
+      object: data-table-query-request
+      formats: [plain-text]
+      required: true
+  produces:
+    - type: data
+      object: data-table-profile
+      formats: [json, text]
+      authoritative: true
+  intents: [data-table-search, data-table-detail-query, table-lineage-query]
+  domains: [data-asset-catalog, data-governance]
+  triggers:
+    strong: [查表字段, 表血缘, 数据表详情, 表有哪些字段, 上游下游表]
+    weak: [表, 字段, 血缘, 查询]
+    exclude: [创建表, 修改表结构, 删除表, 查询表数据, 申请表权限]
+  supersedes: []
+  conflicts_with: []
+  composes_with: []
+  fallback_to: []
+  decision_rules:
+    - when: "用户查询表的字段、描述或上下游血缘"
+      priority: 100
+    - when: "用户请求修改表或执行表业务数据查询"
+      action: exclude
+inputs:
+  - name: keyword_or_table_identifier
+    type: string
+    required: true
+    description: "表 UUID、英文名、中文名或检索关键词"
+outputs:
+  - name: table_detail
+    type: json
+    description: "表元数据、字段清单与已登记的表级血缘"
+tools: [run_skill_script]
+connectors: []
+scripts:
+  - path: scripts/table_query.py
+    entrypoint: true
+    writes_artifacts: false
+artifacts:
+  produces: [.json]
+  final_product: false
+sandbox_contract:
+  reads: []
+  writes: []
+  temp: []
+  forbidden: [SESSION_SANDBOX_ROOT_DERIVATION, _meta]
+security:
+  credential_policy: direct_test_api
+  pii: false
+  audit_required: true
+  approval_required: false
+business_governance:
+  data_source: "宝武数据中台测试 SQL API / ODS 元数据"
+  data_owner: "数智域（待确认）"
+  glossary_version: "待确认"
+  output_disclaimer: "查询结果以接口实时返回为准，不代替数据权限、发布或变更审批。"
+tests:
+  unit: [tests/test_script_smoke.py]
+  smoke: ["表关键词检索", "表详情含字段和血缘", "HTTP 错误返回"]
+  route_evals:
+    positive:
+      - input: "查 T_DWD_FACT_ORDER 的字段和主键"
+        expect_primary: table-query
+      - input: "这个数据表的上游和下游分别是什么"
+        expect_primary: table-query
+      - input: "查询采购订单表详情"
+        expect_primary: table-query
+    negative:
+      - input: "创建一张采购订单表"
+        expect_not: [table-query]
+      - input: "给这张表增加一个字段"
+        expect_not: [table-query]
+      - input: "查询这张表昨天的订单数据"
+        expect_not: [table-query]
+    boundary:
+      - input: "把数据表详情和字段清单整理成 Excel"
+        expect_primary: table-query
+        expect_support: [xlsx-materializer]
+    conflict:
+      - input: "修改采购订单表的字段类型"
+        expect_not: [table-query]
+        expect_primary: table-maintenance

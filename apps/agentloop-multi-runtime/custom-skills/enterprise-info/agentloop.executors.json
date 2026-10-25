@@ -1,0 +1,51 @@
+{
+  "schema": "agentloop.skillExecutors/v1",
+  "executors": [
+    {
+      "id": "enterprise-info-query",
+      "description": "Query current mainland China enterprise registration information.",
+      "command": "python3",
+      "script": "scripts/enterprise_info.py",
+      "actions": [
+        {
+          "id": "search",
+          "description": "Find enterprise candidates from a name, abbreviation, or recognizable clue.",
+          "inputs": [
+            { "name": "name", "description": "The enterprise name or recognizable clue from the user.", "required": true }
+          ],
+          "args": ["--action", "search", "--name", "{{name}}"],
+          "result": "Candidate enterprises for confirmation or a no-result response."
+        },
+        {
+          "id": "detail",
+          "description": "Retrieve registration details for one exact identified enterprise. Use the selected candidate label verbatim and its identityRef as the result binding; do not shorten a branch name or substitute a parent/related entity.",
+          "inputs": [
+            { "name": "name", "description": "The exact selected candidate label. Preserve the full label verbatim.", "required": true },
+            { "name": "identity-ref", "description": "The selected candidate identityRef (normally its unified social credit code). The detail result must match it.", "required": true }
+          ],
+          "decisionBinding": {
+            "labelInputs": ["name"],
+            "identityRefInputs": ["identity-ref"]
+          },
+          "args": ["--action", "detail", "--name", "{{name}}", "--identity-ref", "{{identity-ref}}"],
+          "result": "A standardized registration summary only when the returned identity matches the supplied selected identityRef; otherwise a structured decision conflict."
+        },
+        {
+          "id": "personnel",
+          "description": "Read complete registered key-personnel records for one exact identified enterprise. This is source acquisition, not an instruction to deliver every person. Use relevant records for the user's requested roles; current appointments and titles absent from the registry require complementary sources.",
+          "inputs": [
+            { "name": "name", "description": "The exact selected candidate label. Preserve the full label verbatim.", "required": true },
+            { "name": "identity-ref", "description": "The selected candidate identityRef (normally its unified social credit code). The personnel result must match it.", "required": true }
+          ],
+          "decisionBinding": {
+            "labelInputs": ["name"],
+            "identityRefInputs": ["identity-ref"]
+          },
+          "args": ["--action", "personnel", "--name", "{{name}}", "--identity-ref", "{{identity-ref}}"],
+          "result": "Source records with exact registered names and titles, or an explicit missing-field result. The caller must answer the original question from relevant evidence; this action does not establish current appointment status.",
+          "producesEvidenceKinds": ["source_summary", "record_counts"]
+        }
+      ]
+    }
+  ]
+}

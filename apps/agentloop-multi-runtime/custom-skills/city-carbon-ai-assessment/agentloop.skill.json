@@ -1,0 +1,26 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "city-carbon-ai-assessment",
+    "description": "用于 City Carbon 城市碳评估、项目碳排放评估、低碳评分、0-10 分制指标打分、优化建议和评估报告；build evaluation workflows from assessment models and uploaded project materials with structured scoring, advice, and reports."
+  },
+  "activation": {
+    "semanticTags": [],
+    "intentExamples": []
+  },
+  "workflow": {
+    "roles": [
+      "primary_builder"
+    ],
+    "artifactKinds": [
+      "document",
+      "none"
+    ],
+    "sourceKinds": [
+      "document",
+      "rubric"
+    ],
+    "qaKinds": [],
+    "requiredSkills": []
+  }
+}

@@ -1,0 +1,104 @@
+id: model-query
+name: model-query
+version: 1.0.0
+status: pilot
+category: domain
+owner:
+  team: "数智域（待确认）"
+  contact: "待确认"
+source: internal
+risk: medium
+data_classification: internal
+description: >
+  查询宝武数据中台的维度模型、事实模型和 ER 模型，返回关联数据表、字段与表级血缘。
+tags: [data-model, dimension-model, fact-model, er-model, 数智域]
+routing:
+  role: primary
+  specificity: 92
+  capability_statement: >
+    对宝武数据中台的维度、事实和 ER 模型对象，在模型元数据和关联表资产查询场景下，
+    完成模型检索、表字段汇集和表级血缘解析，产生带来源口径的模型详情结果。
+  consumes:
+    - type: text
+      object: data-model-query-request
+      formats: [plain-text]
+      required: true
+  produces:
+    - type: data
+      object: data-model-profile
+      formats: [json, text]
+      authoritative: true
+  intents: [data-model-search, data-model-detail-query]
+  domains: [data-modeling, data-governance]
+  triggers:
+    strong: [维度模型, 事实模型, ER模型, 查模型, 模型关联表]
+    weak: [模型, 表, 字段, 查询]
+    exclude: [创建模型, 修改模型, 发布模型, 模型设计]
+  supersedes: []
+  conflicts_with: []
+  composes_with: []
+  fallback_to: []
+  decision_rules:
+    - when: "用户查询维度、事实或 ER 模型以及其关联表"
+      priority: 100
+    - when: "用户请求设计、创建或发布模型"
+      action: exclude
+inputs:
+  - name: keyword_or_model_identifier
+    type: string
+    required: true
+    description: "模型 UUID、英文名、中文名或检索关键词"
+outputs:
+  - name: model_detail
+    type: json
+    description: "三类模型的详情、关联表、字段和表级血缘"
+tools: [run_skill_script]
+connectors: []
+scripts:
+  - path: scripts/model_query.py
+    entrypoint: true
+    writes_artifacts: false
+artifacts:
+  produces: [.json]
+  final_product: false
+sandbox_contract:
+  reads: []
+  writes: []
+  temp: []
+  forbidden: [SESSION_SANDBOX_ROOT_DERIVATION, _meta]
+security:
+  credential_policy: direct_test_api
+  pii: false
+  audit_required: true
+  approval_required: false
+business_governance:
+  data_source: "宝武数据中台测试 SQL API / ODS 元数据"
+  data_owner: "数智域（待确认）"
+  glossary_version: "待确认"
+  output_disclaimer: "查询结果以接口实时返回为准，不代替模型设计、发布或变更审批。"
+tests:
+  unit: [tests/test_script_smoke.py]
+  smoke: ["三类模型关键词检索", "模型详情含关联表", "HTTP 错误返回"]
+  route_evals:
+    positive:
+      - input: "查询采购事实模型"
+        expect_primary: model-query
+      - input: "这个 ER 模型关联了哪些表"
+        expect_primary: model-query
+      - input: "查客商代码维度模型的字段"
+        expect_primary: model-query
+    negative:
+      - input: "新建一个采购事实模型"
+        expect_not: [model-query]
+      - input: "修改 ER 模型关系"
+        expect_not: [model-query]
+      - input: "把模型发布上线"
+        expect_not: [model-query]
+    boundary:
+      - input: "把事实模型及关联表导出为 Excel"
+        expect_primary: model-query
+        expect_support: [xlsx-materializer]
+    conflict:
+      - input: "设计并保存新的 ER 模型"
+        expect_not: [model-query]
+        expect_primary: model-maintenance

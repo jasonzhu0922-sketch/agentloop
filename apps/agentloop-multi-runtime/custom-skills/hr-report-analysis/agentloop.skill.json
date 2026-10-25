@@ -1,0 +1,50 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "hr-report-analysis",
+    "description": "基于人事法人汇总报表回答员工人数、员工画像、人员结构与分布问题，分析性别、学历、职称、技能等级、岗位类型、青年员工与党员占比，以及组织比较和月度变化。负责明确口径、选择分析方法、形成数值结论和报告内容，委派 hr-report-data 读取原始数据；纯原始记录、组织匹配、月份或指标目录读取使用 hr-report-data。"
+  },
+  "activation": {
+    "semanticTags": [
+      "hr-report-analysis",
+      "workforce-analysis",
+      "organization-comparison",
+      "employee-profile",
+      "employee-situation",
+      "human-resources-analysis"
+    ],
+    "intentExamples": [
+      "某公司现在有多少员工，人员是怎么构成的",
+      "分析某公司的员工画像，说明各维度人数、分布和占比",
+      "查询某公司男女人数，分析学历、职称、技能等级和岗位结构",
+      "计算某公司35岁以下员工和党员占在岗人数的比例",
+      "对比某公司总部和全公司的人员结构及近一年变化",
+      "根据人事汇总数据形成员工情况报告或仪表盘的分析内容"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "primary_builder"
+    ],
+    "artifactKinds": [
+      "none"
+    ],
+    "sourceKinds": [
+      "database"
+    ],
+    "qaKinds": [
+      "content"
+    ],
+    "requiredSkills": [
+      "hr-report-data"
+    ]
+  },
+  "execution": {
+    "manifest": "agentloop.executors.json"
+  },
+  "compatibility": {
+    "executionProfiles": [
+      "local_script"
+    ]
+  }
+}

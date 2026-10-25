@@ -1,0 +1,46 @@
+{
+  "schema": "agentloop.skillExecutors/v1",
+  "executors": [
+    {
+      "id": "hr-report-data-query",
+      "description": "Read bounded HR report rows from the configured Eplat SQL service without accepting arbitrary SQL.",
+      "command": "python3",
+      "script": "scripts/hr_report_data.py",
+      "actions": [
+        {
+          "id": "describe-catalog",
+          "description": "Return the supported HR report dimensions, exact metric values, table grain and scope rules without querying employee data.",
+          "inputs": [],
+          "args": ["describe-catalog"],
+          "result": "The fixed eight-dimension, 22-metric catalog and data contract."
+        },
+        {
+          "id": "latest-period",
+          "description": "Query the latest available YYYYMM period in the configured HR report view.",
+          "inputs": [],
+          "args": ["latest-period"],
+          "result": "The latest period actually available from the HR report source."
+        },
+        {
+          "id": "resolve-organizations",
+          "description": "Resolve complete company names or configured aliases to approved full-company and headquarters codes before a named-company query.",
+          "inputs": [
+            { "name": "query", "description": "The original user request containing complete company names or configured aliases and any headquarters/full-company qualifier.", "required": true }
+          ],
+          "args": ["resolve-organizations", "--query", "{{query}}"],
+          "result": "Exact organization matches plus an opaque selection token, or truthful ambiguous/no-match evidence."
+        },
+        {
+          "id": "query-report",
+          "description": "Retrieve bounded raw HR report rows for approved months, exact metric values and either an organization selection receipt or an all-company scope.",
+          "inputs": [
+            { "name": "request-json", "description": "JSON with months.start/end, metrics, and either organizationSelection {codes,selectionToken} or companyScope full_company/headquarters/both.", "required": true }
+          ],
+          "args": ["query-report", "--request-json", "{{request-json}}"],
+          "result": "agentloop.hrReportData/v1 raw rows with source receipt, coverage, truncation and downstream analysis handoff."
+        }
+      ]
+    }
+  ]
+}
+

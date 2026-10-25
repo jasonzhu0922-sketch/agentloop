@@ -1,0 +1,38 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "shutu-ods-ddm-modeling",
+    "description": "ODS表分析 → DDM（数据域模型）建模全流程自动化。基于ODS层表分析报告，使用graphify图谱分析识别业务域边界，提取业务对象与逻辑实体，生成详尽的Markdown建模报告和收数标准Excel。触发：/ods-ddm-modeling，或用户提到ODS分析、DDM建模、数据域建模、收数标准、维度建模、业务对象提取、逻辑实体设计等场景时也应主动使用。适用于企业数据中台ODS→DDM层建模场景。"
+  },
+  "activation": {
+    "semanticTags": [
+      "ods",
+      "ddm",
+      "data-modeling"
+    ],
+    "intentExamples": [
+      "基于已核验的 ODS 单表分析报告生成 DDM 建模报告和收数标准"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "primary_builder"
+    ],
+    "artifactKinds": [
+      "document",
+      "spreadsheet"
+    ],
+    "sourceKinds": [
+      "document"
+    ],
+    "qaKinds": [
+      "content",
+      "openability"
+    ],
+    "requiredSkills": [
+      "shutu-ods-analysis",
+      "shutu-ods-analysis-validate",
+      "shutu-ods-report-qc"
+    ]
+  }
+}

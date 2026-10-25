@@ -1,0 +1,70 @@
+{
+  "domain": "hr-report",
+  "probedAt": "2026-07-28",
+  "tables": {
+    "BSTAMSHR00.V_FAWHZHSS0401": {
+      "NY": {
+        "cardinality": 0,
+        "sampling": "unprobed",
+        "values": [],
+        "error": null,
+        "pattern": "年月，VARCHAR(6)，YYYYMM（如'202606'=2026年6月）"
+      },
+      "ORG_CODE": {
+        "cardinality": 0,
+        "sampling": "unprobed",
+        "values": [],
+        "samples": [],
+        "error": null,
+        "pattern": "组织代码，VARCHAR(16)，如'BGTA'=宝山钢铁"
+      },
+      "ORG_NAME": {
+        "cardinality": 0,
+        "sampling": "unprobed",
+        "values": [],
+        "samples": [],
+        "error": null,
+        "pattern": "组织名称，VARCHAR(100)，如'宝山钢铁股份有限公司'"
+      },
+      "REPORT_ITEM_DES": {
+        "cardinality": 22,
+        "sampling": "full",
+        "values": [
+          "在岗员工人数",
+          "男职工人数",
+          "女职工人数",
+          "35岁以下职工人数",
+          "大专以下职工人数",
+          "大专",
+          "本科",
+          "硕士",
+          "博士",
+          "无技能等级",
+          "初级工",
+          "中级工",
+          "高级工",
+          "技师",
+          "高级技师",
+          "未评职称",
+          "初级职称",
+          "中级职称",
+          "高级职称",
+          "操作岗位",
+          "技术岗位",
+          "管理岗位",
+          "中共党员人数"
+        ],
+        "samples": [],
+        "error": null,
+        "pattern": "报表指标描述，VARCHAR(16)，8大维度共22个值"
+      },
+      "MONTH_AMT": {
+        "cardinality": 0,
+        "sampling": "unprobed",
+        "samples": [],
+        "error": null,
+        "pattern": "人数，DOUBLE"
+      }
+    }
+  }
+}

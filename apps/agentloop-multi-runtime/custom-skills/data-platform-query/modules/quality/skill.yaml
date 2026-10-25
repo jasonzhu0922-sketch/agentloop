@@ -1,0 +1,108 @@
+id: quality-query
+name: quality-query
+version: 1.0.0
+status: pilot
+category: domain
+owner:
+  team: "数智域（待确认）"
+  contact: "待确认"
+source: internal
+risk: medium
+data_classification: internal
+description: >
+  查询宝武数据中台的质量规则和已挂载质量规则的质量任务，返回规则、步骤与任务关系。
+tags: [data-quality, quality-rule, quality-task, 数智域]
+routing:
+  role: primary
+  specificity: 93
+  capability_statement: >
+    对宝武数据中台的质量规则和质量任务对象，在质量治理状态和规则任务关联查询场景下，
+    完成只读规则、步骤和任务关系检索，产生带来源口径的质量对象详情结果。
+  consumes:
+    - type: text
+      object: quality-query-request
+      formats: [plain-text]
+      required: true
+  produces:
+    - type: data
+      object: quality-rule-task-profile
+      formats: [json, text]
+      authoritative: true
+  intents: [quality-rule-query, quality-task-query, quality-rule-task-relation-query]
+  domains: [data-quality, data-governance]
+  triggers:
+    strong: [质量规则, 质量任务, 查质量任务, 查质量规则, 规则关联任务]
+    weak: [质量, 规则, 任务, 查询]
+    exclude: [创建质量规则, 修改质量规则, 删除质量规则, 创建质量任务, 提交任务上线]
+  supersedes: []
+  conflicts_with: []
+  composes_with: []
+  fallback_to: []
+  decision_rules:
+    - when: "用户查询质量规则、质量任务或两者关联"
+      priority: 100
+    - when: "用户请求维护规则或任务、执行检查或提交上线"
+      action: exclude
+inputs:
+  - name: mode
+    type: string
+    required: true
+    description: "rules、rule-detail、tasks 或 task-detail"
+  - name: keyword_or_uuid
+    type: string
+    required: true
+    description: "检索关键词、规则 UUID 或任务 UUID"
+outputs:
+  - name: quality_detail
+    type: json
+    description: "质量规则、质量任务及经质量步骤验证的关联关系"
+tools: [run_skill_script]
+connectors: []
+scripts:
+  - path: scripts/quality_query.py
+    entrypoint: true
+    writes_artifacts: false
+artifacts:
+  produces: [.json]
+  final_product: false
+sandbox_contract:
+  reads: []
+  writes: []
+  temp: []
+  forbidden: [SESSION_SANDBOX_ROOT_DERIVATION, _meta]
+security:
+  credential_policy: direct_test_api
+  pii: false
+  audit_required: true
+  approval_required: false
+business_governance:
+  data_source: "宝武数据中台测试 SQL API / ODS 元数据"
+  data_owner: "数智域（待确认）"
+  glossary_version: "待确认"
+  output_disclaimer: "查询结果以接口实时返回为准；任务关联不代表任务已上线、已执行或已通过审批。"
+tests:
+  unit: [tests/test_script_smoke.py]
+  smoke: ["质量规则检索", "质量任务与规则链路查询", "HTTP 错误返回"]
+  route_evals:
+    positive:
+      - input: "查一下空值质量规则"
+        expect_primary: quality-query
+      - input: "这个质量规则挂在哪个质量任务上"
+        expect_primary: quality-query
+      - input: "查询科研域 CDM 的质量任务"
+        expect_primary: quality-query
+    negative:
+      - input: "创建一个空值质量规则"
+        expect_not: [quality-query]
+      - input: "修改质量任务的调度时间"
+        expect_not: [quality-query]
+      - input: "提交质量任务上线审核"
+        expect_not: [quality-query]
+    boundary:
+      - input: "把质量规则和关联任务整理成 Excel"
+        expect_primary: quality-query
+        expect_support: [xlsx-materializer]
+    conflict:
+      - input: "创建并提交一个质量任务上线"
+        expect_not: [quality-query]
+        expect_primary: quality-task-maintenance

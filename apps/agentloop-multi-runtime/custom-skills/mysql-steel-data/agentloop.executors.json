@@ -1,0 +1,121 @@
+{
+  "schema": "agentloop.skillExecutors/v1",
+  "executors": [
+    {
+      "id": "mysql-steel-data-query",
+      "description": "Read mapped steel-market indicators from the configured local MySQL database.",
+      "command": "python3",
+      "script": "scripts/mysql_steel_data.py",
+      "actions": [
+        {
+          "id": "inspect-schema",
+          "description": "Inspect the configured database tables and columns without exposing credentials or sample data.",
+          "inputs": [],
+          "args": ["inspect-schema"],
+          "result": "A safe schema overview used to configure the two-table mapping."
+        },
+        {
+          "id": "preflight-catalog",
+          "description": "Inspect mapped fields and optionally resolve a natural-language request against bounded exact catalog values before discovery.",
+          "inputs": [
+            { "name": "query", "description": "Optional original request. Returns exact catalog-backed field matches and indicator-name terms; it does not infer synonyms or select an indicator.", "required": false }
+          ],
+          "args": ["preflight-catalog", "--query", "{{query}}"],
+          "result": "A bounded catalog profile and, when query is supplied, auditable suggested discovery filters."
+        },
+        {
+          "id": "discover-indicators",
+          "description": "Find candidates when the owner analysis plan needs explicit catalog inspection or multiple candidates. Use confirmed province/city/county/region, product, metric, producer, source, market and name fields; conditions are ANDed and fields are never interchangeable.",
+          "inputs": [
+            { "name": "filters-json", "description": "JSON with confirmed fields, e.g. city_name, breed_name, metric_name, producer_name or indicator_name. Start with stable dimensions. If a field returns zero candidates, omit it and use an indicator_name token, then verify the full name. Samples and null fields do not prove absence.", "required": true }
+          ],
+          "args": ["discover-indicators", "--filters-json", "{{filters-json}}"],
+          "result": "Bounded, non-aggregated indicator candidates with their matched dimensions."
+        },
+        {
+          "id": "locate-series",
+          "description": "For a multi-date request, locate one exact mapped indicator and immediately query its INDEX_CODE-bound raw observations. A one-date request must use locate-day.",
+          "inputs": [
+            { "name": "filters-json", "description": "Catalog-backed fields from preflight queryUnderstanding, including an indicator_name term when a grade is only present in the display name.", "required": true },
+            { "name": "start-date", "description": "Inclusive ISO date, YYYY-MM-DD.", "required": true },
+            { "name": "end-date", "description": "Inclusive ISO date, YYYY-MM-DD.", "required": true }
+          ],
+          "args": ["locate-series", "--filters-json", "{{filters-json}}", "--start-date", "{{start-date}}", "--end-date", "{{end-date}}"],
+          "result": "One exact candidate plus a standard query-series raw JSON artifact (acquisitionAction=locate-series) that can be passed directly to steel-market-analysis analyze-series, or truthful empty/ambiguous candidate evidence without querying observations."
+        },
+        {
+          "id": "locate-day",
+          "description": "For one calendar date, locate one exact mapped indicator and return that date's complete raw observation set without choosing a representative price.",
+          "inputs": [
+            { "name": "filters-json", "description": "Catalog-backed fields from preflight queryUnderstanding. Conditions identify one catalog candidate before any value-table read.", "required": true },
+            { "name": "date", "description": "The one ISO observation date, YYYY-MM-DD.", "required": true }
+          ],
+          "args": ["locate-day", "--filters-json", "{{filters-json}}", "--date", "{{date}}"],
+          "result": "One exact candidate plus agentloop.steelMarketDayEvidence/v1. Same-day multiple raw values remain separate observations."
+        },
+        {
+          "id": "resolve-and-locate-series",
+          "description": "Optional acquisition primitive after the owner analysis plan has selected one bounded, uniquely resolvable series. It atomically preflights exact mapped values, locates one INDEX_CODE and retrieves raw observations; it is not an analysis method or a default route.",
+          "inputs": [
+            { "name": "query", "description": "The complete original request used only for bounded exact matching against mapped catalog values.", "required": true },
+            { "name": "start-date", "description": "Inclusive ISO date, YYYY-MM-DD.", "required": true },
+            { "name": "end-date", "description": "Inclusive ISO date, YYYY-MM-DD.", "required": true }
+          ],
+          "args": ["resolve-and-locate-series", "--query", "{{query}}", "--start-date", "{{start-date}}", "--end-date", "{{end-date}}"],
+          "result": "A standard query-series raw JSON artifact with catalogPreflight and acquisitionAction=resolve-and-locate-series, or truthful unresolved candidate evidence without reading observations."
+        },
+        {
+          "id": "resolve-and-locate-day",
+          "description": "For one date, atomically preflight exact catalog values, locate one indicator, and return that date's raw observation set. It never invents an INDEX_CODE or a representative price.",
+          "inputs": [
+            { "name": "query", "description": "The complete original request used only for bounded exact matching against mapped catalog values.", "required": true },
+            { "name": "date", "description": "The one ISO observation date, YYYY-MM-DD.", "required": true }
+          ],
+          "args": ["resolve-and-locate-day", "--query", "{{query}}", "--date", "{{date}}"],
+          "result": "An agentloop.steelMarketDayEvidence/v1 raw-day artifact with catalog preflight evidence, or truthful unresolved candidate evidence."
+        },
+        {
+          "id": "execute-query-plan",
+          "description": "Execute the upper analysis Skill's bounded data-selection plan. Equal start/end dates use the raw-day path; multi-date windows use raw-series. A direct INDEX_CODE must carry the catalog-issued selectionToken.",
+          "inputs": [
+            { "name": "plan-file", "description": "Absolute Run-workspace path to agentloop.steelMarketQueryPlan/v1. Each direct indicatorId must include its catalog-issued selectionToken; filters remain an alternative selector.", "required": true }
+          ],
+          "args": ["execute-query-plan", "--plan-file", "{{plan-file}}"],
+          "result": "Independently retained raw query batches, each preserving its exact selection receipt, plus an aggregate receipt identifying unresolved plan items. Pass the complete execution result to steel-market-analysis analyze-series."
+        },
+        {
+          "id": "list-indicators",
+          "description": "Legacy one-keyword lookup against the stored INDEX_NAME only. It cannot create or infer a metric name.",
+          "inputs": [
+            { "name": "keyword", "description": "A keyword from an indicator name that actually exists in the catalog.", "required": true }
+          ],
+          "args": ["list-indicators", "--keyword", "{{keyword}}"],
+          "result": "Matching indicator candidates and their configured dimensions."
+        },
+        {
+          "id": "query-series-by-selection",
+          "description": "Retrieve a multi-date raw series only for an INDEX_CODE accompanied by the opaque token issued with one exact catalog candidate.",
+          "inputs": [
+            { "name": "indicator-id", "description": "Exact INDEX_CODE from the preceding unique catalog result.", "required": true },
+            { "name": "selection-token", "description": "Opaque selectionToken returned with that exact candidate; it cannot be invented or substituted.", "required": true },
+            { "name": "start-date", "description": "Inclusive ISO date, YYYY-MM-DD; it must precede end-date.", "required": true },
+            { "name": "end-date", "description": "Inclusive ISO date, YYYY-MM-DD; it must follow start-date.", "required": true }
+          ],
+          "args": ["query-series-by-selection", "--indicator-id", "{{indicator-id}}", "--selection-token", "{{selection-token}}", "--start-date", "{{start-date}}", "--end-date", "{{end-date}}"],
+          "result": "A parameterized, capped exact-indicator multi-date series plus a database evidence receipt."
+        },
+        {
+          "id": "query-day-by-selection",
+          "description": "Retrieve one date's complete raw observation set only for an INDEX_CODE accompanied by its catalog-issued selectionToken.",
+          "inputs": [
+            { "name": "indicator-id", "description": "Exact INDEX_CODE from the preceding unique catalog result.", "required": true },
+            { "name": "selection-token", "description": "Opaque selectionToken returned with that exact candidate.", "required": true },
+            { "name": "date", "description": "The one ISO observation date, YYYY-MM-DD.", "required": true }
+          ],
+          "args": ["query-day-by-selection", "--indicator-id", "{{indicator-id}}", "--selection-token", "{{selection-token}}", "--date", "{{date}}"],
+          "result": "A parameterized exact-indicator raw-day result plus agentloop.steelMarketDayEvidence/v1; it does not choose a daily representative price."
+        }
+      ]
+    }
+  ]
+}

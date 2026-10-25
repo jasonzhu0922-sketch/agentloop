@@ -1,0 +1,23 @@
+{
+  "schema": "agentloop.skillExecutors/v1",
+  "executors": [
+    {
+      "id": "steel-market-python-analysis",
+      "description": "Compute reproducible numerical facts from raw series rows already returned by mysql-steel-data. It supports, but does not replace, the LLM's methodology-led market analysis.",
+      "command": "python3",
+      "script": "scripts/analyze_steel_series.py",
+      "actions": [
+        {
+          "id": "analyze-series",
+          "description": "Required after every mysql-steel-data series query that will support a user-facing trend or numerical conclusion. Profiles the actual series shape, including date-level value sets, single-value changes when defensible, range-boundary movement for same-date multi-value data, coverage, and data-quality facts. It does not select the business methodology.",
+          "inputs": [
+            { "name": "input-file", "description": "The persisted Run-workspace JSON artifact for one mysql-steel-data query-series result, including one acquired through locate-series.", "required": true, "evidenceInput": "immutable_workspace_artifact" }
+          ],
+          "args": ["--input-file", "{{input-file}}"],
+          "producesEvidenceKinds": ["derived_aggregation"],
+          "result": "Per-scope numerical and data-quality facts plus evidenceReceipt.deliveryFacts. Accepts one query-series receipt or an execute-query-plan result. Use single-value changes only for unique endpoints; otherwise use dailyProfiles and endpointRangeMovement."
+        }
+      ]
+    }
+  ]
+}

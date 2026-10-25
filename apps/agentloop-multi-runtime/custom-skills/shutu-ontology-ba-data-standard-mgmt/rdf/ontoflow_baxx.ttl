@@ -1,0 +1,196 @@
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+# 业务架构本体词汇表URI前缀
+@prefix ba: <http://ontoflow.example.org/vocab/ba/> .
+
+# --------------------------
+# 版本：0.1.4（2026-08-27：BusinessRule/rule_text 注释口径修正——「正确理解」→「正确查法」、四要素并列→要素分级〔规则描述必填/错误做法+正确查法推荐/来源会话可选〕，同步开发技能 v0.18.0 框架口径；SBVR 语义参考注释同步。0.1.3：page_code 注释升级——两级来源〔真实编码/自动生成 {上级编码}@{页面名称}〕正式规范化，解决并非所有页面都有编码的通用性问题；明确与打开页面操作解耦。0.1.2：删除 pageReadsEntity/pageWritesEntity 前瞻对象属性——页面↔数据架构实体的挂接属性待图库挂接〔阶段C5〕实际启动时按需定义；0.1.1：删除 page_relations/reads_table/writes_table/wrong_practice/correct_understanding/source_session 六个数据属性，数据链路与规则细节以来源 SKILL.md 为准不进镜像）
+# 创建时间：2026-08-26
+# 用途：定义业务架构（业务域/流程/动作/MCP工具/系统页面/业务规则）的本体词汇表（TBox）。
+#      与数据架构词汇表 ontoflow_cxxx.ttl 平行，命名空间为 http://ontoflow.example.org/vocab/ba/
+# 语义参考：W3C RDF 1.1 / OWL 2（格式骨架）、ArchiMate 3.x 业务层与 BPMN 2.0（类语义映射）、
+#          SBVR（业务规则要素分级）、华为云知识图谱服务方法论（本体设计→知识映射→知识融合）
+# 格式规范：详见业务架构开发技能 docs/RDF格式规范.md
+# --------------------------
+
+<http://ontoflow.example.org/vocab/ba/> rdf:type owl:Ontology ;
+    rdfs:label "业务架构本体词汇表"@zh ;
+    rdfs:comment "定义业务架构侧的本体基础类、对象属性与数据属性。实例数据（ABox）由各业务域业务架构技能的 SKILL.md 经 skill_md_to_rdf.py 转换生成，头部通过 owl:imports 引用本文件。"@zh .
+
+# --------------------------
+# 基础类
+# --------------------------
+
+ba:BusinessDomain rdf:type owl:Class ;
+                  rdfs:label "业务域"@zh ;
+                  rdfs:comment "用于表示一个业务架构技能所覆盖的业务领域。每个业务架构技能对应一个业务域实例。对应 ArchiMate 无直接元素，为本体语义网自定义聚合层"@zh .
+
+ba:BusinessProcess rdf:type owl:Class ;
+                   rdfs:label "业务流程"@zh ;
+                   rdfs:comment "用于表示业务域下的一级业务流程，业务管理链条中的稳定阶段。对应 ArchiMate BusinessProcess / BPMN Process"@zh .
+
+ba:BusinessAction rdf:type owl:Class ;
+                  rdfs:label "业务动作"@zh ;
+                  rdfs:comment "用于表示业务流程下可执行、可落地、可系统化支撑的业务动作。对应 ArchiMate BusinessFunction 细化到 BPMN Task 粒度"@zh .
+
+ba:Tool rdf:type owl:Class ;
+        rdfs:label "MCP工具"@zh ;
+        rdfs:comment "用于表示与业务动作对应的 MCP 工具的抽象基类，细分为业务动作类与服务信息类两个子类"@zh .
+
+ba:BusinessActionTool rdf:type owl:Class ;
+                      rdfs:subClassOf ba:Tool ;
+                      rdfs:label "业务动作类工具"@zh ;
+                      rdfs:comment "承接具体业务动作的 MCP 工具，与业务动作保持一一对应。一个业务动作至多映射一个业务动作类工具（mappedTool 为函数式属性）"@zh .
+
+ba:ServiceInfoTool rdf:type owl:Class ;
+                   rdfs:subClassOf ba:Tool ;
+                   rdfs:label "服务信息类工具"@zh ;
+                   rdfs:comment "提供版本号、健康检查、服务说明等通用能力的 MCP 工具（如 get_version），不对应具体业务动作，不纳入业务动作一一对应统计"@zh .
+
+ba:ToolParameter rdf:type owl:Class ;
+                 rdfs:label "工具参数"@zh ;
+                 rdfs:comment "用于表示 MCP 工具的输入参数，作为工具的结构化子节点（参数名+中文说明），优于 JSON 字面量，可直接落图库"@zh .
+
+ba:SystemPage rdf:type owl:Class ;
+              rdfs:label "业务系统页面"@zh ;
+              rdfs:comment "用于表示承载业务动作的业务系统页面（页面使用向导五要素）。对应 ArchiMate ApplicationInterface"@zh .
+
+ba:BusinessRule rdf:type owl:Class ;
+                rdfs:label "业务规则"@zh ;
+                rdfs:comment "用于表示业务域沉淀的核心业务知识（BR-NN），要素分级：规则描述必填，错误做法/正确查法为推荐要素（暂缺待补全），来源会话为溯源元数据（可考时填写，省略合法）。风格参考 SBVR 业务规则"@zh .
+
+# --------------------------
+# 对象关系（对象属性）
+# --------------------------
+
+ba:hasProcess rdf:type owl:ObjectProperty ;
+              rdfs:label "下设业务流程"@zh ;
+              rdfs:comment "表示业务域与业务流程之间的组成关系"@zh ;
+              rdfs:domain ba:BusinessDomain ;
+              rdfs:range ba:BusinessProcess .
+
+ba:hasAction rdf:type owl:ObjectProperty ;
+             rdfs:label "下设业务动作"@zh ;
+             rdfs:comment "表示业务流程与业务动作之间的组成关系"@zh ;
+             rdfs:domain ba:BusinessProcess ;
+             rdfs:range ba:BusinessAction .
+
+ba:mappedTool rdf:type owl:ObjectProperty, owl:FunctionalProperty ;
+              rdfs:label "映射工具"@zh ;
+              rdfs:comment "表示业务动作与其业务动作类 MCP 工具之间的一一映射关系。函数式属性保障一个业务动作至多映射一个工具；每个业务动作类工具必须被至少一个业务动作指向（由校验规则保障）"@zh ;
+              rdfs:domain ba:BusinessAction ;
+              rdfs:range ba:BusinessActionTool .
+
+ba:hasParameter rdf:type owl:ObjectProperty ;
+                rdfs:label "具有参数"@zh ;
+                rdfs:comment "表示 MCP 工具与其输入参数之间的组成关系"@zh ;
+                rdfs:domain ba:Tool ;
+                rdfs:range ba:ToolParameter .
+
+ba:carriedByPage rdf:type owl:ObjectProperty ;
+                 rdfs:label "承载页面"@zh ;
+                 rdfs:comment "表示业务动作与其承载业务系统页面之间的关联关系（一个动作可由多个页面承载，一个页面可承载多个动作）"@zh ;
+                 rdfs:domain ba:BusinessAction ;
+                 rdfs:range ba:SystemPage .
+
+ba:relatedPage rdf:type owl:ObjectProperty ;
+               rdfs:label "关联页面"@zh ;
+               rdfs:comment "表示业务系统页面之间的上下游关联关系（有向：从当前页面指向其上下游关联页面）"@zh ;
+               rdfs:domain ba:SystemPage ;
+               rdfs:range ba:SystemPage .
+
+ba:hasRule rdf:type owl:ObjectProperty ;
+           rdfs:label "具有业务规则"@zh ;
+           rdfs:comment "表示业务域与其业务规则之间的组成关系"@zh ;
+           rdfs:domain ba:BusinessDomain ;
+           rdfs:range ba:BusinessRule .
+
+# --------------------------
+# 数据属性
+# --------------------------
+
+ba:source_skill rdf:type owl:DatatypeProperty ;
+                rdfs:label "来源技能"@zh ;
+                rdfs:comment "用于表示业务域实例来源的业务架构技能英文名（SKILL.md front matter 的 name 字段），作为 RDF 镜像的可追溯锚点"@zh ;
+                rdfs:domain ba:BusinessDomain ;
+                rdfs:range xsd:string .
+
+ba:skill_version rdf:type owl:DatatypeProperty ;
+                 rdfs:label "技能版本"@zh ;
+                 rdfs:comment "用于表示生成 RDF 镜像时来源技能的版本号（SKILL.md front matter 的 metadata.version 字段）"@zh ;
+                 rdfs:domain ba:BusinessDomain ;
+                 rdfs:range xsd:string .
+
+ba:tool_name rdf:type owl:DatatypeProperty ;
+             rdfs:label "工具英文名"@zh ;
+             rdfs:comment "用于表示 MCP 工具的英文注册名称（如 create_quality_rule），跨业务域全局唯一"@zh ;
+             rdfs:domain ba:Tool ;
+             rdfs:range xsd:string .
+
+ba:tool_desc rdf:type owl:DatatypeProperty ;
+             rdfs:label "功能描述"@zh ;
+             rdfs:comment "用于表示 MCP 工具的功能描述（SKILL.md MCP工具设计章节的 功能描述 要素）"@zh ;
+             rdfs:domain ba:Tool ;
+             rdfs:range xsd:string .
+
+ba:return_desc rdf:type owl:DatatypeProperty ;
+               rdfs:label "返回值说明"@zh ;
+               rdfs:comment "用于表示 MCP 工具的返回值说明（SKILL.md MCP工具设计章节的 返回值 要素）"@zh ;
+               rdfs:domain ba:Tool ;
+               rdfs:range xsd:string .
+
+ba:param_name rdf:type owl:DatatypeProperty ;
+              rdfs:label "参数英文名"@zh ;
+              rdfs:comment "用于表示 MCP 工具输入参数的英文字段名"@zh ;
+              rdfs:domain ba:ToolParameter ;
+              rdfs:range xsd:string .
+
+ba:param_desc rdf:type owl:DatatypeProperty ;
+              rdfs:label "参数说明"@zh ;
+              rdfs:comment "用于表示 MCP 工具输入参数的中文说明"@zh ;
+              rdfs:domain ba:ToolParameter ;
+              rdfs:range xsd:string .
+
+ba:system_name rdf:type owl:DatatypeProperty ;
+               rdfs:label "所属系统"@zh ;
+               rdfs:comment "用于表示业务系统页面所属的系统名称及入口标识（页面使用向导五要素之一，存原文）"@zh ;
+               rdfs:domain ba:SystemPage ;
+               rdfs:range xsd:string .
+
+ba:page_code rdf:type owl:DatatypeProperty ;
+              rdfs:label "页面编码"@zh ;
+              rdfs:comment "用于表示业务系统页面的页面编码，页面顶点的业务键，全局唯一。两级来源（确定性保证）：①真实编码——页面编码与入口原文含可识别编码（如 BEDF15）；②自动生成——原文含「子页面/无独立编码/内部子页面」标识时，取可达路径最近上级编码合成「{上级编码}@{页面名称}」（如 BEXY5201@数图·数据标准目录页）。生成规则输入全部来自 SKILL.md 原文，重复生成必得相同编码（顶点 ID 稳定）。注意：自动生成编码的页面改名会导致其编码及顶点 ID 变化（转换时发 WARNING 提示）。本属性仅作标识，与打开页面操作无直接关系——打开页面用 page_url 直达，无 URL 页面回退 SKILL.md 页面向导原文中的导航路径"@zh ;
+              rdfs:domain ba:SystemPage ;
+              rdfs:range xsd:string .
+
+ba:page_url rdf:type owl:DatatypeProperty ;
+            rdfs:label "页面直达地址"@zh ;
+            rdfs:comment "用于表示业务系统页面的直达 URL（如有）"@zh ;
+            rdfs:domain ba:SystemPage ;
+            rdfs:range xsd:string .
+
+ba:business_role rdf:type owl:DatatypeProperty ;
+                 rdfs:label "业务角色"@zh ;
+                 rdfs:comment "用于表示页面的业务定位描述（页面使用向导五要素之一，存原文，含承载的流程与动作信息）"@zh ;
+                 rdfs:domain ba:SystemPage ;
+                 rdfs:range xsd:string .
+
+ba:data_link_desc rdf:type owl:DatatypeProperty ;
+                  rdfs:label "数据链路描述"@zh ;
+                  rdfs:comment "用于表示页面数据链路的完整原文（页面使用向导五要素之一），读/写表清单以其原文形式保留"@zh ;
+                  rdfs:domain ba:SystemPage ;
+                  rdfs:range xsd:string .
+
+ba:rule_id rdf:type owl:DatatypeProperty ;
+           rdfs:label "规则编号"@zh ;
+           rdfs:comment "用于表示业务规则的编号（BR-NN 格式），业务域内唯一"@zh ;
+           rdfs:domain ba:BusinessRule ;
+           rdfs:range xsd:string .
+
+ba:rule_text rdf:type owl:DatatypeProperty ;
+             rdfs:label "规则描述"@zh ;
+             rdfs:comment "用于表示业务规则的核心规则描述（结构性必填要素）。错误做法/正确查法/来源会话三要素不进 RDF 镜像，完整保留于来源 SKILL.md"@zh ;
+             rdfs:domain ba:BusinessRule ;
+             rdfs:range xsd:string .

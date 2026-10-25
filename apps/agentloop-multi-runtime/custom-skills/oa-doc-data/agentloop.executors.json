@@ -1,0 +1,33 @@
+{
+  "schema": "agentloop.skillExecutors/v1",
+  "executors": [
+    {
+      "id": "oa-doc-data-query",
+      "description": "Query the configured OA document HTTP API for an employee number explicitly supplied by the user.",
+      "command": "python3",
+      "script": "scripts/oa_doc_data.py",
+      "actions": [
+        {
+          "id": "search-documents",
+          "description": "Retrieve one bounded page of OA document metadata, parsed body content and attachment content for the explicitly supplied employee number and date range.",
+          "inputs": [
+            {
+              "name": "request-json",
+              "description": "JSON containing explicit userId, timeRange, optional keyword/text, content flags, pageSize, pageNo and audit reason; never include appId or accCode.",
+              "required": true
+            }
+          ],
+          "args": ["search-documents", "--request-json", "{{request-json}}"],
+          "producesEvidenceKinds": [
+            "source_summary",
+            "source_urls",
+            "record_counts",
+            "structured_extraction_artifact",
+            "explicit_caveats"
+          ],
+          "result": "agentloop.oaDocData/v1 with the sanitized request, complete upstream JSON response, page coverage and an evidence receipt."
+        }
+      ]
+    }
+  ]
+}

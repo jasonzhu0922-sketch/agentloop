@@ -1,0 +1,35 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "shutu-ods-report-qc",
+    "description": "ODS 分析报告质量检查技能。检查指定目录下ODS分析报告的格式完整性、内容完整性，并自动补齐缺失内容，生成检查报告。触发场景包括：检查报告质量、验证报告完整性、补齐报告缺失内容、批量检查报告等。"
+  },
+  "activation": {
+    "semanticTags": [
+      "ods",
+      "data-modeling",
+      "report-quality"
+    ],
+    "intentExamples": [
+      "检查 ODS 分析报告的事实依据、字段覆盖和质量问题"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "qa"
+    ],
+    "artifactKinds": [
+      "none"
+    ],
+    "sourceKinds": [],
+    "qaKinds": [
+      "content"
+    ],
+    "requiredSkills": []
+  },
+  "compatibility": {
+    "executionProfiles": [
+      "local_script"
+    ]
+  }
+}

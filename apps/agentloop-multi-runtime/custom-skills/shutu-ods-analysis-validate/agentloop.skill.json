@@ -1,0 +1,36 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "shutu-ods-analysis-validate",
+    "description": "校验 ODS 单表建模分析报告的结构完整性，判断是否满足 shutu-ods-analysis 规范的章节与子结构要求，输出合规性评分和问题清单。当用户要求检查分析报告结构、验证报告章节是否完整、批量校验建模报告时使用此技能。"
+  },
+  "activation": {
+    "semanticTags": [
+      "ods",
+      "data-modeling",
+      "report-validation"
+    ],
+    "intentExamples": [
+      "校验 ODS 单表建模分析报告的章节和层级是否完整"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "qa"
+    ],
+    "artifactKinds": [
+      "none"
+    ],
+    "sourceKinds": [],
+    "qaKinds": [
+      "content",
+      "openability"
+    ],
+    "requiredSkills": []
+  },
+  "compatibility": {
+    "executionProfiles": [
+      "local_script"
+    ]
+  }
+}

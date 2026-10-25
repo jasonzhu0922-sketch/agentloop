@@ -1,0 +1,47 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "data-platform-query",
+    "description": "只读查询宝武数据中台的 API、数据模型、数据表、数据标准和数据质量元数据。适用于检索定义、字段、参数、关联关系或已登记血缘；不用于写入、发布、变更或业务数据明细查询。"
+  },
+  "activation": {
+    "semanticTags": [
+      "data-platform",
+      "metadata-query",
+      "data-governance",
+      "read-only"
+    ],
+    "intentExamples": [
+      "查询某个 API 的用途、入参、出参或关联数据表",
+      "查询维度模型、事实模型或 ER 模型的关联表和字段",
+      "查询数据表字段、主键或上下游表级血缘",
+      "查询数据分类、业务对象或数据元的已登记关系",
+      "查询质量规则及已挂载规则的质量任务"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "source_provider"
+    ],
+    "artifactKinds": [
+      "none"
+    ],
+    "sourceKinds": [
+      "api",
+      "database"
+    ],
+    "qaKinds": [],
+    "requiredSkills": []
+  },
+  "execution": {
+    "manifest": "agentloop.executors.json"
+  },
+  "compatibility": {
+    "executionProfiles": [
+      "local_script"
+    ],
+    "producesEvidenceKinds": [
+      "source_summary"
+    ]
+  }
+}

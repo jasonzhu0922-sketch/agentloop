@@ -1,0 +1,1646 @@
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix ba: <http://ontoflow.example.org/vocab/ba/> .
+
+# 业务架构 RDF 镜像（ABox）
+# 业务域：集团财务管理    域编码：cwm1
+# 来源技能：shutu-ontology-ba-financial-mgmt v0.12.2（事实源=SKILL.md 及其声明的附录明细，本文件为生成产物，勿手工修改）
+# 词汇表：ontoflow_baxx.ttl（owl:imports 引用，由 skill_md_to_rdf.py 自动复制）
+# 附录明细：docs/业财事项汇总表.md（18 流程 236 动作：并入 143，SKILL.md 已有同名跳过 93，流程未匹配跳过 0）
+
+<> owl:imports <ontoflow_baxx.ttl> .
+
+ba:bd_0d84478423ac rdf:type ba:BusinessDomain ;
+    rdfs:label "集团财务管理"@zh ;
+    rdfs:comment "集团财务管理业务架构技能，用于管理集团财务管理的业务规则、业务流程、业务动作及其对应的 MCP 工具。Invoke when user asks to analyze group finance domain business architecture, identify business rules or business processes, or define MCP tools for group finance domain operations."@zh ;
+    ba:source_skill "shutu-ontology-ba-financial-mgmt" ;
+    ba:skill_version "0.12.2" .
+
+ba:bp_dc5d395a5778 rdf:type ba:BusinessProcess ;
+    rdfs:label "借款管理"@zh ;
+    rdfs:comment "银行借款全生命周期核算——合同签订、本金借入、还本付息、利息预提与结转，及对应红冲事项。完整 9 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_0b86e2732115 rdf:type ba:BusinessProcess ;
+    rdfs:label "资金运作"@zh ;
+    rdfs:comment "金融投资运作核算——定期存款、交易账户资金调拨、金融资产（股票/基金/债券等）购入处置与重估、商品/货币衍生品、外汇购汇结汇。完整 21 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_19ac7813aafa rdf:type ba:BusinessProcess ;
+    rdfs:label "票据管理"@zh ;
+    rdfs:comment "应收/应付票据业务核算——收取、兑现、贴现、背书、质押、退票，应付票据出具与承兑，票据保证金。完整 12 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_eacec3902983 rdf:type ba:BusinessProcess ;
+    rdfs:label "资产管理"@zh ;
+    rdfs:comment "长期资产全生命周期核算——固定资产、投资性房地产、无形资产、长期待摊费用、递延收益、使用权资产、租赁负债、长期股权投资的验收/转入、变动、折旧摊销、减值与处置。完整 49 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_7e23aac53586 rdf:type ba:BusinessProcess ;
+    rdfs:label "成本管理"@zh ;
+    rdfs:comment "产品成本核算——辅助生产成本分配、生产成本结转、产品成本计算、待摊费用摊销。完整 4 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_7fb64c877118 rdf:type ba:BusinessProcess ;
+    rdfs:label "委托贷款"@zh ;
+    rdfs:comment "委托贷款业务核算——本金发放与收回、利息计提与收取、减值计提。完整 8 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_0eee96fc94a1 rdf:type ba:BusinessProcess ;
+    rdfs:label "债券管理"@zh ;
+    rdfs:comment "债券融资核算——发行收款、利息计提、付息。完整 3 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_0891f16b46b8 rdf:type ba:BusinessProcess ;
+    rdfs:label "总账"@zh ;
+    rdfs:comment "总账核心核算——费用结转（7/8 归属）、利润结转、开关账、期初切换、账务调整，及税费/暂估/红冲等报账类事项。完整 44 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_2655acd153f0 rdf:type ba:BusinessProcess ;
+    rdfs:label "财务服务平台"@zh ;
+    rdfs:comment "财务服务平台通用手工报账。完整 1 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_beae2a73907d rdf:type ba:BusinessProcess ;
+    rdfs:label "通宝管理"@zh ;
+    rdfs:comment "应收/应付通宝（集团独立结算工具）业务核算——收取、兑现、贴现、背书、出具、承兑。完整 9 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_d08a17dba1b4 rdf:type ba:BusinessProcess ;
+    rdfs:label "信用证管理"@zh ;
+    rdfs:comment "应收/应付信用证业务核算——开立、收取、交单、收款、付款、贴现/福费廷。完整 6 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_a5896d7a753e rdf:type ba:BusinessProcess ;
+    rdfs:label "资金平台"@zh ;
+    rdfs:comment "股份现金平台内部资金核算——平台资金调拨、利息预提与结算。完整 3 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_a265f724395d rdf:type ba:BusinessProcess ;
+    rdfs:label "应付管理"@zh ;
+    rdfs:comment "应付业务全流程核算——预支/预付、采购与费用报支、尾款、付款指令（对公/对私）、出国业务、债务转移、负数发票。完整 23 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_7123c7df37b8 rdf:type ba:BusinessProcess ;
+    rdfs:label "薪酬核算"@zh ;
+    rdfs:comment "职工薪酬发放核算。完整 1 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_c71b6d4517e4 rdf:type ba:BusinessProcess ;
+    rdfs:label "在建工程"@zh ;
+    rdfs:comment "在建工程核算——暂估与转固。完整 2 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_13144521d67f rdf:type ba:BusinessProcess ;
+    rdfs:label "库存核算"@zh ;
+    rdfs:comment "存货收发存核算——期初切换、各类出入库、减值准备、业财对账。完整 25 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_fae7d192b086 rdf:type ba:BusinessProcess ;
+    rdfs:label "应收管理"@zh ;
+    rdfs:comment "应收业务核算——销售收款与核销、退款转款、销售结算（外销）、暂估与预计。完整 15 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:bp_d49ad0454252 rdf:type ba:BusinessProcess ;
+    rdfs:label "现金管理"@zh ;
+    rdfs:comment "银行间划款核算。完整 1 项业财事项见 `docs/业财事项汇总表.md`"@zh .
+
+ba:ba_2cef3d0c5c2b rdf:type ba:BusinessAction ;
+    rdfs:label "银行借款合同签订"@zh ;
+    rdfs:comment "单据：银行借款合同；相关规则：BR-21"@zh .
+
+ba:ba_2c1e44a28424 rdf:type ba:BusinessAction ;
+    rdfs:label "银行借款本金借入"@zh ;
+    rdfs:comment "单据：银行回单；会计事务：本金借入；抛账功能点：本金借入；相关规则：BR-21"@zh .
+
+ba:ba_be9ee915a959 rdf:type ba:BusinessAction ;
+    rdfs:label "银行借款还本付息"@zh ;
+    rdfs:comment "单据：银行回单；会计事务：还本付息；抛账功能点：还本付息"@zh .
+
+ba:ba_1264b3ee9df2 rdf:type ba:BusinessAction ;
+    rdfs:label "银行借款利息预提"@zh ;
+    rdfs:comment "单据：利息计算单；会计事务：预提抛帐；抛账功能点：预提抛帐"@zh .
+
+ba:ba_6b45a3d18095 rdf:type ba:BusinessAction ;
+    rdfs:label "银行借款本金借入红冲"@zh ;
+    rdfs:comment "单据：银行回单；会计事务：借款红冲；抛账功能点：借款红冲"@zh .
+
+ba:ba_634d640d47a5 rdf:type ba:BusinessAction ;
+    rdfs:label "银行借款利息预提红冲"@zh ;
+    rdfs:comment "单据：银行回单；会计事务：预提红冲；抛账功能点：预提红冲"@zh .
+
+ba:ba_d801aa5c544d rdf:type ba:BusinessAction ;
+    rdfs:label "银行借款利息预提结转"@zh ;
+    rdfs:comment "单据类型：利息结转单；会计事务类型：结转预提；抛账功能点：结转预提"@zh .
+
+ba:ba_cd27a83da758 rdf:type ba:BusinessAction ;
+    rdfs:label "银行借款利息预提结转红冲"@zh ;
+    rdfs:comment "单据类型：利息计算单；会计事务类型：结转预提付息红冲；抛账功能点：结转预提付息"@zh .
+
+ba:ba_4d40826c12fd rdf:type ba:BusinessAction ;
+    rdfs:label "银行借款还本付息红冲"@zh ;
+    rdfs:comment "单据类型：利息结转单；会计事务类型：还本付息红冲；抛账功能点：还本付息红冲"@zh .
+
+ba:ba_3ecc35b840db rdf:type ba:BusinessAction ;
+    rdfs:label "定期存款存入"@zh ;
+    rdfs:comment "单据：定期存款单、银行回单；会计事务：定期存款存入；抛账功能点：定存抛帐；通用单据（手工凭证）"@zh .
+
+ba:ba_d6fbe08114a1 rdf:type ba:BusinessAction ;
+    rdfs:label "定期存款本息收回"@zh ;
+    rdfs:comment "单据：定期存款单、银行回单、定期存款利息清单；会计事务：定期存款本息收回"@zh .
+
+ba:ba_b95865078f45 rdf:type ba:BusinessAction ;
+    rdfs:label "交易账户资金转入"@zh ;
+    rdfs:comment "单据：资金调拨单、银行回单；会计事务：交易账户资金转入"@zh .
+
+ba:ba_7e9692665fdc rdf:type ba:BusinessAction ;
+    rdfs:label "交易账户资金转出"@zh ;
+    rdfs:comment "单据：资金调拨单、银行回单；会计事务：交易账户资金转出"@zh .
+
+ba:ba_33b45180defb rdf:type ba:BusinessAction ;
+    rdfs:label "金融资产购入"@zh ;
+    rdfs:comment "单据：投资交易单据；关联业务对象：会计凭证、银行回单；会计事务：金融资产购入核算；通用单据（手工凭证）"@zh .
+
+ba:ba_c935344b392f rdf:type ba:BusinessAction ;
+    rdfs:label "金融资产处置"@zh ;
+    rdfs:comment "单据：投资交易单据；关联业务对象：会计凭证、银行回单；会计事务：金融资产处置核算；通用单据（手工凭证）"@zh .
+
+ba:ba_36469f6efb61 rdf:type ba:BusinessAction ;
+    rdfs:label "商品衍生品购入"@zh ;
+    rdfs:comment "单据：投资交易单据；关联业务对象：会计凭证、银行回单；会计事务：商品衍生品购入核算；通用单据（手工凭证）"@zh .
+
+ba:ba_97e6a2868807 rdf:type ba:BusinessAction ;
+    rdfs:label "外汇购汇、结汇"@zh ;
+    rdfs:comment "单据：购汇单、结汇单、银行回单；会计事务：外汇购汇核算、结汇核算；通用单据（手工凭证）"@zh .
+
+ba:ba_4dd7a8a24895 rdf:type ba:BusinessAction ;
+    rdfs:label "定期存款利息预提"@zh ;
+    rdfs:comment "单据类型：定期存款预提利息计算单；会计事务类型：定期存款利息预提；抛账功能点：预提抛帐；通用单据：是"@zh .
+
+ba:ba_7abd27595724 rdf:type ba:BusinessAction ;
+    rdfs:label "定期存款提前支取"@zh ;
+    rdfs:comment "单据类型：定期存款单、银行回单、定期存款利息清单；会计事务类型：定期存款提前支取；抛账功能点：运作预提红冲"@zh .
+
+ba:ba_407c5b0bbd56 rdf:type ba:BusinessAction ;
+    rdfs:label "金融资产公允价值重估"@zh ;
+    rdfs:comment "单据类型：公允价值重估单；会计事务类型：金融资产公允价值重估；通用单据：是"@zh .
+
+ba:ba_8c1ddd407c83 rdf:type ba:BusinessAction ;
+    rdfs:label "金融资产减值"@zh ;
+    rdfs:comment "单据类型：减值确认单；会计事务类型：金融资产减值核算；通用单据：是"@zh .
+
+ba:ba_3e5417878609 rdf:type ba:BusinessAction ;
+    rdfs:label "金融资产股利确认"@zh ;
+    rdfs:comment "单据类型：股利确认单；会计事务类型：金融资产股利确认；通用单据：是"@zh .
+
+ba:ba_ef4d9430927e rdf:type ba:BusinessAction ;
+    rdfs:label "金融资产利息预提"@zh ;
+    rdfs:comment "单据类型：利息计算单；会计事务类型：金融资产利息预提；通用单据：是"@zh .
+
+ba:ba_3eac932882af rdf:type ba:BusinessAction ;
+    rdfs:label "金融资产股利结转"@zh ;
+    rdfs:comment "单据类型：股利结转；会计事务类型：金融资产股利结转；通用单据：是"@zh .
+
+ba:ba_0163d6308692 rdf:type ba:BusinessAction ;
+    rdfs:label "金融资产利息预提结转"@zh ;
+    rdfs:comment "单据类型：利息结转；关联业务对象：会计凭证、银行回单；会计事务类型：金融资产利息结转；通用单据：是"@zh .
+
+ba:ba_695c3bd40c64 rdf:type ba:BusinessAction ;
+    rdfs:label "商品衍生品处置"@zh ;
+    rdfs:comment "单据类型：投资交易单据；关联业务对象：会计凭证、银行回单；会计事务类型：商品衍生品处置核算；通用单据：是"@zh .
+
+ba:ba_c085b10fe596 rdf:type ba:BusinessAction ;
+    rdfs:label "商品衍生品公允价值重估"@zh ;
+    rdfs:comment "单据类型：公允价值重估单；会计事务类型：商品衍生品公允价值重估；通用单据：是"@zh .
+
+ba:ba_22bde0fd42b1 rdf:type ba:BusinessAction ;
+    rdfs:label "货币衍生品购入"@zh ;
+    rdfs:comment "单据类型：投资交易单据；关联业务对象：会计凭证、银行回单；会计事务类型：货币衍生品购入；通用单据：是"@zh .
+
+ba:ba_45c8484fc1b7 rdf:type ba:BusinessAction ;
+    rdfs:label "货币衍生品处置"@zh ;
+    rdfs:comment "单据类型：投资交易单据；关联业务对象：会计凭证、银行回单；会计事务类型：货币衍生品处置；通用单据：是"@zh .
+
+ba:ba_7c7b537731af rdf:type ba:BusinessAction ;
+    rdfs:label "货币衍生品公允价值重估"@zh ;
+    rdfs:comment "单据类型：公允价值重估单；会计事务类型：货币衍生品公允价值重估；通用单据：是"@zh .
+
+ba:ba_784e1b2cb617 rdf:type ba:BusinessAction ;
+    rdfs:label "应收票据收取"@zh ;
+    rdfs:comment "单据：应收票据；关联业务对象：签收范围外；非直连票据签收需提供“一事一议”情况说明；相应会计事务：销售收款；抛账功能点：应收票据抛账；相关规则：BR-33"@zh .
+
+ba:ba_c80b710e3b87 rdf:type ba:BusinessAction ;
+    rdfs:label "应收票据兑现"@zh ;
+    rdfs:comment "单据：票据托收单；关联业务对象：银行回单；会计事务：应收票据兑现；抛账功能点：票据兑现；相关规则：BR-12、BR-33"@zh .
+
+ba:ba_ed8536918f2c rdf:type ba:BusinessAction ;
+    rdfs:label "应收票据贴现"@zh ;
+    rdfs:comment "单据：票据贴现单；关联业务对象：银行回单；会计事务：应收票据贴现；抛账功能点：票据贴现执行；相关规则：BR-12"@zh .
+
+ba:ba_50940531e481 rdf:type ba:BusinessAction ;
+    rdfs:label "应收票据背书"@zh ;
+    rdfs:comment "单据：应收票据；关联业务对象：付款申请单、非直连网银审批表、票据背书明细；相应会计事务：采购付款；抛账功能点：应收票据抛账；相关规则：BR-35"@zh .
+
+ba:ba_8a4f470d8a2e rdf:type ba:BusinessAction ;
+    rdfs:label "应付票据出具"@zh ;
+    rdfs:comment "单据：应付票据；关联业务对象：付款申请单、非直连网银审批表、票据开具明细；相应会计事务：采购付款；抛账功能点：应付票据抛账"@zh .
+
+ba:ba_a39df04dcd3a rdf:type ba:BusinessAction ;
+    rdfs:label "票据保证金转入"@zh ;
+    rdfs:comment "单据：银行回单；关联业务对象：会计凭证；会计事务：票据保证金转入；通用单据（手工凭证）"@zh .
+
+ba:ba_3ddfc1e67d7e rdf:type ba:BusinessAction ;
+    rdfs:label "票据保证金转出"@zh ;
+    rdfs:comment "单据类型：银行回单；关联业务对象：会计凭证；会计事务类型：票据保证金转出；通用单据：是"@zh .
+
+ba:ba_6d57101aa83f rdf:type ba:BusinessAction ;
+    rdfs:label "应收票据移交"@zh ;
+    rdfs:comment "单据类型：票据移交单；会计事务类型：应收票据移交；抛账功能点：票据移交接收"@zh .
+
+ba:ba_16d983926172 rdf:type ba:BusinessAction ;
+    rdfs:label "应收票据质押"@zh ;
+    rdfs:comment "单据类型：应收票据质押单"@zh .
+
+ba:ba_629be5dce880 rdf:type ba:BusinessAction ;
+    rdfs:label "应收票据退票"@zh ;
+    rdfs:comment "单据类型：票据退票单；会计事务类型：应收票据退票；抛账功能点：票据退票"@zh .
+
+ba:ba_1881d7af0337 rdf:type ba:BusinessAction ;
+    rdfs:label "应收票据借票"@zh ;
+    rdfs:comment "单据类型：应收票据借票单；会计事务类型：应收票据借票"@zh .
+
+ba:ba_ae900079032f rdf:type ba:BusinessAction ;
+    rdfs:label "应付票据承兑"@zh ;
+    rdfs:comment "单据类型：应付票据承兑单；关联业务对象：银行回单；会计事务类型：应付票据承兑；抛账功能点：应付票据抛账"@zh .
+
+ba:ba_205d04aa2d58 rdf:type ba:BusinessAction ;
+    rdfs:label "固定资产验收"@zh ;
+    rdfs:comment "单据：固定资产验收单；关联业务对象：会计凭证；会计事务：固定资产验收；抛账功能点：验收抛帐"@zh .
+
+ba:ba_4c34a5d19d62 rdf:type ba:BusinessAction ;
+    rdfs:label "固定资产折旧"@zh ;
+    rdfs:comment "单据：固定资产折旧计算单；关联业务对象：会计凭证；会计事务：固定资产折旧；抛账功能点：资产折旧与摊销；相关规则：BR-57"@zh .
+
+ba:ba_1339734e7a8a rdf:type ba:BusinessAction ;
+    rdfs:label "固定资产处置"@zh ;
+    rdfs:comment "单据：固定资产处置单；关联业务对象：会计凭证；会计事务：固定资产处置；抛账功能点：资产处置抛帐；相关规则：BR-07"@zh .
+
+ba:ba_11b7938777f3 rdf:type ba:BusinessAction ;
+    rdfs:label "固定资产报废"@zh ;
+    rdfs:comment "单据：固定资产报废单；关联业务对象：会计凭证；会计事务：固定资产报废；抛账功能点：资产报废抛帐；相关规则：BR-07"@zh .
+
+ba:ba_4d50a64cd577 rdf:type ba:BusinessAction ;
+    rdfs:label "投资性房地产新增/转入"@zh ;
+    rdfs:comment "单据：投资性房地产转入单；关联业务对象：会计凭证；会计事务：投资性房地产新增"@zh .
+
+ba:ba_c43ccaee8c61 rdf:type ba:BusinessAction ;
+    rdfs:label "无形资产摊销"@zh ;
+    rdfs:comment "单据：无形资产折旧计算单；关联业务对象：会计凭证；会计事务：无形资产摊销"@zh .
+
+ba:ba_62e226b0a7ec rdf:type ba:BusinessAction ;
+    rdfs:label "长期待摊费用摊销计算"@zh ;
+    rdfs:comment "单据：长期待摊费用摊销计算单；关联业务对象：会计凭证；会计事务：长期待摊费用摊销"@zh .
+
+ba:ba_5bd4d2adb51e rdf:type ba:BusinessAction ;
+    rdfs:label "递延收益转入"@zh ;
+    rdfs:comment "单据：递延收益转入单；关联业务对象：会计凭证；会计事务：递延收益转入"@zh .
+
+ba:ba_5caf113cb040 rdf:type ba:BusinessAction ;
+    rdfs:label "使用权资产转入"@zh ;
+    rdfs:comment "单据：使用权资产转入单；关联业务对象：会计凭证；会计事务：使用权资产转入"@zh .
+
+ba:ba_5400304ce703 rdf:type ba:BusinessAction ;
+    rdfs:label "长期股权投资购入（按类型细分）"@zh ;
+    rdfs:comment "单据：长期股权投资确认单（按类型细分）；关联业务对象：会计凭证；会计事务：长期股权投资新增/增资；通用单据（手工凭证）"@zh .
+
+ba:ba_e5a205c7bd88 rdf:type ba:BusinessAction ;
+    rdfs:label "长期股权投资权益确认"@zh ;
+    rdfs:comment "单据：长期股权投资权益确认单（权益法，区分损益调整、其他综合收益和其他权益变动）；关联业务对象：会计凭证；会计事务：长期股权投资权益变动确认；通用单据（手工凭证）"@zh .
+
+ba:ba_f90223b964af rdf:type ba:BusinessAction ;
+    rdfs:label "固定资产财务变动"@zh ;
+    rdfs:comment "单据类型：固定资产财务变动单；关联业务对象：会计凭证；会计事务类型：固定资产财务变动；抛账功能点：财务变动抛帐"@zh .
+
+ba:ba_a4708a1d2ff5 rdf:type ba:BusinessAction ;
+    rdfs:label "固定资产异动"@zh ;
+    rdfs:comment "单据类型：固定资产异动单；关联业务对象：会计凭证；会计事务类型：固定资产异动；抛账功能点：资产异动抛帐"@zh .
+
+ba:ba_07c84f571941 rdf:type ba:BusinessAction ;
+    rdfs:label "固定资产闲置处理"@zh ;
+    rdfs:comment "单据类型：固定资产闲置处理单；关联业务对象：会计凭证；会计事务类型：固定资产闲置处理；抛账功能点：闲置处理抛帐"@zh .
+
+ba:ba_acaa5bbe7993 rdf:type ba:BusinessAction ;
+    rdfs:label "固定资产减值"@zh ;
+    rdfs:comment "单据类型：固定资产减值单；关联业务对象：会计凭证；会计事务类型：固定资产减值"@zh .
+
+ba:ba_e7f9d529259e rdf:type ba:BusinessAction ;
+    rdfs:label "固定资产盘亏"@zh ;
+    rdfs:comment "单据类型：固定资产盘亏单；关联业务对象：会计凭证；会计事务类型：固定资产盘亏"@zh .
+
+ba:ba_9414532a5e74 rdf:type ba:BusinessAction ;
+    rdfs:label "固定资产盘盈"@zh ;
+    rdfs:comment "单据类型：固定资产盘盈单；关联业务对象：会计凭证；会计事务类型：固定资产盘盈"@zh .
+
+ba:ba_11ca5e89b941 rdf:type ba:BusinessAction ;
+    rdfs:label "模块关账"@zh ;
+    rdfs:comment "关联业务对象：会计凭证"@zh .
+
+ba:ba_b459deca7ad6 rdf:type ba:BusinessAction ;
+    rdfs:label "投资性房地产财务变动"@zh ;
+    rdfs:comment "单据类型：投资性房地产财务变动单；关联业务对象：会计凭证；会计事务类型：投资性房地产财务变动"@zh .
+
+ba:ba_33132295d98f rdf:type ba:BusinessAction ;
+    rdfs:label "投资性房地产异动"@zh ;
+    rdfs:comment "单据类型：投资性房地产异动单；关联业务对象：会计凭证；会计事务类型：投资性房地产异动"@zh .
+
+ba:ba_0fce6e2a419c rdf:type ba:BusinessAction ;
+    rdfs:label "投资性房地产减少"@zh ;
+    rdfs:comment "单据类型：投资性房地产减少单；关联业务对象：会计凭证；会计事务类型：投资性房地产减少"@zh .
+
+ba:ba_7854c94e9736 rdf:type ba:BusinessAction ;
+    rdfs:label "投资性房地产折旧"@zh ;
+    rdfs:comment "单据类型：投资性房地产折旧计算单；关联业务对象：会计凭证；会计事务类型：投资性房地产折旧"@zh .
+
+ba:ba_5c1e68d82c8e rdf:type ba:BusinessAction ;
+    rdfs:label "投资性房地产减值"@zh ;
+    rdfs:comment "单据类型：投资性房地产减值单；关联业务对象：会计凭证；会计事务类型：投资性房地产减值"@zh .
+
+ba:ba_6bcf68c0b724 rdf:type ba:BusinessAction ;
+    rdfs:label "投资性房地产公允价值变动"@zh ;
+    rdfs:comment "单据类型：投资性房地产公允价值变动单；关联业务对象：会计凭证；会计事务类型：投资性房地产公允价值变动"@zh .
+
+ba:ba_49db6d36fb92 rdf:type ba:BusinessAction ;
+    rdfs:label "无形资产验收"@zh ;
+    rdfs:comment "单据类型：无形资产验收单；关联业务对象：会计凭证；会计事务类型：无形资产验收"@zh .
+
+ba:ba_05efdd3d24ea rdf:type ba:BusinessAction ;
+    rdfs:label "无形资产财务变动"@zh ;
+    rdfs:comment "单据类型：无形资产财务变动单；关联业务对象：会计凭证；会计事务类型：无形资产财务变动"@zh .
+
+ba:ba_129a6873f8b3 rdf:type ba:BusinessAction ;
+    rdfs:label "无形资产异动"@zh ;
+    rdfs:comment "单据类型：无形资产异动单；关联业务对象：会计凭证；会计事务类型：无形资产异动"@zh .
+
+ba:ba_316e36b90dd6 rdf:type ba:BusinessAction ;
+    rdfs:label "无形资产闲置处理"@zh ;
+    rdfs:comment "单据类型：无形资产闲置处理单；关联业务对象：会计凭证；会计事务类型：无形资产闲置处理"@zh .
+
+ba:ba_1d913e4b2f5e rdf:type ba:BusinessAction ;
+    rdfs:label "无形资产报废"@zh ;
+    rdfs:comment "单据类型：无形资产报废单；关联业务对象：会计凭证；会计事务类型：无形资产报废"@zh .
+
+ba:ba_569d1cc4e809 rdf:type ba:BusinessAction ;
+    rdfs:label "无形资产处置"@zh ;
+    rdfs:comment "单据类型：无形资产处置单；关联业务对象：会计凭证；会计事务类型：无形资产处置"@zh .
+
+ba:ba_197fdba65934 rdf:type ba:BusinessAction ;
+    rdfs:label "无形资产减值"@zh ;
+    rdfs:comment "单据类型：无形资产减值单；关联业务对象：会计凭证；会计事务类型：无形资产减值"@zh .
+
+ba:ba_03e6b584af87 rdf:type ba:BusinessAction ;
+    rdfs:label "长期待摊费用转入"@zh ;
+    rdfs:comment "单据类型：长期待摊费用转入单；关联业务对象：会计凭证；会计事务类型：长期待摊费用转入"@zh .
+
+ba:ba_830c4db59501 rdf:type ba:BusinessAction ;
+    rdfs:label "长期待摊费用财务变动"@zh ;
+    rdfs:comment "单据类型：长期待摊费用财务变动单；关联业务对象：会计凭证；会计事务类型：长期待摊费用财务变动"@zh .
+
+ba:ba_b55e00512bae rdf:type ba:BusinessAction ;
+    rdfs:label "长期待摊费用减少"@zh ;
+    rdfs:comment "单据类型：长期待摊费用减少单；关联业务对象：会计凭证；会计事务类型：长期待摊费用减少"@zh .
+
+ba:ba_3c24622a7fd9 rdf:type ba:BusinessAction ;
+    rdfs:label "长期待摊费用减值"@zh ;
+    rdfs:comment "单据类型：长期待摊费用减值单；关联业务对象：会计凭证；会计事务类型：长期待摊费用减值"@zh .
+
+ba:ba_c1204c7ea6d3 rdf:type ba:BusinessAction ;
+    rdfs:label "递延收益财务变动"@zh ;
+    rdfs:comment "单据类型：递延收益财务变动单；关联业务对象：会计凭证；会计事务类型：递延收益财务变动"@zh .
+
+ba:ba_637cff4e5274 rdf:type ba:BusinessAction ;
+    rdfs:label "递延收益异动"@zh ;
+    rdfs:comment "单据类型：递延收益异动单；关联业务对象：会计凭证；会计事务类型：递延收益异动"@zh .
+
+ba:ba_fb729486dfe3 rdf:type ba:BusinessAction ;
+    rdfs:label "递延收益摊销计算"@zh ;
+    rdfs:comment "单据类型：递延收益摊销计算单；关联业务对象：会计凭证；会计事务类型：递延收益摊销"@zh .
+
+ba:ba_0582ada80e4f rdf:type ba:BusinessAction ;
+    rdfs:label "递延收益减少"@zh ;
+    rdfs:comment "单据类型：递延收益减少单；关联业务对象：会计凭证；会计事务类型：递延收益减少单"@zh .
+
+ba:ba_b3c98404def1 rdf:type ba:BusinessAction ;
+    rdfs:label "使用权资产财务变动"@zh ;
+    rdfs:comment "单据类型：使用权资产财务变动单；关联业务对象：会计凭证；会计事务类型：使用权资产财务变动"@zh .
+
+ba:ba_73b9529e02aa rdf:type ba:BusinessAction ;
+    rdfs:label "使用权资产异动"@zh ;
+    rdfs:comment "单据类型：使用权资产异动单；关联业务对象：会计凭证；会计事务类型：使用权资产异动"@zh .
+
+ba:ba_24efaaf59bd3 rdf:type ba:BusinessAction ;
+    rdfs:label "使用权资产折旧计算"@zh ;
+    rdfs:comment "单据类型：使用权资产折旧计算单；关联业务对象：会计凭证；会计事务类型：使用权资产折旧"@zh .
+
+ba:ba_c09ed415043e rdf:type ba:BusinessAction ;
+    rdfs:label "使用权资产减少"@zh ;
+    rdfs:comment "单据类型：使用权资产减少单；关联业务对象：会计凭证；会计事务类型：使用权资产减少"@zh .
+
+ba:ba_bc299056b01e rdf:type ba:BusinessAction ;
+    rdfs:label "租赁负债未确认融资费用转入"@zh ;
+    rdfs:comment "单据类型：租赁负债未确认融资费用转入单；关联业务对象：会计凭证；会计事务类型：租赁负债未确认融资费用转入；通用单据：是"@zh .
+
+ba:ba_75dbe919a3a7 rdf:type ba:BusinessAction ;
+    rdfs:label "租赁负债未确认融资费用摊销"@zh ;
+    rdfs:comment "单据类型：租赁负债未确认融资费用摊销单；关联业务对象：会计凭证；会计事务类型：租赁负债未确认融资费用摊销"@zh .
+
+ba:ba_ef4b7fd49e3b rdf:type ba:BusinessAction ;
+    rdfs:label "长期股权投资处置（按类型细分）"@zh ;
+    rdfs:comment "单据类型：长期股权投资处置单（按类型细分）；关联业务对象：会计凭证；会计事务类型：长期股权投资处置/减资；通用单据：是"@zh .
+
+ba:ba_0d343971419c rdf:type ba:BusinessAction ;
+    rdfs:label "长期股权投资减值(按类型细分）"@zh ;
+    rdfs:comment "单据类型：长期股权投资减值单（按类型细分）；关联业务对象：会计凭证；会计事务类型：长期股权投资减值；通用单据：是"@zh .
+
+ba:ba_59c64c64d402 rdf:type ba:BusinessAction ;
+    rdfs:label "长期股权投资返利计提"@zh ;
+    rdfs:comment "单据类型：长期股权投资返利计提单（按类型细分）；关联业务对象：会计凭证；会计事务类型：长期股权投资返利计提；通用单据：是"@zh .
+
+ba:ba_6da9d2c4ef71 rdf:type ba:BusinessAction ;
+    rdfs:label "长期股权投资返利收回"@zh ;
+    rdfs:comment "单据类型：长期股权投资返利收回单（按类型细分）；关联业务对象：会计凭证；会计事务类型：长期股权投资返利收回；通用单据：是"@zh .
+
+ba:ba_e24ca6acf438 rdf:type ba:BusinessAction ;
+    rdfs:label "辅助生产成本分配"@zh ;
+    rdfs:comment "单据：辅助生产成本分配单；会计事务：产品成本核算"@zh .
+
+ba:ba_8ed132fd0193 rdf:type ba:BusinessAction ;
+    rdfs:label "生产成本结转"@zh ;
+    rdfs:comment "单据：生产成本结转单；会计事务：产品成本核算"@zh .
+
+ba:ba_9a4363c82507 rdf:type ba:BusinessAction ;
+    rdfs:label "产品成本计算"@zh ;
+    rdfs:comment "单据：产品成本计算单；会计事务：产品成本核算"@zh .
+
+ba:ba_c623f9e151e6 rdf:type ba:BusinessAction ;
+    rdfs:label "待摊费用摊销"@zh ;
+    rdfs:comment "单据：待摊费用摊销单；会计事务：产品成本核算"@zh .
+
+ba:ba_bc78603495a0 rdf:type ba:BusinessAction ;
+    rdfs:label "委托贷款本金发放"@zh ;
+    rdfs:comment "单据：委托贷款放款单、银行回单；会计事务：委托贷款发放；相关规则：BR-21"@zh .
+
+ba:ba_750ec5410077 rdf:type ba:BusinessAction ;
+    rdfs:label "委托贷款利息计提"@zh ;
+    rdfs:comment "单据：委托贷款计息单；会计事务：委托贷款利息计提"@zh .
+
+ba:ba_ea415d16e8b3 rdf:type ba:BusinessAction ;
+    rdfs:label "委托贷款利息收取"@zh ;
+    rdfs:comment "单据：委托贷款收息单、银行回单；会计事务：委托贷款收取利息"@zh .
+
+ba:ba_04539b4775d2 rdf:type ba:BusinessAction ;
+    rdfs:label "委托贷款本金收回"@zh ;
+    rdfs:comment "单据：委托贷款收款单、银行回单；会计事务：委托贷款收回本金"@zh .
+
+ba:ba_6f14f0eb3bd7 rdf:type ba:BusinessAction ;
+    rdfs:label "委托贷款减值计提"@zh ;
+    rdfs:comment "单据：资产减值计提单；会计事务：信用减值损失计提"@zh .
+
+ba:ba_b9d9867dc3e7 rdf:type ba:BusinessAction ;
+    rdfs:label "委托贷款本金收款"@zh ;
+    rdfs:comment "单据类型：委托贷款收款单、银行回单；会计事务类型：委托贷款收款"@zh .
+
+ba:ba_76ca777aa58e rdf:type ba:BusinessAction ;
+    rdfs:label "委托贷款利息支付"@zh ;
+    rdfs:comment "单据类型：委托贷款付息单、银行回单；会计事务类型：委托贷款支付利息"@zh .
+
+ba:ba_8ce62bce9f70 rdf:type ba:BusinessAction ;
+    rdfs:label "委托贷款本金支付"@zh ;
+    rdfs:comment "单据类型：委托贷款还款单、银行回单；会计事务类型：委托贷款支付本金"@zh .
+
+ba:ba_853c66063c16 rdf:type ba:BusinessAction ;
+    rdfs:label "债券发行收款"@zh ;
+    rdfs:comment "单据：债券发行协议、收款水单；会计事务：债券发行收款"@zh .
+
+ba:ba_036483e0d95c rdf:type ba:BusinessAction ;
+    rdfs:label "债券利息计提"@zh ;
+    rdfs:comment "单据：债券计息单；会计事务：债券利息计提"@zh .
+
+ba:ba_368bebec04d1 rdf:type ba:BusinessAction ;
+    rdfs:label "债券付息"@zh ;
+    rdfs:comment "单据：付款申请单、银行回单；会计事务：债券付息"@zh .
+
+ba:ba_e10bd179e561 rdf:type ba:BusinessAction ;
+    rdfs:label "7归属费用结转"@zh ;
+    rdfs:comment "单据：7费用结转表；会计事务：7归属费用结转；相关规则：BR-26、BR-27"@zh .
+
+ba:ba_2cdfc2eb9a79 rdf:type ba:BusinessAction ;
+    rdfs:label "8归属费用结转"@zh ;
+    rdfs:comment "单据：8费用结转表；会计事务：8归属费用结转；相关规则：BR-26、BR-27"@zh .
+
+ba:ba_248121487b06 rdf:type ba:BusinessAction ;
+    rdfs:label "本年利润结转"@zh ;
+    rdfs:comment "单据：本年利润结转表；会计事务：本年利润结转；相关规则：BR-43"@zh .
+
+ba:ba_22b2804e9a3c rdf:type ba:BusinessAction ;
+    rdfs:label "汇兑损益结转"@zh ;
+    rdfs:comment "单据：汇兑损益结转表；会计事务：汇兑损益结转"@zh .
+
+ba:ba_5ac8ce833e7d rdf:type ba:BusinessAction ;
+    rdfs:label "总账月度开关账"@zh ;
+    rdfs:comment "相关规则：BR-11"@zh .
+
+ba:ba_2338edbb43c0 rdf:type ba:BusinessAction ;
+    rdfs:label "总账年度关账"@zh ;
+    rdfs:comment "相关规则：BR-11"@zh .
+
+ba:ba_8dfee108c770 rdf:type ba:BusinessAction ;
+    rdfs:label "期初余额切换"@zh ;
+    rdfs:comment "单据：期初余额表；会计事务：期初余额；通用单据（手工凭证）"@zh .
+
+ba:ba_774c04640c28 rdf:type ba:BusinessAction ;
+    rdfs:label "总账调整"@zh ;
+    rdfs:comment "单据：总账余额调整单；会计事务：总账调整；通用单据（手工凭证）"@zh .
+
+ba:ba_4839e9ce0ef9 rdf:type ba:BusinessAction ;
+    rdfs:label "所得税计提"@zh ;
+    rdfs:comment "单据：所得税计提通知单；关联业务对象：会计凭证；会计事务：所得税计提；通用单据（手工凭证）；相关规则：BR-15"@zh .
+
+ba:ba_7d7e01938138 rdf:type ba:BusinessAction ;
+    rdfs:label "税费支付"@zh ;
+    rdfs:comment "单据：税费支付通知单；关联业务对象：银行回单、会计凭证；会计事务：税费支付；通用单据（手工凭证）；相关规则：BR-15"@zh .
+
+ba:ba_d654919333d2 rdf:type ba:BusinessAction ;
+    rdfs:label "账务红冲"@zh ;
+    rdfs:comment "单据：账务红冲通知单；关联业务对象：会计凭证；会计事务：账务红冲；通用单据（手工凭证）；相关规则：BR-24"@zh .
+
+ba:ba_110cacf6caa3 rdf:type ba:BusinessAction ;
+    rdfs:label "进项税暂估"@zh ;
+    rdfs:comment "单据：增值税验票档税金暂挂明细表；关联业务对象：会计凭证；会计事务：进项税暂估"@zh .
+
+ba:ba_9f7184c4c304 rdf:type ba:BusinessAction ;
+    rdfs:label "通用账务结转"@zh ;
+    rdfs:comment "单据类型：通用结转表；会计事务类型：通用账务结转"@zh .
+
+ba:ba_575d53b99a76 rdf:type ba:BusinessAction ;
+    rdfs:label "未分配利润结转"@zh ;
+    rdfs:comment "单据类型：未分配利润结转表；会计事务类型：未分配利润结转；通用单据：是"@zh .
+
+ba:ba_72b162b72450 rdf:type ba:BusinessAction ;
+    rdfs:label "总分公司税金结转"@zh ;
+    rdfs:comment "单据类型：总分公司税金结转；会计事务类型：总分公司税金结转"@zh .
+
+ba:ba_8c23a7ee6999 rdf:type ba:BusinessAction ;
+    rdfs:label "进项税多次暂估"@zh ;
+    rdfs:comment "单据类型：凭证明细档税金暂挂明细表；会计事务类型：进项税多次暂估；通用单据：是"@zh .
+
+ba:ba_c265e9bb7e72 rdf:type ba:BusinessAction ;
+    rdfs:label "其他税费计提"@zh ;
+    rdfs:comment "单据类型：税费计提通知单；关联业务对象：会计凭证；会计事务类型：其他税费计提；通用单据：是"@zh .
+
+ba:ba_6315fe6b4357 rdf:type ba:BusinessAction ;
+    rdfs:label "费用暂估"@zh ;
+    rdfs:comment "单据类型：费用暂估通知单；关联业务对象：会计凭证；会计事务类型：费用暂估；通用单据：是"@zh .
+
+ba:ba_390acbd58adf rdf:type ba:BusinessAction ;
+    rdfs:label "坏账、减值准备计提"@zh ;
+    rdfs:comment "单据类型：坏账、减值准备计提通知单；关联业务对象：会计凭证；会计事务类型：坏账、减值准备计提；通用单据：是"@zh .
+
+ba:ba_184752be5b40 rdf:type ba:BusinessAction ;
+    rdfs:label "薪酬暂估"@zh ;
+    rdfs:comment "单据类型：薪酬暂估表；关联业务对象：会计凭证；会计事务类型：薪酬暂估；通用单据：是"@zh .
+
+ba:ba_45c2cd1d325f rdf:type ba:BusinessAction ;
+    rdfs:label "递延所得税计提"@zh ;
+    rdfs:comment "单据类型：递延所得税计提通知单；关联业务对象：会计凭证；会计事务类型：递延所得税计提；通用单据：是"@zh .
+
+ba:ba_e302aef74243 rdf:type ba:BusinessAction ;
+    rdfs:label "专项储备计提"@zh ;
+    rdfs:comment "单据类型：专项储备计提通知单；关联业务对象：会计凭证；会计事务类型：专项储备计提；通用单据：是"@zh .
+
+ba:ba_7f10237e57c5 rdf:type ba:BusinessAction ;
+    rdfs:label "利润分配计提"@zh ;
+    rdfs:comment "单据类型：利润分配通知单；关联业务对象：会计凭证；会计事务类型：利润分配计提；通用单据：是"@zh .
+
+ba:ba_fcef740e7a72 rdf:type ba:BusinessAction ;
+    rdfs:label "盈余公积计提"@zh ;
+    rdfs:comment "单据类型：盈余公积计提通知单；关联业务对象：会计凭证；会计事务类型：盈余公积计提；通用单据：是"@zh .
+
+ba:ba_f7bb4031c7aa rdf:type ba:BusinessAction ;
+    rdfs:label "收款冲费用"@zh ;
+    rdfs:comment "单据类型：收款冲费用通知单；关联业务对象：会计凭证；会计事务类型：收款冲费用；通用单据：是"@zh .
+
+ba:ba_7fe980e2469e rdf:type ba:BusinessAction ;
+    rdfs:label "收入暂估"@zh ;
+    rdfs:comment "单据类型：收入暂估通知单；关联业务对象：会计凭证；会计事务类型：收入暂估；通用单据：是"@zh .
+
+ba:ba_9933eea99be3 rdf:type ba:BusinessAction ;
+    rdfs:label "销售返利计提"@zh ;
+    rdfs:comment "单据类型：销售返利计提通知单；关联业务对象：会计凭证；会计事务类型：销售返利；通用单据：是"@zh .
+
+ba:ba_1c73337ed839 rdf:type ba:BusinessAction ;
+    rdfs:label "所得税汇算清缴收款处理"@zh ;
+    rdfs:comment "单据类型：所得税汇算清缴收款通知单；关联业务对象：银行回单、会计凭证；会计事务类型：所得税汇算清缴收款处理；通用单据：是"@zh .
+
+ba:ba_eb0879c17baa rdf:type ba:BusinessAction ;
+    rdfs:label "增值税加计抵减计提"@zh ;
+    rdfs:comment "单据类型：增值税加计抵减计提通知单；关联业务对象：会计凭证；会计事务类型：增值税加计抵减计提；通用单据：是"@zh .
+
+ba:ba_5ccf37e1578d rdf:type ba:BusinessAction ;
+    rdfs:label "分公司利润上缴"@zh ;
+    rdfs:comment "单据类型：分公司利润上缴通知单；关联业务对象：会计凭证；会计事务类型：分公司利润上缴；通用单据：是"@zh .
+
+ba:ba_c4371ebce1d1 rdf:type ba:BusinessAction ;
+    rdfs:label "海关增值税比对相符结转"@zh ;
+    rdfs:comment "单据类型：海关增值税比对相符确认单；关联业务对象：会计凭证；会计事务类型：海关增值税比对相符结转；通用单据：是"@zh .
+
+ba:ba_71f831d78108 rdf:type ba:BusinessAction ;
+    rdfs:label "宝华招标利息处理"@zh ;
+    rdfs:comment "单据类型：宝华招标利息确认单；关联业务对象：银行回单；会计事务类型：宝华招标利息处理；通用单据：是"@zh .
+
+ba:ba_3d1f7d887b88 rdf:type ba:BusinessAction ;
+    rdfs:label "增值税结转及附加税计提"@zh ;
+    rdfs:comment "单据类型：增值税结转及附加税计提表；关联业务对象：会计凭证；会计事务类型：增值税结转及附加税计提；通用单据：是"@zh .
+
+ba:ba_82f8186c0b44 rdf:type ba:BusinessAction ;
+    rdfs:label "进项税待认证"@zh ;
+    rdfs:comment "单据类型：凭证明细档税金待认证明细表；关联业务对象：会计凭证；会计事务类型：进项税待认证"@zh .
+
+ba:ba_1225754618fa rdf:type ba:BusinessAction ;
+    rdfs:label "农产品进项税抵扣计算"@zh ;
+    rdfs:comment "单据类型：农产品计算抵扣明细表；关联业务对象：会计凭证；会计事务类型：农产品计算抵扣；通用单据：是；备注：N"@zh .
+
+ba:ba_7ebd623fc40b rdf:type ba:BusinessAction ;
+    rdfs:label "非贸业务费用结转"@zh ;
+    rdfs:comment "单据类型：非贸业务费用结转单；关联业务对象：会计凭证；会计事务类型：非贸业务费用结转；通用单据：是；备注：基于报支单的附件"@zh .
+
+ba:ba_8434b0de11d0 rdf:type ba:BusinessAction ;
+    rdfs:label "增值税预缴结转"@zh ;
+    rdfs:comment "单据类型：增值税预缴通知单；关联业务对象：会计凭证；会计事务类型：增值税预缴结转；通用单据：是；备注：Y"@zh .
+
+ba:ba_b3146671d3fb rdf:type ba:BusinessAction ;
+    rdfs:label "出口免抵退税"@zh ;
+    rdfs:comment "单据类型：出口免抵退税记账单；关联业务对象：会计凭证；会计事务类型：出口免抵退税；通用单据：是；备注：N"@zh .
+
+ba:ba_fbda5aba12fc rdf:type ba:BusinessAction ;
+    rdfs:label "留抵退税"@zh ;
+    rdfs:comment "单据类型：留抵退税记账单；关联业务对象：银行回单、会计凭证；会计事务类型：留抵退税；通用单据：是；备注：N"@zh .
+
+ba:ba_abf15f48b271 rdf:type ba:BusinessAction ;
+    rdfs:label "金融商品转让增值税"@zh ;
+    rdfs:comment "单据类型：金融商品转让增值税记账单；关联业务对象：会计凭证、银行回单；会计事务类型：金融商品转让增值税；通用单据：是；备注：N"@zh .
+
+ba:ba_1370dccae170 rdf:type ba:BusinessAction ;
+    rdfs:label "增值税减免税"@zh ;
+    rdfs:comment "单据类型：增值税减免税记账单；关联业务对象：会计凭证；会计事务类型：增值税减免税；通用单据：是；备注：N"@zh .
+
+ba:ba_f4be38aa2598 rdf:type ba:BusinessAction ;
+    rdfs:label "购买方红字信息表/确认单开具"@zh ;
+    rdfs:comment "单据类型：申请开具红字增值税专用发票情况说明；通用单据：是；备注：N"@zh .
+
+ba:ba_eae5fae69abb rdf:type ba:BusinessAction ;
+    rdfs:label "出口应征税报关单用途确认"@zh ;
+    rdfs:comment "单据类型：出口应征税报关单台账；通用单据：是；备注：N"@zh .
+
+ba:ba_059b44bf9a29 rdf:type ba:BusinessAction ;
+    rdfs:label "科研项目资本化"@zh ;
+    rdfs:comment "单据类型：科研项目资本化通知单；会计事务类型：科研项目资本化"@zh .
+
+ba:ba_81c90c330935 rdf:type ba:BusinessAction ;
+    rdfs:label "手工报账（通用）"@zh ;
+    rdfs:comment "单据：通用报账单；会计事务：手工报账核算；通用单据（手工凭证）；相关规则：BR-53、BR-54"@zh .
+
+ba:ba_3ef2a404113f rdf:type ba:BusinessAction ;
+    rdfs:label "应收通宝收取"@zh ;
+    rdfs:comment "单据：收款收条、应收通宝；关联业务对象：收票通知单；相应会计事务：销售收款；抛账功能点：应收通宝抛帐；相关规则：BR-36"@zh .
+
+ba:ba_90a62df0edd4 rdf:type ba:BusinessAction ;
+    rdfs:label "应收通宝兑现"@zh ;
+    rdfs:comment "单据：通宝托收单；关联业务对象：银行回单；会计事务：应收通宝兑现；抛账功能点：通宝兑现；相关规则：BR-36"@zh .
+
+ba:ba_f68cd17812bd rdf:type ba:BusinessAction ;
+    rdfs:label "应收通宝背书"@zh ;
+    rdfs:comment "单据：付款指令、应收通宝；关联业务对象：付款申请单、通宝背书明细；相应会计事务：采购付款；抛账功能点：应收通宝抛帐"@zh .
+
+ba:ba_9e089f8ca544 rdf:type ba:BusinessAction ;
+    rdfs:label "应付通宝出具"@zh ;
+    rdfs:comment "单据：应付通宝；关联业务对象：付款申请单、通宝开具明细；相应会计事务：采购付款；抛账功能点：应付通宝抛帐"@zh .
+
+ba:ba_066f3e09e66d rdf:type ba:BusinessAction ;
+    rdfs:label "应收通宝移交"@zh ;
+    rdfs:comment "单据类型：通宝移交单；会计事务类型：应收通宝移交；抛账功能点：应收通宝抛帐"@zh .
+
+ba:ba_97da04b03734 rdf:type ba:BusinessAction ;
+    rdfs:label "应收通宝贴现"@zh ;
+    rdfs:comment "单据类型：通宝贴现单；关联业务对象：银行回单；会计事务类型：应收通宝贴现；抛账功能点：应收通宝抛帐"@zh .
+
+ba:ba_342714498d2d rdf:type ba:BusinessAction ;
+    rdfs:label "应收通宝质押"@zh ;
+    rdfs:comment "单据类型：应收通宝质押单"@zh .
+
+ba:ba_bddeef2fe54c rdf:type ba:BusinessAction ;
+    rdfs:label "应收通宝退票"@zh ;
+    rdfs:comment "单据类型：通宝退票单；会计事务类型：应收通宝退票；抛账功能点：应收通宝抛帐"@zh .
+
+ba:ba_450bea083d3e rdf:type ba:BusinessAction ;
+    rdfs:label "应付通宝承兑"@zh ;
+    rdfs:comment "单据类型：应付通宝承兑单；关联业务对象：银行回单；会计事务类型：应付通宝承兑；抛账功能点：应付通宝抛帐"@zh .
+
+ba:ba_0a525023fcb8 rdf:type ba:BusinessAction ;
+    rdfs:label "信用证收取"@zh ;
+    rdfs:comment "单据：销售合同、信用证通知书"@zh .
+
+ba:ba_ef456f3a41d5 rdf:type ba:BusinessAction ;
+    rdfs:label "信用证收款"@zh ;
+    rdfs:comment "单据：收款单、银行承兑通知；关联业务对象：银行回单；会计事务：信用证项下收款；抛账功能点：应收抛账"@zh .
+
+ba:ba_5dfef983a98c rdf:type ba:BusinessAction ;
+    rdfs:label "信用证付款（见单付款）"@zh ;
+    rdfs:comment "单据：付款申请单、银行付款通知；关联业务对象：银行回单；会计事务：信用证项下付款；抛账功能点：付款抛账"@zh .
+
+ba:ba_79015fff0bb1 rdf:type ba:BusinessAction ;
+    rdfs:label "信用证交单"@zh ;
+    rdfs:comment "单据类型：发货单、交单单据；关联业务对象：发票、提单"@zh .
+
+ba:ba_56e9abe590f9 rdf:type ba:BusinessAction ;
+    rdfs:label "信用证贴现/福费廷"@zh ;
+    rdfs:comment "单据类型：信用证贴现申请单；关联业务对象：银行回单；会计事务类型：信用证贴现；抛账功能点：应收抛账"@zh .
+
+ba:ba_2cc90ec708d0 rdf:type ba:BusinessAction ;
+    rdfs:label "信用证开立"@zh ;
+    rdfs:comment "单据类型：采购合同、开证申请书"@zh .
+
+ba:ba_87e7f1233033 rdf:type ba:BusinessAction ;
+    rdfs:label "平台资金调拨"@zh ;
+    rdfs:comment "单据：平台资金调拨单；关联业务对象：银行回单；会计事务：平台资金调拨；抛账功能点：抛帐"@zh .
+
+ba:ba_5b22b074b664 rdf:type ba:BusinessAction ;
+    rdfs:label "平台资金利息预提"@zh ;
+    rdfs:comment "单据：平台资金利息计算单"@zh .
+
+ba:ba_0b74d6387397 rdf:type ba:BusinessAction ;
+    rdfs:label "平台资金利息结算"@zh ;
+    rdfs:comment "单据：平台资金利息计算单；关联业务对象：发票、银行回单；会计事务：平台资金利息结算；抛账功能点：抛帐"@zh .
+
+ba:ba_8b3b18d3016d rdf:type ba:BusinessAction ;
+    rdfs:label "预付报支"@zh ;
+    rdfs:comment "单据：预支单；关联业务对象：合同、海关税费清单、银行履约保函、 缴款通知书、缴投标保证金通知书 备用金借款申请单（对私借款）；会计事务：预付报支；抛账功能点：抛帐；相关规则：BR-22"@zh .
+
+ba:ba_1c2c2115f0d9 rdf:type ba:BusinessAction ;
+    rdfs:label "预付款核销"@zh ;
+    rdfs:comment "单据：预支单；关联业务对象：合同、发票、结算单、入库单、提单；会计事务：预付款核销；抛账功能点：抛帐；相关规则：BR-13、BR-22"@zh .
+
+ba:ba_aeaac1d65b52 rdf:type ba:BusinessAction ;
+    rdfs:label "采购/费用报支"@zh ;
+    rdfs:comment "单据：报支单；关联业务对象：合同、发票、结算单、入库单、提单、工程实物量清单、审价结算表、工程验收单、建安服务验收单、零固购置审批表、设备验收单、工程结算单；会计事务：应付确认；抛账功能点：抛帐；相关规则：BR-34、BR-45、BR-46、BR-56"@zh .
+
+ba:ba_fcf8f626f2fb rdf:type ba:BusinessAction ;
+    rdfs:label "业务活动费报支"@zh ;
+    rdfs:comment "单据：报支单；关联业务对象：会议费：会议通知；发票；会议申请表；会议费用明细表 业务招待费：业务招待费申请表；业务招待费报销明细表；发票；小额大量业务招待费报销清单；会计事务：应付确认；抛账功能点：抛帐"@zh .
+
+ba:ba_f716f73ca890 rdf:type ba:BusinessAction ;
+    rdfs:label "差旅费报支"@zh ;
+    rdfs:comment "单据：报支单；关联业务对象：出差申请单、发票、差旅费报销审批单、会议/培训通知、特殊情况说明；会计事务：应付确认；抛账功能点：抛帐；相关规则：BR-34、BR-46"@zh .
+
+ba:ba_89342b51853e rdf:type ba:BusinessAction ;
+    rdfs:label "尾款报支"@zh ;
+    rdfs:comment "单据：尾款单；关联业务对象：质保金支付申请单；会计事务：尾款报支；抛账功能点：抛帐"@zh .
+
+ba:ba_b058cbe489f9 rdf:type ba:BusinessAction ;
+    rdfs:label "对公付款"@zh ;
+    rdfs:comment "单据：付款单；会计事务：采购付款；抛账功能点：抛帐"@zh .
+
+ba:ba_480a542215bd rdf:type ba:BusinessAction ;
+    rdfs:label "负数发票抵付"@zh ;
+    rdfs:comment "单据：报支单；关联业务对象：红字发票款项处理说明、发票；会计事务：应付确认；抛账功能点：抛帐；相关规则：BR-40"@zh .
+
+ba:ba_0223b4a3437a rdf:type ba:BusinessAction ;
+    rdfs:label "债务转移"@zh ;
+    rdfs:comment "单据：报支单；关联业务对象：债务转移协议；会计事务：债务转移；抛账功能点：抛帐"@zh .
+
+ba:ba_760dd6418b42 rdf:type ba:BusinessAction ;
+    rdfs:label "预付账款期初切换"@zh ;
+    rdfs:comment "单据类型：预支单"@zh .
+
+ba:ba_64321c6d06fe rdf:type ba:BusinessAction ;
+    rdfs:label "应付账款期初切换"@zh ;
+    rdfs:comment "单据类型：报支单"@zh .
+
+ba:ba_6e647e6cfdd4 rdf:type ba:BusinessAction ;
+    rdfs:label "预留尾款期初切换"@zh ;
+    rdfs:comment "单据类型：尾款单"@zh .
+
+ba:ba_a9e8446a9caf rdf:type ba:BusinessAction ;
+    rdfs:label "预付款终止付款"@zh ;
+    rdfs:comment "单据类型：预支单；关联业务对象：终止付款说明；抛账功能点：抛帐"@zh .
+
+ba:ba_4368484cb60d rdf:type ba:BusinessAction ;
+    rdfs:label "预付款收回"@zh ;
+    rdfs:comment "单据类型：预支单；关联业务对象：银行回单；会计事务类型：预付款收回；抛账功能点：抛帐"@zh .
+
+ba:ba_7f71364cab9e rdf:type ba:BusinessAction ;
+    rdfs:label "付款申请"@zh ;
+    rdfs:comment "单据类型：付款申请单"@zh .
+
+ba:ba_6cae4283fead rdf:type ba:BusinessAction ;
+    rdfs:label "对私付款"@zh ;
+    rdfs:comment "单据类型：付款单；会计事务类型：采购付款；抛账功能点：抛帐"@zh .
+
+ba:ba_bd90e1272373 rdf:type ba:BusinessAction ;
+    rdfs:label "对私付款退款"@zh ;
+    rdfs:comment "单据类型：付款单；会计事务类型：采购付款"@zh .
+
+ba:ba_b083332672d5 rdf:type ba:BusinessAction ;
+    rdfs:label "对公付款退款"@zh ;
+    rdfs:comment "单据类型：付款单；会计事务类型：采购付款"@zh .
+
+ba:ba_7d5183179e7e rdf:type ba:BusinessAction ;
+    rdfs:label "负数发票收款"@zh ;
+    rdfs:comment "单据类型：报支单；关联业务对象：红字发票款项处理说明、发票；会计事务类型：应付确认；抛账功能点：抛帐"@zh .
+
+ba:ba_c96383641469 rdf:type ba:BusinessAction ;
+    rdfs:label "外汇购买"@zh ;
+    rdfs:comment "单据类型：出国借款单；关联业务对象：出国批件、出国任务审批表、移动费审批表、出国外汇申请、出国外汇标准及开支登记表、银行购汇表、银行购买外汇申请书、报批申请；会计事务类型：出国借款记账；抛账功能点：出国购汇"@zh .
+
+ba:ba_8b08140e889f rdf:type ba:BusinessAction ;
+    rdfs:label "出国费用核销"@zh ;
+    rdfs:comment "单据类型：出国费用报销单；关联业务对象：出国人员外汇开支登记表、发票、水单、出国批件、收款收据、出国费结算清单；会计事务类型：费用报销审核；抛账功能点：出国报销收款"@zh .
+
+ba:ba_040d4881d1d5 rdf:type ba:BusinessAction ;
+    rdfs:label "外汇退回"@zh ;
+    rdfs:comment "单据类型：还款核销单；关联业务对象：收汇通知；会计事务类型：还款核销；抛账功能点：出国报销付款"@zh .
+
+ba:ba_2d2b6c99394d rdf:type ba:BusinessAction ;
+    rdfs:label "出国费用结转"@zh ;
+    rdfs:comment "单据类型：出国费用结转单；关联业务对象：核销出国费明细表、出国费用分摊表、代垫外单位出国费结算清单；会计事务类型：出国费用结转；抛账功能点：出国费用结转"@zh .
+
+ba:ba_e887a9614ea9 rdf:type ba:BusinessAction ;
+    rdfs:label "职工薪酬发放"@zh ;
+    rdfs:comment "单据：工资汇总表、奖金汇总表；会计事务：职工薪酬核算；抛账功能点：抛帐"@zh .
+
+ba:ba_a2c21efafedc rdf:type ba:BusinessAction ;
+    rdfs:label "在建工程暂估"@zh ;
+    rdfs:comment "单据：在建工程；关联业务对象：暂估交付审批表；会计事务：在建工程暂估；抛账功能点：抛帐"@zh .
+
+ba:ba_e80570ad7b5d rdf:type ba:BusinessAction ;
+    rdfs:label "在建工程转固"@zh ;
+    rdfs:comment "单据：在建工程竣工决算单；关联业务对象：固定资产验收单/移交表；会计事务：在建工程转固"@zh .
+
+ba:ba_abe0d3b8f27a rdf:type ba:BusinessAction ;
+    rdfs:label "存货期初切换"@zh ;
+    rdfs:comment "单据：库存单"@zh .
+
+ba:ba_f761e0a1133d rdf:type ba:BusinessAction ;
+    rdfs:label "存货外购入库"@zh ;
+    rdfs:comment "单据：采购订单；关联业务对象：入库单、发票；会计事务：存货入库核算"@zh .
+
+ba:ba_5587e32b1e31 rdf:type ba:BusinessAction ;
+    rdfs:label "存货暂估入库"@zh ;
+    rdfs:comment "单据：采购订单；关联业务对象：入库单；会计事务：存货入库核算"@zh .
+
+ba:ba_98858f19116b rdf:type ba:BusinessAction ;
+    rdfs:label "存货销售出库"@zh ;
+    rdfs:comment "单据：出库单；关联业务对象：销售发票；会计事务：存货出库核算"@zh .
+
+ba:ba_b038d1c45bc8 rdf:type ba:BusinessAction ;
+    rdfs:label "存货领用出库"@zh ;
+    rdfs:comment "单据：出库单；会计事务：存货入库核算"@zh .
+
+ba:ba_edaa4aa92242 rdf:type ba:BusinessAction ;
+    rdfs:label "存货减值准备计提"@zh ;
+    rdfs:comment "单据：存货减值准备计算单；关联业务对象：存货跌价测算审批表、存货减值审批表；会计事务：存货减值准备计提"@zh .
+
+ba:ba_798a78a72303 rdf:type ba:BusinessAction ;
+    rdfs:label "业财库存对账"@zh ;
+    rdfs:comment "单据类型：业务、财务数据"@zh .
+
+ba:ba_8ba0f28d09c1 rdf:type ba:BusinessAction ;
+    rdfs:label "存货委托加工入库"@zh ;
+    rdfs:comment "单据类型：委托加工入库单；关联业务对象：加工费结算单、采购发票；会计事务类型：存货入库核算"@zh .
+
+ba:ba_554b02a3df74 rdf:type ba:BusinessAction ;
+    rdfs:label "存货盘盈入库"@zh ;
+    rdfs:comment "单据类型：盘盈入库单；关联业务对象：盘点报告；会计事务类型：存货入库核算"@zh .
+
+ba:ba_839906bc9828 rdf:type ba:BusinessAction ;
+    rdfs:label "存货退货入库"@zh ;
+    rdfs:comment "单据类型：入库单；会计事务类型：存货入库核算"@zh .
+
+ba:ba_c443754795c4 rdf:type ba:BusinessAction ;
+    rdfs:label "存货自制入库"@zh ;
+    rdfs:comment "单据类型：入库单；会计事务类型：存货入库核算"@zh .
+
+ba:ba_1ebf42344073 rdf:type ba:BusinessAction ;
+    rdfs:label "存货借入入库"@zh ;
+    rdfs:comment "单据类型：入库单；会计事务类型：存货入库核算"@zh .
+
+ba:ba_20c787f4a450 rdf:type ba:BusinessAction ;
+    rdfs:label "存货调拨入库"@zh ;
+    rdfs:comment "单据类型：入库单；会计事务类型：存货入库核算"@zh .
+
+ba:ba_681fd090ef16 rdf:type ba:BusinessAction ;
+    rdfs:label "存货受赠入库"@zh ;
+    rdfs:comment "单据类型：入库单；关联业务对象：发票；会计事务类型：存货入库核算"@zh .
+
+ba:ba_ebcce18faff8 rdf:type ba:BusinessAction ;
+    rdfs:label "存货调整入库"@zh ;
+    rdfs:comment "单据类型：入库单；会计事务类型：存货入库核算"@zh .
+
+ba:ba_4a45301f5a60 rdf:type ba:BusinessAction ;
+    rdfs:label "存货其他入库"@zh ;
+    rdfs:comment "单据类型：入库单；会计事务类型：存货入库核算"@zh .
+
+ba:ba_b931c1e4f336 rdf:type ba:BusinessAction ;
+    rdfs:label "存货委外加工出库"@zh ;
+    rdfs:comment "单据类型：出库单；关联业务对象：加工费结算单、销售发票；会计事务类型：存货入库核算"@zh .
+
+ba:ba_9a51fe3b8bd6 rdf:type ba:BusinessAction ;
+    rdfs:label "存货退货出库"@zh ;
+    rdfs:comment "单据类型：出库单；会计事务类型：存货出库核算"@zh .
+
+ba:ba_c367765e9fd0 rdf:type ba:BusinessAction ;
+    rdfs:label "存货报废出库"@zh ;
+    rdfs:comment "单据类型：出库单；关联业务对象：报废物料清单；会计事务类型：存货出库核算"@zh .
+
+ba:ba_82bd0b17f7d2 rdf:type ba:BusinessAction ;
+    rdfs:label "存货盘亏出库"@zh ;
+    rdfs:comment "单据类型：出库单；关联业务对象：盘点报告；会计事务类型：存货出库核算"@zh .
+
+ba:ba_4ebdaf7b4006 rdf:type ba:BusinessAction ;
+    rdfs:label "存货借出出库"@zh ;
+    rdfs:comment "单据类型：出库单；会计事务类型：存货出库核算"@zh .
+
+ba:ba_de844b9edbfd rdf:type ba:BusinessAction ;
+    rdfs:label "存货调拨出库"@zh ;
+    rdfs:comment "单据类型：出库单；会计事务类型：存货出库核算"@zh .
+
+ba:ba_4b4ef844be57 rdf:type ba:BusinessAction ;
+    rdfs:label "存货赠送出库"@zh ;
+    rdfs:comment "单据类型：出库单；关联业务对象：销售发票；会计事务类型：存货出库核算"@zh .
+
+ba:ba_b75cdc2ca1fa rdf:type ba:BusinessAction ;
+    rdfs:label "存货调整出库"@zh ;
+    rdfs:comment "单据类型：出库单；会计事务类型：存货出库核算"@zh .
+
+ba:ba_b5f624d690f5 rdf:type ba:BusinessAction ;
+    rdfs:label "存货其他出库"@zh ;
+    rdfs:comment "单据类型：出库单；会计事务类型：存货出库核算"@zh .
+
+ba:ba_8b598fe05336 rdf:type ba:BusinessAction ;
+    rdfs:label "销售收款"@zh ;
+    rdfs:comment "单据：收款收条/银行流水、应收票据、应收通宝；关联业务对象：银行流水、应收票据、应收通宝；会计事务：销售收款；相应会计事务：根据客户不同付款方式做收款确认。；抛账功能点：收条抛账；相关规则：BR-16、BR-52"@zh .
+
+ba:ba_3826b7945cca rdf:type ba:BusinessAction ;
+    rdfs:label "收款核销"@zh ;
+    rdfs:comment "单据：收款核销单；关联业务对象：销项发票、红冲相关附件；会计事务：收款核销；相应会计事务：根据收条核销发票；抛账功能点：核销；相关规则：BR-42"@zh .
+
+ba:ba_0d9904396620 rdf:type ba:BusinessAction ;
+    rdfs:label "收款核销红冲"@zh ;
+    rdfs:comment "单据：收款核销单；关联业务对象：销项发票、红冲相关附件；会计事务：收款核销；相应会计事务：因发票或收条有误，红冲核销；抛账功能点：核销红冲；相关规则：BR-42"@zh .
+
+ba:ba_6034c30b0c6a rdf:type ba:BusinessAction ;
+    rdfs:label "销售退款"@zh ;
+    rdfs:comment "单据：退款申请单；关联业务对象：报支单；会计事务：销售退款；相应会计事务：退回客户的相关款项；抛账功能点：退款；相关规则：BR-47、BR-48"@zh .
+
+ba:ba_9e321fb83b3b rdf:type ba:BusinessAction ;
+    rdfs:label "账套内转款"@zh ;
+    rdfs:comment "单据：转款申请单；关联业务对象：债权转移协议、代收代付说明、情况说明、转款审批表；会计事务：账套内转账；相应会计事务：因不同客户协商债权债务转移等原因造成的账套内不同客户间转款；抛账功能点：账套内转账"@zh .
+
+ba:ba_353380b86af5 rdf:type ba:BusinessAction ;
+    rdfs:label "销售结算"@zh ;
+    rdfs:comment "单据：销货清单；关联业务对象：外销发票、销项发票；会计事务：应收确认；相应会计事务：因外销业务产生的销售结算及开票处理。；抛账功能点：外销抛帐；相关规则：BR-30、BR-58"@zh .
+
+ba:ba_adc22b166266 rdf:type ba:BusinessAction ;
+    rdfs:label "销售暂估"@zh ;
+    rdfs:comment "单据：销售暂估单；关联业务对象：库存（原材料、半成品、产成品）、合同；会计事务：应收暂估；相应会计事务：根据合同、出库单等核算暂估收入。"@zh .
+
+ba:ba_9fbca78e2374 rdf:type ba:BusinessAction ;
+    rdfs:label "销售预计"@zh ;
+    rdfs:comment "单据：应收预计计算单；关联业务对象：工程施工合同、工程进度确认单、已完工程量清单、完工进度计算表、施工日志、分部分项工程质量验收记录、现场签证单、合同履约成本明细表、收入确认计算表、发票及开票台账；会计事务：应收预计；相应会计事务：根据项目、施工或服务进度确认预计收入"@zh .
+
+ba:ba_dcec84df91f2 rdf:type ba:BusinessAction ;
+    rdfs:label "应收账款期初切换"@zh ;
+    rdfs:comment "单据类型：销项发票；相应会计事务：与总账科目余额对应的初始化发票信息，消除模块差异。"@zh .
+
+ba:ba_0aa9f5b656e2 rdf:type ba:BusinessAction ;
+    rdfs:label "销售转款"@zh ;
+    rdfs:comment "单据类型：转款申请单；关联业务对象：报支单、转款审批表；会计事务类型：销售转款；相应会计事务：同一客户下因收款性质的变化造成的科目、责任中心等调账。；抛账功能点：转款"@zh .
+
+ba:ba_82e08d522125 rdf:type ba:BusinessAction ;
+    rdfs:label "收款申请"@zh ;
+    rdfs:comment "单据类型：收款申请单；关联业务对象：报支单；相应会计事务：应付模块负数报支单抛送收款申请单号；抛账功能点：收款申请"@zh .
+
+ba:ba_eb70cf0c9b7a rdf:type ba:BusinessAction ;
+    rdfs:label "收款核销报支单处理"@zh ;
+    rdfs:comment "单据类型：收款收条、报支单；关联业务对象：报支单；会计事务类型：收款核销；相应会计事务：根据收条核销报支单相关台账；抛账功能点：核销"@zh .
+
+ba:ba_dde134900f67 rdf:type ba:BusinessAction ;
+    rdfs:label "代收代付核销"@zh ;
+    rdfs:comment "单据类型：代收代付台账；关联业务对象：报支单；会计事务类型：代收代付核销；抛账功能点：代收代付台账核销"@zh .
+
+ba:ba_59b2f80590ea rdf:type ba:BusinessAction ;
+    rdfs:label "应收票据换票"@zh ;
+    rdfs:comment "单据类型：换票申请单；抛账功能点：换票处理"@zh .
+
+ba:ba_75f5bea06301 rdf:type ba:BusinessAction ;
+    rdfs:label "销售结算红冲"@zh ;
+    rdfs:comment "单据类型：销货清单；关联业务对象：外销发票、销项发票；会计事务类型：应收确认；相应会计事务：因结算或开票有误，需红冲。"@zh .
+
+ba:ba_39fcacb7e03c rdf:type ba:BusinessAction ;
+    rdfs:label "银行间划款"@zh ;
+    rdfs:comment "单据：银行回单；关联业务对象：付款申请；会计事务：银行间划款"@zh .
+
+ba:br_42d7534a0b95 rdf:type ba:BusinessRule ;
+    rdfs:label "会计核心概念：账面金额 ≠ 逐笔明细汇总"@zh ;
+    ba:rule_id "BR-01" ;
+    ba:rule_text "账面金额/科目余额 = **总账余额信息表**的期初余额/借方发生额/贷方发生额/期末余额，按科目代码+会计期查"@zh .
+
+ba:br_8a06b6956dce rdf:type ba:BusinessRule ;
+    rdfs:label "会计口径：发生额查凭证不查余额"@zh ;
+    ba:rule_id "BR-02" ;
+    ba:rule_text "发生额 = **凭证明细表** `SUM(ACCT_AMT)`；余额表含汇总行/明细行重复计数，**不能查发生额**"@zh .
+
+ba:br_5ec243abe0ed rdf:type ba:BusinessRule ;
+    rdfs:label "税务口径：已认证通过按认证日期"@zh ;
+    ba:rule_id "BR-03" ;
+    ba:rule_text "已认证通过 = `AUTH_RESULT='00'`，且按 **AUTH_TIME（认证日期）** 筛选，不是开票日期或税款所属期"@zh .
+
+ba:br_b7df3e812f54 rdf:type ba:BusinessRule ;
+    rdfs:label "税务规则：简易计税需合并科目"@zh ;
+    ba:rule_id "BR-04" ;
+    ba:rule_text "差异分析时，简易计税 `2221026` 和一般计税销项税 `2221010020` **需合并查询**，单查一个科目差异无法解释"@zh .
+
+ba:br_a5f8e777ba71 rdf:type ba:BusinessRule ;
+    rdfs:label "标财归属码体系：7 归属 vs 8 归属"@zh ;
+    ba:rule_id "BR-05" ;
+    ba:rule_text "7 归属（751管理费用/741销售费用/730主营成本等）：`ID_CODE` 直接存 8 位责任中心编码；**8 归属**（810生产成本/820制造费用等）：`ID_CODE` 全是40（汇总码），真正责任中心在 **`ADD_CODE_1`**（13 位=8 位责任中心+5 位成本科目），需 `SUBSTR(ADD_CODE_1,1,8)` 拆分"@zh .
+
+ba:br_5994245d8aee rdf:type ba:BusinessRule ;
+    rdfs:label "会计规则：内部往来科目余额查询"@zh ;
+    ba:rule_id "BR-06" ;
+    ba:rule_text "内部往来（科目 2351010）是**正常的往来科目**，月末有明确余额（且与对方公司方向对称——一借一贷）。挂账查询应查总账余额信息表（看余额）+ 凭证明细表（看发生额和摘要），不能只查应收账款表"@zh .
+
+ba:br_876a3915b06b rdf:type ba:BusinessRule ;
+    rdfs:label "资产管理规则：资产状态与总账口径对应"@zh ;
+    ba:rule_id "BR-07" ;
+    ba:rule_text "固定资产余额验证时，只有 `ASSET_STATUS=11`（已抛帐/在账）的资产计入总账余额；`50`（已报废）/`56`（处置转出）不计入。汇总时须按状态过滤"@zh .
+
+ba:br_c57a17028165 rdf:type ba:BusinessRule ;
+    rdfs:label "凭证编码规则：凭证号跨月不唯一"@zh ;
+    ba:rule_id "BR-08" ;
+    ba:rule_text "凭证号按**会计期循环编号**（如 EBZ1000010 每月重置），同一凭证号在不同月份代表不同凭证。跨月 JOIN 需加 `VOUCHER_DATE`（或 `ACCT_PERIOD_NO`）"@zh .
+
+ba:br_6588d2e5f3fa rdf:type ba:BusinessRule ;
+    rdfs:label "会计口径：余额查总账余额表不查明细账龄表"@zh ;
+    ba:rule_id "BR-09" ;
+    ba:rule_text "余额类查询应定位含余额字样的期末余额表（总账余额信息 `T_DWD_FACT_CWGL_GL_TOTAL_AMT_INFO`），非逐笔明细账龄表。余额表看期末存量，明细表看期间流量"@zh .
+
+ba:br_ace1885436f9 rdf:type ba:BusinessRule ;
+    rdfs:label "会计规则：凭证借贷方金额不可相加"@zh ;
+    ba:rule_id "BR-10" ;
+    ba:rule_text "同一张凭证借贷方金额必然相等（借贷平衡），SUM 时须按 `DEBIT_CREDIT` 区分方向（`1`=借/`2`=贷），不可跨方向相加"@zh .
+
+ba:br_0002120002ef rdf:type ba:BusinessRule ;
+    rdfs:label "会计规则：关账与会计期状态"@zh ;
+    ba:rule_id "BR-11" ;
+    ba:rule_text "关账的本质是将会计期状态从已开账(1)变为未开账(0)。查询关账操作须同时查会计期表（`BFMSXAAA.TAAAA01`）的 `ACCT_PERIOD_STATUS` 字段——这是关账最终状态落点，关账控制只记录执行过程。三层记录：月结族群 `CLOSE_TIME` → 关账控制 `ACCOUNT_END_TIME` → 会计期状态变更 `REC_REVISE_TIME`"@zh .
+
+ba:br_2e2118e5ecd0 rdf:type ba:BusinessRule ;
+    rdfs:label "票据规则：回款判断链路（签收→认领→抛账）"@zh ;
+    ba:rule_id "BR-12" ;
+    ba:rule_text "票据回款是**三步链路**：①签收——查电票签收表 `DRAW_PAPER_STATUS`（60=签收成功→进入下一步；11/21/61=驳回/拒绝→不会回款；10=接收→待签收；30=失败；31=撤销）；②认领——查原始票据档 `T_DWD_FACT_CWPJ_RAW_PAPER_INFO`（有记录=已认领并生成收条号，无记录=等认领）；③抛账——查同表 `RECEIPT_STATUS`（6=已抛账已下发；0=待处理等抛账）。DWD RAW_PAPER_INFO 是**准实时入口**，优于 TASSAA2 批量表（有写入延迟）"@zh .
+
+ba:br_8402c2f26d53 rdf:type ba:BusinessRule ;
+    rdfs:label "收款规则：收条未入账判断（查 ODS 源表）"@zh ;
+    ba:rule_id "BR-14" ;
+    ba:rule_text "未入账收条不是独立实体，是收款状态判断概念：`TASSAA2.RECEIPT_STATUS='0'`（录入）= 未入账，识别特征：无凭证号（VOUCHER_NO）、无入账日期（ACCOUNT_DATE）、FREE_AMT = TOTAL_AMT（全额未分配）。'3'=接收（已生成凭证）、'6'=入账（已记账）"@zh .
+
+ba:br_c7c31f83e9fc rdf:type ba:BusinessRule ;
+    rdfs:label "税务规则：应交税费计提/支付/预缴的时间性差异"@zh ;
+    ba:rule_id "BR-15" ;
+    ba:rule_text "应交税费类负债科目（22 开头）余额变动涉及**计提/支付/预缴三种动作的时间性差异**：计提（SYSTEM_ID=AH）贷记应交税费，支付（SYSTEM_ID=AP）借记应交税费；**支付通常滞后于计提且大部分跨月**（当月支付额可能是上月计提数）。因此贷方发生额≠借方发生额≠余额变动，不能只用期末=期初+贷-借公式推导差异"@zh .
+
+ba:br_039f0b4f2a1a rdf:type ba:BusinessRule ;
+    rdfs:label "收款规则：现金与票据两表并查"@zh ;
+    ba:rule_id "BR-16" ;
+    ba:rule_text "收款分两类分布在不同表：现金/直联网银（A13 等）在 `T_DWD_FACT_CWZQ_RECEIPT_DETAIL_INFO`，票据（B71/B72 银票商票）在 `T_DWD_FACT_CWPJ_RAW_PAPER_INFO`。查某公司收了多少款**必须两表并查**（沿 linkWith 导航），否则漏掉票据收款。界定收款时间用 `RECEIVE_DATE`（收票日期），**不是** `END_DATE`（票据到期日，跨年远期票会混入 2027 年数据）"@zh .
+
+ba:br_78259c988c81 rdf:type ba:BusinessRule ;
+    rdfs:label "应用层口径：标财页面预付款台账金额 = 实时表口径（含待审核）"@zh ;
+    ba:rule_id "BR-13" ;
+    ba:rule_text "标财应付模块预付款台账页面金额是**实时计算口径**：`TAPAPA4` 余额（`ACCT_AMT−CANED_AMT`），**含 LISTING_STATUS=空格的待审核记录**——不等于月末快照表（`T_ZZFX090`）口径。数据库侧不存在任何单一快照表能精确匹配页面金额"@zh .
+
+ba:br_5c709f314de2 rdf:type ba:BusinessRule ;
+    rdfs:label "科目体系规则：账套与科目体系按年度绑定"@zh ;
+    ba:rule_id "BR-17" ;
+    ba:rule_text "账套↔科目体系是**按年度绑定**的关系（同一账套不同年度可能换体系，但同一年度内一个账套只对应一个体系）。查对应关系表不加 `ACCT_YEAR` 过滤会跨年度混合，产生跨体系重复误判。公司代码以 `F100` 结尾的是合并报表用虚拟账套（单体），`ACCOUNT_SYS` 为空或'1'，不参与体系判断"@zh .
+
+ba:br_cf864975e2cf rdf:type ba:BusinessRule ;
+    rdfs:label "科目体系规则：同一科目代码跨体系不等于同一科目"@zh ;
+    ba:rule_id "BR-18" ;
+    ba:rule_text "科目编码和名称可能相同，但**户号/参号类型（ID_CODE_TYPE/REF_CODE_TYPE）不同**（记账辅助核算维度不同），科目的唯一标识 = 科目体系代码 + 科目代码。各体系有签名维度：001钢铁→17/14/05/06/19；002贸易→61；106金融→52/64；107宝地→63/70；400工程→62。跨体系按科目代码直接 JOIN/对比会产生语义错误；匹配率验证体系是循环论证（已在用的体系匹配率必然最高），有效异常信号是账套实际科目不在绑定体系内存在"@zh .
+
+ba:br_4022812065d8 rdf:type ba:BusinessRule ;
+    rdfs:label "合并报表规则：合并层用报表项目体系，无科目体系概念"@zh ;
+    ba:rule_id "BR-19" ;
+    ba:rule_text "会计科目体系用于日常核算（每个账套按年度绑定一个）；**合并报表不用科目体系**，用独立的报表项目体系——各子公司按各自科目体系记账 → 科目到报表项目映射（抵销/调整）→ 汇总到报表项目体系。科目体系不同**不会**给合并报表额外增加问题"@zh .
+
+ba:br_a8a11223db6d rdf:type ba:BusinessRule ;
+    rdfs:label "凭证规则：手工/机制凭证的可靠判据（分类描述含手工）"@zh ;
+    ba:rule_id "BR-20" ;
+    ba:rule_text "手工/机制凭证判据 = 凭证分类维度表 `VOUCHER_TYPE_DESC` 含手工字样（分类码 AA/EA/EB 等由各账套自定义）。**不可靠判据**：① `PROCED_ID`/`VOUCHER_PROCED_ID` 是否为空（手工凭证也自动生成程式名，实测手工凭证 4092 万条仅 11 条为空）；② 凭证号第 4 位 0/1（手工凭证仅 38% 第 4 位为 0）。凭证号编码结构：1-2 位分类码 + 3 位记账类型 + 第 4 位起序号段 + 流水"@zh .
+
+ba:br_2b8035bf1717 rdf:type ba:BusinessRule ;
+    rdfs:label "融资规则：借款数据源按账套体系分裂（三套源）"@zh ;
+    ba:rule_id "BR-21" ;
+    ba:rule_text "借款数据分裂在三套源：**太钢系（24xx 等）→ `V_DWD_FACT_CWZJ_TAFAL91_TG`；宝钢股份系（1xxx）→ 标财 ODS `BFMSXAAL.TAFAL91`；司库/资金系统（如 6701）→ `BSTAMOFM00.T_ODS_V_LOAN_CONTRACT`**。委托贷款类表用 `COMPANY_INNER_CODE`（F 分层编码）关联而非 `COMPANY_CODE`。担保/保函 8 张表仅覆盖 1xxx 账套，查非 1xxx 账套得出无担保业务结论须提示用户可能未采集，请业务核实"@zh .
+
+ba:br_7af9715f131d rdf:type ba:BusinessRule ;
+    rdfs:label "应付规则：预付款台账双表口径（快照有效余额 vs 实时含待审核）"@zh ;
+    ba:rule_id "BR-22" ;
+    ba:rule_text "两套台账口径：① **快照口径** `BFBIFA.T_ZZFX090`（按 YMON 期间分片，有效余额须 `BLANCE_AMT<>0` 过滤——3426 条中仅 314 条有效，对账基准）；② **实时口径** `BFMSXAAP.TAPAPA4`（余额=`ACCT_AMT−CANED_AMT`，含空格=待审核记录，与标财页面一致，见 BR-13）。台账核算科目含 1123 预付账款**和 1221 其他应收款**（非混入）。`TAPAPA5` 是核销记录表（CAV_DATE/CAV_AMT），不是余额表"@zh .
+
+ba:br_aea832fde09e rdf:type ba:BusinessRule ;
+    rdfs:label "会计规则：宝钢国际账套期末往来科目重分类（正常差异）"@zh ;
+    ba:rule_id "BR-23" ;
+    ba:rule_text "宝钢国际账套（1029 等）**期末对往来科目红字余额做重分类**（如借 1123900/贷 2202900），**次月初自动红冲**——月末日总账与台账出现阶段性差异属正常，勿判僵尸余额/异常。重分类是总账层动作，应付模块台账不体现"@zh .
+
+ba:br_7e6be2b44edb rdf:type ba:BusinessRule ;
+    rdfs:label "凭证规则：红冲凭证金额为负 + 专有标识字段（与 VOUCHER_SORT 无关）"@zh ;
+    ba:rule_id "BR-24" ;
+    ba:rule_text "**红冲凭证金额一般为负数**；红冲凭证中金额为**正**的 = 红冲了红冲（二次红冲），通常是误操作信号须逐笔核查。红冲标识字段：`VOUCHER_NO_RED`/`VOUCHER_PERSON_RED` 非空 + 摘要 `VOUCHER_DESC` 含红冲（摘要仅凭证基本信息表有，明细表无 VOUCHER_DESC）。`VOUCHER_SORT`（R 收款/P 付款/Z 转账）是记账类型**与红冲无关**。RZ/CZ 前缀中间凭证不在 DWD 表中，多级红冲链须靠摘要文本逐级还原"@zh .
+
+ba:br_abae17091f84 rdf:type ba:BusinessRule ;
+    rdfs:label "预算规则：预算实际发生额联动双路径与 FACT_AMT=0 根因"@zh ;
+    ba:rule_id "BR-25" ;
+    ba:rule_text "预算实际发生额（FACT_AMT）有**两条联动路径**：差旅路径（S/H 类预算科目 ← 公务系统差旅小秘书联动）与报支路径（M/Y 类 ← 应付报支系统联动，依赖 `TAPAPM01` 报支对照的 FEE_TYPE_CODE 映射）。注意**空格≠NULL**：FEE_TYPE_CODE 空格=未维护。`V_DWD_FACT_CWZW_COST_BUDGET_CONTROL_TG` 视图仅太钢/宝钢系账套，其他账套查 `T_DWD_FACT_CWZW_COST_BUDGET_CONTROL`"@zh .
+
+ba:br_437aabad245c rdf:type ba:BusinessRule ;
+    rdfs:label "费用规则：归属码完整枚举（9 开头科目后缀）"@zh ;
+    ba:rule_id "BR-26" ;
+    ba:rule_text "归属码（BR-05 机制的全量枚举）：**751=管理费用；741=销售费用；753=科研费用；754=资本化科研；810=生产成本(直接)；820=制造费用；730=主营成本；728=生产准备费(转入待摊物资)**；731/830 待定、840 未验证。**权威定义=科目名称后缀**（如已分配一般管理费用-751），非独立代码表"@zh .
+
+ba:br_e673aeb8fefc rdf:type ba:BusinessRule ;
+    rdfs:label "会计规则：科目层级取数（末级/一级净额 + 月末结转链）"@zh ;
+    ba:rule_id "BR-27" ;
+    ba:rule_text "①费用类查询**看末级科目或一级科目净额行，禁止跨层级累加或算术拼凑**（6602910 汇总 − 6602999 结转 ≠ 6602 一级真值——用户两次纠正）；②月末结转链：报支抛账生成明细 9 科目（5301…）→ 月末结转 9910010751（已分配期间费用）→ 按责任中心分摊至 6602910 管理费用 → 月结。**管理费用明细在 9 科目，6602910 只是分配汇总落点**"@zh .
+
+ba:br_bd77d297204a rdf:type ba:BusinessRule ;
+    rdfs:label "凭证规则：凭证号三重不唯一（跨月+跨账套）与编码结构"@zh ;
+    ba:rule_id "BR-28" ;
+    ba:rule_text "①凭证号**同月内跨账套也不唯一**（EZZ0000001 在 8003/8153 同月各一张）——唯一键=凭证号+日期+**账套**；②按制单人工号查凭证须跨账套（一人可跨多账套制单）；③编码结构：1-2 位凭证分类 + 第 3 位记账类型(Z转/P付/R收) + 第 4 位序号段(0/1=号码池分段，**非手工/机制标识**) + 流水；④凭证号前缀：CZ=暂估计提、RZ=红冲中间凭证（不在 DWD）、EZZ=总账电子转账红冲生成"@zh .
+
+ba:br_d155404ea019 rdf:type ba:BusinessRule ;
+    rdfs:label "资金规则：银行账户三源（标财/宝财/DWD视图）"@zh ;
+    ba:rule_id "BR-29" ;
+    ba:rule_text "银行账户数据三源：①标财 `BFMSXACM.TAFCM06`；②宝财系统 `TAFCM06B`（6701 有 8180 条）；③DWD 视图 `V_DWD_DIM_CWZJ_ACCOUNT_BANK_YJ` **仅含启用状态账户**。三源同名实体银行帐户，按 storage_path 消歧"@zh .
+
+ba:br_9d380a6969af rdf:type ba:BusinessRule ;
+    rdfs:label "发票规则：查证收/支两侧表群"@zh ;
+    ba:rule_id "BR-30" ;
+    ba:rule_text "按发票号查证先判断收/支两侧：支出/进项侧（CWZW 报支系 INVOICE_BASE_INFO 等）查空 **≠ 发票不存在**——换销售/销项侧（CWZQ：OFFICIAL_INVOICE_INFO 正式发票 / SALES_INVOICE_MAIN 销项主信息 / SALES_SLIP 销货清单）再查。X0=未开票收入（只在正式发票档，INVOICE_SORT='X0'，发票号前缀 X，税率存整数）"@zh .
+
+ba:br_3a992f554b33 rdf:type ba:BusinessRule ;
+    rdfs:label "主数据规则：公司简称→账套映射歧义"@zh ;
+    ba:rule_id "BR-31" ;
+    ba:rule_text "公司简称模糊匹配命中 ≥2 候选**必须列候选请用户确认**（武钢物流有广西武钢物流 8913 vs 武汉钢铁集团物流 8003）。账套维度存在多形态：名称带-单体后缀（合并用）与不带并存；COMPANY_CODE 4 位 vs COMPANY_INNER_CODE 8 位（8003 vs 8003F100）双编码；F100 后缀=单体账套"@zh .
+
+ba:br_d9d2aebe15e8 rdf:type ba:BusinessRule ;
+    rdfs:label "税务规则：旅客运输计算抵扣（票联外进项税来源）"@zh ;
+    ba:rule_id "BR-32" ;
+    ba:rule_text "总账进项税 ≠ 票联认证税额——差额主因之一是**旅客运输计算抵扣**（非票联来源、无认证记录，凭证对方科目=外地就医及探亲路费等）。进项税对账须考虑：票联认证 + 计算抵扣 + 预交等非票联来源"@zh .
+
+ba:br_1894e0cd2b20 rdf:type ba:BusinessRule ;
+    rdfs:label "票据规则：应收票据不入往来账龄表"@zh ;
+    ba:rule_id "BR-33" ;
+    ba:rule_text "①`T_DWD_FACT_CWGL_CURRENT_ACCOUNT_AGING` 往来账龄表**不含票据类科目**（1121 应收票据在账龄表仅残值 vs 总账 1.32 亿）——应收票据有到期日属性，账龄/余额查 CWPJ 票据库存表（注意其组织字段是 **UNIT_ID** 非 COMPANY_CODE）；②账龄表是**逐笔发生额明细**（无余额字段），与余额表语义不同"@zh .
+
+ba:br_60c103d364c9 rdf:type ba:BusinessRule ;
+    rdfs:label "报支规则：单据系统前缀与两表覆盖差异"@zh ;
+    ba:rule_id "BR-34" ;
+    ba:rule_text "报支单按来源系统前缀区分：BAO/YAO/WAO/L（**报支主信息表 MAIN_INFO 仅含此前缀**）；**BFH=差旅小秘书补贴报支、B9H=人力资源薪酬报支——仅在 BASE_INFO 全量表**。统计报支必须查 BASE_INFO（全量），MAIN_INFO 是子集。系统抛送单（BFH/B9H/L）REJECT_FLAG/SUBMIT_TIME/VOUCHER_DATE 常为空格（=非驳回/未提交语义，勿当异常）。**DELETE_FLAG '1'=有效、'0'=已删除（反直觉）**"@zh .
+
+ba:br_d504aea78bc2 rdf:type ba:BusinessRule ;
+    rdfs:label "票据规则：ZQ_BASE 状态与金额解耦"@zh ;
+    ba:rule_id "BR-35" ;
+    ba:rule_text "`T_DWD_FACT_CWPJ_ZQ_BASE` 票据背书(600)/移出(800)后 `PAPER_SUBSIST_AMT` **不清零**（仍正值）——统计当期留存金额必须 `PAPER_STATUS='200'`（在库）过滤；与 TAFANA1B（状态变更即出表）语义相反。应付票据在 ZW_BASE 分表；总账 1121/2201 科目只核算银票，**商票走应付账款**"@zh .
+
+ba:br_2fc333eedeb6 rdf:type ba:BusinessRule ;
+    rdfs:label "票据规则：留存双口径（系统快照 vs 业务盘点）+ 通宝独立体系"@zh ;
+    ba:rule_id "BR-36" ;
+    ba:rule_text "①票据留存两口径：系统快照口径（`BFMSXAAN.TAFANA1B` `PAPER_SUBSIST_AMT>0` 全部，**含已到期但系统未清理的票据**）vs **业务盘点口径（业务人员默认）**=再加 `PAPER_END_DATE >= 当期起始日`；②**通宝是独立体系**：`TAFTBA1`（应收通宝）/`TAFTBC1`（应付通宝）**无 ACCT_PERIOD_NO 字段**，留存金额字段名不同（REMAIN_AMT/BILL_AMT）——查票据留存须确认是否含通宝并分别查询"@zh .
+
+ba:br_fa3105883865 rdf:type ba:BusinessRule ;
+    rdfs:label "担保规则：保函=或有负债，无表内核算"@zh ;
+    ba:rule_id "BR-37" ;
+    ba:rule_text "保函本身不是资产/负债，是**或有负债**——财务账表内无核算记录，实际发生时才核算至预计负债科目（2801/2802）。保函数据查 `BSTAMOSKGY.T_ODS_T_BM_GUARANTEE_LETTER_INFO`（快照表，统计前按 `GL_CODE` 去重：704 条→91 笔）；科目 1012060 已废弃（数据只到 2015 年）"@zh .
+
+ba:br_96b0d255cd24 rdf:type ba:BusinessRule ;
+    rdfs:label "会计规则：总账查询默认包含未记账数据"@zh ;
+    ba:rule_id "BR-38" ;
+    ba:rule_text "用户未明确指明不含未记账时，**总账查询默认把未记账数据包含进来**（已记账+未记账都算）。判据：`T_DWD_FACT_CWGL_VOUCHER_DETAIL_INFO.VOUCHER_STATUS`（30/40=已过账；10/20=未过账，值域待复验）；总账余额表本身**无记账标志字段**，是否含未记账须沿凭证明细的 VOUCHER_STATUS 判断"@zh .
+
+ba:br_a5fd1da100dc rdf:type ba:BusinessRule ;
+    rdfs:label "主数据规则：华中核算归属双口径（待权威裁定）"@zh ;
+    ba:rule_id "BR-39" ;
+    ba:rule_text "宝武共享华中分公司核算归属存在**两条维表路径、结果差异巨大**（2026-08-18 实测）：路径A `T_DWD_DIM_CWGL_COMPANY_CODE_COST_CENTER_INFO.COST_CENTER='BSWHCW03'`（共享华中总账室）→ **1,424 账套**；路径B `T_DWD_DIM_CWGL_COMPANY_CODE_COVER_INFO.SHARE_CENTER_BRANCH='C02'` → **10,673 账套**。权威口径**待领域专家裁定**（疑 COVER_INFO 含历史/覆盖关系、COST_CENTER 更精确）。另：`COMPANY_CODE_TYPE='1'`（分公司）**≠ 核算归属判据**——归属以 COVER_INFO 为准，勿用组织类型推断质疑权威维表"@zh .
+
+ba:br_e2653756c043 rdf:type ba:BusinessRule ;
+    rdfs:label "报支规则：红字报支抵消匹配（事理模型）"@zh ;
+    ba:rule_id "BR-40" ;
+    ba:rule_text "红票税金转出与报支抛账一正一负抵消的匹配判据：①抛账程式 `PROCED_ID IN ('APAPREC','APAP1120')`；②对方科目**不限于红票摘要**（含 AAAAA1/AAAAA4/bdtc 等多种程式）；③按供应商（ID_CODE）+金额匹配，**支持分组求和**（多行对一笔）与 **±1 分容差**（舍入差）；④凭证明细表无摘要字段，摘要须关联 `T_DWD_FACT_CWGL_VOUCHER_BASE_INFO_YGZ`（已过账凭证表）获取"@zh .
+
+ba:br_f52ef98689a7 rdf:type ba:BusinessRule ;
+    rdfs:label "税务规则：印花税范围口径（资金账簿）"@zh ;
+    ba:rule_id "BR-41" ;
+    ba:rule_text "印花税（资金账簿）缴纳范围 = **实收资本（4001）+ 资本公积-资本溢价/股本溢价（4002010）**，**不含**资本公积-其他资本公积（4002020）。统计资本变动是否符合印花税范围时须按此口径筛选科目"@zh .
+
+ba:br_416dfa1d6ab4 rdf:type ba:BusinessRule ;
+    rdfs:label "收条规则：核销双模式与收条号唯一性"@zh ;
+    ba:rule_id "BR-42" ;
+    ba:rule_text "①收条核销双模式：**ASSA28（收条×报支单）与 ASSA53/TASSAA8（收条×销货清单，图库实体 label 为发票分配）**，摘要路由：ASSA28={客商码}-{子收条号}核销收款申请、ASSA53=核销抛帐；②**科目相同不出核销凭证、科目不同才出**；③收条只能**全额红冲**（RED_CHARGOFF_VOUCHER_NO）；④可用金额 `FREE_AMT = RECEIPT_AMT − APPORT_AMT − CHG_PAPER_AMT − MOVE_OUT_AMT`（TASSAA1）；⑤RECEIPT_STATUS='3'（接收）与可用金额解耦；⑥**收条号跨账套不唯一**（TASSAA1 重号 261.8 万组；QC 前缀为双账套镜像非收条号）——**查收条必带 COMPANY_CODE**；⑦DWD 收条两表均无 VOUCHER_NO（仅 ODS TASSAA2 有）且 BASE/DETAIL 覆盖不一致"@zh .
+
+ba:br_48648f99a63d rdf:type ba:BusinessRule ;
+    rdfs:label "会计规则：本年利润年末结平与科目编码层级"@zh ;
+    ba:rule_id "BR-43" ;
+    ba:rule_text "①**科目编码层级 4+3+3**（一级 4 位定性质/二级 3 位/三级 3 位，如 2241+030+010）——**禁止对科目代码前缀臆测匹配**（LIKE '224103%'、SUBSTR(x,3,4) 均错）；②4103 本年利润年末应结平转 4104：贷余=利润未结转、借余=亏损未结转；③总账余额表 **4103（一级）与 4103010（末级）父子双行并存**取一级精确匹配；凭证明细只挂末级；④**ODS 总账 T_ZZFX030 不含损益类科目**（4103 需查 DWD GL_TOTAL_AMT_INFO，反向于常规回退路径）；⑤核算责任人判定：授权表（TAAAASG/FUN_MOD=AA 全局化）粒度不够，**以凭证制单人为准**（YGZ 表 INPUT_VOUCHER_PERSON，FN 前缀=属地核算人员）"@zh .
+
+ba:br_eea1d1a6259d rdf:type ba:BusinessRule ;
+    rdfs:label "税务规则：旅客运输发票筛选口径（票联/底账/端到端）"@zh ;
+    ba:rule_id "BR-44" ;
+    ba:rule_text "①旅客运输发票完整口径 = **EP ∪ EL+特定要素09**（票联 `TAPAPH3.INVOICE_SORT`：EP=电子发票·旅客运输服务专用类型、EL=全电普票）；②**铁路客票独立**：非 EP 非 EL+09——底账 `TABIN90.INVOICE_TYPE`：41=出租车票/51=火车票/71=飞机行程单；③**跨端按发票号 JOIN 禁止**（进项×销项同号命中是巧合）；④票联 TAPAPH3=已报支采集票、底账 TABIN90=全量进项票（查全量以底账为主源，存在底账有票联未录入的漏票）；⑤**TAX_RATE 双量纲混存**（0.09 与 9.00 并存，查 9% 必须 `IN (0.09,9.00)`；税率在明细表非主表）；⑥进项端无 TDYWLX 特定要素字段（仅标志字段族 CPYBZ 成品油/TXFBZ 通行费，09 无拆散字段）；SSFLBM 前缀 3010≈交通运输可辅助但≠09 精确口径；⑦TABIN90↔TABIN91 按 INVOICE_CODE+INVOICE_NO 关联（主表有账套无税率、明细反之）；⑧分中心账套范围须全历史 `COUNT(DISTINCT COMPANY_CODE)`（C02=256），勿取单期快照"@zh .
+
+ba:br_0d26bce1310a rdf:type ba:BusinessRule ;
+    rdfs:label "报支规则：业务大类判据=BUSI_TYPE 首字母（J=费用、C=采购）"@zh ;
+    ba:rule_id "BR-45" ;
+    ba:rule_text "费用类报支=主办单位代码 `BUSI_TYPE` 以 **J 开头**（JF/JB/JK/JL/JI/JD/JE/JA，含结算与预付）；采购类=**C 开头**（CG/CM）。**勿用** BILL_TYPE（B/Y/W 与业务大类非一一对应，B 下有 5.3 万笔采购类）或单号前缀（B/Y/W/L）推断业务类型（0821 物理实测：J/* 占 87.5%、C/* 占 7.6%）"@zh .
+
+ba:br_289e06f362f1 rdf:type ba:BusinessRule ;
+    rdfs:label "数据覆盖规则：DWD 报支主表选择性覆盖 5.1%——全量统计须直查 ODS"@zh ;
+    ba:rule_id "BR-46" ;
+    ba:rule_text "`T_DWD_FACT_CWZW_PAY_BILL_MAIN_INFO` 仅同步 **BAO/L20/YAO/WAO/LAO** 5 种单号前缀（88.5 万行），ODS 源 `BFMSXAAP.TAPAPA1` 有 35+ 前缀 1,737 万行，覆盖率 **5.1%**（0821 物理对账实测；同前缀内部另有 ~0.4% 缺失）。BAP/BGW/BFH/BA5/BDP/BO1 等前缀（1,600 万+行）全部不在 DWD——费用类驳回漏 37.2%、采购类漏 84.1%，且查询无任何报错"@zh .
+
+ba:br_cf5a95631d53 rdf:type ba:BusinessRule ;
+    rdfs:label "收条规则：报账平台发起的转退款无收条号（4X 流水号判据）"@zh ;
+    ba:rule_id "BR-47" ;
+    ba:rule_text "报账平台发起的转退款**不采集收条信息**——`T_DWD_FACT_CWZQ_RECEIPT_PROCESS.RECEIPT_CODE` 空 ≠ 同步延迟（曾误判），是业务口径。判据：处理流水号以 **4X 开头=报账平台系统别**（⚠️ DWD 层 SYS_ID 字段 68 万行全空未同步，只能从流水号前缀判断）。仅转款类有子收条号（`REFUND_RECEIPT.NEW_SUB_RECEIPT_CODE`）"@zh .
+
+ba:br_693fb96aeef2 rdf:type ba:BusinessRule ;
+    rdfs:label "资金规则：转退款统计直查处理流水表，TRANSFER_STATUS=7 是常态"@zh ;
+    ba:rule_id "BR-48" ;
+    ba:rule_text "转退款笔数统计**直接查 `T_DWD_FACT_CWZQ_RECEIPT_PROCESS` 按 TRANSFER_TYPE 分组**（2X=转帐类、4X=退款类、6X=其他）；勿从 `REFUND_RECEIPT`（结果表，同 TRANSFER_NO 一对多且含历史）JOIN 统计（曾 6 条被一对多淹没 67 vs 72）。`TRANSFER_STATUS`：**1=已完成（主力 62 万）、7=报账平台退款常态阶段（18 万，非未完成）**、X/0/5/9 待确认——勿据 7 推断退款未完成"@zh .
+
+ba:br_01187f3bbc45 rdf:type ba:BusinessRule ;
+    rdfs:label "合并报表规则：抵消分录查法（COMPANY_INNER_CODE 含层级，AO_COMPANY=对方单位）"@zh ;
+    ba:rule_id "BR-49" ;
+    ba:rule_text "查合并抵消分录（`BFMSR4DC.TR4DCM3` 当前 / `TR4DCM4` 历史）：账套+层级筛选用 **`COMPANY_INNER_CODE`**（如 '6701F200'=账套代码+合并层级后缀，F200/F300/G300 为合并架构层级）；**`AO_COMPANY` 存对方单位代码**（非本账套！曾误用 `AO_COMPANY='6701'` 致漏 36/43 条）。AO_TYPE 抵消类型为 57 种编码（BA 系≈往来类、CA 系≈内部交易类，含义待领域确认）；AO_PERIOD：C=当期、O=期初"@zh .
+
+ba:br_c174d3e93b59 rdf:type ba:BusinessRule ;
+    rdfs:label "税务规则：涉税总分=同税号+不同账套；真税号在 COMPANY_CREDIT_CODE"@zh ;
+    ba:rule_id "BR-50" ;
+    ba:rule_text "涉税场景总公司/分公司判定=**同一税号（统一社会信用代码）+不同账套**。⚠️ `T_DWD_FACT_CWSW_ENTERPRISE_BASE_INFO.COMPANY_TAX_NUM_ADD` **不是税号**（实为 01/02 分类标记，值域实测 空/01/02/NaN）；真实税号=同表 **`COMPANY_CREDIT_CODE`**（18 位统一格式）。总分结转/总分报支场景按此口径识别"@zh .
+
+ba:br_edaf9595d2fb rdf:type ba:BusinessRule ;
+    rdfs:label "报支规则：联络函超时口径（起算=首个分配环节，驳回重录不算）"@zh ;
+    ba:rule_id "BR-51" ;
+    ba:rule_text "联络函超时计算（`BSTAMOBZPT.T_ODS_TBZPTA1` 头 + `T_ODS_TBZPTA4` 履历，按 BILL_ID 关联）：①**起算点=履历第一个分配环节**（REMARK 含已推送任务中心/任务中心系统自动分配至，属地审批 OP_TYPE=20 之前），不是 REMARK推送默认分配人文本；②**驳回后重新录入的状态不算超时**；③未完结以**当前时间**为截止；④起算人不固定勿假设岗位。OP_TYPE 枚举图库已有（10 提交/20 属地审批通过/21 驳回/30 流转/35 处理成功/80 完结等）"@zh .
+
+ba:br_8a704102ce64 rdf:type ba:BusinessRule ;
+    rdfs:label "票据规则：收条号集团/股份双环境各存一条"@zh ;
+    ba:rule_id "BR-52" ;
+    ba:rule_text "同一收条号在**集团环境与股份环境各存一条**（用户权威口径）——仅按收条号查询会双环境混合/错账套。环境区分：账套维表 `ACCOUNT_SYS`（用户口径：102/103=集团、001/002/003=股份，待领域确认）或按账套归属判断"@zh .
+
+ba:br_5ee4b342d3a6 rdf:type ba:BusinessRule ;
+    rdfs:label "凭证规则：制单方式源头判据=系统别 AH/AA（维表 T_JXWH03E）"@zh ;
+    ba:rule_id "BR-53" ;
+    ba:rule_text "手工单据制单 vs 手工凭证制单的**更源头判据=凭证表 `SYSTEM_ID`（系统别）**：**AH=手工单据制单、AA=手工凭证制单**；权威维表 `BFBIFA.T_JXWH03E`（凭证系统别维，已建模）。BR-20 的分类维度 DESC 含手工判据仍适用但 SYSTEM_ID 更源头。⚠️ DWS 层 HANDWORK_VOUCHER_TYPE(0/1) 无法区分两种方式；2020 年前未纳入共享中心、制单规范不适用"@zh .
+
+ba:br_442f7c083be2 rdf:type ba:BusinessRule ;
+    rdfs:label "总账规则：手工单据=功能模块；印花税抛账借 6403105 贷 2221110"@zh ;
+    ba:rule_id "BR-54" ;
+    ba:rule_text "①手工单据是**总账管理下的功能模块名**（含报表导入），非泛指手工创建的单据；②手工单据印花税抛账规则=**借 6403105 贷 2221110**；③`BFMSXAAP.TAPAPM3` 是**应付模块**的会计审核抛账规则（其 R09 是代收代付场景，非手工单据规则）；④手工单据抛账真配置在 `BGHDMOBRMN.T_PZ_CONFIG(_DETAIL)`（抛账引擎，页面 GABET00——未建模且无权限）；⑤手工单据画面模版参考 `BSTAMOBCAJ.T_ODS_TAJAH03_JT`"@zh .
+
+ba:br_e6340fbc2e8d rdf:type ba:BusinessRule ;
+    rdfs:label "主数据规则：分中心↔分公司映射权威表 TAUCM29（一码双记录）"@zh ;
+    ba:rule_id "BR-55" ;
+    ba:rule_text "共享中心分中心代码↔分公司名称的**权威映射藏在权限表**：`BFMSXAAU.TAUCM29`（label共享部门人员权限，从分中心/分公司语义不可达）的 `SEND_SHARE_CENTER_CODE/SEND_SHARE_CENTER_NAME`——**一码双记录**（运营共享中心XX分中心+宝武共享XX分公司两行）。⚠️ 勿凭城市/区域名推测归属（C01=上海≠华东分公司）；`COVER_INFO.SHARE_CENTER_BRANCH_CN` 只有城市名（武汉/鄂州）与口语称呼无映射"@zh .
+
+ba:br_19e2861485fd rdf:type ba:BusinessRule ;
+    rdfs:label "报支规则：REJECT_FLAG 是历史标记，驳回后重新提交不清除"@zh ;
+    ba:rule_id "BR-56" ;
+    ba:rule_text "`PAY_BILL_MAIN_INFO.REJECT_FLAG='Y'` 表示**曾被驳回的历史标记**——重新提交后不清除，最终状态=31（全部付款）时仍为 Y。查曾被驳回用 REJECT_FLAG；查当前被驳回须结合 `BILL_STATUS=21`。`BACK_TYPE`：1=退回修改、2=退回撤销"@zh .
+
+ba:br_0cabeab76ae8 rdf:type ba:BusinessRule ;
+    rdfs:label "资产规则：末月折旧尾差保残值 + 快照/明细划转差异"@zh ;
+    ba:rule_id "BR-57" ;
+    ba:rule_text "①**末月折旧额与往期不同=保持账面残值的尾差计提**（正常业务，勿误读为前几月计提0）；②快照表（会计期末值）与明细表（处置时点值）对**划转/处置资产**（ASSET_STATUS=59）存在口径差异（划转时点截断，勿判异常）；③DWD 明细表金额存在小数截断（ODS 32.88→DWD 32）；④DWD 数据滞后 ODS 一个月时回退查 ODS（`TAEAEMF/TAEAED1`）"@zh .
+
+ba:br_5e77e8dfc334 rdf:type ba:BusinessRule ;
+    rdfs:label "收款规则：销货清单→抛账 B1 规则匹配键"@zh ;
+    ba:rule_id "BR-58" ;
+    ba:rule_text "B1 类抛账规则对销货清单的实际匹配键=**PRODUCT_CODE + AS_BUSI_MAIN_CODE + AS_BUSI_DETL_CODE + COMPANY_CODE**（非 INCOME_TYPE_CODE——该字段在销货清单明细 **91.6% 为空**，不可作主键）；销货清单基本信息表 AS_BUSI_DETL_NAME（如能介产品）与明细表对应字段空值不一致属常态"@zh .
+
+# --------------------------
+# 对象关系边
+# --------------------------
+# hasProcess
+ba:bd_0d84478423ac ba:hasProcess ba:bp_dc5d395a5778 .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_0b86e2732115 .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_19ac7813aafa .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_eacec3902983 .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_7e23aac53586 .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_7fb64c877118 .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_0eee96fc94a1 .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_0891f16b46b8 .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_2655acd153f0 .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_beae2a73907d .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_d08a17dba1b4 .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_a5896d7a753e .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_a265f724395d .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_7123c7df37b8 .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_c71b6d4517e4 .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_13144521d67f .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_fae7d192b086 .
+ba:bd_0d84478423ac ba:hasProcess ba:bp_d49ad0454252 .
+
+# hasAction
+ba:bp_dc5d395a5778 ba:hasAction ba:ba_2cef3d0c5c2b .
+ba:bp_dc5d395a5778 ba:hasAction ba:ba_2c1e44a28424 .
+ba:bp_dc5d395a5778 ba:hasAction ba:ba_be9ee915a959 .
+ba:bp_dc5d395a5778 ba:hasAction ba:ba_1264b3ee9df2 .
+ba:bp_dc5d395a5778 ba:hasAction ba:ba_6b45a3d18095 .
+ba:bp_dc5d395a5778 ba:hasAction ba:ba_634d640d47a5 .
+ba:bp_dc5d395a5778 ba:hasAction ba:ba_d801aa5c544d .
+ba:bp_dc5d395a5778 ba:hasAction ba:ba_cd27a83da758 .
+ba:bp_dc5d395a5778 ba:hasAction ba:ba_4d40826c12fd .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_3ecc35b840db .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_d6fbe08114a1 .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_b95865078f45 .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_7e9692665fdc .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_33b45180defb .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_c935344b392f .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_36469f6efb61 .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_97e6a2868807 .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_4dd7a8a24895 .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_7abd27595724 .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_407c5b0bbd56 .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_8c1ddd407c83 .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_3e5417878609 .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_ef4d9430927e .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_3eac932882af .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_0163d6308692 .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_695c3bd40c64 .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_c085b10fe596 .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_22bde0fd42b1 .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_45c8484fc1b7 .
+ba:bp_0b86e2732115 ba:hasAction ba:ba_7c7b537731af .
+ba:bp_19ac7813aafa ba:hasAction ba:ba_784e1b2cb617 .
+ba:bp_19ac7813aafa ba:hasAction ba:ba_c80b710e3b87 .
+ba:bp_19ac7813aafa ba:hasAction ba:ba_ed8536918f2c .
+ba:bp_19ac7813aafa ba:hasAction ba:ba_50940531e481 .
+ba:bp_19ac7813aafa ba:hasAction ba:ba_8a4f470d8a2e .
+ba:bp_19ac7813aafa ba:hasAction ba:ba_a39df04dcd3a .
+ba:bp_19ac7813aafa ba:hasAction ba:ba_3ddfc1e67d7e .
+ba:bp_19ac7813aafa ba:hasAction ba:ba_6d57101aa83f .
+ba:bp_19ac7813aafa ba:hasAction ba:ba_16d983926172 .
+ba:bp_19ac7813aafa ba:hasAction ba:ba_629be5dce880 .
+ba:bp_19ac7813aafa ba:hasAction ba:ba_1881d7af0337 .
+ba:bp_19ac7813aafa ba:hasAction ba:ba_ae900079032f .
+ba:bp_eacec3902983 ba:hasAction ba:ba_205d04aa2d58 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_4c34a5d19d62 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_1339734e7a8a .
+ba:bp_eacec3902983 ba:hasAction ba:ba_11b7938777f3 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_4d50a64cd577 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_c43ccaee8c61 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_62e226b0a7ec .
+ba:bp_eacec3902983 ba:hasAction ba:ba_5bd4d2adb51e .
+ba:bp_eacec3902983 ba:hasAction ba:ba_5caf113cb040 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_5400304ce703 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_e5a205c7bd88 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_f90223b964af .
+ba:bp_eacec3902983 ba:hasAction ba:ba_a4708a1d2ff5 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_07c84f571941 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_acaa5bbe7993 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_e7f9d529259e .
+ba:bp_eacec3902983 ba:hasAction ba:ba_9414532a5e74 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_11ca5e89b941 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_b459deca7ad6 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_33132295d98f .
+ba:bp_eacec3902983 ba:hasAction ba:ba_0fce6e2a419c .
+ba:bp_eacec3902983 ba:hasAction ba:ba_7854c94e9736 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_5c1e68d82c8e .
+ba:bp_eacec3902983 ba:hasAction ba:ba_6bcf68c0b724 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_49db6d36fb92 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_05efdd3d24ea .
+ba:bp_eacec3902983 ba:hasAction ba:ba_129a6873f8b3 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_316e36b90dd6 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_1d913e4b2f5e .
+ba:bp_eacec3902983 ba:hasAction ba:ba_569d1cc4e809 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_197fdba65934 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_03e6b584af87 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_830c4db59501 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_b55e00512bae .
+ba:bp_eacec3902983 ba:hasAction ba:ba_3c24622a7fd9 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_c1204c7ea6d3 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_637cff4e5274 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_fb729486dfe3 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_0582ada80e4f .
+ba:bp_eacec3902983 ba:hasAction ba:ba_b3c98404def1 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_73b9529e02aa .
+ba:bp_eacec3902983 ba:hasAction ba:ba_24efaaf59bd3 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_c09ed415043e .
+ba:bp_eacec3902983 ba:hasAction ba:ba_bc299056b01e .
+ba:bp_eacec3902983 ba:hasAction ba:ba_75dbe919a3a7 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_ef4b7fd49e3b .
+ba:bp_eacec3902983 ba:hasAction ba:ba_0d343971419c .
+ba:bp_eacec3902983 ba:hasAction ba:ba_59c64c64d402 .
+ba:bp_eacec3902983 ba:hasAction ba:ba_6da9d2c4ef71 .
+ba:bp_7e23aac53586 ba:hasAction ba:ba_e24ca6acf438 .
+ba:bp_7e23aac53586 ba:hasAction ba:ba_8ed132fd0193 .
+ba:bp_7e23aac53586 ba:hasAction ba:ba_9a4363c82507 .
+ba:bp_7e23aac53586 ba:hasAction ba:ba_c623f9e151e6 .
+ba:bp_7fb64c877118 ba:hasAction ba:ba_bc78603495a0 .
+ba:bp_7fb64c877118 ba:hasAction ba:ba_750ec5410077 .
+ba:bp_7fb64c877118 ba:hasAction ba:ba_ea415d16e8b3 .
+ba:bp_7fb64c877118 ba:hasAction ba:ba_04539b4775d2 .
+ba:bp_7fb64c877118 ba:hasAction ba:ba_6f14f0eb3bd7 .
+ba:bp_7fb64c877118 ba:hasAction ba:ba_b9d9867dc3e7 .
+ba:bp_7fb64c877118 ba:hasAction ba:ba_76ca777aa58e .
+ba:bp_7fb64c877118 ba:hasAction ba:ba_8ce62bce9f70 .
+ba:bp_0eee96fc94a1 ba:hasAction ba:ba_853c66063c16 .
+ba:bp_0eee96fc94a1 ba:hasAction ba:ba_036483e0d95c .
+ba:bp_0eee96fc94a1 ba:hasAction ba:ba_368bebec04d1 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_e10bd179e561 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_2cdfc2eb9a79 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_248121487b06 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_22b2804e9a3c .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_5ac8ce833e7d .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_2338edbb43c0 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_8dfee108c770 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_774c04640c28 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_4839e9ce0ef9 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_7d7e01938138 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_d654919333d2 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_110cacf6caa3 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_9f7184c4c304 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_575d53b99a76 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_72b162b72450 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_8c23a7ee6999 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_c265e9bb7e72 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_6315fe6b4357 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_390acbd58adf .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_184752be5b40 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_45c2cd1d325f .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_e302aef74243 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_7f10237e57c5 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_fcef740e7a72 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_f7bb4031c7aa .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_7fe980e2469e .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_9933eea99be3 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_1c73337ed839 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_eb0879c17baa .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_5ccf37e1578d .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_c4371ebce1d1 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_71f831d78108 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_3d1f7d887b88 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_82f8186c0b44 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_1225754618fa .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_7ebd623fc40b .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_8434b0de11d0 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_b3146671d3fb .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_fbda5aba12fc .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_abf15f48b271 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_1370dccae170 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_f4be38aa2598 .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_eae5fae69abb .
+ba:bp_0891f16b46b8 ba:hasAction ba:ba_059b44bf9a29 .
+ba:bp_2655acd153f0 ba:hasAction ba:ba_81c90c330935 .
+ba:bp_beae2a73907d ba:hasAction ba:ba_3ef2a404113f .
+ba:bp_beae2a73907d ba:hasAction ba:ba_90a62df0edd4 .
+ba:bp_beae2a73907d ba:hasAction ba:ba_f68cd17812bd .
+ba:bp_beae2a73907d ba:hasAction ba:ba_9e089f8ca544 .
+ba:bp_beae2a73907d ba:hasAction ba:ba_066f3e09e66d .
+ba:bp_beae2a73907d ba:hasAction ba:ba_97da04b03734 .
+ba:bp_beae2a73907d ba:hasAction ba:ba_342714498d2d .
+ba:bp_beae2a73907d ba:hasAction ba:ba_bddeef2fe54c .
+ba:bp_beae2a73907d ba:hasAction ba:ba_450bea083d3e .
+ba:bp_d08a17dba1b4 ba:hasAction ba:ba_0a525023fcb8 .
+ba:bp_d08a17dba1b4 ba:hasAction ba:ba_ef456f3a41d5 .
+ba:bp_d08a17dba1b4 ba:hasAction ba:ba_5dfef983a98c .
+ba:bp_d08a17dba1b4 ba:hasAction ba:ba_79015fff0bb1 .
+ba:bp_d08a17dba1b4 ba:hasAction ba:ba_56e9abe590f9 .
+ba:bp_d08a17dba1b4 ba:hasAction ba:ba_2cc90ec708d0 .
+ba:bp_a5896d7a753e ba:hasAction ba:ba_87e7f1233033 .
+ba:bp_a5896d7a753e ba:hasAction ba:ba_5b22b074b664 .
+ba:bp_a5896d7a753e ba:hasAction ba:ba_0b74d6387397 .
+ba:bp_a265f724395d ba:hasAction ba:ba_8b3b18d3016d .
+ba:bp_a265f724395d ba:hasAction ba:ba_1c2c2115f0d9 .
+ba:bp_a265f724395d ba:hasAction ba:ba_aeaac1d65b52 .
+ba:bp_a265f724395d ba:hasAction ba:ba_fcf8f626f2fb .
+ba:bp_a265f724395d ba:hasAction ba:ba_f716f73ca890 .
+ba:bp_a265f724395d ba:hasAction ba:ba_89342b51853e .
+ba:bp_a265f724395d ba:hasAction ba:ba_b058cbe489f9 .
+ba:bp_a265f724395d ba:hasAction ba:ba_480a542215bd .
+ba:bp_a265f724395d ba:hasAction ba:ba_0223b4a3437a .
+ba:bp_a265f724395d ba:hasAction ba:ba_760dd6418b42 .
+ba:bp_a265f724395d ba:hasAction ba:ba_64321c6d06fe .
+ba:bp_a265f724395d ba:hasAction ba:ba_6e647e6cfdd4 .
+ba:bp_a265f724395d ba:hasAction ba:ba_a9e8446a9caf .
+ba:bp_a265f724395d ba:hasAction ba:ba_4368484cb60d .
+ba:bp_a265f724395d ba:hasAction ba:ba_7f71364cab9e .
+ba:bp_a265f724395d ba:hasAction ba:ba_6cae4283fead .
+ba:bp_a265f724395d ba:hasAction ba:ba_bd90e1272373 .
+ba:bp_a265f724395d ba:hasAction ba:ba_b083332672d5 .
+ba:bp_a265f724395d ba:hasAction ba:ba_7d5183179e7e .
+ba:bp_a265f724395d ba:hasAction ba:ba_c96383641469 .
+ba:bp_a265f724395d ba:hasAction ba:ba_8b08140e889f .
+ba:bp_a265f724395d ba:hasAction ba:ba_040d4881d1d5 .
+ba:bp_a265f724395d ba:hasAction ba:ba_2d2b6c99394d .
+ba:bp_7123c7df37b8 ba:hasAction ba:ba_e887a9614ea9 .
+ba:bp_c71b6d4517e4 ba:hasAction ba:ba_a2c21efafedc .
+ba:bp_c71b6d4517e4 ba:hasAction ba:ba_e80570ad7b5d .
+ba:bp_13144521d67f ba:hasAction ba:ba_abe0d3b8f27a .
+ba:bp_13144521d67f ba:hasAction ba:ba_f761e0a1133d .
+ba:bp_13144521d67f ba:hasAction ba:ba_5587e32b1e31 .
+ba:bp_13144521d67f ba:hasAction ba:ba_98858f19116b .
+ba:bp_13144521d67f ba:hasAction ba:ba_b038d1c45bc8 .
+ba:bp_13144521d67f ba:hasAction ba:ba_edaa4aa92242 .
+ba:bp_13144521d67f ba:hasAction ba:ba_798a78a72303 .
+ba:bp_13144521d67f ba:hasAction ba:ba_8ba0f28d09c1 .
+ba:bp_13144521d67f ba:hasAction ba:ba_554b02a3df74 .
+ba:bp_13144521d67f ba:hasAction ba:ba_839906bc9828 .
+ba:bp_13144521d67f ba:hasAction ba:ba_c443754795c4 .
+ba:bp_13144521d67f ba:hasAction ba:ba_1ebf42344073 .
+ba:bp_13144521d67f ba:hasAction ba:ba_20c787f4a450 .
+ba:bp_13144521d67f ba:hasAction ba:ba_681fd090ef16 .
+ba:bp_13144521d67f ba:hasAction ba:ba_ebcce18faff8 .
+ba:bp_13144521d67f ba:hasAction ba:ba_4a45301f5a60 .
+ba:bp_13144521d67f ba:hasAction ba:ba_b931c1e4f336 .
+ba:bp_13144521d67f ba:hasAction ba:ba_9a51fe3b8bd6 .
+ba:bp_13144521d67f ba:hasAction ba:ba_c367765e9fd0 .
+ba:bp_13144521d67f ba:hasAction ba:ba_82bd0b17f7d2 .
+ba:bp_13144521d67f ba:hasAction ba:ba_4ebdaf7b4006 .
+ba:bp_13144521d67f ba:hasAction ba:ba_de844b9edbfd .
+ba:bp_13144521d67f ba:hasAction ba:ba_4b4ef844be57 .
+ba:bp_13144521d67f ba:hasAction ba:ba_b75cdc2ca1fa .
+ba:bp_13144521d67f ba:hasAction ba:ba_b5f624d690f5 .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_8b598fe05336 .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_3826b7945cca .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_0d9904396620 .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_6034c30b0c6a .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_9e321fb83b3b .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_353380b86af5 .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_adc22b166266 .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_9fbca78e2374 .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_dcec84df91f2 .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_0aa9f5b656e2 .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_82e08d522125 .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_eb70cf0c9b7a .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_dde134900f67 .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_59b2f80590ea .
+ba:bp_fae7d192b086 ba:hasAction ba:ba_75f5bea06301 .
+ba:bp_d49ad0454252 ba:hasAction ba:ba_39fcacb7e03c .
+
+# hasRule
+ba:bd_0d84478423ac ba:hasRule ba:br_42d7534a0b95 .
+ba:bd_0d84478423ac ba:hasRule ba:br_8a06b6956dce .
+ba:bd_0d84478423ac ba:hasRule ba:br_5ec243abe0ed .
+ba:bd_0d84478423ac ba:hasRule ba:br_b7df3e812f54 .
+ba:bd_0d84478423ac ba:hasRule ba:br_a5f8e777ba71 .
+ba:bd_0d84478423ac ba:hasRule ba:br_5994245d8aee .
+ba:bd_0d84478423ac ba:hasRule ba:br_876a3915b06b .
+ba:bd_0d84478423ac ba:hasRule ba:br_c57a17028165 .
+ba:bd_0d84478423ac ba:hasRule ba:br_6588d2e5f3fa .
+ba:bd_0d84478423ac ba:hasRule ba:br_ace1885436f9 .
+ba:bd_0d84478423ac ba:hasRule ba:br_0002120002ef .
+ba:bd_0d84478423ac ba:hasRule ba:br_2e2118e5ecd0 .
+ba:bd_0d84478423ac ba:hasRule ba:br_8402c2f26d53 .
+ba:bd_0d84478423ac ba:hasRule ba:br_c7c31f83e9fc .
+ba:bd_0d84478423ac ba:hasRule ba:br_039f0b4f2a1a .
+ba:bd_0d84478423ac ba:hasRule ba:br_78259c988c81 .
+ba:bd_0d84478423ac ba:hasRule ba:br_5c709f314de2 .
+ba:bd_0d84478423ac ba:hasRule ba:br_cf864975e2cf .
+ba:bd_0d84478423ac ba:hasRule ba:br_4022812065d8 .
+ba:bd_0d84478423ac ba:hasRule ba:br_a8a11223db6d .
+ba:bd_0d84478423ac ba:hasRule ba:br_2b8035bf1717 .
+ba:bd_0d84478423ac ba:hasRule ba:br_7af9715f131d .
+ba:bd_0d84478423ac ba:hasRule ba:br_aea832fde09e .
+ba:bd_0d84478423ac ba:hasRule ba:br_7e6be2b44edb .
+ba:bd_0d84478423ac ba:hasRule ba:br_abae17091f84 .
+ba:bd_0d84478423ac ba:hasRule ba:br_437aabad245c .
+ba:bd_0d84478423ac ba:hasRule ba:br_e673aeb8fefc .
+ba:bd_0d84478423ac ba:hasRule ba:br_bd77d297204a .
+ba:bd_0d84478423ac ba:hasRule ba:br_d155404ea019 .
+ba:bd_0d84478423ac ba:hasRule ba:br_9d380a6969af .
+ba:bd_0d84478423ac ba:hasRule ba:br_3a992f554b33 .
+ba:bd_0d84478423ac ba:hasRule ba:br_d9d2aebe15e8 .
+ba:bd_0d84478423ac ba:hasRule ba:br_1894e0cd2b20 .
+ba:bd_0d84478423ac ba:hasRule ba:br_60c103d364c9 .
+ba:bd_0d84478423ac ba:hasRule ba:br_d504aea78bc2 .
+ba:bd_0d84478423ac ba:hasRule ba:br_2fc333eedeb6 .
+ba:bd_0d84478423ac ba:hasRule ba:br_fa3105883865 .
+ba:bd_0d84478423ac ba:hasRule ba:br_96b0d255cd24 .
+ba:bd_0d84478423ac ba:hasRule ba:br_a5fd1da100dc .
+ba:bd_0d84478423ac ba:hasRule ba:br_e2653756c043 .
+ba:bd_0d84478423ac ba:hasRule ba:br_f52ef98689a7 .
+ba:bd_0d84478423ac ba:hasRule ba:br_416dfa1d6ab4 .
+ba:bd_0d84478423ac ba:hasRule ba:br_48648f99a63d .
+ba:bd_0d84478423ac ba:hasRule ba:br_eea1d1a6259d .
+ba:bd_0d84478423ac ba:hasRule ba:br_0d26bce1310a .
+ba:bd_0d84478423ac ba:hasRule ba:br_289e06f362f1 .
+ba:bd_0d84478423ac ba:hasRule ba:br_cf5a95631d53 .
+ba:bd_0d84478423ac ba:hasRule ba:br_693fb96aeef2 .
+ba:bd_0d84478423ac ba:hasRule ba:br_01187f3bbc45 .
+ba:bd_0d84478423ac ba:hasRule ba:br_c174d3e93b59 .
+ba:bd_0d84478423ac ba:hasRule ba:br_edaf9595d2fb .
+ba:bd_0d84478423ac ba:hasRule ba:br_8a704102ce64 .
+ba:bd_0d84478423ac ba:hasRule ba:br_5ee4b342d3a6 .
+ba:bd_0d84478423ac ba:hasRule ba:br_442f7c083be2 .
+ba:bd_0d84478423ac ba:hasRule ba:br_e6340fbc2e8d .
+ba:bd_0d84478423ac ba:hasRule ba:br_19e2861485fd .
+ba:bd_0d84478423ac ba:hasRule ba:br_0cabeab76ae8 .
+ba:bd_0d84478423ac ba:hasRule ba:br_5e77e8dfc334 .

@@ -1,0 +1,24 @@
+{
+  "schema": "agentloop.skillExecutors/v1",
+  "executors": [
+    {
+      "id": "hr-report-python-analysis",
+      "description": "Compute reproducible HR report distributions, ratios, rankings and month changes from a persisted hr-report-data result.",
+      "command": "python3",
+      "script": "scripts/analyze_hr_report.py",
+      "actions": [
+        {
+          "id": "analyze-report",
+          "description": "Analyze bounded raw HR report rows while keeping company and headquarters scopes separate and refusing unsupported cross-organization totals.",
+          "inputs": [
+            { "name": "input-file", "description": "Persisted agentloop.hrReportData/v1 query-report artifact returned by hr-report-data.", "required": true, "evidenceInput": "immutable_workspace_artifact" }
+          ],
+          "args": ["--input-file", "{{input-file}}"],
+          "producesEvidenceKinds": ["derived_aggregation"],
+          "result": "Per-organization metric series, complete dimension shares, workforce subset ratios and scope-separated rankings with deliveryFacts."
+        }
+      ]
+    }
+  ]
+}
+

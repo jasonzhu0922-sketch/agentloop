@@ -1,0 +1,14 @@
+{
+  "positive": [
+    {"input": "查询采购相关的数据分类", "expect_primary": "standard-query"},
+    {"input": "物流合同属于哪个业务对象", "expect_primary": "standard-query"},
+    {"input": "查指标 ID 数据元的值域和落标字段", "expect_primary": "standard-query"}
+  ],
+  "negative": [
+    {"input": "创建一个新的数据元", "expect_not": ["standard-query"]},
+    {"input": "修改物流合同业务对象定义", "expect_not": ["standard-query"]},
+    {"input": "发布这条数据标准", "expect_not": ["standard-query"]}
+  ],
+  "boundary": [{"input": "把数据元及字段映射导出为 Excel", "expect_primary": "standard-query", "expect_support": ["xlsx-materializer"]}],
+  "conflict": [{"input": "新建并发布数据分类", "expect_not": ["standard-query"], "expect_primary": "standard-maintenance"}]
+}

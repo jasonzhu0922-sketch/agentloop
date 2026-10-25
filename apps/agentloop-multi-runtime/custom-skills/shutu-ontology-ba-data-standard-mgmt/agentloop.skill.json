@@ -1,0 +1,32 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "shutu-ontology-ba-data-standard-mgmt",
+    "description": "平台数据标准管理业务架构技能，用于识别和管理数据标准基础管理与数据标准目录发布的业务流程、业务动作、承载页面及其数据链路（业务对象基础数据→打标签→按标签过滤写入目录），帮助智能体理解页面之间、页面展示数据之间、数据库表之间的逻辑关系，协助用户使用页面功能、理解数据。当用户询问业务对象管理、数据标准目录、数图打标发布、标准上下架口径等问题时使用。"
+  },
+  "activation": {
+    "semanticTags": [
+      "data-standard",
+      "data-governance",
+      "business-architecture"
+    ],
+    "intentExamples": [
+      "解释数据标准业务对象、标签发布和目录上下架的数据链路"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "support"
+    ],
+    "artifactKinds": [
+      "none"
+    ],
+    "sourceKinds": [
+      "document"
+    ],
+    "qaKinds": [
+      "content"
+    ],
+    "requiredSkills": []
+  }
+}

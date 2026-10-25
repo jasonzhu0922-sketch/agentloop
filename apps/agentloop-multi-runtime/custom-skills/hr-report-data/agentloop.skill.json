@@ -1,0 +1,48 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "hr-report-data",
+    "description": "读取部署配置的 Eplat 人事法人汇总报表原始行。用于 hr-report-analysis 的取数委派，或用户明确索取原始记录、组织匹配、可用月份或指标定义；不生成分析结论。"
+  },
+  "activation": {
+    "semanticTags": [
+      "hr-report-data",
+      "database-source",
+      "raw-records"
+    ],
+    "intentExamples": [
+      "按指定组织、月份和指标读取人事报表原始行，不作分析",
+      "仅匹配人事报表中的组织代码和组织范围",
+      "仅查询人事报表的最新可用月份",
+      "查看人事报表的指标目录、字段定义和原始数据粒度"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "source_provider"
+    ],
+    "artifactKinds": [
+      "none"
+    ],
+    "sourceKinds": [
+      "database"
+    ],
+    "qaKinds": [],
+    "requiredSkills": []
+  },
+  "execution": {
+    "manifest": "agentloop.executors.json"
+  },
+  "compatibility": {
+    "executionProfiles": [
+      "local_script"
+    ],
+    "producesEvidenceKinds": [
+      "source_summary",
+      "schema_summary",
+      "record_counts",
+      "structured_extraction_artifact",
+      "explicit_caveats"
+    ]
+  }
+}

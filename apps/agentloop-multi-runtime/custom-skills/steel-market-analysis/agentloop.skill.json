@@ -1,0 +1,43 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "steel-market-analysis",
+    "description": "将可核验的钢材数据库时序转为趋势、区间、比较或风险分析。用于需要钢材价格或指标数值结论的任务；它委派 mysql-steel-data 取得原始数据。纯目录、候选或原始时序读取使用 mysql-steel-data。"
+  },
+  "activation": {
+    "semanticTags": [
+      "steel-market",
+      "commodity-price",
+      "time-series-analysis"
+    ],
+    "intentExamples": [
+      "查询指定日期、地区、生产企业、牌号和规格对应的钢材价格或指标数值",
+      "比较钢材指标在一段时间内的走势、区间、涨跌或区域差异"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "primary_builder"
+    ],
+    "artifactKinds": [
+      "none"
+    ],
+    "sourceKinds": [
+      "database"
+    ],
+    "qaKinds": [
+      "content"
+    ],
+    "requiredSkills": [
+      "mysql-steel-data"
+    ]
+  },
+  "execution": {
+    "manifest": "agentloop.executors.json"
+  },
+  "compatibility": {
+    "executionProfiles": [
+      "local_script"
+    ]
+  }
+}

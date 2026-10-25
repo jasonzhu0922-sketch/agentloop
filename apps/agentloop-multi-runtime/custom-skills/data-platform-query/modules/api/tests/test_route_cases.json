@@ -1,0 +1,44 @@
+{
+  "positive": [
+    {
+      "input": "查一下这个 API 有哪些入参出参",
+      "expect_primary": "api-query"
+    },
+    {
+      "input": "这个接口是干什么的",
+      "expect_primary": "api-query"
+    },
+    {
+      "input": "检索数据中台的 API 目录，找采购相关的接口",
+      "expect_primary": "api-query"
+    }
+  ],
+  "negative": [
+    {
+      "input": "帮我创建一个新的 API",
+      "expect_not": ["api-query"]
+    },
+    {
+      "input": "修改这个接口的入参定义",
+      "expect_not": ["api-query"]
+    },
+    {
+      "input": "帮我写一份企业宣传文案",
+      "expect_not": ["api-query"]
+    }
+  ],
+  "boundary": [
+    {
+      "input": "把 API 目录查询结果整理成 Excel",
+      "expect_primary": "api-query",
+      "expect_support": ["xlsx-materializer"]
+    }
+  ],
+  "conflict": [
+    {
+      "input": "修改这个 API 的注册地址",
+      "expect_not": ["api-query"],
+      "expect_primary": "api-maintenance"
+    }
+  ]
+}

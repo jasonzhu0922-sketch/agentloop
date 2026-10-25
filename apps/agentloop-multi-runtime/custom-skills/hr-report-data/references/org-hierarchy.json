@@ -1,0 +1,6623 @@
+{
+  "description": "ORG_CODE层级映射：4位=全公司（含下属单位），4位+00=仅总部",
+  "totalPairs": 886,
+  "onlyBase": 311,
+  "onlyHq": 6,
+  "pairs": [
+    {
+      "baseCode": "BAAA",
+      "baseName": "上海一钢企业开发有限公司",
+      "hqCode": "BAAA00",
+      "hqName": "上海一钢企业开发有限公司(总部)"
+    },
+    {
+      "baseCode": "BAAN",
+      "baseName": "马鞍山钢铁有限公司",
+      "hqCode": "BAAN00",
+      "hqName": "马鞍山钢铁有限公司（总部）"
+    },
+    {
+      "baseCode": "BAAQ",
+      "baseName": "马鞍山钢铁股份有限公司",
+      "hqCode": "BAAQ00",
+      "hqName": "马鞍山钢铁股份有限公司（总部）"
+    },
+    {
+      "baseCode": "BAAW",
+      "baseName": "安徽马钢矿业资源集团有限公司",
+      "hqCode": "BAAW00",
+      "hqName": "安徽马钢矿业资源集团有限公司（总部）"
+    },
+    {
+      "baseCode": "BAAY",
+      "baseName": "资环链金（云南）再生资源有限公司",
+      "hqCode": "BAAY00",
+      "hqName": "欧冶链金（云南）再生资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BABA",
+      "baseName": "宝武重工有限公司",
+      "hqCode": "BABA00",
+      "hqName": "宝武重工有限公司（总部）"
+    },
+    {
+      "baseCode": "BABC",
+      "baseName": "股份总部1",
+      "hqCode": "BABC00",
+      "hqName": "股份总部1(总部)"
+    },
+    {
+      "baseCode": "BABE",
+      "baseName": "马钢集团物流有限公司",
+      "hqCode": "BABE00",
+      "hqName": "马钢集团物流有限公司（总部）"
+    },
+    {
+      "baseCode": "BABG",
+      "baseName": "马钢国际经济贸易有限公司",
+      "hqCode": "BABG00",
+      "hqName": "马钢国际经济贸易有限公司（总部）"
+    },
+    {
+      "baseCode": "BABJ",
+      "baseName": "资环链金（唐山）再生资源有限公司",
+      "hqCode": "BABJ00",
+      "hqName": "欧冶链金（唐山）再生资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BABM",
+      "baseName": "资环链金再生资源有限公司",
+      "hqCode": "BABM00",
+      "hqName": "资环链金再生资源有限公司（总部）"
+    },
+    {
+      "baseCode": "BABP",
+      "baseName": "资环链金（湛江）再生资源有限公司",
+      "hqCode": "BABP00",
+      "hqName": "欧冶链金（湛江）再生资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BABR",
+      "baseName": "资环链金（湖北）再生资源有限公司",
+      "hqCode": "BABR00",
+      "hqName": "欧冶链金（湖北）再生资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BABT",
+      "baseName": "安徽马钢化工能源科技有限公司",
+      "hqCode": "BABT00",
+      "hqName": "安徽马钢化工能源科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BABV",
+      "baseName": "马钢集团投资有限公司",
+      "hqCode": "BABV00",
+      "hqName": "马钢集团投资有限公司（总部）"
+    },
+    {
+      "baseCode": "BABW",
+      "baseName": "安徽欣创节能环保科技股份有限公司",
+      "hqCode": "BABW00",
+      "hqName": "安徽欣创节能环保科技股份有限公司（总部）"
+    },
+    {
+      "baseCode": "BABX",
+      "baseName": "武钢集团襄阳重型装备材料有限公司武汉分公司",
+      "hqCode": "BABX00",
+      "hqName": "武钢集团襄阳重型装备材料有限公司武汉分公司（总部）"
+    },
+    {
+      "baseCode": "BABY",
+      "baseName": "宝武重工有限公司新余分公司",
+      "hqCode": "BABY00",
+      "hqName": "宝武重工有限公司新余分公司（总部）"
+    },
+    {
+      "baseCode": "BACB",
+      "baseName": "飞马智科信息技术股份有限公司",
+      "hqCode": "BACB00",
+      "hqName": "飞马智科信息技术股份有限公司（总部）"
+    },
+    {
+      "baseCode": "BACE",
+      "baseName": "安徽马钢粉末冶金有限公司",
+      "hqCode": "BACE00",
+      "hqName": "安徽马钢粉末冶金有限公司（总部）"
+    },
+    {
+      "baseCode": "BACF",
+      "baseName": "宝武重工有限公司重庆分公司",
+      "hqCode": "BACF00",
+      "hqName": "宝武重工有限公司重庆分公司（总部）"
+    },
+    {
+      "baseCode": "BACG",
+      "baseName": "安徽马钢嘉华新型建材有限公司",
+      "hqCode": "BACG00",
+      "hqName": "安徽马钢嘉华新型建材有限公司（总部）"
+    },
+    {
+      "baseCode": "BACJ",
+      "baseName": "马钢集团招标咨询有限公司",
+      "hqCode": "BACJ00",
+      "hqName": "马钢集团招标咨询有限公司（总部）"
+    },
+    {
+      "baseCode": "BACM",
+      "baseName": "马钢集团康泰置地发展有限公司",
+      "hqCode": "BACM00",
+      "hqName": "马钢集团康泰置地发展有限公司（总部）"
+    },
+    {
+      "baseCode": "BACN",
+      "baseName": "上海槎南再生资源有限公司",
+      "hqCode": "BACN00",
+      "hqName": "上海槎南再生资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BACP",
+      "baseName": "宝武智慧轧辊技术服务（上海）有限公司重庆分公司",
+      "hqCode": "BACP00",
+      "hqName": "宝武智慧轧辊技术服务（上海）有限公司重庆分公司（总部）"
+    },
+    {
+      "baseCode": "BADB",
+      "baseName": "马鞍山马钢嘉华商品混凝土有限公司",
+      "hqCode": "BADB00",
+      "hqName": "马鞍山马钢嘉华商品混凝土有限公司(总部)"
+    },
+    {
+      "baseCode": "BADF",
+      "baseName": "马鞍山博力建设监理有限责任公司",
+      "hqCode": "BADF00",
+      "hqName": "马鞍山博力建设监理有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BADG",
+      "baseName": "马钢诚兴金属资源有限公司",
+      "hqCode": "BADG00",
+      "hqName": "马钢诚兴金属资源有限公司（总部）"
+    },
+    {
+      "baseCode": "BADK",
+      "baseName": "资环链金（韶关）再生资源有限公司",
+      "hqCode": "BADK00",
+      "hqName": "欧冶链金（韶关）再生资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BAEB",
+      "baseName": "宜昌宜美城市矿产资源循环利用有限公司",
+      "hqCode": "BAEB00",
+      "hqName": "宜昌宜美城市矿产资源循环利用有限公司(总部)"
+    },
+    {
+      "baseCode": "BAEH",
+      "baseName": "马钢集团南山矿业有限责任公司",
+      "hqCode": "BAEH00",
+      "hqName": "马钢集团南山矿业有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BAEJ",
+      "baseName": "马钢集团姑山矿业有限责任公司",
+      "hqCode": "BAEJ00",
+      "hqName": "马钢集团姑山矿业有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BAEK",
+      "baseName": "山西瑞赛格废弃资源综合利用有限公司",
+      "hqCode": "BAEK00",
+      "hqName": "山西瑞赛格废弃资源综合利用有限公司(总部)"
+    },
+    {
+      "baseCode": "BAER",
+      "baseName": "马钢（集团）财务有限公司",
+      "hqCode": "BAER00",
+      "hqName": "马钢（集团）财务有限公司（总部）"
+    },
+    {
+      "baseCode": "BAFA",
+      "baseName": "埃斯科特钢有限公司",
+      "hqCode": "BAFA00",
+      "hqName": "埃斯科特钢有限公司(总部)"
+    },
+    {
+      "baseCode": "BAFC",
+      "baseName": "资环链金（四川）再生资源有限公司",
+      "hqCode": "BAFC00",
+      "hqName": "欧冶链金（四川）再生资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BAFJ",
+      "baseName": "资环链金（福建）再生资源有限公司",
+      "hqCode": "BAFJ00",
+      "hqName": "欧冶链金（福建）再生资源有限公司（总部）"
+    },
+    {
+      "baseCode": "BAFM",
+      "baseName": "资环链金（靖江）再生资源有限公司",
+      "hqCode": "BAFM00",
+      "hqName": "欧冶链金（靖江）再生资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BAFN",
+      "baseName": "宝武集团马钢轨交材料科技有限公司",
+      "hqCode": "BAFN00",
+      "hqName": "宝武集团马钢轨交材料科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BAFV",
+      "baseName": "安徽长江钢铁股份有限公司",
+      "hqCode": "BAFV00",
+      "hqName": "安徽长江钢铁股份有限公司（总部）"
+    },
+    {
+      "baseCode": "BAFW",
+      "baseName": "马钢（合肥）钢铁有限责任公司",
+      "hqCode": "BAFW00",
+      "hqName": "马钢（合肥）钢铁有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BAFY",
+      "baseName": "马钢（上海）钢材销售有限公司",
+      "hqCode": "BAFY00",
+      "hqName": "马钢（上海）钢材销售有限公司（总部）"
+    },
+    {
+      "baseCode": "BAGA",
+      "baseName": "马钢（杭州）钢材销售有限公司",
+      "hqCode": "BAGA00",
+      "hqName": "马钢（杭州）钢材销售有限公司（总部）"
+    },
+    {
+      "baseCode": "BAGC",
+      "baseName": "马钢（广州）钢材加工有限公司",
+      "hqCode": "BAGC00",
+      "hqName": "马钢（广州）钢材加工有限公司（总部）"
+    },
+    {
+      "baseCode": "BAGE",
+      "baseName": "河北格锐恩新材料有限公司",
+      "hqCode": "BAGE00",
+      "hqName": "河北格锐恩新材料有限公司（总部）"
+    },
+    {
+      "baseCode": "BAGH",
+      "baseName": "宝武智慧轧辊技术服务（上海）有限公司马鞍山分公司",
+      "hqCode": "BAGH00",
+      "hqName": "宝武智慧轧辊技术服务（上海）有限公司马鞍山分公司（总部）"
+    },
+    {
+      "baseCode": "BAGJ",
+      "baseName": "宝武智慧轧辊技术服务（上海）有限公司",
+      "hqCode": "BAGJ00",
+      "hqName": "宝武智慧轧辊技术服务（上海）有限公司（总部）"
+    },
+    {
+      "baseCode": "BAGM",
+      "baseName": "马钢（合肥）材料科技有限公司",
+      "hqCode": "BAGM00",
+      "hqName": "马钢（合肥）材料科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BAGR",
+      "baseName": "马钢（合肥）钢材加工有限公司",
+      "hqCode": "BAGR00",
+      "hqName": "马钢（合肥）钢材加工有限公司（总部）"
+    },
+    {
+      "baseCode": "BAGS",
+      "baseName": "欧冶链金（甘肃）再生资源有限公司",
+      "hqCode": "BAGS00",
+      "hqName": "欧冶链金（甘肃）再生资源有限公司（总部）"
+    },
+    {
+      "baseCode": "BAGT",
+      "baseName": "马钢（金华）钢材加工有限公司",
+      "hqCode": "BAGT00",
+      "hqName": "马钢（金华）钢材加工有限公司（总部）"
+    },
+    {
+      "baseCode": "BAGW",
+      "baseName": "马鞍山钢铁无锡销售有限公司",
+      "hqCode": "BAGW00",
+      "hqName": "马鞍山钢铁无锡销售有限公司（总部）"
+    },
+    {
+      "baseCode": "BAGX",
+      "baseName": "马钢（芜湖）材料技术有限公司",
+      "hqCode": "BAGX00",
+      "hqName": "马钢（芜湖）材料技术有限公司（总部）"
+    },
+    {
+      "baseCode": "BAHA",
+      "baseName": "马钢（芜湖）加工配售有限公司",
+      "hqCode": "BAHA00",
+      "hqName": "马钢（芜湖）加工配售有限公司（总部）"
+    },
+    {
+      "baseCode": "BAHE",
+      "baseName": "马钢（武汉）材料技术有限公司",
+      "hqCode": "BAHE00",
+      "hqName": "马钢（武汉）材料技术有限公司（总部）"
+    },
+    {
+      "baseCode": "BAHF",
+      "baseName": "马钢（扬州）钢材加工有限公司",
+      "hqCode": "BAHF00",
+      "hqName": "马钢（扬州）钢材加工有限公司（总部）"
+    },
+    {
+      "baseCode": "BAHN",
+      "baseName": "马钢（长春）钢材销售有限公司",
+      "hqCode": "BAHN00",
+      "hqName": "马钢（长春）钢材销售有限公司（总部）"
+    },
+    {
+      "baseCode": "BAHR",
+      "baseName": "湖北皓润新材料科技有限公司",
+      "hqCode": "BAHR00",
+      "hqName": "湖北皓润新材料科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BAHU",
+      "baseName": "马钢（重庆）材料技术有限公司",
+      "hqCode": "BAHU00",
+      "hqName": "马钢（重庆）材料技术有限公司（总部）"
+    },
+    {
+      "baseCode": "BAJC",
+      "baseName": "南京马钢钢材销售有限公司",
+      "hqCode": "BAJC00",
+      "hqName": "南京马钢钢材销售有限公司（总部）"
+    },
+    {
+      "baseCode": "BAJG",
+      "baseName": "宝武精高（安徽）科技有限公司",
+      "hqCode": "BAJG00",
+      "hqName": "宝武精高（安徽）科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BAJP",
+      "baseName": "马鞍山马钢慈湖钢材加工配售有限公司",
+      "hqCode": "BAJP00",
+      "hqName": "马鞍山马钢慈湖钢材加工配售有限公司（总部）"
+    },
+    {
+      "baseCode": "BAJS",
+      "baseName": "山东神州再生资源有限公司",
+      "hqCode": "BAJS00",
+      "hqName": "山东神州再生资源有限公司（总部）"
+    },
+    {
+      "baseCode": "BAJX",
+      "baseName": "欧冶链金（江西）再生资源有限公司",
+      "hqCode": "BAJX00",
+      "hqName": "欧冶链金（江西）再生资源有限公司（总部）"
+    },
+    {
+      "baseCode": "BAJY",
+      "baseName": "欧冶链金（阳泉）再生资源有限公司",
+      "hqCode": "BAJY00",
+      "hqName": "欧冶链金（阳泉）再生资源有限公司（总部）"
+    },
+    {
+      "baseCode": "BAKB",
+      "baseName": "白象山矿业分公司",
+      "hqCode": "BAKB00",
+      "hqName": "白象山矿业分公司（总部）"
+    },
+    {
+      "baseCode": "BAKE",
+      "baseName": "宝武重工有限公司上海分公司",
+      "hqCode": "BAKE00",
+      "hqName": "宝武重工有限公司上海分公司(总部)"
+    },
+    {
+      "baseCode": "BAKJ",
+      "baseName": "钟九矿业分公司",
+      "hqCode": "BAKJ00",
+      "hqName": "钟九矿业分公司（总部）"
+    },
+    {
+      "baseCode": "BAKU",
+      "baseName": "安徽马钢张庄矿业有限责任公司",
+      "hqCode": "BAKU00",
+      "hqName": "安徽马钢张庄矿业有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BAMM",
+      "baseName": "安徽马钢罗河矿业有限责任公司",
+      "hqCode": "BAMM00",
+      "hqName": "安徽马钢罗河矿业有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BAMQ",
+      "baseName": "安徽马钢矿业资源集团建材科技有限公司",
+      "hqCode": "BAMQ00",
+      "hqName": "安徽马钢矿业资源集团建材科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BANJ",
+      "baseName": "宝武智慧轧辊技术服务（上海）有限公司南京分公司",
+      "hqCode": "BANJ00",
+      "hqName": "宝武智慧轧辊技术服务（上海）有限公司南京分公司（总部）"
+    },
+    {
+      "baseCode": "BANK",
+      "baseName": "宝武重工有限公司南京梅山分公司",
+      "hqCode": "BANK00",
+      "hqName": "宝武重工有限公司南京梅山分公司(总部)"
+    },
+    {
+      "baseCode": "BANM",
+      "baseName": "安徽马钢矿业资源集团材料科技有限公司",
+      "hqCode": "BANM00",
+      "hqName": "安徽马钢矿业资源集团材料科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BANP",
+      "baseName": "长三角（合肥）数字科技有限公司",
+      "hqCode": "BANP00",
+      "hqName": "长三角（合肥）数字科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BAPC",
+      "baseName": "桃冲矿业公司",
+      "hqCode": "BAPC00",
+      "hqName": "桃冲矿业公司(总部)"
+    },
+    {
+      "baseCode": "BAPN",
+      "baseName": "马钢集团测绘有限责任公司",
+      "hqCode": "BAPN00",
+      "hqName": "马钢集团测绘有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BAPW",
+      "baseName": "湖北绿邦再生资源有限公司",
+      "hqCode": "BAPW00",
+      "hqName": "湖北绿邦再生资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BARJ",
+      "baseName": "安徽马钢东力传动设备有限公司",
+      "hqCode": "BARJ00",
+      "hqName": "安徽马钢东力传动设备有限公司（总部）"
+    },
+    {
+      "baseCode": "BARK",
+      "baseName": "资环链金（阜阳）再生资源有限公司",
+      "hqCode": "BARK00",
+      "hqName": "欧冶链金（阜阳）再生资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BART",
+      "baseName": "安徽马钢设备检修有限公司",
+      "hqCode": "BART00",
+      "hqName": "安徽马钢设备检修有限公司（总部）"
+    },
+    {
+      "baseCode": "BARY",
+      "baseName": "马钢集团设计研究院有限责任公司",
+      "hqCode": "BARY00",
+      "hqName": "马钢集团设计研究院有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BASF",
+      "baseName": "宝武重工有限公司上海宝山分公司",
+      "hqCode": "BASF00",
+      "hqName": "宝武重工有限公司上海宝山分公司(总部)"
+    },
+    {
+      "baseCode": "BASQ",
+      "baseName": "安徽马钢物流集装箱联运有限公司",
+      "hqCode": "BASQ00",
+      "hqName": "安徽马钢物流集装箱联运有限公司（总部）"
+    },
+    {
+      "baseCode": "BASW",
+      "baseName": "安徽省马钢矿业资源设备工程科技分公司",
+      "hqCode": "BASW00",
+      "hqName": "安徽省马钢矿业资源设备工程科技分公司(总部)"
+    },
+    {
+      "baseCode": "BASX",
+      "baseName": "山西环球再生资源有限公司",
+      "hqCode": "BASX00",
+      "hqName": "山西环球再生资源有限公司（总部）"
+    },
+    {
+      "baseCode": "BATF",
+      "baseName": "马钢（合肥）物流有限责任公司",
+      "hqCode": "BATF00",
+      "hqName": "马钢（合肥）物流有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BATP",
+      "baseName": "安徽中联海运有限公司",
+      "hqCode": "BATP00",
+      "hqName": "安徽中联海运有限公司（总部）"
+    },
+    {
+      "baseCode": "BATR",
+      "baseName": "安徽马钢汽车运输服务有限公司",
+      "hqCode": "BATR00",
+      "hqName": "安徽马钢汽车运输服务有限公司（总部）"
+    },
+    {
+      "baseCode": "BATS",
+      "baseName": "安徽欣创节能环保科技股份有限公司合肥分公司",
+      "hqCode": "BATS00",
+      "hqName": "安徽欣创节能环保科技股份有限公司合肥分公司（总部）"
+    },
+    {
+      "baseCode": "BATX",
+      "baseName": "上海欧冶链金国际贸易有限公司",
+      "hqCode": "BATX00",
+      "hqName": "上海欧冶链金国际贸易有限公司（总部）"
+    },
+    {
+      "baseCode": "BATY",
+      "baseName": "包头腾亿工贸有限责任公司",
+      "hqCode": "BATY00",
+      "hqName": "包头腾亿工贸有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BAUG",
+      "baseName": "上海宝长燃能源发展有限公司",
+      "hqCode": "BAUG00",
+      "hqName": "上海宝长燃能源发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BAUM",
+      "baseName": "资环链金物宝（安徽）再生资源有限公司",
+      "hqCode": "BAUM00",
+      "hqName": "欧冶链金物宝（安徽）再生资源有限公司（总部）"
+    },
+    {
+      "baseCode": "BAUN",
+      "baseName": "马钢智信资源科技有限公司",
+      "hqCode": "BAUN00",
+      "hqName": "马钢智信资源科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BAUP",
+      "baseName": "马钢利华金属资源有限公司",
+      "hqCode": "BAUP00",
+      "hqName": "马钢利华有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BAVC",
+      "baseName": "山西福马炭材料科技有限公司",
+      "hqCode": "BAVC00",
+      "hqName": "山西福马炭材料科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BAVF",
+      "baseName": "安徽马钢气体科技有限公司",
+      "hqCode": "BAVF00",
+      "hqName": "安徽马钢气体科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BAVK",
+      "baseName": "马鞍山晨马氢能源科技有限公司",
+      "hqCode": "BAVK00",
+      "hqName": "马鞍山晨马氢能源科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BAVP",
+      "baseName": "宝武重工有限公司钢结构工程分公司",
+      "hqCode": "BAVP00",
+      "hqName": "宝武重工有限公司钢结构工程分公司(总部)"
+    },
+    {
+      "baseCode": "BAVS",
+      "baseName": "铜陵有色金翔物资有限责任公司",
+      "hqCode": "BAVS00",
+      "hqName": "铜陵有色金翔物资有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BAVX",
+      "baseName": "安徽马钢矿业资源集团矿山科技服务有限公司",
+      "hqCode": "BAVX00",
+      "hqName": "安徽马钢矿业资源集团矿山科技服务有限公司(总部)"
+    },
+    {
+      "baseCode": "BAWH",
+      "baseName": "武汉钢铁集团轧辊有限责任公司",
+      "hqCode": "BAWH00",
+      "hqName": "武汉钢铁集团轧辊有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BAWR",
+      "baseName": "资环链金（萍乡）再生资源有限公司",
+      "hqCode": "BAWR00",
+      "hqName": "欧冶链金（萍乡）再生资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BAWX",
+      "baseName": "安徽马钢矿业资源集团有限公司生态修复科技分公司",
+      "hqCode": "BAWX00",
+      "hqName": "安徽马钢矿业资源集团有限公司生态修复科技分公司(总部)"
+    },
+    {
+      "baseCode": "BAWY",
+      "baseName": "马鞍山欣创佰能能源科技有限公司",
+      "hqCode": "BAWY00",
+      "hqName": "马鞍山欣创佰能能源科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BAXB",
+      "baseName": "安徽马钢欣巴环保科技有限公司",
+      "hqCode": "BAXB00",
+      "hqName": "安徽马钢欣巴环保科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BAXC",
+      "baseName": "辽宁吉和源再生资源有限公司",
+      "hqCode": "BAXC00",
+      "hqName": "辽宁吉和源再生资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BAXE",
+      "baseName": "资环链金（新疆）再生资源有限公司",
+      "hqCode": "BAXE00",
+      "hqName": "欧冶链金（新疆）再生资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BAXG",
+      "baseName": "福州鑫广泰工贸有限公司",
+      "hqCode": "BAXG00",
+      "hqName": "福州鑫广泰工贸有限公司（总部）"
+    },
+    {
+      "baseCode": "BAXK",
+      "baseName": "马鞍山马钢华阳设备诊断工程有限公司",
+      "hqCode": "BAXK00",
+      "hqName": "马鞍山马钢华阳设备诊断工程有限公司（总部）"
+    },
+    {
+      "baseCode": "BAXN",
+      "baseName": "贵州欣川节能环保有限责任公司",
+      "hqCode": "BAXN00",
+      "hqName": "贵州欣川节能环保有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BAXP",
+      "baseName": "马鞍山市洁源环保有限公司",
+      "hqCode": "BAXP00",
+      "hqName": "马鞍山市洁源环保有限公司（总部）"
+    },
+    {
+      "baseCode": "BAXR",
+      "baseName": "湖北新能量再生材料科技有限公司",
+      "hqCode": "BAXR00",
+      "hqName": "湖北新能量再生材料科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BAXW",
+      "baseName": "宝武重工轧辊协同发展事业部",
+      "hqCode": "BAXW00",
+      "hqName": "宝武重工轧辊协同发展事业部(总部)"
+    },
+    {
+      "baseCode": "BAYG",
+      "baseName": "资环链金（广西）再生资源有限公司",
+      "hqCode": "BAYG00",
+      "hqName": "欧冶链金（广西）再生资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BAYQ",
+      "baseName": "爱智机器人(上海)有限公司",
+      "hqCode": "BAYQ00",
+      "hqName": "爱智机器人(上海)有限公司(总部)"
+    },
+    {
+      "baseCode": "BAYR",
+      "baseName": "河北金瑞隆金属制品有限公司",
+      "hqCode": "BAYR00",
+      "hqName": "河北金瑞隆金属制品有限公司（总部）"
+    },
+    {
+      "baseCode": "BBAA",
+      "baseName": "新疆八一钢铁股份有限公司",
+      "hqCode": "BBAA00",
+      "hqName": "新疆八一钢铁股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BBAB",
+      "baseName": "新疆八钢集团公司炼铁分公司",
+      "hqCode": "BBAB00",
+      "hqName": "新疆八钢集团公司炼铁分公司(总部)"
+    },
+    {
+      "baseCode": "BBAC",
+      "baseName": "新疆八钢集团公司能源中心",
+      "hqCode": "BBAC00",
+      "hqName": "新疆八钢集团公司能源中心(总部)"
+    },
+    {
+      "baseCode": "BBAD",
+      "baseName": "新疆八钢集团公司供应分公司",
+      "hqCode": "BBAD00",
+      "hqName": "新疆八钢集团公司物流运输分公司(总部)"
+    },
+    {
+      "baseCode": "BBAF",
+      "baseName": "新疆八钢集团公司技术开发中心",
+      "hqCode": "BBAF00",
+      "hqName": "新疆八钢集团公司技术开发中心(总部)"
+    },
+    {
+      "baseCode": "BBAH",
+      "baseName": "新疆八钢集团公司冶金信息分公司",
+      "hqCode": "BBAH00",
+      "hqName": "新疆八钢集团公司冶金信息分公司(总部)"
+    },
+    {
+      "baseCode": "BBAJ",
+      "baseName": "新疆钢铁雅满苏矿业有限责任公司",
+      "hqCode": "BBAJ00",
+      "hqName": "新疆钢铁雅满苏矿业有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BBAK",
+      "baseName": "富蕴蒙库铁矿有限责任公司",
+      "hqCode": "BBAK00",
+      "hqName": "富蕴蒙库铁矿有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BBAM",
+      "baseName": "新疆焦煤（集团）有限责任公司",
+      "hqCode": "BBAM00",
+      "hqName": "新疆焦煤（集团）有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BBAP",
+      "baseName": "新疆八钢国际贸易股份有限公司",
+      "hqCode": "BBAP00",
+      "hqName": "新疆八钢国际贸易股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BBAR",
+      "baseName": "新疆金业城市矿产开发有限公司",
+      "hqCode": "BBAR00",
+      "hqName": "新疆金业城市矿产开发有限公司(总部)"
+    },
+    {
+      "baseCode": "BBAS",
+      "baseName": "新疆八钢金属制品有限公司",
+      "hqCode": "BBAS00",
+      "hqName": "新疆八钢金属制品有限公司(总部)"
+    },
+    {
+      "baseCode": "BBAT",
+      "baseName": "新疆八钢板簧有限公司",
+      "hqCode": "BBAT00",
+      "hqName": "新疆八钢金属制品有限公司板簧分公司(总部)"
+    },
+    {
+      "baseCode": "BBAV",
+      "baseName": "新疆八钢钢管有限责任公司",
+      "hqCode": "BBAV00",
+      "hqName": "新疆八钢钢管有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BBAX",
+      "baseName": "新疆八钢金属制品有限公司乌鲁木齐分公司",
+      "hqCode": "BBAX00",
+      "hqName": "新疆八钢金属制品有限公司乌鲁木齐分公司(总部)"
+    },
+    {
+      "baseCode": "BBBA",
+      "baseName": "新疆钢铁设计院有限责任公司",
+      "hqCode": "BBBA00",
+      "hqName": "新疆钢铁设计院有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BBBE",
+      "baseName": "新疆金属材料有限责任公司",
+      "hqCode": "BBBE00",
+      "hqName": "新疆金属材料有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BBCE",
+      "baseName": "马鞍山马钢电气修造有限公司",
+      "hqCode": "BBCE00",
+      "hqName": "马鞍山马钢电气修造有限公司(总部)"
+    },
+    {
+      "baseCode": "BBDV",
+      "baseName": "安徽马钢危险品运输有限公司",
+      "hqCode": "BBDV00",
+      "hqName": "安徽马钢危险品运输有限公司（总部）"
+    },
+    {
+      "baseCode": "BBWQ",
+      "baseName": "新疆八钢巴楚金属有限公司",
+      "hqCode": "BBWQ00",
+      "hqName": "新疆八钢巴楚金属有限公司(总部)"
+    },
+    {
+      "baseCode": "BCAM",
+      "baseName": "上海宝钢印铁有限公司",
+      "hqCode": "BCAM00",
+      "hqName": null
+    },
+    {
+      "baseCode": "BCAN",
+      "baseName": "河北宝钢制罐北方有限公司",
+      "hqCode": "BCAN00",
+      "hqName": "河北宝钢制罐北方有限公司(总部)"
+    },
+    {
+      "baseCode": "BCAR",
+      "baseName": "钢结构事业部",
+      "hqCode": "BCAR00",
+      "hqName": "上海冠达尔钢结构有限公司(总部)"
+    },
+    {
+      "baseCode": "BCAS",
+      "baseName": "上海宝钢建筑工程设计有限公司（待注销）",
+      "hqCode": "BCAS00",
+      "hqName": "研究院院部"
+    },
+    {
+      "baseCode": "BCBS",
+      "baseName": "上海宝钢包装股份有限公司宝申制盖分公司",
+      "hqCode": "BCBS00",
+      "hqName": "上海宝钢包装股份有限公司宝申制盖分公司（总部）"
+    },
+    {
+      "baseCode": "BCEC",
+      "baseName": "兰州宝钢制罐有限公司",
+      "hqCode": "BCEC00",
+      "hqName": "兰州宝钢制罐有限公司(总部)"
+    },
+    {
+      "baseCode": "BCGY",
+      "baseName": "越南宝钢制罐(顺化)有限公司",
+      "hqCode": "BCGY00",
+      "hqName": "越南宝钢制罐顺化有限公司(总部)"
+    },
+    {
+      "baseCode": "BCHB",
+      "baseName": "武汉宝钢印铁有限公司",
+      "hqCode": "BCHB00",
+      "hqName": "武汉宝钢包装有限公司(总部)"
+    },
+    {
+      "baseCode": "BCKR",
+      "baseName": "越南宝钢制罐有限公司",
+      "hqCode": "BCKR00",
+      "hqName": "越南宝钢制罐有限公司(总部)"
+    },
+    {
+      "baseCode": "BCMK",
+      "baseName": "马来西亚宝钢制罐有限公司",
+      "hqCode": "BCMK00",
+      "hqName": "马来西亚宝钢制罐有限公司(总部)"
+    },
+    {
+      "baseCode": "BCMN",
+      "baseName": "贵州宝钢制罐有限公司",
+      "hqCode": "BCMN00",
+      "hqName": "贵州宝钢制罐有限公司(总部)"
+    },
+    {
+      "baseCode": "BCNK",
+      "baseName": "河南宝钢制罐有限公司",
+      "hqCode": "BCNK00",
+      "hqName": "河南宝钢制罐有限公司(总部)"
+    },
+    {
+      "baseCode": "BCNT",
+      "baseName": "哈尔滨宝钢制罐有限公司",
+      "hqCode": "BCNT00",
+      "hqName": "哈尔滨宝钢制罐有限公司(总部)"
+    },
+    {
+      "baseCode": "BCRE",
+      "baseName": "安徽宝钢制罐有限公司",
+      "hqCode": "BCRE00",
+      "hqName": "安徽宝钢制罐有限公司(总部)"
+    },
+    {
+      "baseCode": "BCTW",
+      "baseName": "柬埔寨宝钢制罐有限公司",
+      "hqCode": "BCTW00",
+      "hqName": "柬埔寨宝钢制罐有限公司(总部)"
+    },
+    {
+      "baseCode": "BCXG",
+      "baseName": "厦门宝钢制罐有限公司",
+      "hqCode": "BCXG00",
+      "hqName": "厦门宝钢制罐有限公司（总部）"
+    },
+    {
+      "baseCode": "BCYU",
+      "baseName": "宝钢包装（意大利）有限公司",
+      "hqCode": "BCYU00",
+      "hqName": "宝钢包装（意大利）有限公司(总部)"
+    },
+    {
+      "baseCode": "BDET",
+      "baseName": "南京格灵化工有限公司2",
+      "hqCode": "BDET00",
+      "hqName": "南京格灵化工有限公司2(总部)"
+    },
+    {
+      "baseCode": "BDNJ",
+      "baseName": "南京宝地梅山产城发展有限公司",
+      "hqCode": "BDNJ00",
+      "hqName": "南京宝地梅山产城发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BEAA",
+      "baseName": "苏州冶金机械厂",
+      "hqCode": "BEAA00",
+      "hqName": "宝钢苏冶重工有限公司(总部)"
+    },
+    {
+      "baseCode": "BEAC",
+      "baseName": "上海宝钢铸造有限公司",
+      "hqCode": "BEAC00",
+      "hqName": "上海宝钢铸造有限公司（总部）"
+    },
+    {
+      "baseCode": "BEAD",
+      "baseName": "常州轧辊制造公司",
+      "hqCode": "BEAD00",
+      "hqName": "宝钢轧辊科技有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BEAG",
+      "baseName": "上海宝申建筑工程技术咨询有限公司",
+      "hqCode": "BEAG00",
+      "hqName": "上海宝申建筑工程技术咨询有限公司(总部)"
+    },
+    {
+      "baseCode": "BEAJ",
+      "baseName": "上海江南轧辊有限公司",
+      "hqCode": "BEAJ00",
+      "hqName": "上海江南轧辊有限公司(总部)"
+    },
+    {
+      "baseCode": "BEAN",
+      "baseName": "常州宝菱重工机械有限公司",
+      "hqCode": "BEAN00",
+      "hqName": "常州宝菱重工机械有限公司(总部)"
+    },
+    {
+      "baseCode": "BEAP",
+      "baseName": "上海科德轧辊表面处理有限公司",
+      "hqCode": "BEAP00",
+      "hqName": "上海科德公司(总部)"
+    },
+    {
+      "baseCode": "BEAW",
+      "baseName": "上海宝钢铸造有限公司武汉分公司",
+      "hqCode": "BEAW00",
+      "hqName": "上海宝钢铸造有限公司武汉分公司（总部）"
+    },
+    {
+      "baseCode": "BEXP",
+      "baseName": "上海科德轧辊表面处理有限公司武汉分公司",
+      "hqCode": "BEXP00",
+      "hqName": "上海科德轧辊表面处理有限公司武汉分公司(总部)"
+    },
+    {
+      "baseCode": "BGAF",
+      "baseName": "绍兴宝旌复合材料有限公司",
+      "hqCode": "BGAF00",
+      "hqName": "绍兴宝旌复合材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BGAN",
+      "baseName": "新疆八钢矿业资源有限公司",
+      "hqCode": "BGAN00",
+      "hqName": "新疆八钢矿业资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BGAP",
+      "baseName": "宝钢特钢长材有限公司",
+      "hqCode": "BGAP00",
+      "hqName": "宝钢特钢长材有限公司(总部)"
+    },
+    {
+      "baseCode": "BGAS",
+      "baseName": "上海宝钢心越人才科技有限公司",
+      "hqCode": "BGAS00",
+      "hqName": "上海宝钢心越人才科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BGAX",
+      "baseName": "江苏宝锡炉料有限公司",
+      "hqCode": "BGAX00",
+      "hqName": "江苏宝锡炉料加工有限公司(总部)"
+    },
+    {
+      "baseCode": "BGBD",
+      "baseName": "宝信软件（广西）有限公司",
+      "hqCode": "BGBD00",
+      "hqName": "宝信软件（广西）有限公司(总部)"
+    },
+    {
+      "baseCode": "BGBK",
+      "baseName": "宝钢克拉玛依钢管有限公司",
+      "hqCode": "BGBK00",
+      "hqName": "宝钢克拉玛依钢管有限公司(总部)"
+    },
+    {
+      "baseCode": "BGBT",
+      "baseName": "上海快应信息科技有限公司",
+      "hqCode": "BGBT00",
+      "hqName": "上海快应信息科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BGBW",
+      "baseName": "武汉钢铁有限公司",
+      "hqCode": "BGBW00",
+      "hqName": "武汉钢铁有限公司(总部)"
+    },
+    {
+      "baseCode": "BGBX",
+      "baseName": "宝信软件（南京）有限公司",
+      "hqCode": "BGBX00",
+      "hqName": "宝信软件（南京）有限公司(总部)"
+    },
+    {
+      "baseCode": "BGCD",
+      "baseName": "宝信软件（成都）有限公司",
+      "hqCode": "BGCD00",
+      "hqName": "宝信软件（成都）有限公司(总部)"
+    },
+    {
+      "baseCode": "BGCH",
+      "baseName": "湛江宝钢物流配送有限公司",
+      "hqCode": "BGCH00",
+      "hqName": "湛江宝钢物流配送有限公司(总部)"
+    },
+    {
+      "baseCode": "BGCS",
+      "baseName": "苏州宝化炭黑有限公司",
+      "hqCode": "BGCS00",
+      "hqName": "苏州宝化炭黑有限公司(总部)"
+    },
+    {
+      "baseCode": "BGCV",
+      "baseName": "上海宝景信息技术发展有限公司",
+      "hqCode": "BGCV00",
+      "hqName": "上海宝景信息技术发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BGDF",
+      "baseName": "兰州宝航新能源材料有限公司",
+      "hqCode": "BGDF00",
+      "hqName": "兰州宝航新能源材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BGDN",
+      "baseName": "上海宝信数据中心有限公司",
+      "hqCode": "BGDN00",
+      "hqName": "上海宝信数据中心有限公司(总部)"
+    },
+    {
+      "baseCode": "BGDY",
+      "baseName": "浙江舟山武港码头有限公司",
+      "hqCode": "BGDY00",
+      "hqName": "浙江舟山武港码头有限公司(总部)"
+    },
+    {
+      "baseCode": "BGED",
+      "baseName": "浙江宝旌炭材料有限公司",
+      "hqCode": "BGED00",
+      "hqName": "浙江宝旌炭材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BGEG",
+      "baseName": "浙江宝万碳纤维有限公司",
+      "hqCode": "BGEG00",
+      "hqName": "浙江宝万碳纤维有限公司(总部)"
+    },
+    {
+      "baseCode": "BGEJ",
+      "baseName": "宝信软件（南昌）有限公司",
+      "hqCode": "BGEJ00",
+      "hqName": "宝信软件（南昌）有限公司(总部)"
+    },
+    {
+      "baseCode": "BGEN",
+      "baseName": "宝信软件-湛江分公司",
+      "hqCode": "BGEN00",
+      "hqName": "宝信软件-湛江分公司(总部)"
+    },
+    {
+      "baseCode": "BGEY",
+      "baseName": "河北宝宣数据科技有限公司",
+      "hqCode": "BGEY00",
+      "hqName": "河北宝宣数据科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BGFN",
+      "baseName": "武汉威仕科钢材加工配送有限公司",
+      "hqCode": "BGFN00",
+      "hqName": "武汉威仕科钢材加工配送有限公司(总部)"
+    },
+    {
+      "baseCode": "BGFS",
+      "baseName": "绍兴宝旌复合材料技术研发有限公司",
+      "hqCode": "BGFS00",
+      "hqName": "绍兴宝旌复合材料技术研发有限公司(总部)"
+    },
+    {
+      "baseCode": "BGGB",
+      "baseName": "Aquila Resources Pty Ltd",
+      "hqCode": "BGGB00",
+      "hqName": "Aquila Resources Pty Ltd（总部）"
+    },
+    {
+      "baseCode": "BGGM",
+      "baseName": "开封威仕科材料技术有限公司",
+      "hqCode": "BGGM00",
+      "hqName": "开封威仕科材料技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BGGX",
+      "baseName": "宝信云计算（重庆）有限公司",
+      "hqCode": "BGGX00",
+      "hqName": "宝信云计算（重庆）有限公司(总部)"
+    },
+    {
+      "baseCode": "BGGY",
+      "baseName": "武汉平煤武钢联合焦化有限责任公司",
+      "hqCode": "BGGY00",
+      "hqName": "武汉平煤武汉联合焦化有限公司(总部)"
+    },
+    {
+      "baseCode": "BGHD",
+      "baseName": "宝钢资源（国际）有限公司",
+      "hqCode": "BGHD00",
+      "hqName": "宝钢资源（国际）有限公司(总部)"
+    },
+    {
+      "baseCode": "BGHE",
+      "baseName": "宝钢欧洲有限公司",
+      "hqCode": "BGHE00",
+      "hqName": "宝钢欧洲贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BGHF",
+      "baseName": "好生活（上海）信息科技有限公司",
+      "hqCode": "BGHF00",
+      "hqName": "好生活（上海）信息科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BGHG",
+      "baseName": "武钢集团国际经济贸易有限公司（采购部）",
+      "hqCode": "BGHG00",
+      "hqName": "武钢集团国际经济贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BGHJ",
+      "baseName": "宝和通商株式会社",
+      "hqCode": "BGHJ00",
+      "hqName": "宝和通商株式会社(总部)"
+    },
+    {
+      "baseCode": "BGHU",
+      "baseName": "上海宝汇环境科技有限公司湛江分公司",
+      "hqCode": "BGHU00",
+      "hqName": "上海宝汇环境科技有限公司湛江分公司(总部)"
+    },
+    {
+      "baseCode": "BGHV",
+      "baseName": "武钢集团国际激光拼焊有限公司",
+      "hqCode": "BGHV00",
+      "hqName": "武钢集团国际激光拼焊有限公司(总部)"
+    },
+    {
+      "baseCode": "BGHX",
+      "baseName": "宝钢新加坡有限公司",
+      "hqCode": "BGHX00",
+      "hqName": "宝钢新加坡有限公司(总部)"
+    },
+    {
+      "baseCode": "BGJC",
+      "baseName": "乌海宝杰新能源材料有限公司",
+      "hqCode": "BGJC00",
+      "hqName": "乌海宝杰新能源材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BGJH",
+      "baseName": "新疆鑫联化工有限公司",
+      "hqCode": "BGJH00",
+      "hqName": "新疆鑫联化工有限公司(总部)"
+    },
+    {
+      "baseCode": "BGKA",
+      "baseName": "天津武钢钢材加工有限公司",
+      "hqCode": "BGKA00",
+      "hqName": "天津武钢钢材加工有限公司(总部)"
+    },
+    {
+      "baseCode": "BGKB",
+      "baseName": "上海宝钢二手机动车经营有限公司",
+      "hqCode": "BGKB00",
+      "hqName": "上海宝钢二手机动车经营有限公司(总部)"
+    },
+    {
+      "baseCode": "BGKH",
+      "baseName": "宝方炭材料科技有限公司",
+      "hqCode": "BGKH00",
+      "hqName": "宝方炭材料科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BGKN",
+      "baseName": "武汉钢铁集团金属资源有限公司",
+      "hqCode": "BGKN00",
+      "hqName": "武汉钢铁集团金属资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BGKR",
+      "baseName": "山西云时代太钢信息自动化技术有限公司",
+      "hqCode": "BGKR00",
+      "hqName": "山西云时代太钢信息自动化技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BGKS",
+      "baseName": "青岛宝钢钢材加工配送有限公司",
+      "hqCode": "BGKS00",
+      "hqName": "青岛宝钢钢材加工配送有限公司(总部)"
+    },
+    {
+      "baseCode": "BGKU",
+      "baseName": "武汉武新新型建材股份有限公司",
+      "hqCode": "BGKU00",
+      "hqName": "武汉武新新型建材股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BGKX",
+      "baseName": "吉林精功碳纤维有限公司",
+      "hqCode": "BGKX00",
+      "hqName": "吉林精功碳纤维有限公司(总部)"
+    },
+    {
+      "baseCode": "BGMA",
+      "baseName": "上海宝钢商贸有限公司",
+      "hqCode": "BGMA00",
+      "hqName": "上海宝钢商贸有限公司(总部)"
+    },
+    {
+      "baseCode": "BGMB",
+      "baseName": "上海宝钢钢材贸易有限公司",
+      "hqCode": "BGMB00",
+      "hqName": "上海宝钢钢材贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BGMC",
+      "baseName": "成都宝钢西部贸易有限公司",
+      "hqCode": "BGMC00",
+      "hqName": "成都宝钢西部贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BGMG",
+      "baseName": "广州宝钢南方贸易有限公司",
+      "hqCode": "BGMG00",
+      "hqName": "广州宝钢南方贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BGMH",
+      "baseName": "武汉宝钢华中贸易有限公司",
+      "hqCode": "BGMH00",
+      "hqName": "武汉宝钢华中贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BGMN",
+      "baseName": "上海宝钢宝山钢材贸易有限公司",
+      "hqCode": "BGMN00",
+      "hqName": "上海宝钢宝山钢材贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BGMP",
+      "baseName": "上海宝钢浦东国际贸易有限公司",
+      "hqCode": "BGMP00",
+      "hqName": "上海宝钢浦东国际贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BGMQ",
+      "baseName": "上海宝钢住商汽车贸易有限公司",
+      "hqCode": "BGMQ00",
+      "hqName": "上海宝钢住商汽车贸易有限公司（总部）"
+    },
+    {
+      "baseCode": "BGMT",
+      "baseName": "天津宝钢北方贸易有限公司",
+      "hqCode": "BGMT00",
+      "hqName": "天津宝钢北方贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BGMX",
+      "baseName": "上海宝钢金属贸易有限公司",
+      "hqCode": "BGMX00",
+      "hqName": "上海分公司2(总部)"
+    },
+    {
+      "baseCode": "BGMZ",
+      "baseName": "上海宝钢钢铁资源有限公司",
+      "hqCode": "BGMZ00",
+      "hqName": "上海宝钢钢铁资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BGNG",
+      "baseName": "武汉钢铁工程技术集团计控公司",
+      "hqCode": "BGNG00",
+      "hqName": "武汉钢铁工程技术集团计控公司(总部)"
+    },
+    {
+      "baseCode": "BGNH",
+      "baseName": "佛山三水宝钢钢材部件有限公司",
+      "hqCode": "BGNH00",
+      "hqName": "佛山三水宝钢钢材部件有限公司(总部)"
+    },
+    {
+      "baseCode": "BGNS",
+      "baseName": "武汉冶金渣环保工程有限责任公司",
+      "hqCode": "BGNS00",
+      "hqName": "武汉冶金渣环保工程有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BGNW",
+      "baseName": "Baosteel Resources Holding Company Limited",
+      "hqCode": "BGNW00",
+      "hqName": "Baosteel Resources Holding Company Limited(总部)"
+    },
+    {
+      "baseCode": "BGPE",
+      "baseName": "宁波经济技术开发区宝欣实业有限公司",
+      "hqCode": "BGPE00",
+      "hqName": null
+    },
+    {
+      "baseCode": "BGPM",
+      "baseName": "上海宝钢心越人才科技有限公司武汉分公司",
+      "hqCode": "BGPM00",
+      "hqName": "上海宝钢心越人才科技有限公司武汉分公司(总部)"
+    },
+    {
+      "baseCode": "BGPR",
+      "baseName": "宝力钢管（泰国）有限公司",
+      "hqCode": "BGPR00",
+      "hqName": "宝力钢管（泰国）有限公司(总部)"
+    },
+    {
+      "baseCode": "BGPV",
+      "baseName": "宝武铝业科技有限公司",
+      "hqCode": "BGPV00",
+      "hqName": "宝武铝业科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BGPW",
+      "baseName": "宝钢资源（印尼）有限公司",
+      "hqCode": "BGPW00",
+      "hqName": "宝钢资源（印尼）有限公司(总部)"
+    },
+    {
+      "baseCode": "BGQA",
+      "baseName": "安徽皖宝矿业股份有限公司",
+      "hqCode": "BGQA00",
+      "hqName": "安徽皖宝矿业股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BGQJ",
+      "baseName": "宝船航运有限公司",
+      "hqCode": "BGQJ00",
+      "hqName": "宝船航运有限公司(总部)"
+    },
+    {
+      "baseCode": "BGQT",
+      "baseName": "BaosteelResourcesAustraliaPtyLtd",
+      "hqCode": "BGQT00",
+      "hqName": "BaosteelResourcesAustraliaPtyLtd(总部)"
+    },
+    {
+      "baseCode": "BGRF",
+      "baseName": "重庆宝丞炭材有限公司",
+      "hqCode": "BGRF00",
+      "hqName": "重庆宝丞炭材有限公司(总部)"
+    },
+    {
+      "baseCode": "BGRN",
+      "baseName": "吉林碳谷复合材料有限公司",
+      "hqCode": "BGRN00",
+      "hqName": "吉林碳谷复合材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BGRR",
+      "baseName": "上海钢铁交易中心有限公司",
+      "hqCode": "BGRR00",
+      "hqName": "上海钢铁交易中心有限公司(总部)"
+    },
+    {
+      "baseCode": "BGRW",
+      "baseName": "浙江精业新兴材料有限公司",
+      "hqCode": "BGRW00",
+      "hqName": "浙江精业新兴材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BGRX",
+      "baseName": "上海宝康电子控制工程有限公司",
+      "hqCode": "BGRX00",
+      "hqName": "上海宝康电子控制工程有限公司(总部)"
+    },
+    {
+      "baseCode": "BGSE",
+      "baseName": "上海宝钢国际经济贸易有限公司（合并）",
+      "hqCode": "BGSE00",
+      "hqName": "营销中心（宝钢国际）"
+    },
+    {
+      "baseCode": "BGSG",
+      "baseName": "钢管条钢事业部",
+      "hqCode": "BGSG00",
+      "hqName": "钢管特钢事业部（钢管特钢部）（总部）"
+    },
+    {
+      "baseCode": "BGSH",
+      "baseName": "上海宝钢化工有限公司",
+      "hqCode": "BGSH00",
+      "hqName": "上海宝钢化工有限公司（总部）"
+    },
+    {
+      "baseCode": "BGSM",
+      "baseName": "重庆宝吉汽车零部件有限公司",
+      "hqCode": "BGSM00",
+      "hqName": "重庆宝吉汽车零部件有限公司(总部)"
+    },
+    {
+      "baseCode": "BGST",
+      "baseName": "宝钢资源新加坡有限公司",
+      "hqCode": "BGST00",
+      "hqName": "宝钢资源新加坡有限公司(总部)"
+    },
+    {
+      "baseCode": "BGSU",
+      "baseName": "芜湖威仕科材料技术有限公司",
+      "hqCode": "BGSU00",
+      "hqName": "芜湖威仕科材料技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BGSW",
+      "baseName": "特钢事业部",
+      "hqCode": "BGSW00",
+      "hqName": "特钢事业部(总部)"
+    },
+    {
+      "baseCode": "BGSY",
+      "baseName": "上海宝钢不锈钢有限公司",
+      "hqCode": "BGSY00",
+      "hqName": "上海宝钢不锈钢有限公司(总部)"
+    },
+    {
+      "baseCode": "BGTA",
+      "baseName": "宝山钢铁股份有限公司",
+      "hqCode": "BGTA00",
+      "hqName": "宝山钢铁股份有限公司（总部）",
+      "alias": [
+        "宝钢",
+        "股份",
+        "宝钢股份"
+      ]
+    },
+    {
+      "baseCode": "BGTH",
+      "baseName": "宝钢股份黄石涂镀板有限公司",
+      "hqCode": "BGTH00",
+      "hqName": "宝钢股份黄石涂镀板有限公司(总部)"
+    },
+    {
+      "baseCode": "BGTM",
+      "baseName": "上海梅山钢铁股份有限公司",
+      "hqCode": "BGTM00",
+      "hqName": "上海梅山钢铁股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BGTN",
+      "baseName": "宁波宝新不锈钢有限公司",
+      "hqCode": "BGTN00",
+      "hqName": "宁波宝新不锈钢有限公司（总部）"
+    },
+    {
+      "baseCode": "BGTY",
+      "baseName": "烟台鲁宝钢管有限责任公司",
+      "hqCode": "BGTY00",
+      "hqName": "烟台鲁宝钢管有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BGUS",
+      "baseName": "上海地铁电子科技有限公司",
+      "hqCode": "BGUS00",
+      "hqName": "上海地铁电子科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BGUX",
+      "baseName": "宝武精成（舟山）矿业科技有限公司",
+      "hqCode": "BGUX00",
+      "hqName": "宝武精成（舟山）矿业科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BGVA",
+      "baseName": "武钢（广州）钢材加工有限公司",
+      "hqCode": "BGVA00",
+      "hqName": "武钢（广州）钢材加工有限公司(总部)"
+    },
+    {
+      "baseCode": "BGWG",
+      "baseName": "上海宝钢国际货运代理有限公司",
+      "hqCode": "BGWG00",
+      "hqName": "上海宝钢国际货运代理有限公司(总部)"
+    },
+    {
+      "baseCode": "BGXB",
+      "baseName": "上海宝信软件股份有限公司",
+      "hqCode": "BGXB00",
+      "hqName": "上海宝信软件股份有限公司（总部）",
+      "alias": [
+        "宝信",
+        "宝信软件"
+      ]
+    },
+    {
+      "baseCode": "BGXD",
+      "baseName": "上海欧冶供应链有限公司",
+      "hqCode": "BGXD00",
+      "hqName": "上海欧冶供应链有限公司(总部)"
+    },
+    {
+      "baseCode": "BGXK",
+      "baseName": "武汉钢铁集团气体有限责任公司",
+      "hqCode": "BGXK00",
+      "hqName": "武汉钢铁集团气体有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BGXM",
+      "baseName": "上海宝信能源科技有限责任公司",
+      "hqCode": "BGXM00",
+      "hqName": "上海宝信能源科技有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BGXR",
+      "baseName": "武汉钢铁建工集团有限责任公司机电总公司",
+      "hqCode": "BGXR00",
+      "hqName": "武汉钢铁建工集团有限责任公司机电总公司(总部)"
+    },
+    {
+      "baseCode": "BGXS",
+      "baseName": "武汉聚焦精化工有限责任公司",
+      "hqCode": "BGXS00",
+      "hqName": "武汉聚焦精化工有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BGXT",
+      "baseName": "武汉港迪电气有限公司",
+      "hqCode": "BGXT00",
+      "hqName": "武汉港迪电气有限公司(总部)"
+    },
+    {
+      "baseCode": "BGXV",
+      "baseName": "武钢诺贝（武汉）激光拼焊技术有限公司",
+      "hqCode": "BGXV00",
+      "hqName": "武钢诺贝（武汉）激光拼焊技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BGYB",
+      "baseName": "上海宝钢运输有限公司",
+      "hqCode": "BGYB00",
+      "hqName": "上海宝钢运输有限公司（总部）"
+    },
+    {
+      "baseCode": "BGYN",
+      "baseName": "武钢激光拼焊（武汉）有限公司",
+      "hqCode": "BGYN00",
+      "hqName": "武钢激光拼焊（武汉）有限公司(总部)"
+    },
+    {
+      "baseCode": "BGYW",
+      "baseName": "上海宝汇环境科技有限公司",
+      "hqCode": "BGYW00",
+      "hqName": "上海宝汇环境科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BGYX",
+      "baseName": "湖北宝乾新能源材料有限公司",
+      "hqCode": "BGYX00",
+      "hqName": "襄阳汉江高科新能源材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BHAA",
+      "baseName": "华宝兴业基金管理有限公司",
+      "hqCode": "BHAA00",
+      "hqName": "华宝基金管理有限公司(总部)"
+    },
+    {
+      "baseCode": "BHAB",
+      "baseName": "华宝证券有限责任公司",
+      "hqCode": "BHAB00",
+      "hqName": "华宝证券有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BHBR",
+      "baseName": "上海东大名路证券营业部",
+      "hqCode": "BHBR00",
+      "hqName": "上海东大名路证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHDA",
+      "baseName": "深圳前海证券营业部",
+      "hqCode": "BHDA00",
+      "hqName": "深圳前海证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHDB",
+      "baseName": "深圳新闻路证券营业部",
+      "hqCode": "BHDB00",
+      "hqName": "深圳新闻路证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHEA",
+      "baseName": "上海浦东新区浦电路证券营业部",
+      "hqCode": "BHEA00",
+      "hqName": "上海浦东新区浦电路证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHEK",
+      "baseName": "厦门展鸿路证券营业部",
+      "hqCode": "BHEK00",
+      "hqName": "厦门展鸿路证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHEP",
+      "baseName": "上海西藏中路证券营业部",
+      "hqCode": "BHEP00",
+      "hqName": "上海西藏中路证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHFC",
+      "baseName": "上海世纪大道证券营业部",
+      "hqCode": "BHFC00",
+      "hqName": "上海世纪大道证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHGW",
+      "baseName": "成都天府大道证券营业部",
+      "hqCode": "BHGW00",
+      "hqName": "成都天府大道证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHGY",
+      "baseName": "长沙茶子山东路证券营业部",
+      "hqCode": "BHGY00",
+      "hqName": "长沙茶子山东路证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHHA",
+      "baseName": "苏州苏州大道西证券营业部",
+      "hqCode": "BHHA00",
+      "hqName": "苏州苏州大道西证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHJH",
+      "baseName": "舟山普陀麒麟街证券营业部",
+      "hqCode": "BHJH00",
+      "hqName": "舟山普陀麒麟街证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHJV",
+      "baseName": "北京分公司",
+      "hqCode": "BHJV00",
+      "hqName": "北京分公司(总部)"
+    },
+    {
+      "baseCode": "BHKU",
+      "baseName": "广州花城大道证券营业部",
+      "hqCode": "BHKU00",
+      "hqName": "广州花城大道证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHNC",
+      "baseName": "南京集庆门大街证券营业部",
+      "hqCode": "BHNC00",
+      "hqName": "南京集庆门大街证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHNX",
+      "baseName": "杭州学院路证券营业部",
+      "hqCode": "BHNX00",
+      "hqName": "杭州学院路证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHPB",
+      "baseName": "上海自贸区证券营业部",
+      "hqCode": "BHPB00",
+      "hqName": "上海自贸区证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHPM",
+      "baseName": "华宝资产管理（香港）有限公司",
+      "hqCode": "BHPM00",
+      "hqName": "华宝资产管理（香港）有限公司(总部)"
+    },
+    {
+      "baseCode": "BHQH",
+      "baseName": "中钢期货有限公司",
+      "hqCode": "BHQH00",
+      "hqName": "中钢期货有限公司（总部）"
+    },
+    {
+      "baseCode": "BHSE",
+      "baseName": "武汉建设大道证券营业部",
+      "hqCode": "BHSE00",
+      "hqName": "武汉建设大道证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHTV",
+      "baseName": "湖南分公司",
+      "hqCode": "BHTV00",
+      "hqName": "湖南分公司(总部)"
+    },
+    {
+      "baseCode": "BHVT",
+      "baseName": "合肥潜山路证券营业部",
+      "hqCode": "BHVT00",
+      "hqName": "合肥潜山路证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHWF",
+      "baseName": "舟山解放西路证券营业部",
+      "hqCode": "BHWF00",
+      "hqName": "舟山解放西路证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHWT",
+      "baseName": "盐城世纪大道证券营业部",
+      "hqCode": "BHWT00",
+      "hqName": "盐城世纪大道证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHXA",
+      "baseName": "宁波甬江大道证券营业部",
+      "hqCode": "BHXA00",
+      "hqName": "宁波甬江大道证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHXE",
+      "baseName": "北京建外大街证券营业部",
+      "hqCode": "BHXE00",
+      "hqName": "北京建外大街证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHYE",
+      "baseName": "重庆江北嘴证券营业部",
+      "hqCode": "BHYE00",
+      "hqName": "重庆江北嘴证券营业部(总部)"
+    },
+    {
+      "baseCode": "BHYV",
+      "baseName": "福州江滨中大道证券营业部",
+      "hqCode": "BHYV00",
+      "hqName": "福州江滨中大道证券营业部(总部)"
+    },
+    {
+      "baseCode": "BKAN",
+      "baseName": "上海宝钢源康物业管理有限公司",
+      "hqCode": "BKAN00",
+      "hqName": "上海宝钢源康物业管理有限公司(总部)"
+    },
+    {
+      "baseCode": "BKAP",
+      "baseName": "上海申宝汽车服务有限公司",
+      "hqCode": "BKAP00",
+      "hqName": "上海申宝汽车服务有限公司(总部)"
+    },
+    {
+      "baseCode": "BKAS",
+      "baseName": "上海宝江汽车贸易有限公司",
+      "hqCode": "BKAS00",
+      "hqName": "上海宝江汽车贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BKAU",
+      "baseName": "上海丰宝综合经营有限公司",
+      "hqCode": "BKAU00",
+      "hqName": "上海丰宝综合经营有限公司(总部)"
+    },
+    {
+      "baseCode": "BKAY",
+      "baseName": "园区健康事业部",
+      "hqCode": "BKAY00",
+      "hqName": "园区健康事业部(总部)"
+    },
+    {
+      "baseCode": "BKBB",
+      "baseName": "新型材料公司",
+      "hqCode": "BKBB00",
+      "hqName": "新型材料公司(总部)"
+    },
+    {
+      "baseCode": "BKBR",
+      "baseName": "包装管理部",
+      "hqCode": "BKBR00",
+      "hqName": "包装管理部(总部)"
+    },
+    {
+      "baseCode": "BKCD",
+      "baseName": "维修工程部",
+      "hqCode": "BKCD00",
+      "hqName": "维修工程部(总部)"
+    },
+    {
+      "baseCode": "BKCJ",
+      "baseName": "工业环境技术部",
+      "hqCode": "BKCJ00",
+      "hqName": "工业环境技术部(总部)"
+    },
+    {
+      "baseCode": "BKCW",
+      "baseName": "上海宝钢工贸实业总公司",
+      "hqCode": "BKCW00",
+      "hqName": "上海宝钢工贸实业总公司(总部)"
+    },
+    {
+      "baseCode": "BKCX",
+      "baseName": "上海宝钢工贸有限公司",
+      "hqCode": "BKCX00",
+      "hqName": "上海宝钢工贸有限公司(总部)"
+    },
+    {
+      "baseCode": "BKDD",
+      "baseName": "上海中允投资发展有限公司",
+      "hqCode": "BKDD00",
+      "hqName": "上海中允投资发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BKDN",
+      "baseName": "上海宝钢天通磁业有限公司",
+      "hqCode": "BKDN00",
+      "hqName": "上海宝钢磁业有限公司(总部)"
+    },
+    {
+      "baseCode": "BKEN",
+      "baseName": "宝钢集团宝山宾馆",
+      "hqCode": "BKEN00",
+      "hqName": "宝武集团上海宝山宾馆有限公司"
+    },
+    {
+      "baseCode": "BKEP",
+      "baseName": "宝钢集团上海国际旅行社",
+      "hqCode": "BKEP00",
+      "hqName": "宝钢集团上海国际旅行社有限公司(总部)"
+    },
+    {
+      "baseCode": "BKEV",
+      "baseName": "上海宝钢新事业发展总公司",
+      "hqCode": "BKEV00",
+      "hqName": "上海宝钢新事业发展总公司(总部)"
+    },
+    {
+      "baseCode": "BKGA",
+      "baseName": "餐饮管理公司",
+      "hqCode": "BKGA00",
+      "hqName": "餐饮管理公司(总部)"
+    },
+    {
+      "baseCode": "BKGB",
+      "baseName": "绿化管理部",
+      "hqCode": "BKGB00",
+      "hqName": "绿化管理部(总部)"
+    },
+    {
+      "baseCode": "BKGC",
+      "baseName": "园区通勤事业部",
+      "hqCode": "BKGC00",
+      "hqName": "园区通勤事业部(总部)"
+    },
+    {
+      "baseCode": "BKGD",
+      "baseName": "职业健康中心",
+      "hqCode": "BKGD00",
+      "hqName": "职业健康中心(总部)"
+    },
+    {
+      "baseCode": "BKGE",
+      "baseName": "置业公司",
+      "hqCode": "BKGE00",
+      "hqName": "置业公司(总部)"
+    },
+    {
+      "baseCode": "BKHW",
+      "baseName": "武汉生产作业部",
+      "hqCode": "BKHW00",
+      "hqName": "武汉生产作业部(总部)"
+    },
+    {
+      "baseCode": "BKKX",
+      "baseName": "上海申畅宝公共设施管理有限公司",
+      "hqCode": "BKKX00",
+      "hqName": "上海申畅宝公共设施管理有限公司(总部)"
+    },
+    {
+      "baseCode": "BKNM",
+      "baseName": "南京生产作业部",
+      "hqCode": "BKNM00",
+      "hqName": "南京生产作业部(总部)"
+    },
+    {
+      "baseCode": "BKSE",
+      "baseName": "上海宝钢工业有限公司湛江分公司",
+      "hqCode": "BKSE00",
+      "hqName": "上海宝钢工业有限公司湛江分公司(总部)"
+    },
+    {
+      "baseCode": "BMAF",
+      "baseName": "上海梅山联合经济发展有限公司",
+      "hqCode": "BMAF00",
+      "hqName": "上海梅山联合经济发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BMAX",
+      "baseName": "南京梅山冶金发展有限公司",
+      "hqCode": "BMAX00",
+      "hqName": "南京梅山冶金发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BMAY",
+      "baseName": "南京梅宝新型建材有限公司",
+      "hqCode": "BMAY00",
+      "hqName": "南京梅宝新型建材有限公司(总部)"
+    },
+    {
+      "baseCode": "BMBF",
+      "baseName": "上海梅山矿业有限公司",
+      "hqCode": "BMBF00",
+      "hqName": "上海梅山矿业有限公司(总部)"
+    },
+    {
+      "baseCode": "BPAM",
+      "baseName": "昆明钢铁集团有限责任公司动力能源分公司",
+      "hqCode": "BPAM00",
+      "hqName": "昆明钢铁集团有限责任公司动力能源分公司(总部)"
+    },
+    {
+      "baseCode": "BPAS",
+      "baseName": "昆明钢铁集团有限责任公司罗次分公司",
+      "hqCode": "BPAS00",
+      "hqName": "昆明钢铁集团有限责任公司罗次分公司(总部)"
+    },
+    {
+      "baseCode": "BPBM",
+      "baseName": "云南昆钢国际贸易有限公司",
+      "hqCode": "BPBM00",
+      "hqName": "云南昆钢国际贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BPBR",
+      "baseName": "玉溪新兴钢铁有限公司",
+      "hqCode": "BPBR00",
+      "hqName": "玉溪新兴钢铁有限公司(总部)"
+    },
+    {
+      "baseCode": "BPBU",
+      "baseName": "红河钢铁有限公司",
+      "hqCode": "BPBU00",
+      "hqName": "红河钢铁有限公司(总部)"
+    },
+    {
+      "baseCode": "BPBZ",
+      "baseName": "云南安世投资发展有限公司",
+      "hqCode": "BPBZ00",
+      "hqName": "云南安世投资发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BPCA",
+      "baseName": "云南昆钢电子信息科技有限公司",
+      "hqCode": "BPCA00",
+      "hqName": "云南昆钢电子信息科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BPCC",
+      "baseName": "昆明工业职业技术学院",
+      "hqCode": "BPCC00",
+      "hqName": "昆明工业职业技术学院(总部)"
+    },
+    {
+      "baseCode": "BPCD",
+      "baseName": "玉溪大红山矿业有限公司",
+      "hqCode": "BPCD00",
+      "hqName": "玉溪大红山矿业有限公司(总部)"
+    },
+    {
+      "baseCode": "BPCH",
+      "baseName": "金平昆钢金河有限责任公司",
+      "hqCode": "BPCH00",
+      "hqName": "金平昆钢金河有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BPCM",
+      "baseName": "云南昆钢矿业有限公司",
+      "hqCode": "BPCM00",
+      "hqName": "云南昆钢矿业有限公司(总部)"
+    },
+    {
+      "baseCode": "BPCP",
+      "baseName": "昆明玉东工贸有限公司",
+      "hqCode": "BPCP00",
+      "hqName": "昆明玉东工贸有限公司(总部)"
+    },
+    {
+      "baseCode": "BPCQ",
+      "baseName": "临沧矿业有限公司",
+      "hqCode": "BPCQ00",
+      "hqName": "临沧矿业有限公司(总部)"
+    },
+    {
+      "baseCode": "BPCR",
+      "baseName": "镇康县振兴矿业开发有限责任公司",
+      "hqCode": "BPCR00",
+      "hqName": "镇康县振兴矿业开发有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BPCS",
+      "baseName": "攀枝花昆钢集团有限公司",
+      "hqCode": "BPCS00",
+      "hqName": "攀枝花昆钢集团有限公司(总部)"
+    },
+    {
+      "baseCode": "BPDW",
+      "baseName": "云南永乐海外投资有限公司",
+      "hqCode": "BPDW00",
+      "hqName": "云南永乐海外投资有限公司(总部)"
+    },
+    {
+      "baseCode": "BPEB",
+      "baseName": "云南煤业能源股份有限公司",
+      "hqCode": "BPEB00",
+      "hqName": "云南煤业能源股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BPEC",
+      "baseName": "云南煤业能源股份有限公司安宁分公司",
+      "hqCode": "BPEC00",
+      "hqName": "云南煤业能源股份有限公司安宁分公司(总部)"
+    },
+    {
+      "baseCode": "BPED",
+      "baseName": "云南煤业能源股份有限公司贸易分公司",
+      "hqCode": "BPED00",
+      "hqName": "云南煤业能源股份有限公司贸易分公司(总部)"
+    },
+    {
+      "baseCode": "BPEE",
+      "baseName": "师宗煤焦化工有限公司",
+      "hqCode": "BPEE00",
+      "hqName": "师宗煤焦化工有限公司(总部)"
+    },
+    {
+      "baseCode": "BPEF",
+      "baseName": "云南昆钢燃气工程有限公司",
+      "hqCode": "BPEF00",
+      "hqName": "云南昆钢燃气工程有限公司(总部)"
+    },
+    {
+      "baseCode": "BPEH",
+      "baseName": "师宗县五一煤矿有限责任公司",
+      "hqCode": "BPEH00",
+      "hqName": "师宗县五一煤矿有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BPEM",
+      "baseName": "云南麒安晟贸易有限责任公司",
+      "hqCode": "BPEM00",
+      "hqName": "云南麒安晟贸易有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BPEP",
+      "baseName": "云南昆钢重型装备制造集团有限公司",
+      "hqCode": "BPEP00",
+      "hqName": "云南昆钢重型装备制造集团有限公司(总部)"
+    },
+    {
+      "baseCode": "BPEQ",
+      "baseName": "云南恒峰工程质量检测有限公司",
+      "hqCode": "BPEQ00",
+      "hqName": "云南恒峰工程质量检测有限公司(总部)"
+    },
+    {
+      "baseCode": "BPES",
+      "baseName": "云南昆钢耐磨材料科技股份有限公司",
+      "hqCode": "BPES00",
+      "hqName": "云南昆钢耐磨材料科技股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BPET",
+      "baseName": "云南昆钢集团财务有限公司",
+      "hqCode": "BPET00",
+      "hqName": "云南昆钢集团财务有限公司(总部)"
+    },
+    {
+      "baseCode": "BPEU",
+      "baseName": "云南华创文旅大健康产业集团有限公司",
+      "hqCode": "BPEU00",
+      "hqName": "云南华创文旅大健康产业集团有限公司(总部)"
+    },
+    {
+      "baseCode": "BPEW",
+      "baseName": "云南华创文旅大健康产业集团有限公司迪庆雪映金沙分公司",
+      "hqCode": "BPEW00",
+      "hqName": "云南华创文旅大健康产业集团有限公司迪庆雪映金沙分公司(总部)"
+    },
+    {
+      "baseCode": "BPEX",
+      "baseName": "昆明钢铁控股有限公司昆钢大厦分公司",
+      "hqCode": "BPEX00",
+      "hqName": "昆明钢铁控股有限公司昆钢大厦分公司(总部)"
+    },
+    {
+      "baseCode": "BPFB",
+      "baseName": "云南昆钢国际旅行社有限公司",
+      "hqCode": "BPFB00",
+      "hqName": "云南昆钢国际旅行社有限公司(总部)"
+    },
+    {
+      "baseCode": "BPFC",
+      "baseName": "云南通用机场股份有限公司",
+      "hqCode": "BPFC00",
+      "hqName": "云南通用机场股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BPFD",
+      "baseName": "云南通用机场股份有限公司罗平航空房车国际露营地分公司",
+      "hqCode": "BPFD00",
+      "hqName": "云南通用机场股份有限公司罗平航空房车国际露营地分公司(总部)"
+    },
+    {
+      "baseCode": "BPFH",
+      "baseName": "云南昆钢文化创意有限公司",
+      "hqCode": "BPFH00",
+      "hqName": "云南昆钢文化创意有限公司(总部)"
+    },
+    {
+      "baseCode": "BPFK",
+      "baseName": "宣威海岱昆钢金福食品有限公司",
+      "hqCode": "BPFK00",
+      "hqName": "宣威海岱昆钢金福食品有限公司(总部)"
+    },
+    {
+      "baseCode": "BPFM",
+      "baseName": "云南昆钢石头纸环保材料有限公司",
+      "hqCode": "BPFM00",
+      "hqName": "云南昆钢石头纸环保材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BPFN",
+      "baseName": "云南昆钢养生敬老有限公司",
+      "hqCode": "BPFN00",
+      "hqName": "云南昆钢养生敬老有限公司(总部)"
+    },
+    {
+      "baseCode": "BPFP",
+      "baseName": "云南省安宁市龙箐山泉饮用水有限责任公司",
+      "hqCode": "BPFP00",
+      "hqName": "云南省安宁市龙箐山泉饮用水有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BPFQ",
+      "baseName": "云南省工艺美术有限责任公司",
+      "hqCode": "BPFQ00",
+      "hqName": "云南省工艺美术有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BPFR",
+      "baseName": "云南美研艺术设计有限公司",
+      "hqCode": "BPFR00",
+      "hqName": "云南美研艺术设计有限公司(总部)"
+    },
+    {
+      "baseCode": "BPFS",
+      "baseName": "云南和谐通用航空股份有限公司",
+      "hqCode": "BPFS00",
+      "hqName": "云南和谐通用航空股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BPFT",
+      "baseName": "云南楚丰新材料集团有限公司",
+      "hqCode": "BPFT00",
+      "hqName": "云南楚丰新材料集团有限公司(总部)"
+    },
+    {
+      "baseCode": "BPFU",
+      "baseName": "云南钛业股份有限公司",
+      "hqCode": "BPFU00",
+      "hqName": "云南钛业股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BPFV",
+      "baseName": "攀枝花云钛实业有限公司",
+      "hqCode": "BPFV00",
+      "hqName": "攀枝花云钛实业有限公司(总部)"
+    },
+    {
+      "baseCode": "BPFW",
+      "baseName": "云南云宏钛科技有限公司",
+      "hqCode": "BPFW00",
+      "hqName": "云南云宏钛科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BPFX",
+      "baseName": "云南凝慧电子科技有限公司",
+      "hqCode": "BPFX00",
+      "hqName": "云南凝慧电子科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BPFY",
+      "baseName": "云南华云实业集团有限公司",
+      "hqCode": "BPFY00",
+      "hqName": "云南华云实业集团有限公司(总部)"
+    },
+    {
+      "baseCode": "BPFZ",
+      "baseName": "云南华云实业集团有限公司安宁灏宏贸易分公司",
+      "hqCode": "BPFZ00",
+      "hqName": "云南华云实业集团有限公司安宁灏宏贸易分公司(总部)"
+    },
+    {
+      "baseCode": "BPGA",
+      "baseName": "云南华云实业集团有限公司商贸经营部",
+      "hqCode": "BPGA00",
+      "hqName": "云南华云实业集团有限公司商贸经营部(总部)"
+    },
+    {
+      "baseCode": "BPGC",
+      "baseName": "云南多扶工贸有限公司",
+      "hqCode": "BPGC00",
+      "hqName": "云南多扶工贸有限公司(总部)"
+    },
+    {
+      "baseCode": "BPGD",
+      "baseName": "云南华云双益综合服务有限责任公司",
+      "hqCode": "BPGD00",
+      "hqName": "云南华云双益综合服务有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BPGE",
+      "baseName": "云南浩绿实业集团有限公司",
+      "hqCode": "BPGE00",
+      "hqName": "云南浩绿实业集团有限公司(总部)"
+    },
+    {
+      "baseCode": "BPGH",
+      "baseName": "安宁双益建筑工程有限责任公司",
+      "hqCode": "BPGH00",
+      "hqName": "安宁双益建筑工程有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BPGJ",
+      "baseName": "昆明春景园林绿化有限责任公司",
+      "hqCode": "BPGJ00",
+      "hqName": "昆明春景园林绿化有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BPGK",
+      "baseName": "昆明华吉鑫金属粉料有限公司",
+      "hqCode": "BPGK00",
+      "hqName": "昆明华吉鑫金属粉料有限公司(总部)"
+    },
+    {
+      "baseCode": "BPGQ",
+      "baseName": "云南华云金属制品有限公司",
+      "hqCode": "BPGQ00",
+      "hqName": "云南华云金属制品有限公司(总部)"
+    },
+    {
+      "baseCode": "BPGR",
+      "baseName": "云南昆钢兴达物业服务有限公司",
+      "hqCode": "BPGR00",
+      "hqName": "云南昆钢兴达物业服务有限公司(总部)"
+    },
+    {
+      "baseCode": "BPGV",
+      "baseName": "昆明焦化制气有限公司",
+      "hqCode": "BPGV00",
+      "hqName": "昆明焦化制气有限公司(总部)"
+    },
+    {
+      "baseCode": "BPGW",
+      "baseName": "云南昆钢建设集团有限公司",
+      "hqCode": "BPGW00",
+      "hqName": "云南昆钢建设集团有限公司(总部)"
+    },
+    {
+      "baseCode": "BPGX",
+      "baseName": "云南昆钢建设集团有限公司玉溪焊管分公司",
+      "hqCode": "BPGX00",
+      "hqName": "云南昆钢建设集团有限公司玉溪焊管分公司(总部)"
+    },
+    {
+      "baseCode": "BPGY",
+      "baseName": "云南昆钢钢结构股份有限公司",
+      "hqCode": "BPGY00",
+      "hqName": "云南昆钢钢结构股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BPHB",
+      "baseName": "云南昆钢钢结构股份有限公司安宁分公司",
+      "hqCode": "BPHB00",
+      "hqName": "云南昆钢钢结构股份有限公司安宁分公司(总部)"
+    },
+    {
+      "baseCode": "BPHK",
+      "baseName": "云南昆钢机械设备制造建安工程有限公司",
+      "hqCode": "BPHK00",
+      "hqName": "云南昆钢机械设备制造建安工程有限公司(总部)"
+    },
+    {
+      "baseCode": "BPHN",
+      "baseName": "云南昆钢房地产开发有限公司",
+      "hqCode": "BPHN00",
+      "hqName": "云南昆钢房地产开发有限公司(总部)"
+    },
+    {
+      "baseCode": "BPHY",
+      "baseName": "云南众智招标代理有限公司",
+      "hqCode": "BPHY00",
+      "hqName": "云南众智招标代理有限公司(总部)"
+    },
+    {
+      "baseCode": "BPJA",
+      "baseName": "云南益民投资集团有限公司",
+      "hqCode": "BPJA00",
+      "hqName": "云南益民投资集团有限公司(总部)"
+    },
+    {
+      "baseCode": "BPJC",
+      "baseName": "云南昆钢集团山河工程建设监理有限公司",
+      "hqCode": "BPJC00",
+      "hqName": "云南昆钢集团山河工程建设监理有限公司(总部)"
+    },
+    {
+      "baseCode": "BPJD",
+      "baseName": "昆钢集团设计院有限公司",
+      "hqCode": "BPJD00",
+      "hqName": "昆钢集团设计院有限公司(总部)"
+    },
+    {
+      "baseCode": "BPJK",
+      "baseName": "云南昆钢资产经营有限公司",
+      "hqCode": "BPJK00",
+      "hqName": "云南昆钢资产经营有限公司(总部)"
+    },
+    {
+      "baseCode": "BPJM",
+      "baseName": "昆明钢铁集团有限责任公司上厂分公司",
+      "hqCode": "BPJM00",
+      "hqName": "昆明钢铁集团有限责任公司上厂分公司(总部)"
+    },
+    {
+      "baseCode": "BPJN",
+      "baseName": "云南昆钢钙镁熔剂有限公司",
+      "hqCode": "BPJN00",
+      "hqName": "云南昆钢钙镁熔剂有限公司(总部)"
+    },
+    {
+      "baseCode": "BPJP",
+      "baseName": "云南昆钢鑫龙爆破工程有限公司",
+      "hqCode": "BPJP00",
+      "hqName": "云南昆钢鑫龙爆破工程有限公司(总部)"
+    },
+    {
+      "baseCode": "BPJR",
+      "baseName": "昆明浩广投资有限公司",
+      "hqCode": "BPJR00",
+      "hqName": "昆明浩广投资有限公司(总部)"
+    },
+    {
+      "baseCode": "BPJS",
+      "baseName": "云南纺织有限公司",
+      "hqCode": "BPJS00",
+      "hqName": "云南纺织有限公司(总部)"
+    },
+    {
+      "baseCode": "BPJZ",
+      "baseName": "云南昆钢钢材制品有限公司",
+      "hqCode": "BPJZ00",
+      "hqName": "云南昆钢钢材制品有限公司(总部)"
+    },
+    {
+      "baseCode": "BPKB",
+      "baseName": "云南昆钢冶金新材料股份有限公司",
+      "hqCode": "BPKB00",
+      "hqName": "云南昆钢冶金新材料股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BPKC",
+      "baseName": "迪庆经济开发区昆钢铁合金有限公司",
+      "hqCode": "BPKC00",
+      "hqName": "迪庆经济开发区昆钢铁合金有限公司(总部)"
+    },
+    {
+      "baseCode": "BPKD",
+      "baseName": "云南昆钢拓展钢铁炉料有限公司",
+      "hqCode": "BPKD00",
+      "hqName": "云南昆钢拓展钢铁炉料有限公司(总部)"
+    },
+    {
+      "baseCode": "BPKW",
+      "baseName": "云南省物流投资集团有限公司",
+      "hqCode": "BPKW00",
+      "hqName": "云南省物流投资集团有限公司(总部)"
+    },
+    {
+      "baseCode": "BPKX",
+      "baseName": "云南浩华跨境电子商务有限公司",
+      "hqCode": "BPKX00",
+      "hqName": "云南浩华跨境电子商务有限公司(总部)"
+    },
+    {
+      "baseCode": "BPKY",
+      "baseName": "云南元强经贸有限公司",
+      "hqCode": "BPKY00",
+      "hqName": "云南元强经贸有限公司(总部)"
+    },
+    {
+      "baseCode": "BPKZ",
+      "baseName": "云南宝象物流集团有限公司",
+      "hqCode": "BPKZ00",
+      "hqName": "云南宝象物流集团有限公司(总部)"
+    },
+    {
+      "baseCode": "BPMB",
+      "baseName": "大理现代物流商贸有限公司",
+      "hqCode": "BPMB00",
+      "hqName": "大理现代物流商贸有限公司(总部)"
+    },
+    {
+      "baseCode": "BPMC",
+      "baseName": "云南昆钢物流有限公司",
+      "hqCode": "BPMC00",
+      "hqName": "云南昆钢物流有限公司(总部)"
+    },
+    {
+      "baseCode": "BPMD",
+      "baseName": "云南昆钢物流有限公司元山加油站",
+      "hqCode": "BPMD00",
+      "hqName": "云南昆钢物流有限公司元山加油站(总部)"
+    },
+    {
+      "baseCode": "BPMK",
+      "baseName": "红河罗次物流经贸有限公司",
+      "hqCode": "BPMK00",
+      "hqName": "红河罗次物流经贸有限公司(总部)"
+    },
+    {
+      "baseCode": "BPMM",
+      "baseName": "昆明钢铁集团有限责任公司汽车运输分公司",
+      "hqCode": "BPMM00",
+      "hqName": "昆明钢铁集团有限责任公司汽车运输分公司(总部)"
+    },
+    {
+      "baseCode": "BPMP",
+      "baseName": "云南新储物流配送中心有限公司",
+      "hqCode": "BPMP00",
+      "hqName": "云南新储物流配送中心有限公司(总部)"
+    },
+    {
+      "baseCode": "BPNC",
+      "baseName": "云南天朗节能环保集团有限公司",
+      "hqCode": "BPNC00",
+      "hqName": "云南天朗节能环保集团有限公司(总部)"
+    },
+    {
+      "baseCode": "BPND",
+      "baseName": "云南大红山管道有限公司",
+      "hqCode": "BPND00",
+      "hqName": "云南大红山管道有限公司(总部)"
+    },
+    {
+      "baseCode": "BPNE",
+      "baseName": "云南天朗环境科技有限公司",
+      "hqCode": "BPNE00",
+      "hqName": "云南天朗环境科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BPNF",
+      "baseName": "云南天朗能源科技有限公司",
+      "hqCode": "BPNF00",
+      "hqName": "云南天朗能源科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BPNG",
+      "baseName": "云南天朗再生资源有限责任公司",
+      "hqCode": "BPNG00",
+      "hqName": "云南天朗再生资源有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BPPR",
+      "baseName": "昆明钢铁控股有限公司昆钢大厦分公司索菲特酒店",
+      "hqCode": "BPPR00",
+      "hqName": "昆明钢铁控股有限公司昆钢大厦分公司索菲特酒店(总部)"
+    },
+    {
+      "baseCode": "BSAB",
+      "baseName": "上海宝地仲量联行物业服务有限公司",
+      "hqCode": "BSAB00",
+      "hqName": "上海宝地仲量联行物业服务有限公司(总部)"
+    },
+    {
+      "baseCode": "BSAE",
+      "baseName": "上海宝钢新型建材科技有限公司",
+      "hqCode": "BSAE00",
+      "hqName": "上海宝钢新型建材科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BSAJ",
+      "baseName": "宝钢工程技术集团有限公司湛江分公司",
+      "hqCode": "BSAJ00",
+      "hqName": "宝钢工程技术集团有限公司湛江分公司(总部)"
+    },
+    {
+      "baseCode": "BSAK",
+      "baseName": "上海宝钢拆车有限公司",
+      "hqCode": "BSAK00",
+      "hqName": "上海宝钢拆车有限公司(总部)"
+    },
+    {
+      "baseCode": "BSAM",
+      "baseName": "马钢（集团）控股有限公司",
+      "hqCode": "BSAM00",
+      "hqName": "马钢（集团）控股有限公司(总部)"
+    },
+    {
+      "baseCode": "BSAP",
+      "baseName": "巴州敦德矿业有限责任公司1",
+      "hqCode": "BSAP00",
+      "hqName": "巴州敦德矿业有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSAV",
+      "baseName": "制造服务事业部",
+      "hqCode": "BSAV00",
+      "hqName": "制造服务事业部(总部)"
+    },
+    {
+      "baseCode": "BSAX",
+      "baseName": "诚融（上海）动产信息服务有限公司",
+      "hqCode": "BSAX00",
+      "hqName": "诚融（上海）动产信息服务有限公司(总部)"
+    },
+    {
+      "baseCode": "BSBA",
+      "baseName": "宝武环科鄂州资源有限责任公司",
+      "hqCode": "BSBA00",
+      "hqName": "宝武环科鄂州资源有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSBB",
+      "baseName": "武汉南山养老健康管理有限公司",
+      "hqCode": "BSBB00",
+      "hqName": "武汉南山养老健康管理有限公司(总部)"
+    },
+    {
+      "baseCode": "BSBD",
+      "baseName": "上海宝地置业有限公司",
+      "hqCode": "BSBD00",
+      "hqName": "上海宝地置业有限公司(总部)"
+    },
+    {
+      "baseCode": "BSBF",
+      "baseName": "上海宝钢节能技术有限公司",
+      "hqCode": "BSBF00",
+      "hqName": "上海宝钢节能技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BSBK",
+      "baseName": "广州薄板有限公司",
+      "hqCode": "BSBK00",
+      "hqName": "广州薄板有限公司(总部)"
+    },
+    {
+      "baseCode": "BSBS",
+      "baseName": "昌吉宝地新业房屋经营有限公司",
+      "hqCode": "BSBS00",
+      "hqName": "昌吉宝地新业房屋经营有限公司(总部)"
+    },
+    {
+      "baseCode": "BSBV",
+      "baseName": "湛江宝粤气体有限公司",
+      "hqCode": "BSBV00",
+      "hqName": "湛江宝粤气体有限公司(总部)"
+    },
+    {
+      "baseCode": "BSBY",
+      "baseName": "武钢资源集团鄂州球团有限公司",
+      "hqCode": "BSBY00",
+      "hqName": "武钢资源集团鄂州球团有限公司(总部)"
+    },
+    {
+      "baseCode": "BSCB",
+      "baseName": "武汉钢铁集团耐火材料有限公司",
+      "hqCode": "BSCB00",
+      "hqName": "武汉钢铁集团耐火材料有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSCC",
+      "baseName": "上海宝地上实产城发展有限公司",
+      "hqCode": "BSCC00",
+      "hqName": "上海宝地上实产城发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BSCD",
+      "baseName": "宝武清洁能源有限公司",
+      "hqCode": "BSCD00",
+      "hqName": "宝武清洁能源有限公司(总部)"
+    },
+    {
+      "baseCode": "BSCG",
+      "baseName": "湖北盛事达服务有限责任公司",
+      "hqCode": "BSCG00",
+      "hqName": "湖北盛事达服务有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSCM",
+      "baseName": "工程技术事业部",
+      "hqCode": "BSCM00",
+      "hqName": "工程技术事业部(总部)"
+    },
+    {
+      "baseCode": "BSCP",
+      "baseName": "新疆互力佳源环保科技有限公司",
+      "hqCode": "BSCP00",
+      "hqName": "新疆互力佳源环保科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BSCR",
+      "baseName": "上海宝钢气体有限公司",
+      "hqCode": "BSCR00",
+      "hqName": "上海宝钢气体有限公司(总部)"
+    },
+    {
+      "baseCode": "BSCT",
+      "baseName": "广东南华置业有限公司",
+      "hqCode": "BSCT00",
+      "hqName": "广东南华置业有限公司(总部)"
+    },
+    {
+      "baseCode": "BSCU",
+      "baseName": "人力资源开发中心",
+      "hqCode": "BSCU00",
+      "hqName": "人力资源开发中心(总部)"
+    },
+    {
+      "baseCode": "BSDA",
+      "baseName": "上海宝钢气体有限公司南京分公司",
+      "hqCode": "BSDA00",
+      "hqName": "上海宝钢气体有限公司南京分公司(总部)"
+    },
+    {
+      "baseCode": "BSDC",
+      "baseName": "宝武水务科技有限公司",
+      "hqCode": "BSDC00",
+      "hqName": "宝武水务科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BSDE",
+      "baseName": "新疆八钢物业有限责任公司",
+      "hqCode": "BSDE00",
+      "hqName": "新疆八钢物业有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSDF",
+      "baseName": "苏州大方特种车股份有限公司",
+      "hqCode": "BSDF00",
+      "hqName": "苏州大方特种车股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BSDP",
+      "baseName": "上海欧冶数据技术有限责任公司",
+      "hqCode": "BSDP00",
+      "hqName": "上海欧冶数据技术有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSDS",
+      "baseName": "宝钢德盛不锈钢有限公司",
+      "hqCode": "BSDS00",
+      "hqName": "宝钢德盛不锈钢有限公司(总部)"
+    },
+    {
+      "baseCode": "BSDV",
+      "baseName": "重庆东辰气体有限公司",
+      "hqCode": "BSDV00",
+      "hqName": "重庆东辰气体有限公司(总部)"
+    },
+    {
+      "baseCode": "BSDY",
+      "baseName": "苏尼特右旗宝德利矿业有限公司",
+      "hqCode": "BSDY00",
+      "hqName": "苏尼特右旗宝德利矿业有限公司(总部)"
+    },
+    {
+      "baseCode": "BSEC",
+      "baseName": "宝钢金属有限公司",
+      "hqCode": "BSEC00",
+      "hqName": "宝钢金属有限公司（总部）"
+    },
+    {
+      "baseCode": "BSED",
+      "baseName": "宁德宝铜气体有限公司",
+      "hqCode": "BSED00",
+      "hqName": "宁德宝铜气体有限公司(总部)"
+    },
+    {
+      "baseCode": "BSEF",
+      "baseName": "武汉钢铁工程技术集团通信有限责任公司",
+      "hqCode": "BSEF00",
+      "hqName": "武汉钢铁工程技术集团通信有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSEG",
+      "baseName": "上海宝钢工程技术有限公司",
+      "hqCode": "BSEG00",
+      "hqName": "上海宝钢工程技术有限公司（总部）"
+    },
+    {
+      "baseCode": "BSEM",
+      "baseName": "广东韶钢金属焊材有限公司",
+      "hqCode": "BSEM00",
+      "hqName": "广东韶钢金属焊材有限公司(总部)"
+    },
+    {
+      "baseCode": "BSEN",
+      "baseName": "欧冶商业保理有限责任公司",
+      "hqCode": "BSEN00",
+      "hqName": "欧冶商业保理有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSEP",
+      "baseName": "新疆八钢佳域工业材料有限公司",
+      "hqCode": "BSEP00",
+      "hqName": "新疆八钢佳域工业材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BSEU",
+      "baseName": "上海宝钢气体有限公司福州分公司",
+      "hqCode": "BSEU00",
+      "hqName": "上海宝钢气体有限公司福州分公司(总部)"
+    },
+    {
+      "baseCode": "BSEY",
+      "baseName": "华宝都鼎（上海）融资租赁有限公司",
+      "hqCode": "BSEY00",
+      "hqName": "华宝都鼎（上海）融资租赁有限公司(总部)"
+    },
+    {
+      "baseCode": "BSFA",
+      "baseName": "工厂物业事业部",
+      "hqCode": "BSFA00",
+      "hqName": "工厂物业事业部(总部)"
+    },
+    {
+      "baseCode": "BSFC",
+      "baseName": "宝武集团财务有限责任公司",
+      "hqCode": "BSFC00",
+      "hqName": "宝武集团财务有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSFD",
+      "baseName": "武汉武钢维苏威高级陶瓷有限公司",
+      "hqCode": "BSFD00",
+      "hqName": "武汉武钢维苏威高级陶瓷有限公司(总部)"
+    },
+    {
+      "baseCode": "BSFF",
+      "baseName": "广东宝联迪国际运营管理有限公司",
+      "hqCode": "BSFF00",
+      "hqName": "广东宝联迪国际运营管理有限公司(总部)"
+    },
+    {
+      "baseCode": "BSFH",
+      "baseName": "华宝信托有限责任公司",
+      "hqCode": "BSFH00",
+      "hqName": "华宝信托有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BSFP",
+      "baseName": "武汉钢电股份有限公司",
+      "hqCode": "BSFP00",
+      "hqName": "武汉钢电股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BSFU",
+      "baseName": "协同管理部",
+      "hqCode": "BSFU00",
+      "hqName": "协同管理部(总部)"
+    },
+    {
+      "baseCode": "BSFY",
+      "baseName": "武汉武钢大数据产业园有限公司",
+      "hqCode": "BSFY00",
+      "hqName": "武汉武钢大数据产业园有限公司(总部)"
+    },
+    {
+      "baseCode": "BSGA",
+      "baseName": "上海金艺检测技术有限公司",
+      "hqCode": "BSGA00",
+      "hqName": "上海金艺检测技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BSGD",
+      "baseName": "广东宝钢置业有限公司",
+      "hqCode": "BSGD00",
+      "hqName": "广东宝钢置业有限公司(总部)"
+    },
+    {
+      "baseCode": "BSGF",
+      "baseName": "矿山事业部",
+      "hqCode": "BSGF00",
+      "hqName": "矿山事业部(总部)"
+    },
+    {
+      "baseCode": "BSGH",
+      "baseName": "广东粤钢松山物流有限公司",
+      "hqCode": "BSGH00",
+      "hqName": "广东粤钢松山物流有限公司(总部)"
+    },
+    {
+      "baseCode": "BSGK",
+      "baseName": "上海宝钢物流有限公司",
+      "hqCode": "BSGK00",
+      "hqName": "上海宝钢物流有限公司(总部)"
+    },
+    {
+      "baseCode": "BSGQ",
+      "baseName": "宝武特种冶金有限公司",
+      "hqCode": "BSGQ00",
+      "hqName": "宝武特种冶金有限公司(总部)"
+    },
+    {
+      "baseCode": "BSGT",
+      "baseName": "华宝（上海）股权投资基金管理有限公司",
+      "hqCode": "BSGT00",
+      "hqName": "华宝（上海）股权投资基金管理有限公司(总部)"
+    },
+    {
+      "baseCode": "BSGU",
+      "baseName": "武汉钢铁江北集团有限公司汉冶萍文旅分公司",
+      "hqCode": "BSGU00",
+      "hqName": "武汉钢铁江北集团有限公司汉冶萍文旅分公司(总部)"
+    },
+    {
+      "baseCode": "BSGV",
+      "baseName": "武钢资源集团有限公司",
+      "hqCode": "BSGV00",
+      "hqName": "武钢资源集团有限公司(总部)"
+    },
+    {
+      "baseCode": "BSHD",
+      "baseName": "武汉华德环保工程技术有限公司",
+      "hqCode": "BSHD00",
+      "hqName": "武汉华德环保工程技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BSHE",
+      "baseName": "九江宝永气体有限公司",
+      "hqCode": "BSHE00",
+      "hqName": "九江宝永气体有限公司(总部)"
+    },
+    {
+      "baseCode": "BSHF",
+      "baseName": "宝钢集团（上海）置业有限公司",
+      "hqCode": "BSHF00",
+      "hqName": "宝钢集团（上海）置业有限公司(总部)"
+    },
+    {
+      "baseCode": "BSHJ",
+      "baseName": "转底炉事业部",
+      "hqCode": "BSHJ00",
+      "hqName": "转底炉事业部(总部)"
+    },
+    {
+      "baseCode": "BSHL",
+      "baseName": "北京汇利房地产开发有限公司",
+      "hqCode": "BSHL00",
+      "hqName": "北京汇利房地产开发有限公司(总部)"
+    },
+    {
+      "baseCode": "BSHR",
+      "baseName": "上海宝钢心越人力资源服务有限公司",
+      "hqCode": "BSHR00",
+      "hqName": "上海宝钢心越人力资源服务有限公司(总部)"
+    },
+    {
+      "baseCode": "BSHS",
+      "baseName": "湛江宝发赛迪转底炉技术有限公司",
+      "hqCode": "BSHS00",
+      "hqName": "湛江宝发赛迪转底炉技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BSHT",
+      "baseName": "华宝投资有限公司",
+      "hqCode": "BSHT00",
+      "hqName": "华宝投资有限公司（总部）"
+    },
+    {
+      "baseCode": "BSHX",
+      "baseName": "上海宝钢生态绿化有限公司",
+      "hqCode": "BSHX00",
+      "hqName": "上海宝钢生态绿化有限公司（总部）"
+    },
+    {
+      "baseCode": "BSHY",
+      "baseName": "新疆宝新盛源建材有限公司",
+      "hqCode": "BSHY00",
+      "hqName": "新疆宝新盛源建材有限公司(总部)"
+    },
+    {
+      "baseCode": "BSHZ",
+      "baseName": "宝武集团环境资源科技有限公司",
+      "hqCode": "BSHZ00",
+      "hqName": "宝武集团环境资源科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BSJA",
+      "baseName": "工业环境保障部",
+      "hqCode": "BSJA00",
+      "hqName": "工业环境保障部(总部)"
+    },
+    {
+      "baseCode": "BSJB",
+      "baseName": "武汉华枫传感技术有限责任公司",
+      "hqCode": "BSJB00",
+      "hqName": "武汉华枫传感技术有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSJE",
+      "baseName": "广东韶钢工程技术有限公司",
+      "hqCode": "BSJE00",
+      "hqName": "广东韶钢工程技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BSJF",
+      "baseName": "武汉武钢绿色城市技术发展有限公司通信分公司",
+      "hqCode": "BSJF00",
+      "hqName": "园林工程有限公司(总部)"
+    },
+    {
+      "baseCode": "BSJH",
+      "baseName": "广东韶钢国贸贸易有限公司",
+      "hqCode": "BSJH00",
+      "hqName": "广东韶钢国贸贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BSJK",
+      "baseName": "武汉考克利尔工程技术有限公司",
+      "hqCode": "BSJK00",
+      "hqName": "武汉考克利尔工程技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BSJM",
+      "baseName": "上海欧冶金融信息服务股份有限公司",
+      "hqCode": "BSJM00",
+      "hqName": "上海欧冶金融信息服务股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BSJP",
+      "baseName": "宜昌国诚资产管理有限公司",
+      "hqCode": "BSJP00",
+      "hqName": "宜昌国诚资产管理有限公司(总部)"
+    },
+    {
+      "baseCode": "BSJQ",
+      "baseName": "上海宝钢建筑工程设计有限公司",
+      "hqCode": "BSJQ00",
+      "hqName": "上海宝钢建筑工程设计有限公司(总部)"
+    },
+    {
+      "baseCode": "BSJR",
+      "baseName": "上海金艺检测技术有限公司湛江分公司",
+      "hqCode": "BSJR00",
+      "hqName": "上海金艺检测技术有限公司湛江分公司(总部)"
+    },
+    {
+      "baseCode": "BSJX",
+      "baseName": "乌鲁木齐互力众安安全技术咨询服务有限公司",
+      "hqCode": "BSJX00",
+      "hqName": "乌鲁木齐互力众安安全技术咨询服务有限公司(总部)"
+    },
+    {
+      "baseCode": "BSJY",
+      "baseName": "武汉钢铁工程技术集团有限责任公司",
+      "hqCode": "BSJY00",
+      "hqName": "武汉钢铁工程技术集团有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSKA",
+      "baseName": "新疆天山汽车服务有限公司",
+      "hqCode": "BSKA00",
+      "hqName": "新疆天山汽车服务有限公司(总部)"
+    },
+    {
+      "baseCode": "BSKB",
+      "baseName": "上海宝华国际招标有限公司",
+      "hqCode": "BSKB00",
+      "hqName": "上海宝华国际招标有限公司(总部)"
+    },
+    {
+      "baseCode": "BSKC",
+      "baseName": "上海宝化国立化工技术有限公司",
+      "hqCode": "BSKC00",
+      "hqName": "上海宝化国立化工技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BSKE",
+      "baseName": "上海欧冶资讯电子商务有限公司",
+      "hqCode": "BSKE00",
+      "hqName": "上海欧冶资讯电子商务有限公司(总部)"
+    },
+    {
+      "baseCode": "BSKF",
+      "baseName": "宝钢发展有限公司",
+      "hqCode": "BSKF00",
+      "hqName": "宝钢发展有限公司（总部）"
+    },
+    {
+      "baseCode": "BSKG",
+      "baseName": "上海宝钢工业检测有限公司",
+      "hqCode": "BSKG00",
+      "hqName": "上海宝钢工业检测有限公司(总部)"
+    },
+    {
+      "baseCode": "BSKH",
+      "baseName": "广东昆仑信息科技有限公司",
+      "hqCode": "BSKH00",
+      "hqName": "广东昆仑信息科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BSKS",
+      "baseName": "湖北鄂钢嘉华新型建材有限公司",
+      "hqCode": "BSKS00",
+      "hqName": "湖北鄂钢嘉华新型建材有限公司(总部)"
+    },
+    {
+      "baseCode": "BSKW",
+      "baseName": "武汉汉威炉外精炼工程有限公司",
+      "hqCode": "BSKW00",
+      "hqName": "武汉汉威炉外精炼工程有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMC",
+      "baseName": "广东中南钢铁股份有限公司",
+      "hqCode": "BSMC00",
+      "hqName": "广东中南钢铁股份有限公司（总部）"
+    },
+    {
+      "baseCode": "BSMD",
+      "baseName": "韶关钢铁(香港)有限公司",
+      "hqCode": "BSMD00",
+      "hqName": "韶关钢铁(香港)有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMH",
+      "baseName": "广东韶钢资源有限公司",
+      "hqCode": "BSMH00",
+      "hqName": "广东韶钢资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMJ",
+      "baseName": "香港松山置业发展有限公司",
+      "hqCode": "BSMJ00",
+      "hqName": "香港松山置业发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMK",
+      "baseName": "广州市韶钢港务有限公司",
+      "hqCode": "BSMK00",
+      "hqName": "广州市韶钢港务有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMM",
+      "baseName": "深圳市粤钢松山物流有限公司",
+      "hqCode": "BSMM00",
+      "hqName": "深圳市粤钢松山物流有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMN",
+      "baseName": "佛山市南海韶洲钢线制品有限公司",
+      "hqCode": "BSMN00",
+      "hqName": "佛山市南海韶洲钢线制品有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMO",
+      "baseName": "韶关市南海韶洲钢线制品有限公司",
+      "hqCode": "BSMO00",
+      "hqName": "韶关市南海韶洲钢线制品有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMP",
+      "baseName": "广东韶钢嘉羊新型材料有限公司",
+      "hqCode": "BSMP00",
+      "hqName": "广东韶钢嘉羊新型材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMQ",
+      "baseName": "韶关市新韶钢嘉羊新型材料有限公司",
+      "hqCode": "BSMQ00",
+      "hqName": "韶关市新韶钢嘉羊新型材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMR",
+      "baseName": "韶关市韶钢嘉羊新型建材有限公司",
+      "hqCode": "BSMR00",
+      "hqName": "韶关市韶钢嘉羊新型建材有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMS",
+      "baseName": "广东松山贸易有限公司",
+      "hqCode": "BSMS00",
+      "hqName": "广东松山贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMT",
+      "baseName": "韶关韶钢恒然锌业有限公司",
+      "hqCode": "BSMT00",
+      "hqName": "韶关韶钢恒然锌业有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMU",
+      "baseName": "韶关市曲江韶钢招待所有限公司",
+      "hqCode": "BSMU00",
+      "hqName": "韶关市曲江韶钢招待所有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMW",
+      "baseName": "武汉钢铁绿色城建金属结构有限责任公司",
+      "hqCode": "BSMW00",
+      "hqName": "武汉钢铁绿色城建金属结构有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSMX",
+      "baseName": "宝钢资源控股（上海）有限公司",
+      "hqCode": "BSMX00",
+      "hqName": "宝钢资源控股（上海）有限公司(总部)"
+    },
+    {
+      "baseCode": "BSMY",
+      "baseName": "宝武资源有限公司",
+      "hqCode": "BSMY00",
+      "hqName": "宝武资源有限公司（总部）"
+    },
+    {
+      "baseCode": "BSMZ",
+      "baseName": "宝武环科马鞍山资源利用有限公司",
+      "hqCode": "BSMZ00",
+      "hqName": "宝武环科马鞍山资源利用有限公司(总部)"
+    },
+    {
+      "baseCode": "BSNA",
+      "baseName": "广东韶钢华欣环保科技有限公司",
+      "hqCode": "BSNA00",
+      "hqName": "广东华欣环保科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BSND",
+      "baseName": "重庆宝渝中辰气体有限公司",
+      "hqCode": "BSND00",
+      "hqName": "重庆宝渝中辰气体有限公司(总部)"
+    },
+    {
+      "baseCode": "BSNE",
+      "baseName": "欧冶国际电商有限公司",
+      "hqCode": "BSNE00",
+      "hqName": "欧冶国际电商有限公司(总部)"
+    },
+    {
+      "baseCode": "BSNF",
+      "baseName": "武汉市雅苑房地产开发有限责任公司",
+      "hqCode": "BSNF00",
+      "hqName": "武汉市雅苑房地产开发有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSNH",
+      "baseName": "园区物业服务事业部（好生活公司）",
+      "hqCode": "BSNH00",
+      "hqName": "园区物业服务事业部（好生活公司）(总部)"
+    },
+    {
+      "baseCode": "BSNJ",
+      "baseName": "上海欧冶资源电子商务有限公司",
+      "hqCode": "BSNJ00",
+      "hqName": "上海欧冶资源电子商务有限公司(总部)"
+    },
+    {
+      "baseCode": "BSNK",
+      "baseName": "宝钢资源南非有限公司",
+      "hqCode": "BSNK00",
+      "hqName": "宝钢资源南非有限公司(总部)"
+    },
+    {
+      "baseCode": "BSNR",
+      "baseName": "武钢资源集团大冶铁矿有限公司",
+      "hqCode": "BSNR00",
+      "hqName": "武钢资源集团大冶铁矿有限公司(总部)"
+    },
+    {
+      "baseCode": "BSNS",
+      "baseName": "武汉武钢华工激光大型装备有限公司",
+      "hqCode": "BSNS00",
+      "hqName": "武汉武钢华工激光大型装备有限公司(总部)"
+    },
+    {
+      "baseCode": "BSPB",
+      "baseName": "宝武环境科技湛江有限公司",
+      "hqCode": "BSPB00",
+      "hqName": "湛江公司(总部)"
+    },
+    {
+      "baseCode": "BSPD",
+      "baseName": "上海宝钢工业技术服务有限公司",
+      "hqCode": "BSPD00",
+      "hqName": "上海宝钢工业技术服务有限公司(总部)"
+    },
+    {
+      "baseCode": "BSPF",
+      "baseName": "宝钢工程（越南）有限责任公司",
+      "hqCode": "BSPF00",
+      "hqName": "宝钢工程（越南）有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSPM",
+      "baseName": "武汉钢铁江北集团工业服务有限公司",
+      "hqCode": "BSPM00",
+      "hqName": "武汉钢铁江北集团工业服务有限公司(总部)"
+    },
+    {
+      "baseCode": "BSPN",
+      "baseName": "武钢集团鄂钢贸易有限责任公司",
+      "hqCode": "BSPN00",
+      "hqName": "武钢集团鄂钢贸易有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSPR",
+      "baseName": "物流业务部",
+      "hqCode": "BSPR00",
+      "hqName": "物流业务部(总部)"
+    },
+    {
+      "baseCode": "BSPT",
+      "baseName": "武汉钢铁集团江南燃气热力有限公司",
+      "hqCode": "BSPT00",
+      "hqName": "武汉钢铁集团江南燃气热力有限公司(总部)"
+    },
+    {
+      "baseCode": "BSPU",
+      "baseName": "武汉钢铁江北集团有限公司精密带钢厂",
+      "hqCode": "BSPU00",
+      "hqName": "武汉钢铁江北集团有限公司精密带钢厂(总部)"
+    },
+    {
+      "baseCode": "BSPV",
+      "baseName": "宝钢工程印度有限公司",
+      "hqCode": "BSPV00",
+      "hqName": "宝钢工程印度有限公司(总部)"
+    },
+    {
+      "baseCode": "BSPW",
+      "baseName": "武钢资源集团金山店矿业有限公司",
+      "hqCode": "BSPW00",
+      "hqName": "武钢资源集团金山店矿业有限公司(总部)"
+    },
+    {
+      "baseCode": "BSPY",
+      "baseName": "上海宝钢气体有限公司郑州分公司",
+      "hqCode": "BSPY00",
+      "hqName": "上海宝钢气体有限公司郑州分公司(总部)"
+    },
+    {
+      "baseCode": "BSQB",
+      "baseName": "陕西北强能源有限公司",
+      "hqCode": "BSQB00",
+      "hqName": "陕西北强能源有限公司(总部)"
+    },
+    {
+      "baseCode": "BSQC",
+      "baseName": "上海宝钢气体有限公司广州分公司",
+      "hqCode": "BSQC00",
+      "hqName": "上海宝钢气体有限公司广州分公司(总部)"
+    },
+    {
+      "baseCode": "BSQF",
+      "baseName": "新疆宝信智能技术有限公司",
+      "hqCode": "BSQF00",
+      "hqName": "新疆宝信智能技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BSQH",
+      "baseName": "开圣公司",
+      "hqCode": "BSQH00",
+      "hqName": "开圣公司(总部)"
+    },
+    {
+      "baseCode": "BSQJ",
+      "baseName": "武汉钢铁江北集团冷弯型钢有限公司",
+      "hqCode": "BSQJ00",
+      "hqName": "武汉钢铁江北集团冷弯型钢有限公司(总部)"
+    },
+    {
+      "baseCode": "BSQM",
+      "baseName": "上海宝敏科汽车工程技术有限公司",
+      "hqCode": "BSQM00",
+      "hqName": "上海宝敏科汽车工程技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BSQQ",
+      "baseName": "园区技术服务事业部（扬光公司）",
+      "hqCode": "BSQQ00",
+      "hqName": "园区技术服务事业部（扬光公司）(总部)"
+    },
+    {
+      "baseCode": "BSQR",
+      "baseName": "武汉钢铁江北集团有限公司武钢汉阳钢厂",
+      "hqCode": "BSQR00",
+      "hqName": "武汉钢铁江北集团有限公司武钢汉阳钢厂(总部)"
+    },
+    {
+      "baseCode": "BSQT",
+      "baseName": "不锈钢资源服务部",
+      "hqCode": "BSQT00",
+      "hqName": "不锈钢资源服务部(总部)"
+    },
+    {
+      "baseCode": "BSQU",
+      "baseName": "温州市环境发展有限公司",
+      "hqCode": "BSQU00",
+      "hqName": "温州市环境发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BSQV",
+      "baseName": "欧冶云商股份有限公司马鞍山分公司",
+      "hqCode": "BSQV00",
+      "hqName": "欧冶云商股份有限公司马鞍山分公司(总部)"
+    },
+    {
+      "baseCode": "BSQX",
+      "baseName": "武汉山水雅苑置业有限公司",
+      "hqCode": "BSQX00",
+      "hqName": "武汉山水雅苑置业有限公司(总部)"
+    },
+    {
+      "baseCode": "BSRA",
+      "baseName": "武汉武钢维苏威高级连铸耐火材有限公司",
+      "hqCode": "BSRA00",
+      "hqName": "武汉武钢维苏威高级连铸耐火材有限公司(总部)"
+    },
+    {
+      "baseCode": "BSRC",
+      "baseName": "武汉武钢港务外贸码头有限公司",
+      "hqCode": "BSRC00",
+      "hqName": "武汉武钢港务外贸码头有限公司(总部)"
+    },
+    {
+      "baseCode": "BSRE",
+      "baseName": "武钢中冶工业技术服务有限公司",
+      "hqCode": "BSRE00",
+      "hqName": "武钢中冶工业技术服务有限公司(总部)"
+    },
+    {
+      "baseCode": "BSRG",
+      "baseName": "新疆八钢佳域气体有限责任公司",
+      "hqCode": "BSRG00",
+      "hqName": "新疆八钢佳域气体有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSRH",
+      "baseName": "人力资源中心",
+      "hqCode": "BSRH00",
+      "hqName": "人力资源中心(总部)"
+    },
+    {
+      "baseCode": "BSRJ",
+      "baseName": "湖北鄂钢长航港务有限公司",
+      "hqCode": "BSRJ00",
+      "hqName": "湖北鄂钢长航港务有限公司(总部)"
+    },
+    {
+      "baseCode": "BSRP",
+      "baseName": "西藏宝钢包装有限责任公司",
+      "hqCode": "BSRP00",
+      "hqName": "西藏宝钢包装有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSRT",
+      "baseName": "宝武杰富意特殊钢有限公司",
+      "hqCode": "BSRT00",
+      "hqName": "宝武杰富意特殊钢有限公司(总部)"
+    },
+    {
+      "baseCode": "BSRU",
+      "baseName": "广东韶钢现代产业发展有限公司",
+      "hqCode": "BSRU00",
+      "hqName": "广东韶钢现代产业发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BSSF",
+      "baseName": "上海矿石国际交易中心有限公司",
+      "hqCode": "BSSF00",
+      "hqName": "上海矿石国际交易中心有限公司(总部)"
+    },
+    {
+      "baseCode": "BSSG",
+      "baseName": "广东省韶关钢铁集团有限公司",
+      "hqCode": "BSSG00",
+      "hqName": "广东省韶关钢铁集团有限公司(总部)"
+    },
+    {
+      "baseCode": "BSSK",
+      "baseName": "武汉钢铁物流有限公司",
+      "hqCode": "BSSK00",
+      "hqName": "武汉钢铁物流有限公司(总部)"
+    },
+    {
+      "baseCode": "BSSP",
+      "baseName": "上海宝发环科技术有限公司",
+      "hqCode": "BSSP00",
+      "hqName": "上海宝发环科技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BSSQ",
+      "baseName": "园区技术事业部",
+      "hqCode": "BSSQ00",
+      "hqName": "园区技术事业部"
+    },
+    {
+      "baseCode": "BSSR",
+      "baseName": "上海欧珏供应链管理有限公司",
+      "hqCode": "BSSR00",
+      "hqName": "上海欧珏供应链管理有限公司(总部)"
+    },
+    {
+      "baseCode": "BSSS",
+      "baseName": "上海宝地长江口创智产城发展有限公司",
+      "hqCode": "BSSS00",
+      "hqName": "上海宝地长江口创智产城发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BSSU",
+      "baseName": "福建宝钢置业有限公司",
+      "hqCode": "BSSU00",
+      "hqName": "福建宝钢置业有限公司(总部)"
+    },
+    {
+      "baseCode": "BSSW",
+      "baseName": "秦皇岛北戴河北华园观海酒店有限公司",
+      "hqCode": "BSSW00",
+      "hqName": "秦皇岛北戴河北华园观海酒店有限公司(总部)"
+    },
+    {
+      "baseCode": "BSSX",
+      "baseName": "武钢资源集团乌龙泉矿业有限公司",
+      "hqCode": "BSSX00",
+      "hqName": "武钢资源集团乌龙泉矿业有限公司(总部)"
+    },
+    {
+      "baseCode": "BSSY",
+      "baseName": "新疆八钢集团公司检修中心",
+      "hqCode": "BSSY00",
+      "hqName": "新疆八钢集团公司检修中心(总部)"
+    },
+    {
+      "baseCode": "BSTA",
+      "baseName": "中国宝武钢铁集团有限公司",
+      "hqCode": "BSTA00",
+      "hqName": "宝武集团（总部）",
+      "alias": [
+        "集团",
+        "宝武",
+        "宝武集团"
+      ]
+    },
+    {
+      "baseCode": "BSTB",
+      "baseName": "新疆八一钢铁集团有限公司",
+      "hqCode": "BSTB00",
+      "hqName": "新疆八一钢铁集团有限公司（总部）"
+    },
+    {
+      "baseCode": "BSTD",
+      "baseName": "武钢中非（香港）矿业有限公司",
+      "hqCode": "BSTD00",
+      "hqName": "武钢中非（香港）矿业有限公司(总部)"
+    },
+    {
+      "baseCode": "BSTG",
+      "baseName": "宝钢集团上海钢管有限公司",
+      "hqCode": "BSTG00",
+      "hqName": "宝钢集团上海钢管有限公司（总部）"
+    },
+    {
+      "baseCode": "BSTH",
+      "baseName": "新疆蝶王针织有限责任公司",
+      "hqCode": "BSTH00",
+      "hqName": "新疆蝶王针织有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSTK",
+      "baseName": "上海全仕宝信息技术有限公司",
+      "hqCode": "BSTK00",
+      "hqName": "上海全仕宝信息技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BSTM",
+      "baseName": "宝钢集团上海梅山有限公司",
+      "hqCode": "BSTM00",
+      "hqName": "宝钢集团上海梅山有限公司（总部）"
+    },
+    {
+      "baseCode": "BSTN",
+      "baseName": "南京宝日钢丝制品有限公司",
+      "hqCode": "BSTN00",
+      "hqName": "南京宝日钢丝制品有限公司(总部)"
+    },
+    {
+      "baseCode": "BSTP",
+      "baseName": "宝钢集团上海浦东钢铁有限公司",
+      "hqCode": "BSTP00",
+      "hqName": "宝钢集团上海浦东钢铁有限公司（总部）"
+    },
+    {
+      "baseCode": "BSTQ",
+      "baseName": "新疆八一钢铁集团有限责任公司医院",
+      "hqCode": "BSTQ00",
+      "hqName": "新疆八一钢铁集团有限责任公司医院(总部)"
+    },
+    {
+      "baseCode": "BSTR",
+      "baseName": "新疆八一钢铁集团有限责任公司物业管理分公司",
+      "hqCode": "BSTR00",
+      "hqName": "新疆八一钢铁集团有限责任公司物业管理分公司(总部)"
+    },
+    {
+      "baseCode": "BSTU",
+      "baseName": "宝发展酒店物业管理有限公司",
+      "hqCode": "BSTU00",
+      "hqName": "宝发展酒店物业管理有限公司(总部)"
+    },
+    {
+      "baseCode": "BSTW",
+      "baseName": "宝钢集团上海五钢有限公司",
+      "hqCode": "BSTW00",
+      "hqName": "宝钢集团上海五钢有限公司（总部）"
+    },
+    {
+      "baseCode": "BSTX",
+      "baseName": "武汉武钢海绵城市建设项目投资有限责任公司",
+      "hqCode": "BSTX00",
+      "hqName": "武汉武钢海绵城市建设项目投资有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BSTY",
+      "baseName": "宝钢集团上海第一钢铁有限公司",
+      "hqCode": "BSTY00",
+      "hqName": "宝钢集团上海第一钢铁有限公司（总部）"
+    },
+    {
+      "baseCode": "BSUA",
+      "baseName": "济宁宝钢气体有限公司",
+      "hqCode": "BSUA00",
+      "hqName": "济宁宝钢气体有限公司(总部)"
+    },
+    {
+      "baseCode": "BSUB",
+      "baseName": "武汉钢铁江北集团金属制品有限公司",
+      "hqCode": "BSUB00",
+      "hqName": "武汉钢铁江北集团金属制品有限公司(总部)"
+    },
+    {
+      "baseCode": "BSUC",
+      "baseName": "武钢资源集团程潮矿业有限公司",
+      "hqCode": "BSUC00",
+      "hqName": "武钢资源集团程潮矿业有限公司(总部)"
+    },
+    {
+      "baseCode": "BSUD",
+      "baseName": "上海宝地互联众创空间管理有限公司",
+      "hqCode": "BSUD00",
+      "hqName": "上海宝地互联众创空间管理有限公司(总部)"
+    },
+    {
+      "baseCode": "BSUF",
+      "baseName": "广东韶钢海工新材料有限公司",
+      "hqCode": "BSUF00",
+      "hqName": "广东韶钢海工新材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BSUG",
+      "baseName": "成都宝钢制罐有限公司",
+      "hqCode": "BSUG00",
+      "hqName": "成都宝钢制罐有限公司(总部)"
+    },
+    {
+      "baseCode": "BSUP",
+      "baseName": "宝武物流资产有限公司",
+      "hqCode": "BSUP00",
+      "hqName": "宝武物流资产有限公司(总部)"
+    },
+    {
+      "baseCode": "BSUQ",
+      "baseName": "新疆钢城房地产开发有限责任公司",
+      "hqCode": "BSUQ00",
+      "hqName": "新疆宝地产城发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BSUU",
+      "baseName": "武汉钢铁江北集团有限公司北湖分公司",
+      "hqCode": "BSUU00",
+      "hqName": "武汉钢铁江北集团有限公司北湖分公司(总部)"
+    },
+    {
+      "baseCode": "BSUV",
+      "baseName": "通用电气（武汉）自动化有限公司",
+      "hqCode": "BSUV00",
+      "hqName": "通用电气（武汉）自动化有限公司(总部)"
+    },
+    {
+      "baseCode": "BSUX",
+      "baseName": "武汉武钢绿色城市技术发展有限公司",
+      "hqCode": "BSUX00",
+      "hqName": "武汉武钢绿色城市技术发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BSUY",
+      "baseName": "上海宝地宝郦汇企业发展有限公司",
+      "hqCode": "BSUY00",
+      "hqName": "上海宝地宝郦汇企业发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BSVE",
+      "baseName": "宝钢金属有限公司上海秉玟型材分公司",
+      "hqCode": "BSVE00",
+      "hqName": "宝钢金属有限公司秉玟型材分公司(总部)"
+    },
+    {
+      "baseCode": "BSVJ",
+      "baseName": "武钢恩施铁矿开发有限公司",
+      "hqCode": "BSVJ00",
+      "hqName": "武钢恩施铁矿开发有限公司(总部)"
+    },
+    {
+      "baseCode": "BSVK",
+      "baseName": "武汉钢铁集团鄂城钢铁有限公司",
+      "hqCode": "BSVK00",
+      "hqName": "武汉钢铁集团鄂城钢铁有限公司(总部)"
+    },
+    {
+      "baseCode": "BSVM",
+      "baseName": "自贸大宗（上海）信息服务有限公司",
+      "hqCode": "BSVM00",
+      "hqName": "自贸大宗（上海）信息服务有限公司(总部)"
+    },
+    {
+      "baseCode": "BSVQ",
+      "baseName": "武钢集团海南有限责任公司",
+      "hqCode": "BSVQ00",
+      "hqName": "武钢集团海南有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSVR",
+      "baseName": "佛山宝钢不锈钢贸易有限公司上海欧冶不锈钢分公司",
+      "hqCode": "BSVR00",
+      "hqName": "佛山宝钢不锈钢贸易有限公司上海欧冶不锈钢分公司(总部)"
+    },
+    {
+      "baseCode": "BSVY",
+      "baseName": "上海宝统物业管理有限公司",
+      "hqCode": "BSVY00",
+      "hqName": "上海宝统物业管理有限公司(总部)"
+    },
+    {
+      "baseCode": "BSWB",
+      "baseName": "上海欧冶物流股份有限公司",
+      "hqCode": "BSWB00",
+      "hqName": "上海欧冶物流股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BSWC",
+      "baseName": "宏信公司",
+      "hqCode": "BSWC00",
+      "hqName": "宏信公司(总部)"
+    },
+    {
+      "baseCode": "BSWF",
+      "baseName": "上海欧冶材料技术有限责任公司",
+      "hqCode": "BSWF00",
+      "hqName": "上海欧冶材料技术有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSWG",
+      "baseName": "上海欧冶采购信息科技有限责任公司",
+      "hqCode": "BSWG00",
+      "hqName": "上海欧冶采购信息科技有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSWH",
+      "baseName": "武汉钢铁（集团）公司",
+      "hqCode": "BSWH00",
+      "hqName": "武汉钢铁（集团）公司(总部)"
+    },
+    {
+      "baseCode": "BSWM",
+      "baseName": "原料采购管理事业部",
+      "hqCode": "BSWM00",
+      "hqName": "原料采购管理事业部(总部)"
+    },
+    {
+      "baseCode": "BSWP",
+      "baseName": "湛江宝钢新型建材科技有限公司",
+      "hqCode": "BSWP00",
+      "hqName": "湛江生产部"
+    },
+    {
+      "baseCode": "BSWQ",
+      "baseName": "宝钢金属有限公司沈阳宝玛克分公司",
+      "hqCode": "BSWQ00",
+      "hqName": "宝钢金属有限公司沈阳宝玛克分公司(总部)"
+    },
+    {
+      "baseCode": "BSWR",
+      "baseName": "武钢集团襄阳重型装备材料有限公司",
+      "hqCode": "BSWR00",
+      "hqName": "武钢集团襄阳重型装备材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BSWS",
+      "baseName": "上海吴淞口创业园有限公司",
+      "hqCode": "BSWS00",
+      "hqName": "上海吴淞口创业园有限公司(总部)"
+    },
+    {
+      "baseCode": "BSWV",
+      "baseName": "上海宝地临港产城发展有限公司",
+      "hqCode": "BSWV00",
+      "hqName": "上海宝地临港产城发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BSWW",
+      "baseName": "欧冶云商股份有限公司",
+      "hqCode": "BSWW00",
+      "hqName": "欧冶云商股份有限公司(总部)",
+      "alias": [
+        "欧冶",
+        "云商",
+        "欧冶云商"
+      ]
+    },
+    {
+      "baseCode": "BSXA",
+      "baseName": "重庆市创亿气体有限公司",
+      "hqCode": "BSXA00",
+      "hqName": "重庆市创亿气体有限公司(总部)"
+    },
+    {
+      "baseCode": "BSXB",
+      "baseName": "武汉钢铁江北集团有限公司",
+      "hqCode": "BSXB00",
+      "hqName": "武钢集团武汉江北钢铁有限公司(总部)"
+    },
+    {
+      "baseCode": "BSXD",
+      "baseName": "上海欧冶典当有限公司",
+      "hqCode": "BSXD00",
+      "hqName": "上海欧冶典当有限公司(总部)"
+    },
+    {
+      "baseCode": "BSXE",
+      "baseName": "新疆德勤互力工业技术有限公司",
+      "hqCode": "BSXE00",
+      "hqName": "新疆德勤互力工业技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BSXK",
+      "baseName": "广东宝韶东大特种材料有限公司",
+      "hqCode": "BSXK00",
+      "hqName": "广东宝韶东大特种材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BSXR",
+      "baseName": "宝钢金属制品工业(香港)有限公司",
+      "hqCode": "BSXR00",
+      "hqName": "宝钢金属制品工业(香港)有限公司(总部)"
+    },
+    {
+      "baseCode": "BSXS",
+      "baseName": "上海宝锋工程技术有限公司",
+      "hqCode": "BSXS00",
+      "hqName": "上海宝锋工程技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BSYC",
+      "baseName": "工厂作业事业部",
+      "hqCode": "BSYC00",
+      "hqName": "工厂作业事业部(总部)"
+    },
+    {
+      "baseCode": "BSYF",
+      "baseName": "上海宝钢工业有限公司",
+      "hqCode": "BSYF00",
+      "hqName": "上海宝钢工业有限公司(总部)"
+    },
+    {
+      "baseCode": "BSYH",
+      "baseName": "武钢鄂州耐火材料有限公司",
+      "hqCode": "BSYH00",
+      "hqName": "武钢鄂州耐火材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BSYK",
+      "baseName": "武钢江南中燃燃气（武汉）有限公司",
+      "hqCode": "BSYK00",
+      "hqName": "武钢江南中燃燃气（武汉）有限公司(总部)"
+    },
+    {
+      "baseCode": "BSYM",
+      "baseName": "淮北宝相气体有限公司",
+      "hqCode": "BSYM00",
+      "hqName": "淮北宝相气体有限公司(总部)"
+    },
+    {
+      "baseCode": "BSYQ",
+      "baseName": "湖北武钢雅苑钢结构建设有限公司",
+      "hqCode": "BSYQ00",
+      "hqName": "湖北武钢雅苑钢结构建设有限公司(总部)"
+    },
+    {
+      "baseCode": "BSYR",
+      "baseName": "物业管理部",
+      "hqCode": "BSYR00",
+      "hqName": "物业管理部(总部)"
+    },
+    {
+      "baseCode": "BSYV",
+      "baseName": "乌鲁木齐互利安康保安服务有限责任公司",
+      "hqCode": "BSYV00",
+      "hqName": "乌鲁木齐互利安康保安服务有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BSYW",
+      "baseName": "武汉市青青教育管理有限公司",
+      "hqCode": "BSYW00",
+      "hqName": "武汉市青青教育管理有限公司(总部)"
+    },
+    {
+      "baseCode": "BSYX",
+      "baseName": "武汉钢铁集团财务有限公司",
+      "hqCode": "BSYX00",
+      "hqName": "武汉钢铁集团财务有限公司(总部)"
+    },
+    {
+      "baseCode": "BUAP",
+      "baseName": "宝信软件-几内亚分公司",
+      "hqCode": "BUAP00",
+      "hqName": "宝信软件-几内亚分公司（总部）"
+    },
+    {
+      "baseCode": "BUBN",
+      "baseName": "安徽马钢矿业资源集团环境科技有限公司",
+      "hqCode": "BUBN00",
+      "hqName": "安徽马钢矿业资源集团环境科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BUBP",
+      "baseName": "华宝证券股份有限公司东莞东莞大道证券营业部",
+      "hqCode": "BUBP00",
+      "hqName": "华宝证券股份有限公司东莞东莞大道证券营业部（总部）"
+    },
+    {
+      "baseCode": "BUBX",
+      "baseName": "上海欧冶材料技术有限责任公司马鞍山分公司",
+      "hqCode": "BUBX00",
+      "hqName": "上海欧冶材料技术有限责任公司马鞍山分公司（总部）"
+    },
+    {
+      "baseCode": "BWAF",
+      "baseName": "马钢（合肥）工业供水有限责任公司",
+      "hqCode": "BWAF00",
+      "hqName": "马钢（合肥）工业供水有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWAG",
+      "baseName": "上海十钢有限公司",
+      "hqCode": "BWAG00",
+      "hqName": "上海十钢有限公司(总部)"
+    },
+    {
+      "baseCode": "BWAP",
+      "baseName": "上海钢铁研究所",
+      "hqCode": "BWAP00",
+      "hqName": "上海钢铁研究所(总部)"
+    },
+    {
+      "baseCode": "BWAS",
+      "baseName": "宝钢集团上海二钢有限公司",
+      "hqCode": "BWAS00",
+      "hqName": "宝钢集团上海二钢有限公司(总部)"
+    },
+    {
+      "baseCode": "BWAV",
+      "baseName": "宝信软件（江西）有限公司",
+      "hqCode": "BWAV00",
+      "hqName": "宝信软件（江西）有限公司（总部）"
+    },
+    {
+      "baseCode": "BWAY",
+      "baseName": "宝钢资源（国际）有限公司中东代表处",
+      "hqCode": "BWAY00",
+      "hqName": "宝钢资源（国际）有限公司中东代表处（总部）"
+    },
+    {
+      "baseCode": "BWBA",
+      "baseName": "山西太钢不锈钢股份有限公司",
+      "hqCode": "BWBA00",
+      "hqName": "山西太钢不锈钢股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BWBC",
+      "baseName": "上海欧冶材料技术有限责任公司太原分公司",
+      "hqCode": "BWBC00",
+      "hqName": "上海欧冶材料技术有限责任公司太原分公司(总部)"
+    },
+    {
+      "baseCode": "BWBD",
+      "baseName": "天津太钢销售有限公司",
+      "hqCode": "BWBD00",
+      "hqName": "天津太钢销售有限公司(总部)"
+    },
+    {
+      "baseCode": "BWBE",
+      "baseName": "上海金艺检测技术有限公司新余分公司",
+      "hqCode": "BWBE00",
+      "hqName": "上海金艺检测技术有限公司新余分公司（总部）"
+    },
+    {
+      "baseCode": "BWBG",
+      "baseName": "马鞍山宝至纯钙镁科技有限公司",
+      "hqCode": "BWBG00",
+      "hqName": "马鞍山宝至纯钙镁科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BWBK",
+      "baseName": "马鞍山利民冶金固体废物综合利用科技有限公司",
+      "hqCode": "BWBK00",
+      "hqName": "马鞍山利民冶金固体废物综合利用科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BWBN",
+      "baseName": "安徽马钢冶金工业技术服务有限责任公司",
+      "hqCode": "BWBN00",
+      "hqName": "安徽马钢冶金工业技术服务有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWBQ",
+      "baseName": "安徽马钢利民建筑安装有限责任公司",
+      "hqCode": "BWBQ00",
+      "hqName": "安徽马钢利民建筑安装有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWBR",
+      "baseName": "上海市避雷装置检测站有限公司",
+      "hqCode": "BWBR00",
+      "hqName": "上海市避雷装置检测站有限公司（总部）"
+    },
+    {
+      "baseCode": "BWBS",
+      "baseName": "太原钢铁（集团）电气有限公司",
+      "hqCode": "BWBS00",
+      "hqName": "太原钢铁（集团）电气有限公司(总部)"
+    },
+    {
+      "baseCode": "BWBT",
+      "baseName": "宝武清洁能源鄂州有限公司",
+      "hqCode": "BWBT00",
+      "hqName": "宝武清洁能源鄂州有限公司(总部)"
+    },
+    {
+      "baseCode": "BWBV",
+      "baseName": "湛江宝粤气体有限公司",
+      "hqCode": "BWBV00",
+      "hqName": "湛江宝粤气体有限公司（总部）"
+    },
+    {
+      "baseCode": "BWBY",
+      "baseName": "白银扎布耶锂业有限公司",
+      "hqCode": "BWBY00",
+      "hqName": "白银扎布耶锂业有限公司(总部)"
+    },
+    {
+      "baseCode": "BWCB",
+      "baseName": "马鞍山利民星火治金渣环保技术开发有限公司",
+      "hqCode": "BWCB00",
+      "hqName": "马鞍山利民星火治金渣环保技术开发有限公司(总部)"
+    },
+    {
+      "baseCode": "BWCC",
+      "baseName": "广州中南产城发展有限公司",
+      "hqCode": "BWCC00",
+      "hqName": "广州中南产城发展有限公司（总部）"
+    },
+    {
+      "baseCode": "BWCD",
+      "baseName": "宝武资源有限公司华中营销分公司",
+      "hqCode": "BWCD00",
+      "hqName": "宝武资源有限公司华中营销分公司（总部）"
+    },
+    {
+      "baseCode": "BWCG",
+      "baseName": "重庆钢铁股份有限公司（长寿钢铁）",
+      "hqCode": "BWCG00",
+      "hqName": "重庆钢铁股份有限公司（长寿钢铁）(总部)"
+    },
+    {
+      "baseCode": "BWCH",
+      "baseName": "中国中钢集团有限公司",
+      "hqCode": "BWCH00",
+      "hqName": "中国中钢集团有限公司(总部)"
+    },
+    {
+      "baseCode": "BWCK",
+      "baseName": "天津太钢天管不锈钢有限公司",
+      "hqCode": "BWCK00",
+      "hqName": "天津太钢天管不锈钢有限公司(总部)"
+    },
+    {
+      "baseCode": "BWCQ",
+      "baseName": "重庆钢铁（集团）有限责任公司",
+      "hqCode": "BWCQ00",
+      "hqName": "重庆钢铁（集团）有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWCV",
+      "baseName": "青岛太钢销售有限公司",
+      "hqCode": "BWCV00",
+      "hqName": "青岛太钢销售有限公司(总部)"
+    },
+    {
+      "baseCode": "BWCW",
+      "baseName": "太原钢铁（集团）有限公司矿业分公司",
+      "hqCode": "BWCW00",
+      "hqName": "太原钢铁（集团）有限公司矿业分公司(总部)"
+    },
+    {
+      "baseCode": "BWDE",
+      "baseName": "太钢进出口（香港）有限公司",
+      "hqCode": "BWDE00",
+      "hqName": "太钢进出口（香港）有限公司(总部)"
+    },
+    {
+      "baseCode": "BWDG",
+      "baseName": "西藏永兴工程建设有限公司",
+      "hqCode": "BWDG00",
+      "hqName": "西藏永兴工程建设有限公司(总部)"
+    },
+    {
+      "baseCode": "BWDH",
+      "baseName": "欧冶工业品股份有限公司",
+      "hqCode": "BWDH00",
+      "hqName": "欧冶工业品股份有限公司(总部)",
+      "alias": [
+        "工业品",
+        "欧冶工业品"
+      ]
+    },
+    {
+      "baseCode": "BWDQ",
+      "baseName": "华宝都鼎（上海）融资租赁有限公司浙江分公司",
+      "hqCode": "BWDQ00",
+      "hqName": "华宝都鼎（上海）融资租赁有限公司浙江分公司（总部）"
+    },
+    {
+      "baseCode": "BWEA",
+      "baseName": "山西太钢岚县生态农业发展有限公司",
+      "hqCode": "BWEA00",
+      "hqName": "山西太钢岚县生态农业发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BWEC",
+      "baseName": "重庆朵力物业管理有限责任公司",
+      "hqCode": "BWEC00",
+      "hqName": "重庆朵力物业管理有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWEG",
+      "baseName": "杭州太钢销售有限公司",
+      "hqCode": "BWEG00",
+      "hqName": "杭州太钢销售有限公司(总部)"
+    },
+    {
+      "baseCode": "BWEJ",
+      "baseName": "重庆三钢钢业有限责任公司",
+      "hqCode": "BWEJ00",
+      "hqName": "重庆三钢钢业有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWEK",
+      "baseName": "重庆钢铁集团钢管有限责任公司",
+      "hqCode": "BWEK00",
+      "hqName": "重庆钢铁集团钢管有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWEP",
+      "baseName": "重庆钢铁集团电子有限责任公司",
+      "hqCode": "BWEP00",
+      "hqName": "重庆钢铁集团电子有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWEQ",
+      "baseName": "重庆朝阳气体有限公司",
+      "hqCode": "BWEQ00",
+      "hqName": "重庆朝阳气体有限公司(总部)"
+    },
+    {
+      "baseCode": "BWET",
+      "baseName": "重庆钢铁集团产业有限公司",
+      "hqCode": "BWET00",
+      "hqName": "重庆钢铁集团产业有限公司(总部)"
+    },
+    {
+      "baseCode": "BWEU",
+      "baseName": "重庆钢铁集团中兴实业有限责任公司",
+      "hqCode": "BWEU00",
+      "hqName": "重庆钢铁集团中兴实业有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWEV",
+      "baseName": "广东宝氢科技有限公司",
+      "hqCode": "BWEV00",
+      "hqName": "广东宝氢科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BWEX",
+      "baseName": "重庆三环建设监理咨询有限公司",
+      "hqCode": "BWEX00",
+      "hqName": "重庆三环建设监理咨询有限公司(总部)"
+    },
+    {
+      "baseCode": "BWEY",
+      "baseName": "上海金艺检测技术有限公司武汉分公司",
+      "hqCode": "BWEY00",
+      "hqName": "上海金艺检测技术有限公司武汉分公司(总部)"
+    },
+    {
+      "baseCode": "BWFG",
+      "baseName": "重钢西昌矿业有限公司",
+      "hqCode": "BWFG00",
+      "hqName": "重钢西昌矿业有限公司(总部)"
+    },
+    {
+      "baseCode": "BWFK",
+      "baseName": "欧冶工业品股份有限公司福州分公司",
+      "hqCode": "BWFK00",
+      "hqName": "欧冶工业品股份有限公司福州分公司(总部)"
+    },
+    {
+      "baseCode": "BWFM",
+      "baseName": "重庆重钢矿产开发投资有限公司",
+      "hqCode": "BWFM00",
+      "hqName": "重庆重钢矿产开发投资有限公司(总部)"
+    },
+    {
+      "baseCode": "BWFN",
+      "baseName": "西藏矿业发展股份有限公司山南分公司",
+      "hqCode": "BWFN00",
+      "hqName": "西藏矿业发展股份有限公司山南分公司(总部)"
+    },
+    {
+      "baseCode": "BWFP",
+      "baseName": "重庆钢铁集团运输有限责任公司",
+      "hqCode": "BWFP00",
+      "hqName": "重庆钢铁集团运输有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWFS",
+      "baseName": "山西太钢工程技术有限公司",
+      "hqCode": "BWFS00",
+      "hqName": "山西太钢工程技术有限公司(总部)"
+    },
+    {
+      "baseCode": "BWFT",
+      "baseName": "宝玛克（合肥）科技有限公司",
+      "hqCode": "BWFT00",
+      "hqName": "宝玛克（合肥）科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BWFW",
+      "baseName": "太钢集团岚县矿业有限公司",
+      "hqCode": "BWFW00",
+      "hqName": "太钢集团岚县矿业有限公司(总部)"
+    },
+    {
+      "baseCode": "BWFY",
+      "baseName": "太原钢铁（集团）不锈钢工业园有限公司",
+      "hqCode": "BWFY00",
+      "hqName": "太原钢铁（集团）不锈钢工业园有限公司(总部)"
+    },
+    {
+      "baseCode": "BWGB",
+      "baseName": "山西太钢鑫磊资源有限公司",
+      "hqCode": "BWGB00",
+      "hqName": "山西太钢鑫磊资源有限公司(总部)"
+    },
+    {
+      "baseCode": "BWGD",
+      "baseName": "重庆钢铁集团朵力房地产股份有限公司",
+      "hqCode": "BWGD00",
+      "hqName": "重庆钢铁集团朵力房地产股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BWGH",
+      "baseName": "欧冶新加坡有限责任公司",
+      "hqCode": "BWGH00",
+      "hqName": "欧冶新加坡有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWGM",
+      "baseName": "宝武原料供应有限公司",
+      "hqCode": "BWGM00",
+      "hqName": "宝武原料供应有限公司(总部)"
+    },
+    {
+      "baseCode": "BWGP",
+      "baseName": "武汉太钢销售有限公司",
+      "hqCode": "BWGP00",
+      "hqName": "武汉太钢销售有限公司(总部)"
+    },
+    {
+      "baseCode": "BWGQ",
+      "baseName": "欧冶工业品股份有限公司南京分公司",
+      "hqCode": "BWGQ00",
+      "hqName": "欧冶工业品股份有限公司南京分公司(总部)"
+    },
+    {
+      "baseCode": "BWGR",
+      "baseName": "重庆钢铁集团矿业有限公司",
+      "hqCode": "BWGR00",
+      "hqName": "重庆钢铁集团矿业有限公司(总部)"
+    },
+    {
+      "baseCode": "BWHC",
+      "baseName": "亚洲钢铁控股有限公司",
+      "hqCode": "BWHC00",
+      "hqName": "亚洲钢铁控股有限公司(总部)"
+    },
+    {
+      "baseCode": "BWHD",
+      "baseName": "欧冶工业品股份有限公司韶关分公司",
+      "hqCode": "BWHD00",
+      "hqName": "欧冶工业品股份有限公司韶关分公司(总部)"
+    },
+    {
+      "baseCode": "BWHE",
+      "baseName": "重庆工业博物馆置业有限公司",
+      "hqCode": "BWHE00",
+      "hqName": "重庆工业博物馆置业有限公司(总部)"
+    },
+    {
+      "baseCode": "BWHF",
+      "baseName": "伊斯坦鑫山股份有限公司",
+      "hqCode": "BWHF00",
+      "hqName": "伊斯坦鑫山股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BWHH",
+      "baseName": "上海欧冶材料技术有限责任公司杭州分公司",
+      "hqCode": "BWHH00",
+      "hqName": "上海欧冶材料技术有限责任公司杭州分公司（总部）"
+    },
+    {
+      "baseCode": "BWHL",
+      "baseName": "西藏新鼎矿业大酒店有限公司",
+      "hqCode": "BWHL00",
+      "hqName": "西藏新鼎矿业大酒店有限公司(总部)"
+    },
+    {
+      "baseCode": "BWHQ",
+      "baseName": "山西临汾太钢中厚板有限公司",
+      "hqCode": "BWHQ00",
+      "hqName": "山西临汾太钢中厚板有限公司（总部）"
+    },
+    {
+      "baseCode": "BWHU",
+      "baseName": "山西世茂商务中心有限公司",
+      "hqCode": "BWHU00",
+      "hqName": "山西世茂商务中心有限公司(总部)"
+    },
+    {
+      "baseCode": "BWHW",
+      "baseName": "山西太钢万邦炉料有限公司",
+      "hqCode": "BWHW00",
+      "hqName": "山西太钢万邦炉料有限公司(总部)"
+    },
+    {
+      "baseCode": "BWJA",
+      "baseName": "天津运帮物流有限公司",
+      "hqCode": "BWJA00",
+      "hqName": "天津运帮物流有限公司(总部)"
+    },
+    {
+      "baseCode": "BWJD",
+      "baseName": "宝武资源有限公司华东营销分公司",
+      "hqCode": "BWJD00",
+      "hqName": "宝武资源有限公司华东营销分公司（总部）"
+    },
+    {
+      "baseCode": "BWJE",
+      "baseName": "武汉钢铁集团耐火材料有限责任公司鄂州分公司",
+      "hqCode": "BWJE00",
+      "hqName": "武汉钢铁集团耐火材料有限责任公司鄂州分公司（总部）"
+    },
+    {
+      "baseCode": "BWJG",
+      "baseName": "山西钢科碳材料有限公司",
+      "hqCode": "BWJG00",
+      "hqName": "山西钢科碳材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BWJN",
+      "baseName": "太钢北方（北京）销售有限公司",
+      "hqCode": "BWJN00",
+      "hqName": "太钢北方（北京）销售有限公司（总部）"
+    },
+    {
+      "baseCode": "BWJP",
+      "baseName": "武汉钢铁江北集团有限公司建安钢构分公司",
+      "hqCode": "BWJP00",
+      "hqName": "武汉钢铁江北集团有限公司建安钢构分公司（总部）"
+    },
+    {
+      "baseCode": "BWJS",
+      "baseName": "上海金艺检测技术有限公司韶关分公司",
+      "hqCode": "BWJS00",
+      "hqName": "上海金艺检测技术有限公司韶关分公司(总部)"
+    },
+    {
+      "baseCode": "BWJX",
+      "baseName": "欧冶工业品股份有限公司新余分公司",
+      "hqCode": "BWJX00",
+      "hqName": "欧冶工业品股份有限公司新余分公司（总部）"
+    },
+    {
+      "baseCode": "BWJY",
+      "baseName": "宝武智慧轧辊技术服务（上海）有限公司新余分公司",
+      "hqCode": "BWJY00",
+      "hqName": "宝武智慧轧辊技术服务（上海）有限公司新余分公司（总部）"
+    },
+    {
+      "baseCode": "BWKB",
+      "baseName": "欧冶工业品股份有限公司武汉分公司",
+      "hqCode": "BWKB00",
+      "hqName": "欧冶工业品股份有限公司武汉分公司(总部)"
+    },
+    {
+      "baseCode": "BWKD",
+      "baseName": "城市矿山事业部",
+      "hqCode": "BWKD00",
+      "hqName": "城市矿山事业部（总部）"
+    },
+    {
+      "baseCode": "BWKE",
+      "baseName": "宝武水务水治理事业部",
+      "hqCode": "BWKE00",
+      "hqName": "宝武水务水治理事业部（总部）"
+    },
+    {
+      "baseCode": "BWKG",
+      "baseName": "昆明钢铁控股有限公司",
+      "hqCode": "BWKG00",
+      "hqName": "昆明钢铁控股有限公司(总部)"
+    },
+    {
+      "baseCode": "BWKH",
+      "baseName": "宝武水务大气治理事业部",
+      "hqCode": "BWKH00",
+      "hqName": "宝武水务大气治理事业部（总部）"
+    },
+    {
+      "baseCode": "BWKJ",
+      "baseName": "安徽宝钢钢材贸易有限公司",
+      "hqCode": "BWKJ00",
+      "hqName": "安徽宝钢钢材贸易有限公司（总部）"
+    },
+    {
+      "baseCode": "BWKK",
+      "baseName": "乌鲁木齐互利安康安保技术有限责任公司伊犁分公司",
+      "hqCode": "BWKK00",
+      "hqName": "乌鲁木齐互利安康安保技术有限责任公司伊犁分公司(总部)"
+    },
+    {
+      "baseCode": "BWKM",
+      "baseName": "西藏矿业资产经营有限公司",
+      "hqCode": "BWKM00",
+      "hqName": "西藏矿业资产经营有限公司(总部)"
+    },
+    {
+      "baseCode": "BWKN",
+      "baseName": "宝锐特气体有限公司",
+      "hqCode": "BWKN00",
+      "hqName": "宝锐特气体有限公司(总部)"
+    },
+    {
+      "baseCode": "BWKP",
+      "baseName": "韶关中南港航有限公司",
+      "hqCode": "BWKP00",
+      "hqName": "韶关中南港航有限公司（总部）"
+    },
+    {
+      "baseCode": "BWKT",
+      "baseName": "包头宝楷炭材料有限公司",
+      "hqCode": "BWKT00",
+      "hqName": "包头宝楷炭材料有限公司（总部）"
+    },
+    {
+      "baseCode": "BWKW",
+      "baseName": "新疆伊犁钢铁有限责任公司",
+      "hqCode": "BWKW00",
+      "hqName": "新疆伊犁钢铁有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWKX",
+      "baseName": "宝钢金属有限公司上海分公司",
+      "hqCode": "BWKX00",
+      "hqName": "宝钢金属有限公司上海分公司(总部)"
+    },
+    {
+      "baseCode": "BWKY",
+      "baseName": "西藏矿业发展股份有限公司",
+      "hqCode": "BWKY00",
+      "hqName": "西藏矿业发展股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BWMA",
+      "baseName": "宝武资源镇江矿业科技有限公司",
+      "hqCode": "BWMA00",
+      "hqName": "宝武资源镇江矿业科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BWMB",
+      "baseName": "山西太钢不锈钢钢管有限公司",
+      "hqCode": "BWMB00",
+      "hqName": "山西太钢不锈钢钢管有限公司(总部)"
+    },
+    {
+      "baseCode": "BWMC",
+      "baseName": "宝武环科重庆资源循环利用有限公司",
+      "hqCode": "BWMC00",
+      "hqName": "宝武环科重庆资源循环利用有限公司(总部)"
+    },
+    {
+      "baseCode": "BWME",
+      "baseName": "合肥宝地产城发展有限公司",
+      "hqCode": "BWME00",
+      "hqName": "合肥宝地产城发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BWMG",
+      "baseName": "宝武特冶（马鞍山）高金科技有限公司上海特冶供应链分公司",
+      "hqCode": "BWMG00",
+      "hqName": "宝武特冶（马鞍山）高金科技有限公司上海特冶供应链分公司（总部）"
+    },
+    {
+      "baseCode": "BWMK",
+      "baseName": "宝武镁业科技股份有限公司",
+      "hqCode": "BWMK00",
+      "hqName": "宝武镁业科技股份有限公司（总部）"
+    },
+    {
+      "baseCode": "BWMM",
+      "baseName": "太钢集团财务有限公司",
+      "hqCode": "BWMM00",
+      "hqName": "太钢集团财务有限公司(总部)"
+    },
+    {
+      "baseCode": "BWMN",
+      "baseName": "太钢（天津）商业保理有限公司",
+      "hqCode": "BWMN00",
+      "hqName": "太钢（天津）商业保理有限公司(总部)"
+    },
+    {
+      "baseCode": "BWMP",
+      "baseName": "欧冶工业品股份有限公司宁波分公司",
+      "hqCode": "BWMP00",
+      "hqName": "欧冶工业品股份有限公司宁波分公司（总部）"
+    },
+    {
+      "baseCode": "BWMS",
+      "baseName": "宝武特冶（马鞍山）高金科技有限公司",
+      "hqCode": "BWMS00",
+      "hqName": "宝武特冶（马鞍山）高金科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BWMU",
+      "baseName": "太原钢铁（集团）金属回收加工贸易有限公司",
+      "hqCode": "BWMU00",
+      "hqName": "太原钢铁（集团）金属回收加工贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BWMV",
+      "baseName": "欧冶工业品股份有限公司马鞍山分公司",
+      "hqCode": "BWMV00",
+      "hqName": "欧冶工业品股份有限公司马鞍山分公司(总部)"
+    },
+    {
+      "baseCode": "BWMY",
+      "baseName": "无锡太钢销售有限公司",
+      "hqCode": "BWMY00",
+      "hqName": "无锡太钢销售有限公司(总部)"
+    },
+    {
+      "baseCode": "BWNB",
+      "baseName": "山西宝地产城发展有限公司太原钢盛公园运营管理分公司",
+      "hqCode": "BWNB00",
+      "hqName": "山西宝地产城发展有限公司太原钢盛公园运营管理分公司（总部）"
+    },
+    {
+      "baseCode": "BWNC",
+      "baseName": "上海金艺检测技术有限公司南京分公司",
+      "hqCode": "BWNC00",
+      "hqName": "上海金艺检测技术有限公司南京分公司(总部)"
+    },
+    {
+      "baseCode": "BWNE",
+      "baseName": "宝武资源营销（南京）有限公司",
+      "hqCode": "BWNE00",
+      "hqName": "宝武资源营销（南京）有限公司（总部）"
+    },
+    {
+      "baseCode": "BWNG",
+      "baseName": "宝武物流资产有限公司南京分公司",
+      "hqCode": "BWNG00",
+      "hqName": "宝武物流资产有限公司南京分公司(总部)"
+    },
+    {
+      "baseCode": "BWNJ",
+      "baseName": "宝武资源有限公司南京营销分公司",
+      "hqCode": "BWNJ00",
+      "hqName": "宝武资源有限公司南京营销分公司（总部）"
+    },
+    {
+      "baseCode": "BWNK",
+      "baseName": "新疆天山钢铁巴州有限公司",
+      "hqCode": "BWNK00",
+      "hqName": "新疆天山钢铁巴州有限公司(总部)"
+    },
+    {
+      "baseCode": "BWNM",
+      "baseName": "尼木县铜业开发有限责任公司",
+      "hqCode": "BWNM00",
+      "hqName": "尼木县铜业开发有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWNU",
+      "baseName": "山西太钢房地产开发有限公司",
+      "hqCode": "BWNU00",
+      "hqName": "山西太钢房地产开发有限公司(总部)"
+    },
+    {
+      "baseCode": "BWNY",
+      "baseName": "宝武镁业科技股份有限公司上海分公司",
+      "hqCode": "BWNY00",
+      "hqName": "宝武镁业科技股份有限公司上海分公司（总部）"
+    },
+    {
+      "baseCode": "BWPA",
+      "baseName": "山西太钢定襄销售有限公司",
+      "hqCode": "BWPA00",
+      "hqName": "山西太钢定襄销售有限公司(总部)"
+    },
+    {
+      "baseCode": "BWPF",
+      "baseName": "山西太钢保税综合服务有限公司",
+      "hqCode": "BWPF00",
+      "hqName": "山西太钢保税综合服务有限公司(总部)"
+    },
+    {
+      "baseCode": "BWPG",
+      "baseName": "越南宝钢制罐（顺化）有限公司隆安分公司",
+      "hqCode": "BWPG00",
+      "hqName": "越南宝钢制罐（顺化）有限公司隆安分公司（总部）"
+    },
+    {
+      "baseCode": "BWPH",
+      "baseName": "上海润益互联网科技有限公司",
+      "hqCode": "BWPH00",
+      "hqName": "上海润益互联网科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BWPJ",
+      "baseName": "太钢集团代县矿业有限公司",
+      "hqCode": "BWPJ00",
+      "hqName": "太钢集团代县矿业有限公司(总部)"
+    },
+    {
+      "baseCode": "BWPN",
+      "baseName": "欧冶工业品股份有限公司昆明分公司",
+      "hqCode": "BWPN00",
+      "hqName": "欧冶工业品股份有限公司昆明分公司(总部)"
+    },
+    {
+      "baseCode": "BWPQ",
+      "baseName": "太原钢铁（集团）粉煤灰综合利用有限公司",
+      "hqCode": "BWPQ00",
+      "hqName": "太原钢铁（集团）粉煤灰综合利用有限公司(总部)"
+    },
+    {
+      "baseCode": "BWPT",
+      "baseName": "太原钢铁（集团）修建有限责任公司",
+      "hqCode": "BWPT00",
+      "hqName": "太原钢铁（集团）修建有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWPX",
+      "baseName": "山西太钢不锈钢股份有限公司临汾分公司",
+      "hqCode": "BWPX00",
+      "hqName": "山西太钢不锈钢股份有限公司临汾分公司(总部)"
+    },
+    {
+      "baseCode": "BWQE",
+      "baseName": "山西钢泰房地产开发有限公司",
+      "hqCode": "BWQE00",
+      "hqName": "山西钢泰房地产开发有限公司(总部)"
+    },
+    {
+      "baseCode": "BWQG",
+      "baseName": "武汉钢铁江北集团有限公司琴台钢材市场",
+      "hqCode": "BWQG00",
+      "hqName": "武汉钢铁江北集团有限公司琴台钢材市场（总部）"
+    },
+    {
+      "baseCode": "BWQK",
+      "baseName": "太钢集团临汾钢铁有限公司",
+      "hqCode": "BWQK00",
+      "hqName": "太钢集团临汾钢铁有限公司(总部)"
+    },
+    {
+      "baseCode": "BWQN",
+      "baseName": "宝武特冶航研科技有限公司",
+      "hqCode": "BWQN00",
+      "hqName": "宝武特冶航研科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BWQR",
+      "baseName": "武汉润桦辉氧气气瓶检验有限责任公司",
+      "hqCode": "BWQR00",
+      "hqName": "武汉润桦辉氧气气瓶检验有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BWQT",
+      "baseName": "欧冶工业品股份有限公司湛江分公司",
+      "hqCode": "BWQT00",
+      "hqName": "欧冶工业品股份有限公司湛江分公司(总部)"
+    },
+    {
+      "baseCode": "BWQX",
+      "baseName": "宝武资源有限公司球团营销分公司",
+      "hqCode": "BWQX00",
+      "hqName": "宝武资源有限公司球团营销分公司（总部）"
+    },
+    {
+      "baseCode": "BWRF",
+      "baseName": "宝武产教融合发展（上海）有限公司",
+      "hqCode": "BWRF00",
+      "hqName": "宝武产教融合发展（上海）有限公司（总部）"
+    },
+    {
+      "baseCode": "BWRH",
+      "baseName": "西藏润恒矿产品销售有限公司",
+      "hqCode": "BWRH00",
+      "hqName": "西藏润恒矿产品销售有限公司(总部)"
+    },
+    {
+      "baseCode": "BWRM",
+      "baseName": "山西太钢投资有限公司",
+      "hqCode": "BWRM00",
+      "hqName": "山西太钢投资有限公司(总部)"
+    },
+    {
+      "baseCode": "BWRN",
+      "baseName": "中钢洛耐科技股份有限公司",
+      "hqCode": "BWRN00",
+      "hqName": "中钢洛耐科技股份有限公司（总部）"
+    },
+    {
+      "baseCode": "BWRP",
+      "baseName": "PRECISIONROBOTICAS.R.L.",
+      "hqCode": "BWRP00",
+      "hqName": "PRECISIONROBOTICAS.R.L.（总部）"
+    },
+    {
+      "baseCode": "BWRQ",
+      "baseName": "R.R.ROBOTICAS.R.L.",
+      "hqCode": "BWRQ00",
+      "hqName": "R.R.ROBOTICAS.R.L.（总部）"
+    },
+    {
+      "baseCode": "BWRW",
+      "baseName": "BAOWURESOURCESWESTAFRICACOMPANYLIMITED",
+      "hqCode": "BWRW00",
+      "hqName": "BAOWURESOURCESWESTAFRICACOMPANYLIMITED（总部）"
+    },
+    {
+      "baseCode": "BWRZ",
+      "baseName": "西藏日喀则扎布耶锂业高科技有限公司",
+      "hqCode": "BWRZ00",
+      "hqName": "西藏日喀则扎布耶锂业高科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BWSD",
+      "baseName": "华宝证券股份有限公司山东分公司",
+      "hqCode": "BWSD00",
+      "hqName": "华宝证券股份有限公司山东分公司（总部）"
+    },
+    {
+      "baseCode": "BWSF",
+      "baseName": "宝钢工程技术集团有限公司沙特分公司",
+      "hqCode": "BWSF00",
+      "hqName": "宝钢工程技术集团有限公司沙特分公司（总部）"
+    },
+    {
+      "baseCode": "BWSG",
+      "baseName": "留守单位管理中心",
+      "hqCode": "BWSG00",
+      "hqName": "留守单位管理中心(总部)"
+    },
+    {
+      "baseCode": "BWSM",
+      "baseName": "宝武清洁能源（三门峡）有限公司",
+      "hqCode": "BWSM00",
+      "hqName": "宝武清洁能源（三门峡）有限公司（总部）"
+    },
+    {
+      "baseCode": "BWSN",
+      "baseName": "上海宝信智矿信息科技有限公司",
+      "hqCode": "BWSN00",
+      "hqName": "上海宝信智矿信息科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BWSS",
+      "baseName": "宝武共享服务有限公司",
+      "hqCode": "BWSS00",
+      "hqName": "宝武共享服务有限公司（总部）",
+      "alias": [
+        "共享",
+        "宝武共享"
+      ]
+    },
+    {
+      "baseCode": "BWSU",
+      "baseName": "欧冶(老挝)有限公司",
+      "hqCode": "BWSU00",
+      "hqName": "欧冶(老挝)有限公司(总部)"
+    },
+    {
+      "baseCode": "BWSY",
+      "baseName": "欧冶工业品股份有限公司沈阳分公司",
+      "hqCode": "BWSY00",
+      "hqName": "欧冶工业品股份有限公司沈阳分公司（总部）"
+    },
+    {
+      "baseCode": "BWTB",
+      "baseName": "伊犁八钢矿业有限公司",
+      "hqCode": "BWTB00",
+      "hqName": "伊犁八钢矿业有限公司（总部）"
+    },
+    {
+      "baseCode": "BWTC",
+      "baseName": "太原钢铁（集团）现货销售有限公司",
+      "hqCode": "BWTC00",
+      "hqName": "太原钢铁（集团）现货销售有限公司(总部)"
+    },
+    {
+      "baseCode": "BWTJ",
+      "baseName": "江苏图灵智能机器人有限公司",
+      "hqCode": "BWTJ00",
+      "hqName": "江苏图灵智能机器人有限公司（总部）"
+    },
+    {
+      "baseCode": "BWTM",
+      "baseName": "图灵智造机器人（深圳）有限公司烟台分公司",
+      "hqCode": "BWTM00",
+      "hqName": "图灵智造机器人（深圳）有限公司烟台分公司（总部）"
+    },
+    {
+      "baseCode": "BWTP",
+      "baseName": "西安太钢销售有限公司",
+      "hqCode": "BWTP00",
+      "hqName": "西安太钢销售有限公司(总部)"
+    },
+    {
+      "baseCode": "BWTQ",
+      "baseName": "山西省冶金研究所有限公司",
+      "hqCode": "BWTQ00",
+      "hqName": "山西省冶金研究所有限公司(总部)"
+    },
+    {
+      "baseCode": "BWTT",
+      "baseName": "武汉市青山天途工业气体危险品运输有限公司",
+      "hqCode": "BWTT00",
+      "hqName": "武汉市青山天途工业气体危险品运输有限公司（总部）"
+    },
+    {
+      "baseCode": "BWTU",
+      "baseName": "上海图灵智造机器人股份有限公司",
+      "hqCode": "BWTU00",
+      "hqName": "上海图灵智造机器人股份有限公司（总部）"
+    },
+    {
+      "baseCode": "BWTV",
+      "baseName": "图灵智造机器人(深圳)有限公司",
+      "hqCode": "BWTV00",
+      "hqName": "图灵智造机器人(深圳)有限公司（总部）"
+    },
+    {
+      "baseCode": "BWTX",
+      "baseName": "山东鑫海实业有限公司",
+      "hqCode": "BWTX00",
+      "hqName": "山东鑫海实业有限公司（总部）"
+    },
+    {
+      "baseCode": "BWTY",
+      "baseName": "太原钢铁（集团）有限公司",
+      "hqCode": "BWTY00",
+      "hqName": "太原钢铁（集团）有限公司(总部)"
+    },
+    {
+      "baseCode": "BWUA",
+      "baseName": "上海欧冶材料技术有限责任公司西安分公司",
+      "hqCode": "BWUA00",
+      "hqName": "上海欧冶材料技术有限责任公司西安分公司(总部)"
+    },
+    {
+      "baseCode": "BWUE",
+      "baseName": "山西太钢保险代理有限公司",
+      "hqCode": "BWUE00",
+      "hqName": "山西太钢保险代理有限公司(总部)"
+    },
+    {
+      "baseCode": "BWUF",
+      "baseName": "太钢（天津）融资租赁有限公司",
+      "hqCode": "BWUF00",
+      "hqName": "太钢（天津）融资租赁有限公司(总部)"
+    },
+    {
+      "baseCode": "BWUH",
+      "baseName": "欧冶工业品股份有限公司乌鲁木齐分公司",
+      "hqCode": "BWUH00",
+      "hqName": "欧冶工业品股份有限公司乌鲁木齐分公司(总部)"
+    },
+    {
+      "baseCode": "BWUJ",
+      "baseName": "成都(太钢)销售有限公司",
+      "hqCode": "BWUJ00",
+      "hqName": "成都(太钢)销售有限公司(总部)"
+    },
+    {
+      "baseCode": "BWUP",
+      "baseName": "山西太钢不锈钢精密带钢有限公司",
+      "hqCode": "BWUP00",
+      "hqName": "山西太钢不锈钢精密带钢有限公司(总部)"
+    },
+    {
+      "baseCode": "BWUR",
+      "baseName": "山西钢盛房地产开发有限公司",
+      "hqCode": "BWUR00",
+      "hqName": "山西钢盛房地产开发有限公司(总部)"
+    },
+    {
+      "baseCode": "BWUX",
+      "baseName": "太原钢铁（集团）国际经济贸易有限公司",
+      "hqCode": "BWUX00",
+      "hqName": "太原钢铁（集团）国际经济贸易有限公司(总部)"
+    },
+    {
+      "baseCode": "BWVR",
+      "baseName": "欧冶工业品股份有限公司天津分公司",
+      "hqCode": "BWVR00",
+      "hqName": "欧冶工业品股份有限公司天津分公司（总部）"
+    },
+    {
+      "baseCode": "BWWA",
+      "baseName": "常熟威仕科大衡金属材料科技有限公司",
+      "hqCode": "BWWA00",
+      "hqName": "常熟威仕科大衡金属材料科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BWWB",
+      "baseName": "无锡宝井钢材加工配送有限公司",
+      "hqCode": "BWWB00",
+      "hqName": "无锡宝井钢材加工配送有限公司（总部）"
+    },
+    {
+      "baseCode": "BWWC",
+      "baseName": "山西宝地产城发展有限公司太原物业分公司",
+      "hqCode": "BWWC00",
+      "hqName": "山西宝地产城发展有限公司太原物业分公司(总部)"
+    },
+    {
+      "baseCode": "BWWD",
+      "baseName": "上海金艺检测技术有限公司太原分公司",
+      "hqCode": "BWWD00",
+      "hqName": "上海金艺检测技术有限公司太原分公司(总部)"
+    },
+    {
+      "baseCode": "BWWF",
+      "baseName": "南京梅山智能采矿科技有限公司",
+      "hqCode": "BWWF00",
+      "hqName": "南京梅山智能采矿科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BWWK",
+      "baseName": "武钢集团昆明钢铁股份有限公司",
+      "hqCode": "BWWK00",
+      "hqName": "武钢集团昆明钢铁股份有限公司(总部)"
+    },
+    {
+      "baseCode": "BWWQ",
+      "baseName": "山西临钢产城发展有限公司",
+      "hqCode": "BWWQ00",
+      "hqName": "山西临钢产城发展有限公司(总部)"
+    },
+    {
+      "baseCode": "BWWX",
+      "baseName": "新疆八钢物业有限责任公司新源分公司",
+      "hqCode": "BWWX00",
+      "hqName": "新疆八钢物业有限责任公司新源分公司（总部）"
+    },
+    {
+      "baseCode": "BWXA",
+      "baseName": "上海金艺检测技术有限公司马鞍山分公司",
+      "hqCode": "BWXA00",
+      "hqName": "上海金艺检测技术有限公司马鞍山分公司(总部)"
+    },
+    {
+      "baseCode": "BWXD",
+      "baseName": "武汉钢铁江北集团有限公司现代矿山产业园分公司",
+      "hqCode": "BWXD00",
+      "hqName": "武汉钢铁江北集团有限公司现代矿山产业园分公司（总部）"
+    },
+    {
+      "baseCode": "BWXG",
+      "baseName": "尼勒克县瑞祥焦化有限责任公司",
+      "hqCode": "BWXG00",
+      "hqName": "尼勒克县瑞祥焦化有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWXH",
+      "baseName": "沈阳太钢不锈钢加工销售有限公司",
+      "hqCode": "BWXH00",
+      "hqName": "沈阳太钢不锈钢加工销售有限公司(总部)"
+    },
+    {
+      "baseCode": "BWXK",
+      "baseName": "山西禄纬堡太钢耐火材料有限公司",
+      "hqCode": "BWXK00",
+      "hqName": "山西禄纬堡太钢耐火材料有限公司(总部)"
+    },
+    {
+      "baseCode": "BWXM",
+      "baseName": "宝武清洁能源（西藏）有限公司",
+      "hqCode": "BWXM00",
+      "hqName": "宝武清洁能源（西藏）有限公司（总部）"
+    },
+    {
+      "baseCode": "BWXQ",
+      "baseName": "欧冶工业品股份有限公司重庆分公司",
+      "hqCode": "BWXQ00",
+      "hqName": "欧冶工业品股份有限公司重庆分公司(总部)"
+    },
+    {
+      "baseCode": "BWXR",
+      "baseName": "山西星火弘源工贸有限公司",
+      "hqCode": "BWXR00",
+      "hqName": "山西星火弘源工贸有限公司（总部）"
+    },
+    {
+      "baseCode": "BWXT",
+      "baseName": "太钢南方（广东）销售有限公司",
+      "hqCode": "BWXT00",
+      "hqName": "太钢南方（广东）销售有限公司（总部）"
+    },
+    {
+      "baseCode": "BWXX",
+      "baseName": "上海宝钢新创享科技有限公司",
+      "hqCode": "BWXX00",
+      "hqName": "上海宝钢新创享科技有限公司（总部）"
+    },
+    {
+      "baseCode": "BWXY",
+      "baseName": "宝武水务孝义有限公司",
+      "hqCode": "BWXY00",
+      "hqName": "宝武水务孝义有限公司（总部）"
+    },
+    {
+      "baseCode": "BWYC",
+      "baseName": "欧冶工业品股份有限公司鄂州分公司",
+      "hqCode": "BWYC00",
+      "hqName": "欧冶工业品股份有限公司鄂州分公司(总部)"
+    },
+    {
+      "baseCode": "BWYD",
+      "baseName": "湖北鄂钢商贸服务有限公司园区服务分公司",
+      "hqCode": "BWYD00",
+      "hqName": "湖北鄂钢商贸服务有限公司园区服务分公司（总部）"
+    },
+    {
+      "baseCode": "BWYE",
+      "baseName": "重庆市长寿区化工品交易市场有限公司",
+      "hqCode": "BWYE00",
+      "hqName": "重庆市长寿区化工品交易市场有限公司（总部）"
+    },
+    {
+      "baseCode": "BWYH",
+      "baseName": "宝武特冶钛金科技有限公司",
+      "hqCode": "BWYH00",
+      "hqName": "宝武特冶钛金科技有限公司(总部)"
+    },
+    {
+      "baseCode": "BWYJ",
+      "baseName": "新余钢铁集团有限公司",
+      "hqCode": "BWYJ00",
+      "hqName": "新余钢铁集团有限公司（总部）"
+    },
+    {
+      "baseCode": "BWYK",
+      "baseName": "太钢欧洲有限责任公司",
+      "hqCode": "BWYK00",
+      "hqName": "太钢欧洲有限责任公司(总部)"
+    },
+    {
+      "baseCode": "BWYM",
+      "baseName": "上海欧冶材料技术有限责任公司天津分公司",
+      "hqCode": "BWYM00",
+      "hqName": "上海欧冶材料技术有限责任公司天津分公司(总部)"
+    },
+    {
+      "baseCode": "BWYP",
+      "baseName": "欧冶工业品股份有限公司太原分公司",
+      "hqCode": "BWYP00",
+      "hqName": "欧冶工业品股份有限公司太原分公司（总部）"
+    },
+    {
+      "baseCode": "BWYR",
+      "baseName": "江西欧冶新钢供应链有限责任公司",
+      "hqCode": "BWYR00",
+      "hqName": "江西欧冶新钢供应链有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BWYS",
+      "baseName": "武钢集团有限公司幼教中心分公司",
+      "hqCode": "BWYS00",
+      "hqName": "武钢集团有限公司幼教中心分公司（总部）"
+    },
+    {
+      "baseCode": "BWYT",
+      "baseName": "欧冶工业品股份有限公司广州分公司",
+      "hqCode": "BWYT00",
+      "hqName": "欧冶工业品股份有限公司广州分公司(总部)"
+    },
+    {
+      "baseCode": "BWYU",
+      "baseName": "宝钢工程技术集团有限公司新疆分公司",
+      "hqCode": "BWYU00",
+      "hqName": "宝钢工程技术集团有限公司新疆分公司(总部)"
+    },
+    {
+      "baseCode": "BWYY",
+      "baseName": "重庆钢铁集团矿业有限公司大宝坡石灰石矿",
+      "hqCode": "BWYY00",
+      "hqName": "重庆钢铁集团矿业有限公司大宝坡石灰石矿(总部)"
+    },
+    {
+      "baseCode": "BYAS",
+      "baseName": "宝钢澳大利亚矿业有限公司",
+      "hqCode": "BYAS00",
+      "hqName": "宝钢澳大利亚矿业有限公司(总部)"
+    },
+    {
+      "baseCode": "BZAP",
+      "baseName": "中钢国际控股有限公司",
+      "hqCode": "BZAP00",
+      "hqName": "中钢国际控股有限公司（总部）"
+    },
+    {
+      "baseCode": "BZAU",
+      "baseName": "中钢国际货运有限公司",
+      "hqCode": "BZAU00",
+      "hqName": "中钢国际货运有限公司（总部）"
+    },
+    {
+      "baseCode": "BZBQ",
+      "baseName": "衡阳中钢衡重设备有限公司",
+      "hqCode": "BZBQ00",
+      "hqName": "衡阳中钢衡重设备有限公司（总部）"
+    },
+    {
+      "baseCode": "BZBS",
+      "baseName": "中钢宁夏耐研滨河新材料有限公司",
+      "hqCode": "BZBS00",
+      "hqName": "中钢宁夏耐研滨河新材料有限公司（总部）"
+    },
+    {
+      "baseCode": "BZCR",
+      "baseName": "中钢天源股份有限公司",
+      "hqCode": "BZCR00",
+      "hqName": "中钢天源股份有限公司（总部）"
+    },
+    {
+      "baseCode": "BZCT",
+      "baseName": "中钢集团马鞍山矿山研究总院股份有限公司",
+      "hqCode": "BZCT00",
+      "hqName": "中钢集团马鞍山矿山研究总院股份有限公司（总部）"
+    },
+    {
+      "baseCode": "BZCU",
+      "baseName": "中钢集团鞍山热能研究院有限公司",
+      "hqCode": "BZCU00",
+      "hqName": "中钢集团鞍山热能研究院有限公司（总部）"
+    },
+    {
+      "baseCode": "BZDJ",
+      "baseName": "中钢洛耐科技股份有限公司中钢耐火分公司",
+      "hqCode": "BZDJ00",
+      "hqName": "中钢洛耐科技股份有限公司中钢耐火分公司（总部）"
+    },
+    {
+      "baseCode": "BZDK",
+      "baseName": "中钢洛耐（洛阳）新材料有限公司",
+      "hqCode": "BZDK00",
+      "hqName": "中钢洛耐（洛阳）新材料有限公司（总部）"
+    },
+    {
+      "baseCode": "BZDM",
+      "baseName": "中钢集团洛阳耐火材料研究院有限公司",
+      "hqCode": "BZDM00",
+      "hqName": "中钢集团洛阳耐火材料研究院有限公司（总部）"
+    },
+    {
+      "baseCode": "BZDW",
+      "baseName": "中钢长春钢材加工有限公司",
+      "hqCode": "BZDW00",
+      "hqName": "中钢长春钢材加工有限公司（总部）"
+    },
+    {
+      "baseCode": "BZEC",
+      "baseName": "中钢设备有限公司乌克兰分公司",
+      "hqCode": "BZEC00",
+      "hqName": "中钢设备有限公司乌克兰分公司（总部）"
+    },
+    {
+      "baseCode": "BZEH",
+      "baseName": "中钢集团工程设计研究院有限公司",
+      "hqCode": "BZEH00",
+      "hqName": "中钢集团工程设计研究院有限公司（总部）"
+    },
+    {
+      "baseCode": "BZEJ",
+      "baseName": "中钢石家庄工程设计研究院有限公司",
+      "hqCode": "BZEJ00",
+      "hqName": "中钢石家庄工程设计研究院有限公司（总部）"
+    },
+    {
+      "baseCode": "BZEK",
+      "baseName": "中钢集团天澄环保科技股份有限公司",
+      "hqCode": "BZEK00",
+      "hqName": "中钢集团天澄环保科技股份有限公司（总部）"
+    },
+    {
+      "baseCode": "BZEM",
+      "baseName": "中钢武汉安全环保研究院股份有限公司",
+      "hqCode": "BZEM00",
+      "hqName": "中钢武汉安全环保研究院股份有限公司（总部）"
+    },
+    {
+      "baseCode": "BZEN",
+      "baseName": "湖南中钢设备工程有限公司",
+      "hqCode": "BZEN00",
+      "hqName": "湖南中钢设备工程有限公司（总部）"
+    },
+    {
+      "baseCode": "BZFT",
+      "baseName": "中钢装备技术有限公司北京分公司",
+      "hqCode": "BZFT00",
+      "hqName": "中钢装备技术有限公司北京分公司（总部）"
+    },
+    {
+      "baseCode": "BZFU",
+      "baseName": "中钢集团邢台机械轧辊有限公司",
+      "hqCode": "BZFU00",
+      "hqName": "中钢集团邢台机械轧辊有限公司（总部）"
+    },
+    {
+      "baseCode": "BZFV",
+      "baseName": "中钢集团西安重机有限公司",
+      "hqCode": "BZFV00",
+      "hqName": "中钢集团西安重机有限公司（总部）"
+    },
+    {
+      "baseCode": "BZFW",
+      "baseName": "中钢集团衡阳机械有限公司",
+      "hqCode": "BZFW00",
+      "hqName": "中钢集团衡阳机械有限公司（总部）"
+    },
+    {
+      "baseCode": "BZFX",
+      "baseName": "中钢上海钢材加工有限公司",
+      "hqCode": "BZFX00",
+      "hqName": "中钢上海钢材加工有限公司（总部）"
+    },
+    {
+      "baseCode": "BZGA",
+      "baseName": "中钢国际工程技术股份有限公司",
+      "hqCode": "BZGA00",
+      "hqName": "中钢国际工程技术股份有限公司（总部）"
+    },
+    {
+      "baseCode": "BZGB",
+      "baseName": "中钢国际贸易有限公司",
+      "hqCode": "BZGB00",
+      "hqName": "中钢国际贸易有限公司（总部）"
+    },
+    {
+      "baseCode": "BZGC",
+      "baseName": "中钢海外资源有限公司",
+      "hqCode": "BZGC00",
+      "hqName": "中钢海外资源有限公司（总部）"
+    },
+    {
+      "baseCode": "BZGD",
+      "baseName": "中钢集团衡阳重机有限公司",
+      "hqCode": "BZGD00",
+      "hqName": "中钢集团衡阳重机有限公司（总部）"
+    },
+    {
+      "baseCode": "BZGF",
+      "baseName": "中钢科技发展有限公司",
+      "hqCode": "BZGF00",
+      "hqName": "中钢科技发展有限公司（总部）"
+    },
+    {
+      "baseCode": "BZGG",
+      "baseName": "中钢矿业开发有限公司",
+      "hqCode": "BZGG00",
+      "hqName": "中钢矿业开发有限公司（总部）"
+    },
+    {
+      "baseCode": "BZGH",
+      "baseName": "中钢投资有限公司",
+      "hqCode": "BZGH00",
+      "hqName": "中钢投资有限公司（总部）"
+    },
+    {
+      "baseCode": "BZGJ",
+      "baseName": "中钢物业管理有限公司",
+      "hqCode": "BZGJ00",
+      "hqName": "中钢物业管理有限公司（总部）"
+    },
+    {
+      "baseCode": "BZGK",
+      "baseName": "中钢装备技术有限公司",
+      "hqCode": "BZGK00",
+      "hqName": "中钢装备技术有限公司（总部）"
+    },
+    {
+      "baseCode": "BZGM",
+      "baseName": "中钢资产管理有限责任公司",
+      "hqCode": "BZGM00",
+      "hqName": "中钢资产管理有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BZGP",
+      "baseName": "中钢设备有限公司",
+      "hqCode": "BZGP00",
+      "hqName": "中钢设备有限公司（总部）"
+    },
+    {
+      "baseCode": "BZJQ",
+      "baseName": "邢台轧辊线棒辊有限责任公司",
+      "hqCode": "BZJQ00",
+      "hqName": "邢台轧辊线棒辊有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BZJR",
+      "baseName": "邢台轧辊异型辊有限公司",
+      "hqCode": "BZJR00",
+      "hqName": "邢台轧辊异型辊有限公司（总部）"
+    },
+    {
+      "baseCode": "BZJS",
+      "baseName": "邢台轧辊小冷辊有限责任公司",
+      "hqCode": "BZJS00",
+      "hqName": "邢台轧辊小冷辊有限责任公司（总部）"
+    },
+    {
+      "baseCode": "BZJT",
+      "baseName": "邢台轧辊机电工程有限公司",
+      "hqCode": "BZJT00",
+      "hqName": "邢台轧辊机电工程有限公司（总部）"
+    }
+  ],
+  "onlyBaseCompany": [
+    {
+      "code": "AG00",
+      "name": "池州市贵池港埠有限责任公司"
+    },
+    {
+      "code": "BAAC",
+      "name": "上海一钢运输公司"
+    },
+    {
+      "code": "BAAG",
+      "name": "上海第一钢铁厂华南矿棉制品厂"
+    },
+    {
+      "code": "BAAH",
+      "name": "上海华轶工贸有限公司"
+    },
+    {
+      "code": "BAAK",
+      "name": "上海昌新钢渣有限公司"
+    },
+    {
+      "code": "BAAM",
+      "name": "上海开拓磁选金属有限公司"
+    },
+    {
+      "code": "BAFP",
+      "name": "安徽马钢和菱实业有限公司"
+    },
+    {
+      "code": "BAJU",
+      "name": "马钢瓦顿股份有限公司"
+    },
+    {
+      "code": "BAJW",
+      "name": "马钢（香港）有限公司"
+    },
+    {
+      "code": "BAKD",
+      "name": "德国MG贸易发展有限公司"
+    },
+    {
+      "code": "BAKK",
+      "name": "马钢美洲有限公司"
+    },
+    {
+      "code": "BAKT",
+      "name": "马钢宏飞电力能源有限公司"
+    },
+    {
+      "code": "BAQM",
+      "name": "上海马钢机电科技有限责任公司"
+    },
+    {
+      "code": "BAQN",
+      "name": "安徽马钢重型机械制造有限公司"
+    },
+    {
+      "code": "BAQX",
+      "name": "安徽马钢表面技术股份有限公司"
+    },
+    {
+      "code": "BARC",
+      "name": "安徽马钢输送设备制造有限公司"
+    },
+    {
+      "code": "BAUD",
+      "name": "安徽江南钢铁材料质量监督检验有限公司"
+    },
+    {
+      "code": "BAUF",
+      "name": "美泰澳门离岸商业服务有限公司"
+    },
+    {
+      "code": "BAWE",
+      "name": "马钢（上海）融资租赁有限公司"
+    },
+    {
+      "code": "BAXQ",
+      "name": "安徽祥云科技有限公司"
+    },
+    {
+      "code": "BAXT",
+      "name": "深圳市粤鑫马信息科技有限公司"
+    },
+    {
+      "code": "BAYJ",
+      "name": "安徽祥盾信息科技有限公司"
+    },
+    {
+      "code": "BAYV",
+      "name": "安徽裕泰物业管理有限责任公司"
+    },
+    {
+      "code": "BAYY",
+      "name": "马钢集团康诚建筑安装有限责任公司"
+    },
+    {
+      "code": "BBAQ",
+      "name": "新疆中钢冶金进出口公司"
+    },
+    {
+      "code": "BBAU",
+      "name": "陕西八钢板簧有限责任公司"
+    },
+    {
+      "code": "BBAW",
+      "name": "新疆八钢金圆钢管有限责任公司"
+    },
+    {
+      "code": "BBBB",
+      "name": "新疆八钢自动化技术有限公司"
+    },
+    {
+      "code": "BBBC",
+      "name": "新疆西域水泥有限责任公司"
+    },
+    {
+      "code": "BBCR",
+      "name": "安徽长江钢铁贸易南京有限公司"
+    },
+    {
+      "code": "BBCT",
+      "name": "安徽长江钢铁贸易合肥有限公司"
+    },
+    {
+      "code": "BBCW",
+      "name": "马鞍山长钢金属贸易有限公司"
+    },
+    {
+      "code": "BBCY",
+      "name": "马钢（合肥）板材有限责任公司"
+    },
+    {
+      "code": "BBDR",
+      "name": "安徽省江北钢铁材料质量监督检验有限公司"
+    },
+    {
+      "code": "BBFK",
+      "name": "新疆焦煤集团阜康气煤有限公司"
+    },
+    {
+      "code": "BBGE",
+      "name": "新疆伊犁霍尔果斯正成工贸有限公司"
+    },
+    {
+      "code": "BBJM",
+      "name": "金圆螺旋焊管分厂"
+    },
+    {
+      "code": "BBPN",
+      "name": "新疆八钢喀什金属有限公司"
+    },
+    {
+      "code": "BCAA",
+      "name": "上海宝产轻型房屋有限公司"
+    },
+    {
+      "code": "BCAG",
+      "name": "上海宝钢普莱克斯实用气体有限公司"
+    },
+    {
+      "code": "BCAH",
+      "name": "上海宝翼制罐有限公司"
+    },
+    {
+      "code": "BCAJ",
+      "name": "上海宝产三和门业有限公司"
+    },
+    {
+      "code": "BCAP",
+      "name": "上海大通钢结构有限公司"
+    },
+    {
+      "code": "BCDT",
+      "name": "河北宝钢制罐北方有限公司印铁分公司"
+    },
+    {
+      "code": "BCJC",
+      "name": "上海宝钢包装股份有限公司印铁分公司"
+    },
+    {
+      "code": "BCMU",
+      "name": "上海宝钢印铁有限公司北京分公司"
+    },
+    {
+      "code": "BCPT",
+      "name": "上海宝钢智能化停车库有限公司"
+    },
+    {
+      "code": "BCRY",
+      "name": "钢结构产业研究所"
+    },
+    {
+      "code": "BCTY",
+      "name": "宝山第一分院"
+    },
+    {
+      "code": "BCVV",
+      "name": "上海宝钢包装股份有限公司佛山印铁分公司"
+    },
+    {
+      "code": "BCWA",
+      "name": "冷弯型钢厂"
+    },
+    {
+      "code": "BEAB",
+      "name": "常州冶金机械厂"
+    },
+    {
+      "code": "BEAF",
+      "name": "上海杰出图文制作中心"
+    },
+    {
+      "code": "BEAH",
+      "name": "上海宝钢建设监理公司"
+    },
+    {
+      "code": "BEAK",
+      "name": "上海宝菱冶金设备工程技术有限公司"
+    },
+    {
+      "code": "BEAM",
+      "name": "上海宝菱电气控制设备有限公司"
+    },
+    {
+      "code": "BGAJ",
+      "name": "郑州宝钢钢材加工配送有限公司"
+    },
+    {
+      "code": "BGAU",
+      "name": "上海宝谊汽车销售服务有限公司"
+    },
+    {
+      "code": "BGAW",
+      "name": "宝钢化工代表处"
+    },
+    {
+      "code": "BGAY",
+      "name": "上海宝悦汽车销售服务有限公司"
+    },
+    {
+      "code": "BGBA",
+      "name": "股份总部3"
+    },
+    {
+      "code": "BGBN",
+      "name": "南京宝宁化工有限公司"
+    },
+    {
+      "code": "BGBR",
+      "name": "浙江宝井精密钢材科技有限公司"
+    },
+    {
+      "code": "BGBY",
+      "name": "上海宝云汽车销售服务有限公司"
+    },
+    {
+      "code": "BGCA",
+      "name": "宝信软件-北京分公司"
+    },
+    {
+      "code": "BGCB",
+      "name": "上海宝钢船板加工配送有限公司"
+    },
+    {
+      "code": "BGCC",
+      "name": "西安宝钢钢材加工配送有限公司"
+    },
+    {
+      "code": "BGCT",
+      "name": "襄阳宝林泓钢材加工配送有限公司"
+    },
+    {
+      "code": "BGCW",
+      "name": "沈阳宝钢东北贸易有限公司"
+    },
+    {
+      "code": "BGCX",
+      "name": "湖南宝钢车轮有限公司"
+    },
+    {
+      "code": "BGDA",
+      "name": "柳州宝钢汽车钢材部件有限公司"
+    },
+    {
+      "code": "BGDG",
+      "name": "宝信软件-南京分公司"
+    },
+    {
+      "code": "BGDM",
+      "name": "宝钢化工湛江有限公司"
+    },
+    {
+      "code": "BGDR",
+      "name": "宝信软件-广州分公司"
+    },
+    {
+      "code": "BGDU",
+      "name": "成都宝钢汽车钢材部件加工配送有限公司"
+    },
+    {
+      "code": "BGDV",
+      "name": "日本宝信株式会社"
+    },
+    {
+      "code": "BGDW",
+      "name": "大连宝友金属制品有限公司"
+    },
+    {
+      "code": "BGEF",
+      "name": "上海宝钢实业公司"
+    },
+    {
+      "code": "BGET",
+      "name": "南京住商金属制品有限公司"
+    },
+    {
+      "code": "BGFB",
+      "name": "宝信软件-西安分公司"
+    },
+    {
+      "code": "BGFE",
+      "name": "BGM株式会社"
+    },
+    {
+      "code": "BGFG",
+      "name": "宝信软件-深圳分公司"
+    },
+    {
+      "code": "BGFK",
+      "name": "常熟宝升精冲材料有限公司"
+    },
+    {
+      "code": "BGFP",
+      "name": "上海欧冶数智聚合信息技术有限公司"
+    },
+    {
+      "code": "BGFT",
+      "name": "上海宝和丰田汽车销售服务有限公司"
+    },
+    {
+      "code": "BGFU",
+      "name": "揭阳宝钢不锈钢贸易有限公司（筹）"
+    },
+    {
+      "code": "BGGA",
+      "name": "大连宝信起重技术有限公司"
+    },
+    {
+      "code": "BGGK",
+      "name": "上海梅山工业民用工程设计研究院有限公司"
+    },
+    {
+      "code": "BGGN",
+      "name": "广州宝丰井汽车钢材加工有限公司"
+    },
+    {
+      "code": "BGGR",
+      "name": "上海宝钢高强钢加工配送有限公司"
+    },
+    {
+      "code": "BGGT",
+      "name": "宝银特种钢管有限公司"
+    },
+    {
+      "code": "BGHA",
+      "name": "宝钢美洲有限公司"
+    },
+    {
+      "code": "BGHB",
+      "name": "宝钢巴西贸易有限公司"
+    },
+    {
+      "code": "BGHS",
+      "name": "化工公司-直属厂部"
+    },
+    {
+      "code": "BGHT",
+      "name": "宝信软件-成都分公司"
+    },
+    {
+      "code": "BGHY",
+      "name": "宝运企业有限公司"
+    },
+    {
+      "code": "BGJQ",
+      "name": "重庆宝钢钢材加工配送有限公司"
+    },
+    {
+      "code": "BGJS",
+      "name": "上海宝钢特殊金属材料有限公司"
+    },
+    {
+      "code": "BGJX",
+      "name": "苏州宝化炭黑有限公司湛江分公司"
+    },
+    {
+      "code": "BGKF",
+      "name": "嘉兴宝达丰田汽车销售服务有限公司"
+    },
+    {
+      "code": "BGKJ",
+      "name": "江西省二手车交易大市场有限公司"
+    },
+    {
+      "code": "BGKL",
+      "name": "上海宝乐汽车销售服务有限公司"
+    },
+    {
+      "code": "BGKP",
+      "name": "宝信软件-宁波分公司"
+    },
+    {
+      "code": "BGKV",
+      "name": "宝化炭黑（贵阳）有限公司"
+    },
+    {
+      "code": "BGKW",
+      "name": "上海大众汽车无锡特约维修站"
+    },
+    {
+      "code": "BGKY",
+      "name": "上海宝友汽车销售服务有限公司"
+    },
+    {
+      "code": "BGLJ",
+      "name": "中厚板分公司"
+    },
+    {
+      "code": "BGMD",
+      "name": "上海宝顶能源有限公司"
+    },
+    {
+      "code": "BGME",
+      "name": "上海宝晟能源有限公司"
+    },
+    {
+      "code": "BGMJ",
+      "name": "广州宝钢井昌钢材配送有限公司"
+    },
+    {
+      "code": "BGMR",
+      "name": "日照宝鑫矿业资源有限公司"
+    },
+    {
+      "code": "BGND",
+      "name": "上海化工宝数字科技有限公司（合并）"
+    },
+    {
+      "code": "BGNE",
+      "name": "上海欧冶化工宝电子商务有限公司"
+    },
+    {
+      "code": "BGNF",
+      "name": "吉林市一汽宝钢汽车钢材部件有限公司"
+    },
+    {
+      "code": "BGNQ",
+      "name": "重庆宝井钢材加工有限公司"
+    },
+    {
+      "code": "BGNR",
+      "name": "宝化炭黑（达州）有限公司"
+    },
+    {
+      "code": "BGNX",
+      "name": "宝信软件-厦门分公司"
+    },
+    {
+      "code": "BGPA",
+      "name": "上海宝信数字技术有限公司"
+    },
+    {
+      "code": "BGPB",
+      "name": "镇江宝润汽车销售服务有限公司"
+    },
+    {
+      "code": "BGPJ",
+      "name": "北京宝钢北方贸易有限公司"
+    },
+    {
+      "code": "BGPS",
+      "name": "长沙宝钢钢材加工配送有限公司"
+    },
+    {
+      "code": "BGPT",
+      "name": "长春宝钢钢材配送有限公司"
+    },
+    {
+      "code": "BGPY",
+      "name": "宝信软件-山东分公司"
+    },
+    {
+      "code": "BGQD",
+      "name": "宝信软件-南通分公司"
+    },
+    {
+      "code": "BGQM",
+      "name": "乌海宝骐炭材料有限公司"
+    },
+    {
+      "code": "BGQS",
+      "name": "宝信软件-大连分公司"
+    },
+    {
+      "code": "BGQW",
+      "name": "上海五钢气体有限责任公司"
+    },
+    {
+      "code": "BGRD",
+      "name": "东莞宝钢钢材部件有限公司"
+    },
+    {
+      "code": "BGRH",
+      "name": "柳州宝钢汽车零部件有限公司"
+    },
+    {
+      "code": "BGSA",
+      "name": "宝钢分公司"
+    },
+    {
+      "code": "BGSC",
+      "name": "宁波宝井钢材加工配送有限公司"
+    },
+    {
+      "code": "BGSN",
+      "name": "上海宝荣汽车销售服务有限公司"
+    },
+    {
+      "code": "BGSQ",
+      "name": "烟台宝钢钢管有限责任公司"
+    },
+    {
+      "code": "BGTB",
+      "name": "上海宝钢新材料技术有限公司"
+    },
+    {
+      "code": "BGTD",
+      "name": "东莞市宝特模具钢加工有限公司"
+    },
+    {
+      "code": "BGTG",
+      "name": "上海新华钢铁有限公司"
+    },
+    {
+      "code": "BGTJ",
+      "name": "上海申井钢材加工有限公司"
+    },
+    {
+      "code": "BGTP",
+      "name": "东方付通支付科技有限公司"
+    },
+    {
+      "code": "BGTQ",
+      "name": "上海宝景信息技术发展有限公司盐城分公司"
+    },
+    {
+      "code": "BGTX",
+      "name": "上海宝钢汽车板有限公司"
+    },
+    {
+      "code": "BGUC",
+      "name": "BSR Global Holding Ltd"
+    },
+    {
+      "code": "BGUD",
+      "name": "宝信软件-海盐分公司"
+    },
+    {
+      "code": "BGUF",
+      "name": "烟台鲁宝钢管有限责任公司宝鲁分公司"
+    },
+    {
+      "code": "BGUM",
+      "name": "上海宝希计算机技术有限公司"
+    },
+    {
+      "code": "BGUY",
+      "name": "宝信软件-重庆分公司"
+    },
+    {
+      "code": "BGVW",
+      "name": "宝钢化工（张家港保税区）国际贸易有限公司"
+    },
+    {
+      "code": "BGWA",
+      "name": "安徽宝钢钢材配送有限公司"
+    },
+    {
+      "code": "BGWB",
+      "name": "上海宝井钢材加工配送有限公司"
+    },
+    {
+      "code": "BGWC",
+      "name": "长春一汽宝友钢材加工配送有限公司"
+    },
+    {
+      "code": "BGWD",
+      "name": "青岛宝井钢材加工配送有限公司"
+    },
+    {
+      "code": "BGWE",
+      "name": "上海宝钢不锈钢贸易有限公司"
+    },
+    {
+      "code": "BGWF",
+      "name": "福州宝井钢材有限公司"
+    },
+    {
+      "code": "BGWH",
+      "name": "杭州宝井钢材加工配送有限公司"
+    },
+    {
+      "code": "BGWJ",
+      "name": "重庆宝钢汽车钢材部件有限公司"
+    },
+    {
+      "code": "BGWL",
+      "name": "广州宝井钢材加工有限公司"
+    },
+    {
+      "code": "BGWM",
+      "name": "宁波宝钢不锈钢加工有限公司"
+    },
+    {
+      "code": "BGWN",
+      "name": "南昌宝江钢材加工配送有限公司"
+    },
+    {
+      "code": "BGWP",
+      "name": "天津宝钢钢材配送有限公司"
+    },
+    {
+      "code": "BGWQ",
+      "name": "重庆宝井钢材加工配送有限公司"
+    },
+    {
+      "code": "BGWS",
+      "name": "沈阳宝钢钢材配送有限公司"
+    },
+    {
+      "code": "BGWT",
+      "name": "天津宝储菱"
+    },
+    {
+      "code": "BGWX",
+      "name": "佛山宝钢不锈钢贸易有限公司"
+    },
+    {
+      "code": "BGWY",
+      "name": "烟台宝井钢材加工有限公司"
+    },
+    {
+      "code": "BGXA",
+      "name": "厦门宝钢精密钢材科技有限公司"
+    },
+    {
+      "code": "BGXC",
+      "name": "天津宝井钢材加工配送有限公司"
+    },
+    {
+      "code": "BGYA",
+      "name": "济南宝钢钢材加工配送有限公司"
+    },
+    {
+      "code": "BGYJ",
+      "name": "浙江嵊泗宝捷国际船舶代理有限公司"
+    },
+    {
+      "code": "BGYP",
+      "name": "上海宝立自动化工程有限公司"
+    },
+    {
+      "code": "BGYQ",
+      "name": "青岛宝邯运输贸易有限公司"
+    },
+    {
+      "code": "BGYR",
+      "name": "上海宝江航运有限公司"
+    },
+    {
+      "code": "BGYT",
+      "name": "上海宝通运输实业有限公司"
+    },
+    {
+      "code": "BGYY",
+      "name": "上海宝洋国际船舶代理有限公司"
+    },
+    {
+      "code": "BKAF",
+      "name": "上海宝江燃气有限公司"
+    },
+    {
+      "code": "BKAK",
+      "name": "上海宝钢商务大厦"
+    },
+    {
+      "code": "BKAQ",
+      "name": "上海宝钢汽车检测修复有限公司"
+    },
+    {
+      "code": "BKBD",
+      "name": "上海宝钢劳防用品厂"
+    },
+    {
+      "code": "BKBJ",
+      "name": "上海宝龙建材有限公司"
+    },
+    {
+      "code": "BKBQ",
+      "name": "上海宝田新型建材有限公司"
+    },
+    {
+      "code": "BKCC",
+      "name": "上海华昌金属材料厂（托管）"
+    },
+    {
+      "code": "BKCG",
+      "name": "上海新昕板材有限公司"
+    },
+    {
+      "code": "BKCH",
+      "name": "上海宝舜联钢铁制品有限公司"
+    },
+    {
+      "code": "BKCM",
+      "name": "上海宝鼎资源利用有限公司"
+    },
+    {
+      "code": "BKCN",
+      "name": "上海宝齐氧化铁有限公司"
+    },
+    {
+      "code": "BKCQ",
+      "name": "上海盘龙实业有限公司"
+    },
+    {
+      "code": "BKCR",
+      "name": "上海宝钢废旧油处理有限公司"
+    },
+    {
+      "code": "BKCV",
+      "name": "上海开宝耐火材料有限公司"
+    },
+    {
+      "code": "BKDH",
+      "name": "上海中新典当有限公司"
+    },
+    {
+      "code": "BKDS",
+      "name": "上海振欣冷拔钢管厂"
+    },
+    {
+      "code": "BKDT",
+      "name": "上海宝钢新宝工贸实业有限公司"
+    },
+    {
+      "code": "BKDU",
+      "name": "上海宝钢模具钢加工配送有限公司"
+    },
+    {
+      "code": "BKDW",
+      "name": "吴江宝金钢材有限公司"
+    },
+    {
+      "code": "BKDX",
+      "name": "上海国益工贸实业有限公司"
+    },
+    {
+      "code": "BKEQ",
+      "name": "无锡宝钢碧波园饭店"
+    },
+    {
+      "code": "BKER",
+      "name": "常熟宝钢职工教育培训中心"
+    },
+    {
+      "code": "BKET",
+      "name": "普陀宝钢朱家尖培训中心"
+    },
+    {
+      "code": "BKEU",
+      "name": "上海新宝山郁金香物业管理中心"
+    },
+    {
+      "code": "BKEZ",
+      "name": "上海宝氢气体工业有限公司"
+    },
+    {
+      "code": "BKFE",
+      "name": "上海宝泉房地产经营有限公司"
+    },
+    {
+      "code": "BKFP",
+      "name": "宝钢矿棉科技（宁波）有限公司"
+    },
+    {
+      "code": "BKJE",
+      "name": "上海宝钢磁业有限公司湛江分公司"
+    },
+    {
+      "code": "BMAA",
+      "name": "南京梅山钢渣处理有限责任公司"
+    },
+    {
+      "code": "BMAC",
+      "name": "上海梅山科技发展有限公司"
+    },
+    {
+      "code": "BMAD",
+      "name": "上海欧冶航运有限责任公司"
+    },
+    {
+      "code": "BMAE",
+      "name": "上海梅山（集团）南京冷轧板有限公司"
+    },
+    {
+      "code": "BMAZ",
+      "name": "上海梅山梅利达工业总厂"
+    },
+    {
+      "code": "BMBA",
+      "name": "上海梅山新产业开发总公司"
+    },
+    {
+      "code": "BMBB",
+      "name": "南京梅山物业管理有限责任公司"
+    },
+    {
+      "code": "BMBD",
+      "name": "上海梅山园林工程有限公司"
+    },
+    {
+      "code": "BMBG",
+      "name": "上海梅山（南京）机电设备有限公司"
+    },
+    {
+      "code": "BMBH",
+      "name": "上海梅山集团（南京）工贸实业有限公司"
+    },
+    {
+      "code": "BMBJ",
+      "name": "南京格灵化工有限公司"
+    },
+    {
+      "code": "BMMC",
+      "name": "梅山医院"
+    },
+    {
+      "code": "BMMD",
+      "name": "梅利达分公司"
+    },
+    {
+      "code": "BMQY",
+      "name": "南京汽车运输分公司"
+    },
+    {
+      "code": "BMRN",
+      "name": "资源分公司"
+    },
+    {
+      "code": "BMSB",
+      "name": "南京设备建筑安装分公司"
+    },
+    {
+      "code": "BMSF",
+      "name": "南京生活服务分公司"
+    },
+    {
+      "code": "BMSU",
+      "name": "市政绿化服务分公司"
+    },
+    {
+      "code": "BMXN",
+      "name": "南京梅山冶金发展有限公司(总部2)"
+    },
+    {
+      "code": "BMXY",
+      "name": "新事业服务分公司"
+    },
+    {
+      "code": "BSAF",
+      "name": "新疆八钢旅游有限责任公司"
+    },
+    {
+      "code": "BSAN",
+      "name": "常州宝氢天辰气体有限公司"
+    },
+    {
+      "code": "BSAS",
+      "name": "特钢生活后勤管理部"
+    },
+    {
+      "code": "BSAU",
+      "name": "宝武轻材（武汉）有限公司"
+    },
+    {
+      "code": "BSAY",
+      "name": "上海欧冶材料技术有限责任公司成都分公司"
+    },
+    {
+      "code": "BSBG",
+      "name": "冷轧作业管理部"
+    },
+    {
+      "code": "BSBJ",
+      "name": "宝金新城江都气体有限公司"
+    },
+    {
+      "code": "BSBX",
+      "name": "宝钢不锈钢有限公司"
+    },
+    {
+      "code": "BSCH",
+      "name": "宝钢集团南通线材制品有限公司"
+    },
+    {
+      "code": "BSCK",
+      "name": "新疆旺德福大酒店"
+    },
+    {
+      "code": "BSCN",
+      "name": "新疆八钢佳域工业材料有限公司乌鲁木齐钢城优宜商业广场"
+    },
+    {
+      "code": "BSCV",
+      "name": "新疆八钢南疆钢铁拜城有限公司"
+    },
+    {
+      "code": "BSCX",
+      "name": "工厂物流公司"
+    },
+    {
+      "code": "BSDB",
+      "name": "宝武装备智能科技有限公司韶关分公司"
+    },
+    {
+      "code": "BSDG",
+      "name": "上海宝钢长兴工业气体有限公司"
+    },
+    {
+      "code": "BSDH",
+      "name": "新疆佳域投资有限责任公司"
+    },
+    {
+      "code": "BSDK",
+      "name": "上海宝钢制盖有限公司"
+    },
+    {
+      "code": "BSDN",
+      "name": "新疆钢城绿化工程有限责任公司"
+    },
+    {
+      "code": "BSES",
+      "name": "冠达尔钢结构（江苏）有限公司"
+    },
+    {
+      "code": "BSEX",
+      "name": "不锈钢作业管理部"
+    },
+    {
+      "code": "BSFM",
+      "name": "合肥宝新工业气体有限公司"
+    },
+    {
+      "code": "BSFQ",
+      "name": "特钢作业管理部"
+    },
+    {
+      "code": "BSFX",
+      "name": "武汉宝悍焊接设备有限公司"
+    },
+    {
+      "code": "BSGB",
+      "name": "上海欧冶材料技术有限责任公司广州分公司"
+    },
+    {
+      "code": "BSGE",
+      "name": "不锈特钢业务管理部"
+    },
+    {
+      "code": "BSGR",
+      "name": "上海钢益实业发展有限公司"
+    },
+    {
+      "code": "BSGX",
+      "name": "南京宝化气体有限公司"
+    },
+    {
+      "code": "BSGY",
+      "name": "新疆八钢佳域工贸总公司乌鲁木齐正浩材料分厂"
+    },
+    {
+      "code": "BSHB",
+      "name": "上海欧冶材料技术有限责任公司沈阳分公司"
+    },
+    {
+      "code": "BSHC",
+      "name": "上海宝钢热冲压零部件有限公司"
+    },
+    {
+      "code": "BSHG",
+      "name": "新疆八钢佳域工业材料有限公司乌鲁木齐佳信印刷分厂"
+    },
+    {
+      "code": "BSHP",
+      "name": "上海宝钢航运有限公司"
+    },
+    {
+      "code": "BSHQ",
+      "name": "中厚板作业管理部"
+    },
+    {
+      "code": "BSJL",
+      "name": "上海基量标准气体有限公司"
+    },
+    {
+      "code": "BSKJ",
+      "name": "上海宝钢设备检修有限公司"
+    },
+    {
+      "code": "BSKM",
+      "name": "新疆八钢佳域工贸总公司轧钢厂"
+    },
+    {
+      "code": "BSKP",
+      "name": "南京宝日钢丝制品有限公司南通分公司"
+    },
+    {
+      "code": "BSKQ",
+      "name": "开封市宝钢气体有限公司"
+    },
+    {
+      "code": "BSKT",
+      "name": "宁波钢铁有限公司"
+    },
+    {
+      "code": "BSKX",
+      "name": "宝钢磁业（江苏）有限公司"
+    },
+    {
+      "code": "BSMB",
+      "name": "泰兴市宝氢科达气体有限公司"
+    },
+    {
+      "code": "BSNG",
+      "name": "上海宝闵工业气体有限公司"
+    },
+    {
+      "code": "BSNT",
+      "name": "青海宝矿工程咨询有限公司"
+    },
+    {
+      "code": "BSNV",
+      "name": "昆山宝盐气体有限公司"
+    },
+    {
+      "code": "BSNW",
+      "name": "宝钢物流（江苏）有限公司"
+    },
+    {
+      "code": "BSPC",
+      "name": "上海宝钢车轮有限公司"
+    },
+    {
+      "code": "BSPE",
+      "name": "上海宝钢工业技术服务有限公司湛江分公司"
+    },
+    {
+      "code": "BSPH",
+      "name": "上海宝地仲量联行物业服务有限公司广州分公司"
+    },
+    {
+      "code": "BSPP",
+      "name": "上海宝钢朗泽新能源有限公司"
+    },
+    {
+      "code": "BSQN",
+      "name": "上海宝绿置业有限公司"
+    },
+    {
+      "code": "BSQP",
+      "name": "上海宝地杨浦房地产开发有限公司"
+    },
+    {
+      "code": "BSQW",
+      "name": "新疆分公司"
+    },
+    {
+      "code": "BSQY",
+      "name": "上海宝地物业管理有限公司"
+    },
+    {
+      "code": "BSRF",
+      "name": "安康市宝林矿业有限公司"
+    },
+    {
+      "code": "BSSC",
+      "name": "新疆宝新昌佳石灰制品有限公司"
+    },
+    {
+      "code": "BSSD",
+      "name": "佛山宝钢制罐有限公司"
+    },
+    {
+      "code": "BSSH",
+      "name": "江苏宝钢精密钢丝有限公司"
+    },
+    {
+      "code": "BSTC",
+      "name": "宝钢特种材料有限公司"
+    },
+    {
+      "code": "BSTE",
+      "name": "新疆佳域联强工贸有限责任公司"
+    },
+    {
+      "code": "BSTF",
+      "name": "热轧作业管理部"
+    },
+    {
+      "code": "BSTT",
+      "name": "南通宝钢钢铁有限公司"
+    },
+    {
+      "code": "BSUH",
+      "name": "上海欧冶材料技术有限责任公司华中分公司"
+    },
+    {
+      "code": "BSUR",
+      "name": "新疆八钢佳域工业材料有限公司板材分公司"
+    },
+    {
+      "code": "BSWJ",
+      "name": "宝钢金属有限公司合肥宝敏科分公司"
+    },
+    {
+      "code": "BSWN",
+      "name": "福建德盛物流有限公司"
+    },
+    {
+      "code": "BSWT",
+      "name": "武汉宝钢制罐有限公司"
+    },
+    {
+      "code": "BSWX",
+      "name": "钢管作业管理部"
+    },
+    {
+      "code": "BSXF",
+      "name": "陕西宝钢气体有限公司"
+    },
+    {
+      "code": "BSXT",
+      "name": "上海宝钢物流有限公司湛江分公司"
+    },
+    {
+      "code": "BSXY",
+      "name": "上海宝钢液压成形零部件有限公司"
+    },
+    {
+      "code": "BSYB",
+      "name": "烟台宝钢车轮有限公司"
+    },
+    {
+      "code": "BSYP",
+      "name": "欧冶云商北方分公司"
+    },
+    {
+      "code": "BSZG",
+      "name": "宝钢湛江钢铁有限公司"
+    },
+    {
+      "code": "BWAA",
+      "name": "上海五钢物流有限责任公司"
+    },
+    {
+      "code": "BWAB",
+      "name": "上海五钢物业有限公司"
+    },
+    {
+      "code": "BWAK",
+      "name": "上海三川出租汽车公司"
+    },
+    {
+      "code": "BWAM",
+      "name": "上海十钢农副产品市场经营有限公司"
+    },
+    {
+      "code": "BWAN",
+      "name": "上海十钢设备工程有限公司"
+    },
+    {
+      "code": "BWAW",
+      "name": "上海申佳金属制品有限公司"
+    },
+    {
+      "code": "BWAX",
+      "name": "上海沪中冶金制品厂（集体企业）"
+    },
+    {
+      "code": "BWBJ",
+      "name": "宝武装备智能科技有限公司南京分公司"
+    },
+    {
+      "code": "BWBX",
+      "name": "宝武装备智能科技有限公司马鞍山分公司"
+    },
+    {
+      "code": "BWEH",
+      "name": "宝武装备智能科技有限公司宁波分公司"
+    },
+    {
+      "code": "BWGT",
+      "name": "宝武装备智能科技有限公司重庆分公司"
+    },
+    {
+      "code": "BWGV",
+      "name": "宝武清能（广东）气体有限公司"
+    },
+    {
+      "code": "BWPM",
+      "name": "资源上海（营销中心）"
+    },
+    {
+      "code": "BWWH",
+      "name": "宝武装备智能科技有限公司武汉分公司"
+    },
+    {
+      "code": "BWWL",
+      "name": "物流事业部"
+    },
+    {
+      "code": "MBK0",
+      "name": "化工公司-梅山分公司"
+    },
+    {
+      "code": "SEHD",
+      "name": "广州花都宝井汽车钢材部件有限公司"
+    },
+    {
+      "code": "TYGM",
+      "name": "烟台鲁宝工贸有限责任公司"
+    }
+  ],
+  "onlyHqCompany": [
+    {
+      "code": "BAAD00",
+      "name": "上海三冠钢铁有限公司"
+    },
+    {
+      "code": "BPCB00",
+      "name": "云南昆钢电视网络有限公司(总部)"
+    },
+    {
+      "code": "BSQS00",
+      "name": "宝钢工业炉工程技术有限公司(总部)"
+    },
+    {
+      "code": "BSSM00",
+      "name": "湖北中平鄂钢联合焦化有限责任公司(总部)"
+    },
+    {
+      "code": "BSSV00",
+      "name": null
+    },
+    {
+      "code": "BZJU00",
+      "name": "邢台轧辊特种制造有限公司（总部）"
+    }
+  ]
+}

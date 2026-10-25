@@ -1,0 +1,84 @@
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix ba: <http://ontoflow.example.org/vocab/ba/> .
+
+# 业务架构 RDF 镜像（ABox）
+# 业务域：数据标准管理    域编码：dsm1
+# 来源技能：shutu-ontology-ba-data-standard-mgmt v0.10.7（单一事实源，本文件为生成产物，勿手工修改）
+# 词汇表：ontoflow_baxx.ttl（owl:imports 引用，由 skill_md_to_rdf.py 自动复制）
+
+<> owl:imports <ontoflow_baxx.ttl> .
+
+ba:bd_2c1a0078ebe7 rdf:type ba:BusinessDomain ;
+    rdfs:label "数据标准管理"@zh ;
+    rdfs:comment "平台数据标准管理业务架构技能，用于识别和管理数据标准基础管理与数据标准目录发布的业务流程、业务动作、承载页面及其数据链路（业务对象基础数据→打标签→按标签过滤写入目录），帮助智能体理解页面之间、页面展示数据之间、数据库表之间的逻辑关系，协助用户使用页面功能、理解数据。当用户询问业务对象管理、数据标准目录、数图打标发布、标准上下架口径等问题时使用。"@zh ;
+    ba:source_skill "shutu-ontology-ba-data-standard-mgmt" ;
+    ba:skill_version "0.10.7" .
+
+ba:bp_9a1092101ea5 rdf:type ba:BusinessProcess ;
+    rdfs:label "数据标准基础管理"@zh ;
+    rdfs:comment "在治理中心维护数据标准基础数据（业务对象）的流程——按数据分类组织、查询与新增业务对象，形成全量编辑态基础数据。承载页面：业务对象管理页（BEDF15）。"@zh .
+
+ba:bp_2807b8198f12 rdf:type ba:BusinessProcess ;
+    rdfs:label "数据标准目录发布"@zh ;
+    rdfs:comment "将基础数据标准打上资产标签并发布到数图数据标准目录的流程——通过标签体系控制目录上架范围（打上「推荐」标签的对象才上架；标签变更待下周期同步更新目录）。承载页面：数图·数据标准目录页（查询）等。"@zh .
+
+ba:ba_43ebe960a519 rdf:type ba:BusinessAction ;
+    rdfs:label "查询业务对象"@zh ;
+    rdfs:comment "按数据分类（分类树）或条件（标识符/英文名/中文名/制定者等）检索业务对象基础数据。"@zh .
+
+ba:ba_23c657a430e4 rdf:type ba:BusinessAction ;
+    rdfs:label "新增业务对象"@zh ;
+    rdfs:comment "在指定数据分类下创建新的业务对象，录入英文名/中文名/制定者/制定组织/数据持有方等基础属性。"@zh .
+
+ba:ba_7844192770d9 rdf:type ba:BusinessAction ;
+    rdfs:label "查询数据标准目录"@zh ;
+    rdfs:comment "在数图数据标准目录按标准分类树、资产类型（业务对象/数据元/业务术语）与条件检索已上架的数据标准。"@zh .
+
+ba:ba_fef537378517 rdf:type ba:BusinessAction ;
+    rdfs:label "给基础标准打标签发布到目录"@zh ;
+    rdfs:comment "在数图数据标准目录页面上，为基础数据标准（业务对象）打上资产标签（推荐/注销/暂时保留），打标结果决定该标准是否写入目录表、是否在数图数据标准目录上架。承载页面：数图·数据标准目录页（与查询目录同一页面）。"@zh .
+
+ba:bpg_bff43413889a rdf:type ba:SystemPage ;
+    rdfs:label "业务对象管理页"@zh ;
+    ba:page_code "BEDF15" ;
+    ba:system_name "数据平台（XDATA，治理中心 xdata-standard-admin，eplat.baocloud.cn）"@zh ;
+    ba:page_url "https://eplat.baocloud.cn/xdata-standard-admin/web/BEDF15" ;
+    ba:business_role "承载流程1（数据标准基础管理）的查询业务对象、新增业务对象两个动作；是数据标准基础数据的全量编辑态入口（含已注销/未生效对象）"@zh ;
+    ba:data_link_desc "读写业务对象基础表 `T_ODS_TBEDF15`（UUID 前缀 DY_BO）；关联数据分类表 `T_ODS_TBEDF32`——关联字段为 `OBJECT_RANGE = TBEDF32.UUID`（唯一 100% 有效关联；TBEDF15.AREA_ID/AREA_NAME 含 36 条陈旧旧口径值，勿用于分类关联）；左侧分类树按 TBEDF32 层级组织"@zh .
+
+ba:bpg_ddce9c287761 rdf:type ba:SystemPage ;
+    rdfs:label "数图·数据标准目录页"@zh ;
+    ba:page_code "BEXY5201@数图·数据标准目录页" ;
+    ba:system_name "数据平台（XDATA 数图，中国宝武数据资产 xdata-assets-manager，eplat.baocloud.cn）"@zh ;
+    ba:business_role "承载流程2（数据标准目录发布）的查询数据标准目录、给基础标准打标签发布到目录两个动作；既是已上架数据标准的目录展示态入口（不含注销/暂时保留对象），也是打标操作（控制上下架）的工作页面"@zh ;
+    ba:data_link_desc "读数据标准目录表 `T_ODS_TBEXY41`（UUID 与 TBEDF15 同为 DY_BO 前缀，可直接按 UUID 对齐；查业务对象须加 `STANDARD_TYPE='businessObject'`；按 `AREA_ID` 中文路径如「财务->应付」直筛分类）；打标操作写 `T_ODS_TBEDF1417`（打标关系）＋`T_ODS_TBEDF1413`（标签主数据），经按标签过滤写入 TBEXY41"@zh .
+
+ba:br_30420be63212 rdf:type ba:BusinessRule ;
+    rdfs:label "数据标准目录数据链路"@zh ;
+    ba:rule_id "BR-01" ;
+    ba:rule_text "`BEDF15（基础）→ 打标签 → 按标签过滤写入 TBEXY41（目录）`——治理中心维护业务对象基础数据（TBEDF15）；数图侧通过资产标签体系（TBEDF1417 打标关系 + TBEDF1413 标签主数据）打标；目录表 TBEXY41 在**写入时**按标签过滤，**打上「推荐」标签的对象才进入目录**（注销/暂时保留/未打标均不写入，非查询时过滤）；**标签变更（含取消标签）不即时生效，待下个周期同步数据时更新目录**——同步前目录可能残留已取消标签的对象"@zh .
+
+# --------------------------
+# 对象关系边
+# --------------------------
+# hasProcess
+ba:bd_2c1a0078ebe7 ba:hasProcess ba:bp_9a1092101ea5 .
+ba:bd_2c1a0078ebe7 ba:hasProcess ba:bp_2807b8198f12 .
+
+# hasAction
+ba:bp_9a1092101ea5 ba:hasAction ba:ba_43ebe960a519 .
+ba:bp_9a1092101ea5 ba:hasAction ba:ba_23c657a430e4 .
+ba:bp_2807b8198f12 ba:hasAction ba:ba_7844192770d9 .
+ba:bp_2807b8198f12 ba:hasAction ba:ba_fef537378517 .
+
+# carriedByPage
+ba:ba_43ebe960a519 ba:carriedByPage ba:bpg_bff43413889a .
+ba:ba_23c657a430e4 ba:carriedByPage ba:bpg_bff43413889a .
+ba:ba_7844192770d9 ba:carriedByPage ba:bpg_ddce9c287761 .
+ba:ba_fef537378517 ba:carriedByPage ba:bpg_ddce9c287761 .
+
+# hasRule
+ba:bd_2c1a0078ebe7 ba:hasRule ba:br_30420be63212 .

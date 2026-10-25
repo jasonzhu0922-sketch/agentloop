@@ -1,0 +1,29 @@
+{
+  "schema": "agentloop.mysqlSteelDataMap/v1",
+  "indicatorTable": "steel_market_indicators",
+  "valueTable": "indicator_values",
+  "indicatorIdColumn": "id",
+  "indicatorNameColumn": "indicator_name",
+  "valueIndicatorIdColumn": "indicator_id",
+  "observationDateColumn": "observation_date",
+  "valueColumn": "value",
+  "optionalColumns": {
+    "unit": { "table": "indicator", "column": "unit" }
+  },
+  "semanticColumns": {
+    "province_name": "province_name",
+    "city_name": "city_name",
+    "county_name": "county_name",
+    "region_name": "region_name",
+    "breed_name": "product_name",
+    "caliber_name": "caliber_name",
+    "metric_name": "metric_name",
+    "frequency_name": "frequency_name",
+    "unit_name": "unit",
+    "producer_name": "producer_name",
+    "producer_short_name": "producer_short_name",
+    "source_name": "source_name",
+    "market_name": "market_name",
+    "description": "description"
+  }
+}

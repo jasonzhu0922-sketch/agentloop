@@ -1,0 +1,46 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "mysql-steel-data",
+    "description": "读取部署映射的钢材指标目录和原始时序。用于 steel-market-analysis 的取数委派，或用户明确索取目录、候选或原始记录；不生成趋势结论、不接受任意 SQL。"
+  },
+  "activation": {
+    "semanticTags": [
+      "steel-data",
+      "database-source",
+      "time-series"
+    ],
+    "intentExamples": [
+      "读取指定钢材指标在明确日期或日期范围内的原始时序记录",
+      "检索钢材指标目录、候选、字段语义或唯一指标代码"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "source_provider"
+    ],
+    "artifactKinds": [
+      "none"
+    ],
+    "sourceKinds": [
+      "database"
+    ],
+    "qaKinds": [],
+    "requiredSkills": []
+  },
+  "execution": {
+    "manifest": "agentloop.executors.json"
+  },
+  "compatibility": {
+    "executionProfiles": [
+      "local_script"
+    ],
+    "producesEvidenceKinds": [
+      "source_summary",
+      "schema_summary",
+      "record_counts",
+      "structured_extraction_artifact",
+      "explicit_caveats"
+    ]
+  }
+}

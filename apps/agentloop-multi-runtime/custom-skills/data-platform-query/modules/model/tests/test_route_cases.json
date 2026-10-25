@@ -1,0 +1,14 @@
+{
+  "positive": [
+    {"input": "查询采购事实模型", "expect_primary": "model-query"},
+    {"input": "这个 ER 模型关联了哪些表", "expect_primary": "model-query"},
+    {"input": "查客商代码维度模型字段", "expect_primary": "model-query"}
+  ],
+  "negative": [
+    {"input": "新建一个采购事实模型", "expect_not": ["model-query"]},
+    {"input": "修改 ER 模型关系", "expect_not": ["model-query"]},
+    {"input": "把模型发布上线", "expect_not": ["model-query"]}
+  ],
+  "boundary": [{"input": "把事实模型及关联表导出为 Excel", "expect_primary": "model-query", "expect_support": ["xlsx-materializer"]}],
+  "conflict": [{"input": "设计并保存新的 ER 模型", "expect_not": ["model-query"], "expect_primary": "model-maintenance"}]
+}
