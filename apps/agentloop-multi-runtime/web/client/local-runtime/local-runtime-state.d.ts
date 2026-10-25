@@ -5,6 +5,7 @@ export interface LocalRuntimeState {
   sessionRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   scopes: Array<Record<string, unknown>>;
   runtimes: Array<Record<string, unknown>>;
+  lifecycleOperations: Record<string, { message: string; tone: string; pending: boolean }>;
   agentHealth: Record<string, unknown> | undefined;
   agentConfig: Record<string, unknown> | undefined;
   agentStatus: string;

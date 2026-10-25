@@ -133,3 +133,22 @@ test("direct Local Agent-style MCP credentials use the shared HTTP loader", asyn
     globalThis.fetch = originalFetch;
   }
 });
+
+test("MCP startup handshake and discovery honor the configured request timeout", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => await new Promise<Response>((_resolve, reject) => {
+    const signal = init?.signal;
+    if (signal?.aborted) { reject(signal.reason); return; }
+    signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
+  try {
+    const integration = await loadMcpToolsFromConfig(parseMcpServersConfig({
+      servers: [{ key: "slow-source", transport: "http", url: "https://mcp.example.test", timeoutMs: 20 }],
+    }));
+    assert.deepEqual(integration.loadedServers, []);
+    assert.equal(integration.failedServers.length, 1);
+    assert.equal(integration.failedServers[0]?.key, "slow-source");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

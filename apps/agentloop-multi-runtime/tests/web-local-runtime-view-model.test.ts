@@ -50,3 +50,18 @@ test("local Runtime manager markup preserves lifecycle affordances as data attri
   assert.doesNotMatch(markup, /合同审核|合同库/);
   assert.match(markup, /忙碌/);
 });
+
+test("local Runtime lifecycle state renders above its card and disables only that Runtime", () => {
+  const markup = localRuntimeListMarkup([
+    { id: "starting", displayName: "启动中", status: "stopped", isDefault: false, activeRunCount: 0 },
+    { id: "ready", displayName: "可用", status: "ready", isDefault: false, activeRunCount: 0 },
+  ], "ready", String, (status) => status, {
+    starting: { message: "启动中：正在启动…", tone: "running", pending: true },
+  });
+  assert.match(markup, /local-runtime-operation-status[^>]*data-tone="running"[^>]*>启动中：正在启动…/);
+  assert.match(markup, /data-local-runtime-action="view" data-runtime-id="starting" disabled/);
+  assert.match(markup, /data-local-runtime-action="toggle" data-runtime-id="starting" disabled/);
+  assert.match(markup, /class="local-runtime-action-menu pending"/);
+  assert.match(markup, /data-local-runtime-action="view" data-runtime-id="ready" title="查看 Skill 和 MCP 明细"/);
+  assert.doesNotMatch(markup, /data-local-runtime-action="view" data-runtime-id="ready" disabled/);
+});

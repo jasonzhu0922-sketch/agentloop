@@ -8,6 +8,7 @@ import type { RuntimeTool, ToolSourceCapability } from "../tools/tool-registry.t
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 const MCP_CLIENT_NAME = "agentloop";
 const MCP_CLIENT_VERSION = "0.1.0";
+const DEFAULT_MCP_REQUEST_TIMEOUT_MS = 30_000;
 
 export interface McpServersConfig {
   readonly defaultTrust?: "trusted" | "untrusted";
@@ -493,6 +494,7 @@ async function listAllTools(session: McpSession): Promise<readonly McpToolDefini
 async function createHttpMcpSession(server: McpServerRegistration, environment: Readonly<Record<string, string | undefined>>): Promise<McpSession> {
   const baseUrl = resolveHttpRequestUrl(server, environment);
   const protocolVersion = server.protocolVersion ?? MCP_PROTOCOL_VERSION;
+  const startupTimeoutMs = server.timeoutMs ?? DEFAULT_MCP_REQUEST_TIMEOUT_MS;
   const headers = createMcpRequestHeaders(server, environment, "initialize", protocolVersion, { includeProtocolVersion: false });
   const initResponse = await postJsonRpc(baseUrl, headers, {
     jsonrpc: "2.0",
@@ -503,15 +505,17 @@ async function createHttpMcpSession(server: McpServerRegistration, environment: 
       capabilities: { tools: {} },
       clientInfo: { name: MCP_CLIENT_NAME, version: MCP_CLIENT_VERSION },
     },
-  });
+  }, AbortSignal.timeout(startupTimeoutMs));
   if (initResponse._mcpSessionId !== undefined) headers.set("mcp-session-id", initResponse._mcpSessionId);
   await postNotification(baseUrl, createMcpRequestHeadersFrom(headers, protocolVersion, "notifications/initialized"), {
     jsonrpc: "2.0",
     method: "notifications/initialized",
-  });
+  }, AbortSignal.timeout(startupTimeoutMs));
   let requestId = 2;
   return {
-    request: (method, params, signal) => requestHttpJsonRpc(baseUrl, headers, protocolVersion, method, params, signal, requestId++),
+    // tools/list is called during Runtime startup without a caller signal;
+    // bound it to the same per-server timeout as the initialization handshake.
+    request: (method, params, signal) => requestHttpJsonRpc(baseUrl, headers, protocolVersion, method, params, signal ?? AbortSignal.timeout(startupTimeoutMs), requestId++),
     close: async () => undefined,
   };
 }

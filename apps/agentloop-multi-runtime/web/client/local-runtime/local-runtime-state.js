@@ -13,6 +13,7 @@ export function createLocalRuntimeState() {
     sessionRefreshTimer: undefined,
     scopes: [],
     runtimes: [],
+    lifecycleOperations: {},
     agentHealth: undefined,
     agentConfig: undefined,
     agentStatus: "checking",
@@ -26,6 +27,7 @@ export function createLocalRuntimeState() {
       this.sessionRefreshTimer = undefined;
       this.scopes = [];
       this.runtimes = [];
+      this.lifecycleOperations = {};
       this.agentHealth = undefined;
       this.agentConfig = undefined;
       this.agentStatus = "checking";

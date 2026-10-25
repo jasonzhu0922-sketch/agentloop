@@ -19,4 +19,4 @@ export function localRuntimeViewModel(input: {
 }): LocalRuntimeViewModel;
 
 export function localRuntimeOptions(values: unknown[], escapeHtml: (value: unknown) => string, runtimeStatusLabel: (status: string) => string): string;
-export function localRuntimeListMarkup(values: unknown[], selectedRuntimeId: string, escapeHtml: (value: unknown) => string, runtimeStatusLabel: (status: string) => string): string;
+export function localRuntimeListMarkup(values: unknown[], selectedRuntimeId: string, escapeHtml: (value: unknown) => string, runtimeStatusLabel: (status: string) => string, lifecycleOperations?: Record<string, { message?: string; tone?: string; pending?: boolean }>): string;

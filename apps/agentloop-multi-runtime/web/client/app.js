@@ -226,6 +226,7 @@ $("local-runtime-list").addEventListener("click", (event) => {
   if (!button || button.disabled) return;
   const runtimeId = button.dataset.runtimeId;
   if (!runtimeId) return;
+  button.closest("details")?.removeAttribute("open");
   const action = button.dataset.localRuntimeAction;
   if (action === "select") void selectLocalRuntime(runtimeId);
   if (action === "view") void openLocalRuntimeDetails(runtimeId);
@@ -1119,17 +1120,36 @@ async function pickUploadStorage() {
   } catch (error) { setStatus(`切换上传源文件目录失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
 }
 
+function setLocalRuntimeLifecycleStatus(runtimeId, message = "", tone = "", pending = false) {
+  if (!runtimeId) return;
+  localRuntimeState.lifecycleOperations[runtimeId] = { message, tone, pending };
+  syncLocalRuntimeManager();
+}
+
 async function applyLocalRuntimeLifecycle(action, runtimeId = localRuntimeState.runtimeId) {
   if (!runtimeId) return;
+  if (localRuntimeState.lifecycleOperations[runtimeId]?.pending) return;
+  const displayName = selectedLocalRuntime(runtimeId)?.displayName || "Runtime";
+  const pendingLabels = { drain: "正在进入 Drain…", restart: "正在重启…", stop: "正在停止…", start: "正在启动…" };
+  const labels = { drain: "已进入 Drain", restart: "重启请求已提交", stop: "已停止", start: "已启动" };
+  const pendingMessage = `${displayName}：${pendingLabels[action] || "正在处理…"}`;
+  setStatus(pendingMessage, "running");
+  setLocalRuntimeLifecycleStatus(runtimeId, pendingMessage, "running", true);
   try {
     const response = await routerClient.request(localAgentRouterPath(`/runtimes/${encodeURIComponent(runtimeId)}/${action}`), { method: "POST" });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
     await loadLocalRuntimes();
     await loadLocalScopes();
-    const labels = { drain: "已进入 Drain", restart: "重启请求已提交", stop: "已停止", start: "已启动" };
-    setStatus(`${body.runtime.displayName}：${labels[action]}`, body.runtime.status === "failed" ? "error" : "ok");
-  } catch (error) { setStatus(`Runtime 操作失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
+    const message = `${body.runtime.displayName}：${labels[action]}`;
+    const failed = body.runtime.status === "failed";
+    setStatus(message, failed ? "error" : "ok");
+    setLocalRuntimeLifecycleStatus(runtimeId, message, failed ? "error" : "ok", false);
+  } catch (error) {
+    const message = `Runtime 操作失败：${error instanceof Error ? error.message : String(error)}`;
+    setStatus(message, "error");
+    setLocalRuntimeLifecycleStatus(runtimeId, message, "error", false);
+  }
 }
 
 async function toggleLocalRuntimeStarted(runtimeId = localRuntimeState.runtimeId) {
@@ -1190,7 +1210,7 @@ function localAgentRouterPath(suffix) {
 function syncLocalRuntimeManager() {
   const list = $("local-runtime-list");
   if (!list) return;
-  list.innerHTML = localRuntimeListMarkup(localRuntimeState.runtimes, localRuntimeState.runtimeId, escapeHtml, runtimeStatusLabel);
+  list.innerHTML = localRuntimeListMarkup(localRuntimeState.runtimes, localRuntimeState.runtimeId, escapeHtml, runtimeStatusLabel, localRuntimeState.lifecycleOperations);
 }
 
 function runtimeStatusLabel(status) {
