@@ -224,6 +224,8 @@ async function cloudArchive(f: Awaited<ReturnType<typeof fixture>>) {
   await mkdir(join(skillSource, "candidate-skill"), { recursive: true });
   await mkdir(join(skillSource, "legacy-skill"), { recursive: true });
   await writeFile(join(skillSource, "candidate-skill/SKILL.md"), "# Candidate from code release\n");
+  await mkdir(join(skillSource, "candidate-skill/references"), { recursive: true });
+  await writeFile(join(skillSource, "candidate-skill/references/说明.md"), "Unicode reference\n");
   await writeFile(join(skillSource, "legacy-skill/SKILL.md"), "# Legacy replacement from code release\n");
   await mkdir(customSkills, { recursive: true });
   execFileSync("zip", ["-qr", join(customSkills, "custom-skills.zip"), "custom-skills"], { cwd: join(f.root, "cloud-skills-source") });
@@ -254,6 +256,7 @@ test("cloud release reuses immutable build inputs and preserves deployed port co
   assert.match(env, /WEB_PORT=13001\nROUTER_PORT=15001/);
   assert.equal(await readFile(f.config, "utf8"), '{"marker":"original","models":{"fixture":{"displayName":"Fixture","providerModel":"fixture"}}}\n');
   assert.equal(await readFile(join(f.root, "config/custom-skills/candidate-skill/SKILL.md"), "utf8"), "# Candidate from code release\n");
+  assert.equal(await readFile(join(f.root, "config/custom-skills/candidate-skill/references/说明.md"), "utf8"), "Unicode reference\n");
   assert.equal(await readFile(join(f.root, "config/custom-skills/legacy-skill/SKILL.md"), "utf8"), "# Legacy replacement from code release\n");
   assert.equal(await readFile(join(f.root, "config/custom-skills/legacy-skill/.env"), "utf8"), "LEGACY_SECRET=keep-me\n");
   const current = await readFile(join(f.root,"current-compose"),"utf8");

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Internal server helper, uploaded by release-cloud.sh / update-cloud-llm.sh.
 set -Eeuo pipefail
-export LC_ALL=C
+# Production CentOS 7 hosts use Python 3.6 for archive extraction. Keep
+# deterministic shell behavior while enabling UTF-8 filesystem paths in Skill
+# packages (the archive contract permits non-ASCII filenames).
+export LC_ALL=en_US.utf8
 operation=${1:?operation required}
 job=${2:?job directory required}
 root=${AGENTLOOP_DEPLOY_ROOT:-/opt/agentloop}
