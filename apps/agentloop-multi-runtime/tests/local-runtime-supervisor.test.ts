@@ -312,7 +312,7 @@ test("removed custom-directory Skills are unbound during startup synchronization
   }
 });
 
-test("uploaded Skill metadata is editable through a new immutable package revision", async () => {
+test("uploaded Skill metadata is editable without changing the immutable package", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-skill-metadata-store-"));
   const database = new AppDatabase(join(root, "supervisor.db"));
   const configurations = new LocalRuntimeConfigurationStore(database, undefined, [], join(root, "packages", "uploaded"));
@@ -326,7 +326,7 @@ test("uploaded Skill metadata is editable through a new immutable package revisi
     assert.ok(installed);
     const original = await configurations.registerUploadedPackage(installed);
     const metadata = await configurations.skillMetadata(original.packageId);
-    assert.equal(metadata.source, "package");
+    assert.equal(metadata.source, "detected");
     assert.equal(metadata.editable, true);
     const updated = await configurations.updateSkillMetadata(original.packageId, {
       schema: "agentloop.skillDeclaration/v1",
@@ -334,12 +334,62 @@ test("uploaded Skill metadata is editable through a new immutable package revisi
       activation: { semanticTags: ["contracts"], intentExamples: ["Review a contract"] },
       workflow: { roles: ["primary_builder"], artifactKinds: ["document"], sourceKinds: [], qaKinds: [], requiredSkills: [] },
     });
-    assert.notEqual(updated.packageId, original.packageId);
-    assert.equal(updated.metadataSource, "package");
+    assert.equal(updated.packageId, original.packageId);
+    assert.equal(updated.metadataSource, "detected");
     assert.equal(updated.metadataNeedsReview, false);
-    const edited = await configurations.skillMetadata(updated.packageId);
+    const edited = await configurations.skillMetadata(original.packageId);
     assert.deepEqual(edited.declaration.activation.semanticTags, ["contracts"]);
-    assert.equal((await configurations.listSkillPackages()).find((skill) => skill.packageId === original.packageId)?.validationStatus, "invalid");
+    assert.equal(edited.revision, 2);
+    assert.equal((await configurations.listSkillPackages()).find((skill) => skill.packageId === original.packageId)?.validationStatus, "valid");
+  } finally {
+    await database.close();
+    await makeWritable(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("package-declared metadata is materialized as revision one and remains immutable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-skill-package-metadata-revision-"));
+  const database = new AppDatabase(join(root, "supervisor.db"));
+  const configurations = new LocalRuntimeConfigurationStore(database, undefined, [], join(root, "packages", "uploaded"));
+  const installer = new LocalSkillPackageInstaller(join(root, "packages", "uploaded"));
+  const declaration = JSON.stringify({
+    schema: "agentloop.skillDeclaration/v1",
+    identity: { name: "declared", description: "Declared Skill" },
+    activation: { semanticTags: ["declared"], intentExamples: ["Use the declared skill"] },
+    workflow: { roles: ["support"], artifactKinds: ["none"], sourceKinds: [], qaKinds: [], requiredSkills: [] },
+  });
+  try {
+    await configurations.ready();
+    const [installed] = await installer.installDirectory([
+      { path: "declared/SKILL.md", content: Buffer.from("---\nname: declared\ndescription: Declared Skill\n---\n") },
+      { path: "declared/agentloop.skill.json", content: Buffer.from(declaration) },
+    ]);
+    assert.ok(installed);
+    const original = await configurations.registerUploadedPackage(installed);
+    assert.equal(original.metadataSource, "package");
+    assert.equal(original.metadataGenerationMethod, "none");
+    const before = await configurations.skillMetadata(original.packageId);
+    assert.equal(before.revision, 1);
+    assert.equal(before.source, "package");
+    assert.equal(before.packageHash, installed.inspection.packageHash);
+    const sidecarBefore = await readFile(join(installed.root, "agentloop.skill.json"), "utf8");
+
+    const updated = await configurations.updateSkillMetadata(original.packageId, {
+      schema: "agentloop.skillDeclaration/v1",
+      identity: { name: "declared", description: "Declared Skill" },
+      activation: { semanticTags: ["edited"], intentExamples: ["Use the edited skill"] },
+      workflow: { roles: ["support"], artifactKinds: ["none"], sourceKinds: [], qaKinds: [], requiredSkills: [] },
+    });
+    assert.equal(updated.packageId, original.packageId);
+    assert.equal(updated.metadataSource, "package");
+    assert.equal(updated.metadataGenerationMethod, "user");
+    const after = await configurations.skillMetadata(original.packageId);
+    assert.equal(after.revision, 2);
+    assert.equal(after.source, "package");
+    assert.equal(after.packageHash, before.packageHash);
+    assert.deepEqual(after.declaration.activation.semanticTags, ["edited"]);
+    assert.equal(await readFile(join(installed.root, "agentloop.skill.json"), "utf8"), sidecarBefore);
   } finally {
     await database.close();
     await makeWritable(root);

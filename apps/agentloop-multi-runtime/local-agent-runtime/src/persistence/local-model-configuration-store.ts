@@ -1,4 +1,4 @@
-import { LlmProviderRegistry, type AppDatabase } from "@zhujun/agentloop";
+import { LlmProviderRegistry, type AppDatabase, type ModelAdapter } from "@zhujun/agentloop";
 import type { LocalRuntimeSecretStore } from "./local-runtime-configuration-store.ts";
 
 export interface LocalModelProviderInput {
@@ -71,6 +71,19 @@ export class LocalModelConfigurationStore {
   current(): ResolvedLocalModelConfiguration {
     if (this.currentConfiguration === undefined) throw new Error("local_model_configuration_not_ready");
     return this.currentConfiguration;
+  }
+
+  /** Stable user-configured order used by non-Run model selection, including Skill metadata generation. */
+  async orderedModelKeys(): Promise<readonly string[]> {
+    const configuration = await this.read();
+    return configuration.providers.flatMap((provider) => provider.models.map((model) => `local:${model.key}`));
+  }
+
+  createModelAdapter(modelKey: string): ModelAdapter {
+    const configuration = this.current();
+    if (configuration.registryConfig === undefined) throw new Error("local_model_unavailable");
+    const registry = LlmProviderRegistry.fromConfigObject(configuration.registryConfig, configuration.environment);
+    return registry.create(modelKey.slice("local:".length));
   }
 
   async read(): Promise<LocalModelConfigurationInput> {

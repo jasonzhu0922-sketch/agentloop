@@ -1,14 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { LocalModelConfigurationStore, ResolvedLocalModelConfiguration } from "./local-model-configuration-store.ts";
 import {
   discoverSkillDirectory,
+  detectSkillDeclaration,
   inspectSkillPackage,
-  makeSkillPackageReadOnly,
   parseSkillDeclaration,
-  removeSkillPackage,
-  serializeSkillDeclaration,
   type SkillDeclaration,
   parseMcpServersConfig,
   type AppDatabase,
@@ -29,6 +26,9 @@ export interface LocalSkillPackageSummary {
   readonly validationDetail?: string;
   readonly metadataSource?: "package" | "legacy-frontmatter" | "detected";
   readonly metadataNeedsReview: boolean;
+  readonly metadataRevision?: number;
+  readonly metadataGenerationMethod?: "none" | "legacy-projection" | "deterministic" | "model" | "deterministic+model" | "user";
+  readonly metadataModelKey?: string;
   readonly updatedAt: number;
 }
 
@@ -40,6 +40,25 @@ export interface LocalSkillMetadata {
   readonly declaration: SkillDeclaration;
   readonly source: "package" | "legacy-frontmatter" | "detected";
   readonly editable: boolean;
+  readonly revision: number;
+  readonly generation: Readonly<Record<string, unknown>>;
+  readonly fields: Readonly<Record<string, LocalSkillMetadataField>>;
+}
+
+export interface LocalSkillMetadataGeneration {
+  readonly generationMethod: "none" | "legacy-projection" | "deterministic" | "model" | "deterministic+model" | "user";
+  readonly generationStatus: "not-needed" | "completed" | "fallback" | "failed";
+  readonly modelKey?: string;
+  readonly attemptedModelKeys?: readonly string[];
+  readonly generationError?: string;
+  readonly fields?: Readonly<Record<string, LocalSkillMetadataField>>;
+}
+
+export interface LocalSkillMetadataField {
+  readonly origin: "package" | "legacy" | "detected" | "suggested" | "user";
+  readonly confidence?: "high" | "medium" | "low";
+  readonly editable: boolean;
+  readonly evidence: readonly string[];
 }
 
 export type LocalRuntimeMcpAuthentication =
@@ -160,6 +179,10 @@ interface SkillPackageRow {
   validation_status: "valid" | "invalid";
   validation_detail: string | null;
   updated_at: number;
+  metadata_revision?: number | null;
+  active_metadata_source?: string | null;
+  active_generation_method?: string | null;
+  active_generation_json?: string | null;
 }
 
 interface McpServerRow {
@@ -220,6 +243,23 @@ export class LocalRuntimeConfigurationStore {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS local_skill_metadata_revisions (
+        package_id TEXT NOT NULL REFERENCES local_skill_packages(package_id) ON DELETE CASCADE,
+        package_hash TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        metadata_source TEXT NOT NULL,
+        generation_method TEXT NOT NULL,
+        declaration_json TEXT NOT NULL,
+        field_metadata_json TEXT NOT NULL,
+        generation_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('active', 'superseded', 'invalid')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(package_id, revision)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS local_skill_metadata_active_idx
+        ON local_skill_metadata_revisions(package_id)
+        WHERE status = 'active';
       CREATE TABLE IF NOT EXISTS local_runtime_configurations (
         runtime_id TEXT PRIMARY KEY REFERENCES local_runtime_instances(runtime_id) ON DELETE CASCADE,
         updated_at INTEGER NOT NULL
@@ -360,9 +400,16 @@ export class LocalRuntimeConfigurationStore {
 
   async listSkillPackages(): Promise<readonly LocalSkillPackageSummary[]> {
     const rows = await this.database.prepare(`
-      SELECT package_id, skill_name, display_name, source_kind, storage_key, manifest_json,
-             validation_status, validation_detail, updated_at
-      FROM local_skill_packages ORDER BY display_name, package_id
+      SELECT p.package_id, p.skill_name, p.display_name, p.source_kind, p.storage_key, p.manifest_json,
+             p.validation_status, p.validation_detail, p.updated_at,
+             r.revision AS metadata_revision,
+             r.metadata_source AS active_metadata_source,
+             r.generation_method AS active_generation_method,
+             r.generation_json AS active_generation_json
+      FROM local_skill_packages p
+      LEFT JOIN local_skill_metadata_revisions r
+        ON r.package_id = p.package_id AND r.status = 'active'
+      ORDER BY p.display_name, p.package_id
     `).all() as SkillPackageRow[];
     return rows.map(toSkillSummary);
   }
@@ -370,6 +417,7 @@ export class LocalRuntimeConfigurationStore {
   async registerUploadedPackage(input: {
     readonly storageKey: string;
     readonly root: string;
+    readonly metadataSource?: "package" | "legacy-frontmatter" | "detected";
     readonly inspection: {
       readonly name: string;
       readonly description: string;
@@ -377,11 +425,26 @@ export class LocalRuntimeConfigurationStore {
       readonly fileCount: number;
       readonly totalBytes: number;
       readonly agentLoop?: unknown;
+      readonly declaration?: SkillDeclaration;
       readonly metadataSource?: "package" | "legacy-frontmatter" | "detected";
     };
+    readonly metadataDeclaration?: SkillDeclaration;
+    readonly metadataGeneration?: LocalSkillMetadataGeneration;
   }): Promise<LocalSkillPackageSummary> {
     if (!/^uploaded-[0-9a-f]{64}$/.test(input.storageKey)) throw new LocalRuntimeConfigurationStoreError(400, "skill_package_storage_key_invalid");
     const packageId = `local_skill_${input.inspection.packageHash.slice(0, 32)}`;
+    const metadataDeclaration = input.metadataDeclaration ?? input.inspection.declaration ?? detectSkillDeclaration(
+      input.inspection.name,
+      input.inspection.description,
+      "",
+      [],
+      false,
+    );
+    const metadataGeneration = input.metadataGeneration ?? {
+      generationMethod: (input.inspection.metadataSource ?? input.metadataSource) === "legacy-frontmatter" ? "legacy-projection" as const : input.inspection.declaration === undefined ? "deterministic" as const : "none" as const,
+      generationStatus: "fallback" as const,
+    };
+    const metadataSource = input.inspection.metadataSource ?? input.metadataSource ?? (input.inspection.declaration === undefined ? "detected" : "package");
     const now = Date.now();
     await this.database.prepare(`
       INSERT INTO local_skill_packages(
@@ -406,12 +469,32 @@ export class LocalRuntimeConfigurationStore {
         packageHash: input.inspection.packageHash,
         fileCount: input.inspection.fileCount,
         totalBytes: input.inspection.totalBytes,
-        metadataSource: input.inspection.metadataSource ?? "package",
         ...(input.inspection.agentLoop === undefined ? {} : { agentLoop: input.inspection.agentLoop }),
       }),
       now,
       now,
     );
+    const existingRevision = await this.database.prepare(
+      "SELECT revision FROM local_skill_metadata_revisions WHERE package_id = ? AND status = 'active' LIMIT 1",
+    ).get(packageId) as { revision: number } | undefined;
+    if (existingRevision === undefined) {
+      await this.database.prepare(`
+        INSERT INTO local_skill_metadata_revisions(
+          package_id, package_hash, revision, metadata_source, generation_method,
+          declaration_json, field_metadata_json, generation_json, status, created_at, updated_at
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, 'active', ?, ?)
+      `).run(
+        packageId,
+        input.inspection.packageHash,
+        metadataSource,
+        metadataGeneration.generationMethod,
+        JSON.stringify(metadataDeclaration),
+        JSON.stringify(metadataGeneration.fields ?? {}),
+        JSON.stringify(metadataGeneration),
+        now,
+        now,
+      );
+    }
     this.packageRoots.set(packageId, input.root);
     return (await this.listSkillPackages()).find((skill) => skill.packageId === packageId)!;
   }
@@ -421,26 +504,61 @@ export class LocalRuntimeConfigurationStore {
     const root = this.packageRoots.get(packageId);
     if (root === undefined || row.validation_status !== "valid") throw new LocalRuntimeConfigurationStoreError(409, "skill_package_not_available");
     const inspection = await inspectSkillPackage(root);
-    if (inspection.declaration === undefined || inspection.declarationSource === undefined) {
-      throw new LocalRuntimeConfigurationStoreError(409, "skill_metadata_missing");
+    let revision = await this.activeMetadataRevision(packageId);
+    if (revision === undefined) {
+      const declaration = inspection.declaration ?? detectSkillDeclaration(
+        inspection.name,
+        inspection.description,
+        inspection.instructions,
+        inspection.files,
+        inspection.files.includes("agentloop.executors.json"),
+      );
+      const metadataSource = inspection.declarationSource ?? "detected";
+      const generationMethod = inspection.declarationSource === "legacy-frontmatter"
+        ? "legacy-projection"
+        : inspection.declarationSource === "package" ? "none" : "deterministic";
+      const generationStatus = inspection.declarationSource === undefined ? "fallback" : "not-needed";
+      const now = Date.now();
+      await this.database.prepare(`
+        INSERT OR IGNORE INTO local_skill_metadata_revisions(
+          package_id, package_hash, revision, metadata_source, generation_method,
+          declaration_json, field_metadata_json, generation_json, status, created_at, updated_at
+        ) VALUES (?, ?, 1, ?, ?, ?, '{}', ?, 'active', ?, ?)
+      `).run(
+        packageId,
+        inspection.packageHash,
+        metadataSource,
+        generationMethod,
+        JSON.stringify(declaration),
+        JSON.stringify({ generationMethod, generationStatus }),
+        now,
+        now,
+      );
+      revision = await this.activeMetadataRevision(packageId);
     }
-    const manifest = parseRecord(row.manifest_json, "stored Skill manifest");
-    const source = manifest.metadataSource === "legacy-frontmatter" || manifest.metadataSource === "detected" || manifest.metadataSource === "package"
-      ? manifest.metadataSource
-      : inspection.declarationSource;
-    if (source === undefined) throw new LocalRuntimeConfigurationStoreError(409, "skill_metadata_missing");
+    if (revision === undefined) throw new LocalRuntimeConfigurationStoreError(409, "skill_metadata_missing");
+    if (revision.package_hash !== inspection.packageHash) {
+      throw new LocalRuntimeConfigurationStoreError(409, "skill_metadata_revision_stale");
+    }
+    const declaration = parseSkillDeclaration(JSON.parse(revision.declaration_json));
+    const source = revision.metadata_source === "legacy-frontmatter" || revision.metadata_source === "detected" || revision.metadata_source === "package"
+      ? revision.metadata_source
+      : inspection.declarationSource ?? "detected";
     return {
       packageId,
       packageHash: inspection.packageHash,
       name: inspection.name,
       description: inspection.description,
-      declaration: inspection.declaration,
+      declaration,
       source,
       editable: row.source_kind === "uploaded",
+      revision: revision.revision,
+      generation: parseRecord(revision.generation_json, "stored Skill metadata generation"),
+      fields: parseRecord(revision.field_metadata_json, "stored Skill metadata fields") as Readonly<Record<string, LocalSkillMetadataField>>,
     };
   }
 
-  /** Create a new immutable uploaded-package revision with an edited sidecar. */
+  /** Create a new metadata revision without changing the immutable uploaded package. */
   async updateSkillMetadata(packageId: string, value: unknown): Promise<LocalSkillPackageSummary> {
     const row = await this.skillPackageRow(packageId);
     if (row.source_kind !== "uploaded") throw new LocalRuntimeConfigurationStoreError(403, "skill_metadata_not_editable");
@@ -456,50 +574,44 @@ export class LocalRuntimeConfigurationStore {
     }
     if (activeBinding !== undefined) throw new LocalRuntimeConfigurationStoreError(409, "skill_metadata_runtime_active");
     const root = this.packageRoots.get(packageId);
-    if (root === undefined || this.uploadedPackageRoot === undefined) throw new LocalRuntimeConfigurationStoreError(409, "skill_package_not_available");
+    if (root === undefined) throw new LocalRuntimeConfigurationStoreError(409, "skill_package_not_available");
     const before = await inspectSkillPackage(root);
     const declaration = parseSkillDeclaration(value);
     if (declaration.identity.name !== before.name || declaration.identity.description !== before.description) {
       throw new LocalRuntimeConfigurationStoreError(409, "skill_identity_immutable");
     }
-    const staging = join(this.uploadedPackageRoot, `.metadata-${randomUUID()}`);
-    await fs.cp(root, staging, { recursive: true, force: true });
-    try {
-      await makeWritableTree(staging);
-      await fs.writeFile(join(staging, "agentloop.skill.json"), serializeSkillDeclaration(declaration), { mode: 0o600 });
-      const edited = await inspectSkillPackage(staging);
-      const storageKey = `uploaded-${edited.packageHash}`;
-      const target = join(this.uploadedPackageRoot, storageKey);
-      if (edited.packageHash !== before.packageHash) {
-        const existing = await inspectSkillPackage(target).catch(() => undefined);
-        if (existing !== undefined && existing.packageHash !== edited.packageHash) throw new LocalRuntimeConfigurationStoreError(409, "skill_package_storage_conflict");
-        if (existing === undefined) await fs.rename(staging, target);
-      }
-      const finalRoot = edited.packageHash === before.packageHash ? root : target;
-      await makeSkillPackageReadOnly({ ...edited, root: finalRoot });
-      const newPackageId = `local_skill_${edited.packageHash.slice(0, 32)}`;
-      const now = Date.now();
-      const manifest = JSON.stringify(manifestForInspection(edited));
-      await this.database.transaction(async () => {
-        await this.database.prepare(`
-          INSERT INTO local_skill_packages(
-            package_id, skill_name, display_name, source_kind, storage_key, manifest_json,
-            validation_status, validation_detail, created_at, updated_at
-          ) VALUES (?, ?, ?, 'uploaded', ?, ?, 'valid', NULL, ?, ?)
-          ON CONFLICT(package_id) DO UPDATE SET
-            manifest_json = excluded.manifest_json,
-            validation_status = 'valid', validation_detail = NULL, updated_at = excluded.updated_at
-        `).run(newPackageId, edited.name, edited.name, storageKey, manifest, now, now);
-        if (newPackageId !== packageId) {
-          await this.database.prepare("UPDATE local_runtime_skill_bindings SET package_id = ? WHERE package_id = ?").run(newPackageId, packageId);
-          await this.database.prepare("UPDATE local_skill_packages SET validation_status = 'invalid', validation_detail = ?, updated_at = ? WHERE package_id = ?").run(`superseded_by:${newPackageId}`, now, packageId);
-        }
-      });
-      this.packageRoots.set(newPackageId, finalRoot);
-      return (await this.listSkillPackages()).find((skill) => skill.packageId === newPackageId)!;
-    } finally {
-      if (await pathExists(staging)) await removeSkillPackage(staging);
+    const active = await this.activeMetadataRevision(packageId);
+    if (active !== undefined && active.package_hash !== before.packageHash) {
+      throw new LocalRuntimeConfigurationStoreError(409, "skill_metadata_revision_stale");
     }
+    const nextRevision = (active?.revision ?? 0) + 1;
+    const now = Date.now();
+    const metadataSource = active?.metadata_source === "package"
+      || active?.metadata_source === "legacy-frontmatter"
+      || active?.metadata_source === "detected"
+      ? active.metadata_source
+      : before.declarationSource ?? "detected";
+    await this.database.transaction(async () => {
+      await this.database.prepare("UPDATE local_skill_metadata_revisions SET status = 'superseded', updated_at = ? WHERE package_id = ? AND status = 'active'").run(now, packageId);
+      await this.database.prepare(`
+        INSERT INTO local_skill_metadata_revisions(
+          package_id, package_hash, revision, metadata_source, generation_method,
+          declaration_json, field_metadata_json, generation_json, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'user', ?, ?, ?, 'active', ?, ?)
+      `).run(
+        packageId,
+        before.packageHash,
+        nextRevision,
+        metadataSource,
+        JSON.stringify(declaration),
+        JSON.stringify(userMetadataFields()),
+        JSON.stringify({ generationMethod: "user", generationStatus: "completed", createdAt: now }),
+        now,
+        now,
+      );
+      await this.database.prepare("UPDATE local_skill_packages SET updated_at = ? WHERE package_id = ?").run(now, packageId);
+    });
+    return (await this.listSkillPackages()).find((skill) => skill.packageId === packageId)!;
   }
 
   async allValidSkillPackageIds(): Promise<readonly string[]> {
@@ -507,6 +619,29 @@ export class LocalRuntimeConfigurationStore {
       SELECT package_id FROM local_skill_packages WHERE validation_status = 'valid' ORDER BY package_id
     `).all() as Array<{ package_id: string }>;
     return rows.map((row) => row.package_id);
+  }
+
+  private async activeMetadataRevision(packageId: string): Promise<{
+    readonly revision: number;
+    readonly package_hash: string;
+    readonly metadata_source: string;
+    readonly declaration_json: string;
+    readonly field_metadata_json: string;
+    readonly generation_json: string;
+  } | undefined> {
+    return await this.database.prepare(`
+      SELECT revision, package_hash, metadata_source, declaration_json, field_metadata_json, generation_json
+      FROM local_skill_metadata_revisions
+      WHERE package_id = ? AND status = 'active'
+      ORDER BY revision DESC LIMIT 1
+    `).get(packageId) as {
+      revision: number;
+      package_hash: string;
+      metadata_source: string;
+      declaration_json: string;
+      field_metadata_json: string;
+      generation_json: string;
+    } | undefined;
   }
 
   async hasConfiguration(runtimeId: string): Promise<boolean> {
@@ -995,6 +1130,16 @@ function nonSecretAuthConfig(auth: LocalRuntimeMcpServerWrite["auth"]): Record<s
 
 function toSkillSummary(row: SkillPackageRow): LocalSkillPackageSummary {
   const manifest = parseRecord(row.manifest_json, "stored Skill manifest");
+  const generation = row.active_generation_json === null || row.active_generation_json === undefined
+    ? undefined
+    : parseRecord(row.active_generation_json, "stored Skill metadata generation");
+  const metadataSource = validMetadataSource(row.active_metadata_source)
+    ?? validMetadataSource(manifest.metadataSource);
+  const generationMethod = validGenerationMethod(row.active_generation_method)
+    ?? validGenerationMethod(manifest.metadataGenerationMethod);
+  const metadataModelKey = typeof generation?.modelKey === "string"
+    ? generation.modelKey
+    : typeof manifest.metadataModelKey === "string" ? manifest.metadataModelKey : undefined;
   return {
     packageId: row.package_id,
     skillName: row.skill_name,
@@ -1003,43 +1148,48 @@ function toSkillSummary(row: SkillPackageRow): LocalSkillPackageSummary {
     sourceKind: row.source_kind,
     validationStatus: row.validation_status,
     ...(row.validation_detail === null ? {} : { validationDetail: row.validation_detail }),
-    ...(manifest.metadataSource === "package" || manifest.metadataSource === "legacy-frontmatter" || manifest.metadataSource === "detected"
-      ? { metadataSource: manifest.metadataSource }
-      : {}),
-    metadataNeedsReview: manifest.metadataSource !== "package",
+    ...(metadataSource === undefined ? {} : { metadataSource }),
+    metadataNeedsReview: generationMethod === "user"
+      || metadataSource === "package"
+      || manifest.metadataReviewed === true
+      ? false
+      : metadataSource !== undefined,
+    ...(row.metadata_revision === null || row.metadata_revision === undefined ? {} : { metadataRevision: row.metadata_revision }),
+    ...(generationMethod === undefined ? {} : { metadataGenerationMethod: generationMethod }),
+    ...(metadataModelKey === undefined ? {} : { metadataModelKey }),
     updatedAt: row.updated_at,
   };
 }
 
-function manifestForInspection(inspection: {
-  readonly description: string;
-  readonly packageHash: string;
-  readonly fileCount: number;
-  readonly totalBytes: number;
-  readonly declarationSource?: string;
-  readonly agentLoop?: unknown;
-}): Record<string, unknown> {
+function validMetadataSource(value: unknown): LocalSkillPackageSummary["metadataSource"] | undefined {
+  return value === "package" || value === "legacy-frontmatter" || value === "detected" ? value : undefined;
+}
+
+function validGenerationMethod(value: unknown): LocalSkillPackageSummary["metadataGenerationMethod"] | undefined {
+  return value === "none"
+    || value === "legacy-projection"
+    || value === "deterministic"
+    || value === "model"
+    || value === "deterministic+model"
+    || value === "user"
+    ? value
+    : undefined;
+}
+
+function userMetadataFields(): Readonly<Record<string, LocalSkillMetadataField>> {
+  const editable = { origin: "user" as const, editable: true, evidence: [] as readonly string[] };
+  const readonlyField = { origin: "user" as const, editable: false, evidence: [] as readonly string[] };
   return {
-    description: inspection.description,
-    packageHash: inspection.packageHash,
-    fileCount: inspection.fileCount,
-    totalBytes: inspection.totalBytes,
-    metadataSource: inspection.declarationSource ?? "package",
-    ...(inspection.agentLoop === undefined ? {} : { agentLoop: inspection.agentLoop }),
+    "activation.semanticTags": editable,
+    "activation.intentExamples": editable,
+    "workflow.roles": editable,
+    "workflow.artifactKinds": editable,
+    "workflow.sourceKinds": editable,
+    "workflow.qaKinds": editable,
+    "workflow.requiredSkills": editable,
+    "identity.name": readonlyField,
+    "identity.description": readonlyField,
   };
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  return await fs.stat(path).then(() => true).catch(() => false);
-}
-
-async function makeWritableTree(path: string): Promise<void> {
-  await fs.chmod(path, 0o700).catch(() => undefined);
-  for (const entry of await fs.readdir(path, { withFileTypes: true }).catch(() => [])) {
-    const child = join(path, entry.name);
-    if (entry.isDirectory()) await makeWritableTree(child);
-    else await fs.chmod(child, 0o600).catch(() => undefined);
-  }
 }
 
 function toPublicMcpServer(row: McpServerRow): LocalRuntimeMcpServerConfiguration {
