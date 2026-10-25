@@ -16,7 +16,7 @@ test("Skill package management is global while Runtime dialogs only select insta
 });
 
 for (const prefix of ["local"]) {
-  test(`${prefix} shows local upload progress, selects the installed Skill and keeps existing selections`, async () => {
+  test(`${prefix} shows global upload progress and keeps open Runtime selections`, async () => {
     const input = { files: [{ name: "private-skill.zip" }], value: "private-skill.zip" };
     const button = { disabled: false };
     const status = { textContent: "", dataset: { tone: "" } };
@@ -27,6 +27,7 @@ for (const prefix of ["local"]) {
       "runtime-config-skills": { querySelectorAll: () => [{ value: "existing" }] },
     };
     let finish!: (value: Response) => void;
+    const rendered: Array<[string, string[]]> = [];
     const upload = vm.runInNewContext(`${uploadSource}\nuploadRuntimeSkill`, {
       Error, $: (id: string) => elements[id as keyof typeof elements],
       fileAsBase64: async () => "encoded-zip",
@@ -36,7 +37,7 @@ for (const prefix of ["local"]) {
         return new Promise<Response>((resolve) => { finish = resolve; });
       },
       loadLocalSkillPackages: async () => undefined,
-      renderRuntimeSkillOptions: () => undefined,
+      renderRuntimeSkillOptions: (id: string, selected: string[]) => { rendered.push([id, selected]); },
     });
     assert.ok(html.includes(`id="${prefix}-skill-upload-status"`));
     assert.ok(html.includes(`id="${prefix}-skill-directory-upload"`));
@@ -53,6 +54,7 @@ for (const prefix of ["local"]) {
     assert.equal(status.dataset.tone, "ok");
     assert.match(status.textContent, /已安装到本机：Private Skill/);
     assert.match(status.textContent, /各 Runtime 配置中选择/);
+    assert.equal(JSON.stringify(rendered), JSON.stringify([["runtime-create-skills", ["existing"]], ["runtime-config-skills", ["existing"]]]));
   });
 
   test(`${prefix} shows actionable ZIP layout errors inside the dialog and permits retry`, async () => {

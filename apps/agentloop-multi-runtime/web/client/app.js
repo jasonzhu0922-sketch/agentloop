@@ -850,7 +850,7 @@ function renderLocalSkillPackageManager() {
   if (!container) return;
   container.innerHTML = localSkillPackages.length === 0
     ? '<span class="runtime-capability-empty">暂无可管理的 Custom / 上传 Skill；Runtime 仍会加载全部内核 Skills。</span>'
-    : localSkillPackages.map((skill) => `<article class="local-skill-package"><div><strong>${escapeHtml(skill.displayName)}</strong><small>${escapeHtml(skill.description || skill.sourceKind || "")}</small><span class="local-skill-package-status">${skill.metadataNeedsReview ? "待维护元数据" : "元数据已确认"}</span></div><div class="local-skill-package-actions"><button type="button" data-edit-skill-metadata="${escapeHtml(skill.packageId)}">维护元数据</button></div></article>`).join("");
+    : localSkillPackages.map((skill) => `<article class="local-skill-package"><div><strong>${escapeHtml(skill.displayName)}</strong><small>${escapeHtml(skill.description || skill.sourceKind || "")}</small><span class="local-skill-package-status">${skill.metadataNeedsReview ? "待维护元数据" : "元数据已确认"}</span></div><div class="local-skill-package-actions">${skill.sourceKind === "uploaded" ? `<button type="button" data-edit-skill-metadata="${escapeHtml(skill.packageId)}">维护元数据</button>` : ""}</div></article>`).join("");
 }
 
 function renderRuntimeSkillOptions(containerId, selectedPackageIds) {
