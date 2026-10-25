@@ -194,9 +194,20 @@ export class LocalAgentService {
     return { skills: await this.configurations.listSkillPackages() };
   }
 
+  async localSkillMetadata(packageId: string): Promise<unknown> {
+    return await this.configurations.skillMetadata(packageId);
+  }
+
+  async updateLocalSkillMetadata(packageId: string, value: unknown): Promise<unknown> {
+    return { skill: await this.configurations.updateSkillMetadata(packageId, value) };
+  }
+
   async installLocalSkillPackage(originalName: string, content: Buffer): Promise<unknown> {
     const installed = await this.skillPackageInstaller.installZip(content, originalName);
-    const skills = await Promise.all(installed.map((packageInfo) => this.configurations.registerUploadedPackage(packageInfo)));
+    const skills = await Promise.all(installed.map((packageInfo) => this.configurations.registerUploadedPackage({
+      ...packageInfo,
+      inspection: { ...packageInfo.inspection, metadataSource: packageInfo.metadataSource },
+    })));
     return {
       skills,
       ...(skills.length === 1 ? { skill: skills[0] } : {}),
@@ -205,7 +216,10 @@ export class LocalAgentService {
 
   async installLocalSkillDirectory(files: readonly LocalSkillUploadFile[]): Promise<unknown> {
     const installed = await this.skillPackageInstaller.installDirectory(files);
-    const skills = await Promise.all(installed.map((packageInfo) => this.configurations.registerUploadedPackage(packageInfo)));
+    const skills = await Promise.all(installed.map((packageInfo) => this.configurations.registerUploadedPackage({
+      ...packageInfo,
+      inspection: { ...packageInfo.inspection, metadataSource: packageInfo.metadataSource },
+    })));
     return {
       skills,
       ...(skills.length === 1 ? { skill: skills[0] } : {}),

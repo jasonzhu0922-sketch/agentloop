@@ -19,6 +19,13 @@ import type {
   SkillAgentLoopRole,
   SkillAgentLoopSourceKind,
 } from "./agentloop-metadata.ts";
+import {
+  declarationFromLegacyMetadata,
+  parseSkillDeclarationJson,
+  projectSkillAgentLoopMetadata,
+  type SkillDeclaration,
+  type SkillDeclarationSource,
+} from "./skill-declaration.ts";
 
 export type {
   SkillAgentLoopArtifactKind,
@@ -57,6 +64,7 @@ const EXECUTION_PROFILE_VALUES = new Set<string>(SKILL_AGENT_LOOP_EXECUTION_PROF
 const PRODUCED_EVIDENCE_KIND_VALUES = new Set<string>(SKILL_AGENT_LOOP_PRODUCED_EVIDENCE_KIND_VALUES);
 const MAX_AGENT_LOOP_SEMANTIC_TAGS = 32;
 const MAX_AGENT_LOOP_INTENT_EXAMPLES = 16;
+export const SKILL_DECLARATION_FILE = "agentloop.skill.json" as const;
 
 export interface SkillPackageInspection {
   readonly root: string;
@@ -69,6 +77,9 @@ export interface SkillPackageInspection {
   readonly totalBytes: number;
   readonly files: readonly string[];
   readonly agentLoop?: SkillAgentLoopMetadata;
+  /** Versioned sidecar declaration. Legacy frontmatter is projected here during migration. */
+  readonly declaration?: SkillDeclaration;
+  readonly declarationSource?: SkillDeclarationSource;
 }
 
 export async function inspectSkillPackage(directory: string): Promise<SkillPackageInspection> {
@@ -131,6 +142,31 @@ export async function inspectSkillPackage(directory: string): Promise<SkillPacka
 
   const instructions = await fs.readFile(resolve(root, "SKILL.md"), "utf8");
   const metadata = parseSkillFrontmatter(instructions);
+  const declarationPath = resolve(root, SKILL_DECLARATION_FILE);
+  const declarationSource = await fs.readFile(declarationPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw invalidPackage("Skill declaration could not be read");
+  });
+  let declaration: SkillDeclaration | undefined;
+  try {
+    declaration = declarationSource === undefined
+      ? metadata.agentLoop === undefined
+        ? undefined
+        : declarationFromLegacyMetadata(metadata.name, metadata.description, metadata.agentLoop, files.includes("agentloop.executors.json"))
+      : parseSkillDeclarationJson(declarationSource);
+  } catch (error) {
+    throw invalidPackage(`Invalid ${SKILL_DECLARATION_FILE}: ${error instanceof Error ? error.message : "unknown error"}`);
+  }
+  if (declaration !== undefined && (declaration.identity.name !== metadata.name || declaration.identity.description !== metadata.description)) {
+    throw invalidPackage("Skill declaration identity does not match SKILL.md frontmatter");
+  }
+  if (declaration !== undefined && declarationSource !== undefined && metadata.agentLoop !== undefined) {
+    const legacyProjection = declarationFromLegacyMetadata(metadata.name, metadata.description, metadata.agentLoop, files.includes("agentloop.executors.json"));
+    if (JSON.stringify(projectSkillAgentLoopMetadata(declaration)) !== JSON.stringify(projectSkillAgentLoopMetadata(legacyProjection))) {
+      throw invalidPackage("Skill declaration conflicts with legacy SKILL.md metadata");
+    }
+  }
+  const projected = declaration === undefined ? metadata.agentLoop : projectSkillAgentLoopMetadata(declaration);
   return {
     root,
     entrypointPath: "SKILL.md",
@@ -141,7 +177,11 @@ export async function inspectSkillPackage(directory: string): Promise<SkillPacka
     fileCount: files.length,
     totalBytes,
     files,
-    ...(metadata.agentLoop === undefined ? {} : { agentLoop: metadata.agentLoop }),
+    ...(projected === undefined ? {} : { agentLoop: projected }),
+    ...(declaration === undefined ? {} : {
+      declaration,
+      declarationSource: declarationSource === undefined ? "legacy-frontmatter" as const : "package" as const,
+    }),
   };
 }
 

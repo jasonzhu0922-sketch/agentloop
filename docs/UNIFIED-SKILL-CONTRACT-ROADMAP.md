@@ -67,12 +67,12 @@ Package/Runtime 外部存储（可审计、可版本化）
 - `@zhujun/agentloop-skills` 通过 `bundledSkillDirectories()` 提供独立发布的 Bundled Skill；
 - Runtime Host 将 bundled 目录和配置的 Custom 目录合并后调用 `SkillService.syncSkillDirectories()`；
 - `packages/agentloop/src/skills/skill-package.ts` 负责包检查、hash、复制和旧 `agentloop:` frontmatter 解析；
-- 当前 `skill-package.ts` 仍从 `SKILL.md` 读取 `agentloop:`，这只是迁移输入，不是目标存储方案；
+- `skill-package.ts` 仍保留从 `SKILL.md` 读取 `agentloop:` 的迁移适配器，但当前 bundled Skill 与发布的 `custom-skills.zip` 已将声明迁移到各包根的 `agentloop.skill.json`，`SKILL.md` 不再承载 AgentLoop 元数据；
 - `packages/agentloop/src/skills/agentloop-metadata.ts` 定义当前角色、artifact、source、QA 和 evidence vocabulary；
 - `agentloop.executors.json` 已经描述 package-owned action，但它目前与顶层 Skill metadata 存在 evidence 声明重复；
 - `discovered_skills.agent_loop_json` 和 `SkillSummary.agentLoop` 仍是旧 projection，迁移期只能用于诊断/等价性快照，不能成为用户编辑 metadata 的存储；
 - Planner、Admission 和 Runtime Service 已经消费 `skill.agentLoop`，但没有统一的编译产物；
-- Custom Skill 目录和已发布 `custom-skills.zip` 的同步、重启和部署验证仍然是独立操作。
+- Custom Skill 目录和已发布 `custom-skills.zip` 的同步、重启和部署验证仍然是独立操作；本迭代已验证两者均能以 `declarationSource=package` 被发现。
 
 因此第一阶段应同时建立契约编译边界和用户上传的识别草稿边界。上传流程可以尽早可用，但上传结果必须停在可编辑草稿，不能把自动识别结果直接变成运行授权。
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, readFile, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,6 +12,7 @@ import { DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS, LocalRuntimeSupervisor, type
 import { persistSessions } from "../web/client/state/session-persistence.js";
 import { loadLocalRuntimePreference, localRuntimePreferenceKey, saveLocalRuntimePreference } from "../web/client/local-runtime/local-runtime-preference.js";
 import { submissionFailureMessage } from "../web/client/presentation/submission-failure-message.js";
+import { LocalSkillPackageInstaller } from "../local-agent-runtime/src/service/local-skill-package-installer.ts";
 
 test("local-execution preference is explicit, user-device scoped, and best-effort", () => {
   const values = new Map<string, string>();
@@ -307,6 +308,41 @@ test("removed custom-directory Skills are unbound during startup synchronization
     assert.deepEqual((await restarted.resolve("runtime")).customSkillDirectories, []);
   } finally {
     await database.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("uploaded Skill metadata is editable through a new immutable package revision", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-skill-metadata-store-"));
+  const database = new AppDatabase(join(root, "supervisor.db"));
+  const configurations = new LocalRuntimeConfigurationStore(database, undefined, [], join(root, "packages", "uploaded"));
+  const installer = new LocalSkillPackageInstaller(join(root, "packages", "uploaded"));
+  try {
+    await configurations.ready();
+    const [installed] = await installer.installDirectory([{
+      path: "editable/SKILL.md",
+      content: Buffer.from("---\nname: editable\ndescription: Editable Skill\n---\n"),
+    }]);
+    assert.ok(installed);
+    const original = await configurations.registerUploadedPackage(installed);
+    const metadata = await configurations.skillMetadata(original.packageId);
+    assert.equal(metadata.source, "package");
+    assert.equal(metadata.editable, true);
+    const updated = await configurations.updateSkillMetadata(original.packageId, {
+      schema: "agentloop.skillDeclaration/v1",
+      identity: { name: "editable", description: "Editable Skill" },
+      activation: { semanticTags: ["contracts"], intentExamples: ["Review a contract"] },
+      workflow: { roles: ["primary_builder"], artifactKinds: ["document"], sourceKinds: [], qaKinds: [], requiredSkills: [] },
+    });
+    assert.notEqual(updated.packageId, original.packageId);
+    assert.equal(updated.metadataSource, "package");
+    assert.equal(updated.metadataNeedsReview, false);
+    const edited = await configurations.skillMetadata(updated.packageId);
+    assert.deepEqual(edited.declaration.activation.semanticTags, ["contracts"]);
+    assert.equal((await configurations.listSkillPackages()).find((skill) => skill.packageId === original.packageId)?.validationStatus, "invalid");
+  } finally {
+    await database.close();
+    await makeWritable(root);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -828,4 +864,13 @@ function fakeRuntime(definition: LocalRuntimeDefinition): LocalRuntimeControl {
     modelKeys: ["shared-model"],
     activeRunIds: new Set<string>(),
   };
+}
+
+async function makeWritable(path: string): Promise<void> {
+  await chmod(path, 0o700).catch(() => undefined);
+  for (const entry of await readdir(path, { withFileTypes: true }).catch(() => [])) {
+    const child = join(path, entry.name);
+    if (entry.isDirectory()) await makeWritable(child);
+    else await chmod(child, 0o600).catch(() => undefined);
+  }
 }

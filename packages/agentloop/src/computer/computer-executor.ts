@@ -224,7 +224,9 @@ export interface PatchFileInput {
 
 export interface PatchFileHunkInput {
   /** One-indexed first line. A file-end insertion uses totalLines + 1. */
-  readonly startLine: number;
+  readonly startLine?: number;
+  /** Resolve the exact expectedLines at its unique occurrence instead of relying on a model-computed line number. */
+  readonly match?: "unique";
   /** Exact current lines to replace. An empty array means insert before startLine. */
   readonly expectedLines: readonly string[];
   /** Exact new lines, preserving leading/trailing whitespace. An empty array means delete. */
@@ -516,7 +518,9 @@ export class ComputerExecutor {
 
   private async assertCurrentFileRevision(revisionId: string, path: string, currentSha256: string): Promise<void> {
     if (this.fileRevisionScope === undefined) {
-      throw conflict("Patch requires a Run-scoped file revision; reread the file before patching");
+      throw conflict("Patch requires a Run-scoped file revision; reread the file before patching", {
+        failureKind: "patch_revision_scope_unavailable",
+      });
     }
     if (!FILE_REVISION_ID_PATTERN.test(revisionId)) {
       throw badRequest("baseRevisionId must be an opaque revision handle returned by computer_read_file, computer_write_file, or computer_patch_file");
@@ -528,7 +532,9 @@ export class ComputerExecutor {
       raw = await fs.readFile(target, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        throw conflict("Patch precondition failed: baseRevisionId is unknown for this Run; reread the file before patching");
+        throw conflict("Patch precondition failed: baseRevisionId is unknown for this Run; reread the file before patching", {
+          failureKind: "patch_revision_unknown",
+        });
       }
       throw error;
     }
@@ -543,10 +549,14 @@ export class ComputerExecutor {
       }
     } catch { /* Invalid server record is not a model-repairable input. */ }
     if (record === undefined || record.path !== path) {
-      throw conflict("Patch precondition failed: baseRevisionId does not belong to this file; reread the target before patching");
+      throw conflict("Patch precondition failed: baseRevisionId does not belong to this file; reread the target before patching", {
+        failureKind: "patch_revision_wrong_file",
+      });
     }
     if (record.sha256 !== currentSha256) {
-      throw conflict("Patch precondition failed: file revision is stale; reread the file before patching");
+      throw conflict("Patch precondition failed: file revision is stale; reread the file before patching", {
+        failureKind: "patch_revision_stale",
+      });
     }
   }
 
@@ -1307,8 +1317,14 @@ export class ComputerExecutor {
     let expectedCharacters = 0;
     let replacementCharacters = 0;
     for (const [index, hunk] of input.hunks.entries()) {
-      if (!Number.isSafeInteger(hunk.startLine) || hunk.startLine < 1) {
+      if (hunk.startLine === undefined && hunk.match !== "unique") {
+        throw badRequest(`hunks[${index}] must provide startLine or match="unique"`);
+      }
+      if (hunk.startLine !== undefined && (!Number.isSafeInteger(hunk.startLine) || hunk.startLine < 1)) {
         throw badRequest(`hunks[${index}].startLine must be a positive safe integer`);
+      }
+      if (hunk.startLine !== undefined && hunk.match !== undefined) {
+        throw badRequest(`hunks[${index}] cannot provide both startLine and match`);
       }
       if (hunk.expectedLines.length > PATCH_MAX_LINES || hunk.replacementLines.length > PATCH_MAX_LINES) {
         throw badRequest(`hunks[${index}] line arrays must contain at most ${PATCH_MAX_LINES} lines`);
@@ -1345,9 +1361,35 @@ export class ComputerExecutor {
     const beforeInspection = inspectWrittenText(beforeContent);
     await this.assertCurrentFileRevision(input.baseRevisionId, workspacePath, beforeInspection.sha256);
     const beforeLines = splitTextLines(beforeContent);
+    const resolvedHunks = input.hunks.map((hunk, index) => {
+      if (hunk.startLine !== undefined) return hunk as PatchFileHunkInput & { startLine: number };
+      if (hunk.match !== "unique" || hunk.expectedLines.length === 0) {
+        throw badRequest(`hunks[${index}] must provide startLine, or match="unique" with non-empty expectedLines`);
+      }
+      const candidateStartLines: number[] = [];
+      for (let lineIndex = 0; lineIndex <= beforeLines.length - hunk.expectedLines.length; lineIndex += 1) {
+        if (linesEqual(beforeLines.slice(lineIndex, lineIndex + hunk.expectedLines.length), hunk.expectedLines)) {
+          candidateStartLines.push(lineIndex + 1);
+          if (candidateStartLines.length > 20) break;
+        }
+      }
+      if (candidateStartLines.length !== 1) {
+        const count = candidateStartLines.length > 20 ? ">20" : String(candidateStartLines.length);
+        throw conflict(
+          `Patch precondition failed: unique expectedLines match ${count} locations at hunks[${index}]; reread the target and provide a unique anchor`,
+          {
+            failureKind: "patch_anchor_not_unique",
+            hunkIndex: index,
+            matchCount: candidateStartLines.length > 20 ? 21 : candidateStartLines.length,
+            candidateStartLines,
+          },
+        );
+      }
+      return { ...hunk, startLine: candidateStartLines[0] };
+    });
     let previousStartLine = 0;
     let previousEndLineExclusive = 0;
-    for (const [index, hunk] of input.hunks.entries()) {
+    for (const [index, hunk] of resolvedHunks.entries()) {
       const endLineExclusive = hunk.startLine + hunk.expectedLines.length;
       if (hunk.startLine > beforeLines.length + 1 || endLineExclusive > beforeLines.length + 1) {
         throw badRequest(`hunks[${index}] is outside the ${beforeLines.length}-line file`);
@@ -1358,13 +1400,18 @@ export class ComputerExecutor {
       const firstLineIndex = hunk.startLine - 1;
       const actualLines = beforeLines.slice(firstLineIndex, firstLineIndex + hunk.expectedLines.length);
       if (!linesEqual(actualLines, hunk.expectedLines)) {
-        throw conflict(`Patch precondition failed: expectedLines do not match the current file at hunks[${index}]; reread the target before patching`);
+        throw conflict(`Patch precondition failed: expectedLines do not match the current file at hunks[${index}]; reread the target before patching`, {
+          failureKind: "patch_expected_lines_mismatch",
+          hunkIndex: index,
+          startLine: hunk.startLine,
+          expectedLineCount: hunk.expectedLines.length,
+        });
       }
       previousStartLine = hunk.startLine;
       previousEndLineExclusive = endLineExclusive;
     }
     const afterLines = [...beforeLines];
-    for (const hunk of [...input.hunks].reverse()) {
+    for (const hunk of [...resolvedHunks].reverse()) {
       afterLines.splice(hunk.startLine - 1, hunk.expectedLines.length, ...hunk.replacementLines);
     }
     const lineEnding = beforeContent.includes("\r\n") ? "\r\n" : "\n";
@@ -1380,7 +1427,7 @@ export class ComputerExecutor {
       path: workspacePath,
       operation: "apply_hunks",
       replacements: input.hunks.length,
-      hunks: input.hunks.map((hunk) => ({
+      hunks: resolvedHunks.map((hunk) => ({
         startLine: hunk.startLine,
         deletedLineCount: hunk.expectedLines.length,
         insertedLineCount: hunk.replacementLines.length,
@@ -2596,16 +2643,16 @@ async function readLineRanges(
 function formatReadRangeContent(path: string, ranges: readonly ReadFileRangeResult[]): string {
   if (ranges.length === 1) {
     const range = ranges[0];
-    return [
-      range.content,
-      range.nextOffset === undefined ? "" : `\n[More readable content available. Use offset=${range.nextOffset} to continue.]`,
-    ].join("").trimEnd();
+    return range.content + (range.nextOffset === undefined
+      ? ""
+      : `\n[More readable content available. Use offset=${range.nextOffset} to continue.]`);
   }
-  return ranges.map((range) => [
-    `--- ${path} lines ${range.startLine}-${range.endLine} ---`,
-    range.content,
-    range.nextOffset === undefined ? "" : `[More readable content available after this range. Use offset=${range.nextOffset} to continue.]`,
-  ].filter((part) => part !== "").join("\n")).join("\n\n").trimEnd();
+  return ranges.map((range) => {
+    const marker = range.nextOffset === undefined
+      ? ""
+      : `\n[More readable content available after this range. Use offset=${range.nextOffset} to continue.]`;
+    return `--- ${path} lines ${range.startLine}-${range.endLine} ---\n${range.content}${marker}`;
+  }).join("\n\n");
 }
 
 function isBareFilename(path: string): boolean {

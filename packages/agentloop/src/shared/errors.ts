@@ -55,8 +55,8 @@ export function notFound(resource: string): AppError {
   return new AppError("NOT_FOUND", `${resource} not found`, 404);
 }
 
-export function conflict(message: string): AppError {
-  return new AppError("CONFLICT", message, 409);
+export function conflict(message: string, details?: Readonly<Record<string, unknown>>): AppError {
+  return new AppError("CONFLICT", message, 409, details);
 }
 
 export function asAppError(error: unknown): AppError {

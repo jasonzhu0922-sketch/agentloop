@@ -2,16 +2,6 @@
 name: docx
 description: "Use this skill whenever the user wants to create, read, edit, or manipulate Word documents, including legacy .doc files, .docx files, and Word templates (.dotx files). Triggers include: any mention of 'Word doc', 'word document', '.doc', '.docx', '.dotx', or requests to produce professional documents with formatting like tables of contents, headings, page numbers, or letterheads. Also use when extracting or reorganizing content from Word files, inserting or replacing images, performing find-and-replace, working with tracked changes or comments, or converting content into a polished Word document. If the user asks for a 'report', 'memo', 'letter', 'template', or similar deliverable as a Word file, use this skill. Do NOT use for PDFs, spreadsheets, Google Docs, or general coding tasks unrelated to document generation."
 license: Proprietary. LICENSE.txt has complete terms
-agentloop:
-  roles:
-    - primary_builder
-  artifactKinds:
-    - document
-  sourceKinds:
-    - document
-  qaKinds: []
-  executionProfiles:
-    - local_script
 ---
 
 # DOCX creation, editing, and analysis

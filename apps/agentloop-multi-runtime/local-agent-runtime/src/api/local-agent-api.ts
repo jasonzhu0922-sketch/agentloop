@@ -27,6 +27,16 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
         await session(request, service);
         return json(response, 200, await service.listLocalSkillPackages());
       }
+      const skillMetadata = url.pathname.match(/^\/v1\/local-skill-packages\/([^/]+)\/metadata$/);
+      if (skillMetadata !== null && request.method === "GET") {
+        await session(request, service);
+        return json(response, 200, await service.localSkillMetadata(decodeURIComponent(skillMetadata[1])));
+      }
+      if (skillMetadata !== null && request.method === "PUT") {
+        await session(request, service);
+        const value = await body(request);
+        return json(response, 200, await service.updateLocalSkillMetadata(decodeURIComponent(skillMetadata[1]), value.declaration ?? value));
+      }
       if (request.method === "GET" && url.pathname === "/v1/local-models/configuration") {
         await session(request, service);
         return json(response, 200, await service.localModelConfiguration());

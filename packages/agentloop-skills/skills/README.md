@@ -10,6 +10,14 @@ does not change Package bytes, but absence or invalidity of that optional file
 does not stop package discovery. An explicit `<name>.disabled.json` excludes a
 directory from inspection, copying, disclosure, and loading.
 
+AgentLoop metadata is package-root data, not instruction text. Every bundled
+package ships an `agentloop.skill.json` beside `SKILL.md`; custom packages use
+the same sidecar contract. `SKILL.md` keeps only its human-readable `name` and
+`description` compatibility header. User uploads without a declaration receive
+a deterministic, reviewable sidecar during installation. Legacy `agentloop:`
+frontmatter is accepted only as migration input and is not the long-term
+metadata source.
+
 At runtime these sources are never used as a shared mutable user Skill. After
 directory verification, AgentLoop copies each discovered Package byte-for-byte
 into the current user's isolated read-only Package Store. Planner disclosure,

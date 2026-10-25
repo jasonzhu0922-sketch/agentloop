@@ -1802,6 +1802,65 @@ test("computer_patch_file transactionally applies exact revision-bound hunks and
   }
 });
 
+test("computer_patch_file resolves a unique expected-lines anchor without model-computed line numbers", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-patch-file-anchor-"));
+  try {
+    await fs.writeFile(join(root, "report.txt"), "header\nold value\nfooter\n");
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_read_file", "computer_patch_file"]));
+    const read = allowed.prepare({ id: "read-anchor", name: "computer_read_file", arguments: { path: "report.txt" } });
+    const readResult = await read.tool.execute(grantContext(["computer_read_file", "computer_patch_file"]), read.input) as { revisionId?: string };
+    const patch = allowed.prepare({
+      id: "patch-anchor",
+      name: "computer_patch_file",
+      arguments: {
+        path: "report.txt",
+        hunks: [{ match: "unique", expectedLines: ["old value"], replacementLines: ["new value"] }],
+        baseRevisionId: readResult.revisionId,
+      },
+    });
+    const result = await patch.tool.execute(grantContext(["computer_patch_file"]), patch.input) as {
+      hunks: Array<{ startLine: number; deletedLineCount: number; insertedLineCount: number }>;
+    };
+    assert.equal(await fs.readFile(join(root, "report.txt"), "utf8"), "header\nnew value\nfooter\n");
+    assert.deepEqual(result.hunks, [{ startLine: 2, deletedLineCount: 1, insertedLineCount: 1 }]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_patch_file rejects a non-unique anchor without changing the file", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-patch-file-anchor-duplicate-"));
+  try {
+    const original = "header\nold value\nseparator\nold value\nfooter\n";
+    await fs.writeFile(join(root, "report.txt"), original);
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_read_file", "computer_patch_file"]));
+    const read = allowed.prepare({ id: "read-anchor-duplicate", name: "computer_read_file", arguments: { path: "report.txt" } });
+    const readResult = await read.tool.execute(grantContext(["computer_read_file", "computer_patch_file"]), read.input) as { revisionId?: string };
+    const patch = allowed.prepare({
+      id: "patch-anchor-duplicate",
+      name: "computer_patch_file",
+      arguments: {
+        path: "report.txt",
+        hunks: [{ match: "unique", expectedLines: ["old value"], replacementLines: ["new value"] }],
+        baseRevisionId: readResult.revisionId,
+      },
+    });
+    await assert.rejects(
+      () => patch.tool.execute(grantContext(["computer_patch_file"]), patch.input),
+      (error: unknown) => hasCode(error, "CONFLICT")
+        && error instanceof Error
+        && error.message.includes("unique expectedLines match 2 locations")
+        && (error as { details?: { failureKind?: string; candidateStartLines?: number[] } }).details?.failureKind === "patch_anchor_not_unique"
+        && (error as { details?: { candidateStartLines?: number[] } }).details?.candidateStartLines?.join(",") === "2,4",
+    );
+    assert.equal(await fs.readFile(join(root, "report.txt"), "utf8"), original);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("computer_patch_file preserves indentation, trailing spaces, and blank lines across multiple hunks", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-patch-file-whitespace-"));
   try {
@@ -3372,6 +3431,25 @@ test("computer_read_file reads line windows beyond the default byte prefix", asy
     assert.equal(window.limit, 3);
     assert.equal(window.totalLines, 30_050);
     assert.equal(window.nextOffset, 30_023);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_read_file preserves trailing spaces and blank lines in patchable line windows", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-read-whitespace-window-"));
+  try {
+    await fs.writeFile(join(root, "whitespace.txt"), "first\n\nlast  ");
+    const window = await new ComputerExecutor(root).readFile("whitespace.txt", undefined, { offset: 1, limit: 3 });
+    assert.equal(window.content, "first\n\nlast  ");
+    assert.deepEqual(window.ranges?.[0], {
+      offset: 1,
+      limit: 3,
+      startLine: 1,
+      endLine: 3,
+      content: "first\n\nlast  ",
+      truncated: false,
+    });
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
