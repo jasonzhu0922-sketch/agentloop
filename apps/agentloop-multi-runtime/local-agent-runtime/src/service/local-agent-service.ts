@@ -3,7 +3,7 @@ import { hostname } from "node:os";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { AppDatabase, loadMcpToolsFromConfig, parseMcpServersConfig, type McpServerRegistration, type McpServersConfig } from "@zhujun/agentloop";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
-import { LocalRuntimeFactory, redactMcpDiagnostic } from "./local-runtime-factory.ts";
+import { CloudProxyModel, LocalRuntimeFactory, redactMcpDiagnostic } from "./local-runtime-factory.ts";
 import { LocalRuntimeSupervisor, LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
 import { RuntimeConnectionClient } from "../connection/router-runtime-control-client.ts";
 import { pickNativeDirectory } from "../infrastructure/native-directory-picker.ts";
@@ -12,6 +12,7 @@ import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, ty
 import { LocalModelConfigurationStore, type LocalModelConfigurationInput } from "../persistence/local-model-configuration-store.ts";
 import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local-runtime-secret-store.ts";
 import { LocalSkillPackageInstaller, type LocalSkillUploadFile } from "./local-skill-package-installer.ts";
+import { generateSkillMetadata, type SkillMetadataModelInvoker } from "./local-skill-metadata-generator.ts";
 import { LOCAL_AGENT_VERSION } from "../config/local-agent-version.ts";
 
 export { LOCAL_AGENT_VERSION };
@@ -204,9 +205,13 @@ export class LocalAgentService {
 
   async installLocalSkillPackage(originalName: string, content: Buffer): Promise<unknown> {
     const installed = await this.skillPackageInstaller.installZip(content, originalName);
-    const skills = await Promise.all(installed.map((packageInfo) => this.configurations.registerUploadedPackage({
+    const metadata: Array<Awaited<ReturnType<typeof generateSkillMetadata>>> = [];
+    for (const packageInfo of installed) metadata.push(await generateSkillMetadata(packageInfo.inspection, this.metadataModelInvoker()));
+    const skills = await Promise.all(installed.map((packageInfo, index) => this.configurations.registerUploadedPackage({
       ...packageInfo,
       inspection: { ...packageInfo.inspection, metadataSource: packageInfo.metadataSource },
+      metadataDeclaration: metadata[index]!.declaration,
+      metadataGeneration: { ...metadata[index], fields: metadata[index]!.fields },
     })));
     return {
       skills,
@@ -216,13 +221,29 @@ export class LocalAgentService {
 
   async installLocalSkillDirectory(files: readonly LocalSkillUploadFile[]): Promise<unknown> {
     const installed = await this.skillPackageInstaller.installDirectory(files);
-    const skills = await Promise.all(installed.map((packageInfo) => this.configurations.registerUploadedPackage({
+    const metadata: Array<Awaited<ReturnType<typeof generateSkillMetadata>>> = [];
+    for (const packageInfo of installed) metadata.push(await generateSkillMetadata(packageInfo.inspection, this.metadataModelInvoker()));
+    const skills = await Promise.all(installed.map((packageInfo, index) => this.configurations.registerUploadedPackage({
       ...packageInfo,
       inspection: { ...packageInfo.inspection, metadataSource: packageInfo.metadataSource },
+      metadataDeclaration: metadata[index]!.declaration,
+      metadataGeneration: { ...metadata[index], fields: metadata[index]!.fields },
     })));
     return {
       skills,
       ...(skills.length === 1 ? { skill: skills[0] } : {}),
+    };
+  }
+
+  private metadataModelInvoker(): SkillMetadataModelInvoker {
+    return {
+      orderedModelKeys: async () => {
+        const result = await this.localModels() as { models?: Array<{ key?: unknown }> };
+        return (result.models ?? []).flatMap((model) => typeof model.key === "string" ? [model.key] : []);
+      },
+      createModel: (modelKey) => modelKey.startsWith("cloud:")
+        ? new CloudProxyModel(this.input, modelKey.slice("cloud:".length))
+        : this.modelConfigurations.createModelAdapter(modelKey),
     };
   }
 

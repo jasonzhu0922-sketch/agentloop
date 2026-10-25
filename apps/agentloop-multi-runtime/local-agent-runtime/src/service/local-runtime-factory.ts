@@ -12,7 +12,7 @@ import { LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntim
 import { LocalAgentStateStore } from "../persistence/local-agent-state-store.ts";
 import { consumeModelResponse } from "../../../src/shared/model-proxy.ts";
 
-class CloudProxyModel implements ModelAdapter {
+export class CloudProxyModel implements ModelAdapter {
   readonly limits = { contextWindowTokens: 1_000_000, maxOutputTokens: 1_000_000 };
   readonly completeTimeoutMs = 30 * 60_000;
   readonly operationTimeoutMs = 30 * 60_000;

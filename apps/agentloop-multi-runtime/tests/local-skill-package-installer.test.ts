@@ -74,7 +74,7 @@ test("local Skill upload preserves user-owned private files and installs multipl
   }
 });
 
-test("local Skill upload materializes a sidecar declaration and migrates legacy frontmatter", async () => {
+test("local Skill upload preserves legacy metadata without mutating the package", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-skill-metadata-"));
   try {
     const installer = new LocalSkillPackageInstaller(join(root, "packages"));
@@ -95,12 +95,10 @@ test("local Skill upload materializes a sidecar declaration and migrates legacy 
     ].join("\n"));
     const [installed] = await installer.installZip(await zip.generateAsync({ type: "nodebuffer" }), "legacy.zip");
     assert.ok(installed);
-    const sidecar = JSON.parse(await readFile(join(installed.root, "agentloop.skill.json"), "utf8")) as { schema: string; workflow: { roles: string[] } };
-    assert.equal(sidecar.schema, "agentloop.skillDeclaration/v1");
-    assert.deepEqual(sidecar.workflow.roles, ["primary_builder"]);
-    assert.equal((await readFile(join(installed.root, "SKILL.md"), "utf8")).includes("agentloop:"), false);
+    await assert.rejects(readFile(join(installed.root, "agentloop.skill.json")), { code: "ENOENT" });
+    assert.equal((await readFile(join(installed.root, "SKILL.md"), "utf8")).includes("agentloop:"), true);
     const inspection = await inspectSkillPackage(installed.root);
-    assert.equal(inspection.declarationSource, "package");
+    assert.equal(inspection.declarationSource, "legacy-frontmatter");
     assert.equal(inspection.declaration?.identity.name, "legacy");
   } finally {
     await makeWritable(root);
