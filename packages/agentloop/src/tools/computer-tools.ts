@@ -519,7 +519,7 @@ export function createComputerTools(
         "Use this for local repairs to an existing artifact or generated source file instead of rewriting the whole file with computer_write_file.",
         "path must be relative to the workspace root; absolute paths and read-only virtual roots are rejected.",
         "baseRevisionId is required. Obtain it by reading or writing this exact workspace file in the current Run; it is an opaque server handle, never a content hash.",
-        "Each hunk has a 1-indexed startLine, exact expectedLines copied from that read, and exact replacementLines. Use expectedLines=[] to insert before startLine, replacementLines=[] to delete, and non-empty arrays on both sides to replace.",
+        "Each hunk has exact expectedLines copied from that read and exact replacementLines. Normally provide a 1-indexed startLine; for a non-empty expectedLines block whose location may have shifted, use match=\"unique\" and the Runtime will apply it only when that block occurs exactly once.",
         "Line strings are preserved byte-for-byte, including indentation, trailing spaces, and empty strings. Do not include newline characters inside a line string.",
         "All hunks are validated against the same revision before any write; they must be ordered by strictly increasing startLine and must not overlap. Any mismatch rejects the entire patch without changing the file.",
         "This is a surgical edit: at most 64 hunks and 50000 total expected/replacement characters are accepted. For a larger new file body, use computer_write_file with the complete intended replacement or a purpose-built materialization Tool.",
@@ -536,9 +536,10 @@ export function createComputerTools(
           items: {
             type: "object",
             additionalProperties: false,
-            required: ["startLine", "expectedLines", "replacementLines"],
+            required: ["expectedLines", "replacementLines"],
             properties: {
               startLine: { type: "integer", minimum: 1 },
+              match: { type: "string", enum: ["unique"] },
               expectedLines: { type: "array", maxItems: 2_000, items: { type: "string", maxLength: 50_000 } },
               replacementLines: { type: "array", maxItems: 2_000, items: { type: "string", maxLength: 50_000 } },
             },
@@ -1659,8 +1660,21 @@ function requirePatchHunks(value: unknown): PatchFileInput["hunks"] {
   }
   const hunks = value.map((item, index) => {
     const record = requireRecord(item, `hunks[${index}]`);
+    const startLine = record.startLine === undefined
+      ? undefined
+      : requireBoundedInteger(record.startLine, `hunks[${index}].startLine`, 1, Number.MAX_SAFE_INTEGER);
+    const match = record.match === undefined
+      ? undefined
+      : record.match === "unique" ? "unique" : (() => { throw badRequest(`hunks[${index}].match must be unique`); })();
+    if (startLine === undefined && match !== "unique") {
+      throw badRequest(`hunks[${index}] must provide startLine or match="unique"`);
+    }
+    if (startLine !== undefined && match !== undefined) {
+      throw badRequest(`hunks[${index}] cannot provide both startLine and match`);
+    }
     return {
-      startLine: requireBoundedInteger(record.startLine, `hunks[${index}].startLine`, 1, Number.MAX_SAFE_INTEGER),
+      ...(startLine === undefined ? {} : { startLine }),
+      ...(match === undefined ? {} : { match: match as "unique" }),
       expectedLines: requireExactPatchLines(record.expectedLines, `hunks[${index}].expectedLines`),
       replacementLines: requireExactPatchLines(record.replacementLines, `hunks[${index}].replacementLines`),
     };

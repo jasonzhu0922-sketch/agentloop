@@ -1242,7 +1242,7 @@ function instructionForStepState(input: {
   }
   if (input.recentPatchPreconditionFailure) {
     lines.push("The last patch failed because its patch precondition did not match the current file.");
-    lines.push("Read that exact patch target once to rebase the edit, then patch, write, run, or verify; do not broaden into directory listing or reference search.");
+    lines.push("Read that exact patch target once to rebase the edit. If the non-empty expected block is unique but its line number shifted, use computer_patch_file with match=\"unique\"; never guess a new line number. Then patch, write, run, or verify; do not broaden into directory listing or reference search.");
     return lines.join(" ");
   }
   if (input.recentComputationBindingMismatch) {
