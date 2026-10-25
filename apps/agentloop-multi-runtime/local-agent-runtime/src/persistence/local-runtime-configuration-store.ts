@@ -1,9 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { promises as fs } from "node:fs";
+import { join, resolve } from "node:path";
 import type { LocalModelConfigurationStore, ResolvedLocalModelConfiguration } from "./local-model-configuration-store.ts";
 import {
   discoverSkillDirectory,
   inspectSkillPackage,
+  makeSkillPackageReadOnly,
+  parseSkillDeclaration,
+  removeSkillPackage,
+  serializeSkillDeclaration,
+  type SkillDeclaration,
   parseMcpServersConfig,
   type AppDatabase,
   type McpServersConfig,
@@ -21,7 +27,19 @@ export interface LocalSkillPackageSummary {
   readonly sourceKind: LocalSkillPackageSourceKind;
   readonly validationStatus: "valid" | "invalid";
   readonly validationDetail?: string;
+  readonly metadataSource?: "package" | "legacy-frontmatter" | "detected";
+  readonly metadataNeedsReview: boolean;
   readonly updatedAt: number;
+}
+
+export interface LocalSkillMetadata {
+  readonly packageId: string;
+  readonly packageHash: string;
+  readonly name: string;
+  readonly description: string;
+  readonly declaration: SkillDeclaration;
+  readonly source: "package" | "legacy-frontmatter" | "detected";
+  readonly editable: boolean;
 }
 
 export type LocalRuntimeMcpAuthentication =
@@ -315,6 +333,7 @@ export class LocalRuntimeConfigurationStore {
             packageHash: entry.inspection.packageHash,
             fileCount: entry.inspection.fileCount,
             totalBytes: entry.inspection.totalBytes,
+            ...(entry.inspection.declarationSource === undefined ? {} : { metadataSource: entry.inspection.declarationSource }),
             ...(entry.inspection.agentLoop === undefined ? {} : { agentLoop: entry.inspection.agentLoop }),
           }),
           now,
@@ -344,6 +363,7 @@ export class LocalRuntimeConfigurationStore {
       readonly fileCount: number;
       readonly totalBytes: number;
       readonly agentLoop?: unknown;
+      readonly metadataSource?: "package" | "legacy-frontmatter" | "detected";
     };
   }): Promise<LocalSkillPackageSummary> {
     if (!/^uploaded-[0-9a-f]{64}$/.test(input.storageKey)) throw new LocalRuntimeConfigurationStoreError(400, "skill_package_storage_key_invalid");
@@ -372,6 +392,7 @@ export class LocalRuntimeConfigurationStore {
         packageHash: input.inspection.packageHash,
         fileCount: input.inspection.fileCount,
         totalBytes: input.inspection.totalBytes,
+        metadataSource: input.inspection.metadataSource ?? "package",
         ...(input.inspection.agentLoop === undefined ? {} : { agentLoop: input.inspection.agentLoop }),
       }),
       now,
@@ -379,6 +400,92 @@ export class LocalRuntimeConfigurationStore {
     );
     this.packageRoots.set(packageId, input.root);
     return (await this.listSkillPackages()).find((skill) => skill.packageId === packageId)!;
+  }
+
+  async skillMetadata(packageId: string): Promise<LocalSkillMetadata> {
+    const row = await this.skillPackageRow(packageId);
+    const root = this.packageRoots.get(packageId);
+    if (root === undefined || row.validation_status !== "valid") throw new LocalRuntimeConfigurationStoreError(409, "skill_package_not_available");
+    const inspection = await inspectSkillPackage(root);
+    if (inspection.declaration === undefined || inspection.declarationSource === undefined) {
+      throw new LocalRuntimeConfigurationStoreError(409, "skill_metadata_missing");
+    }
+    const manifest = parseRecord(row.manifest_json, "stored Skill manifest");
+    const source = manifest.metadataSource === "legacy-frontmatter" || manifest.metadataSource === "detected" || manifest.metadataSource === "package"
+      ? manifest.metadataSource
+      : inspection.declarationSource;
+    if (source === undefined) throw new LocalRuntimeConfigurationStoreError(409, "skill_metadata_missing");
+    return {
+      packageId,
+      packageHash: inspection.packageHash,
+      name: inspection.name,
+      description: inspection.description,
+      declaration: inspection.declaration,
+      source,
+      editable: row.source_kind === "uploaded",
+    };
+  }
+
+  /** Create a new immutable uploaded-package revision with an edited sidecar. */
+  async updateSkillMetadata(packageId: string, value: unknown): Promise<LocalSkillPackageSummary> {
+    const row = await this.skillPackageRow(packageId);
+    if (row.source_kind !== "uploaded") throw new LocalRuntimeConfigurationStoreError(403, "skill_metadata_not_editable");
+    let activeBinding: { status: string } | undefined;
+    try {
+      activeBinding = await this.database.prepare(`
+        SELECT i.status FROM local_runtime_skill_bindings b
+        JOIN local_runtime_instances i ON i.runtime_id = b.runtime_id
+        WHERE b.package_id = ? AND i.status <> 'stopped' LIMIT 1
+      `).get(packageId) as { status: string } | undefined;
+    } catch (error) {
+      if (!(error instanceof Error) || !/no such table/i.test(error.message)) throw error;
+    }
+    if (activeBinding !== undefined) throw new LocalRuntimeConfigurationStoreError(409, "skill_metadata_runtime_active");
+    const root = this.packageRoots.get(packageId);
+    if (root === undefined || this.uploadedPackageRoot === undefined) throw new LocalRuntimeConfigurationStoreError(409, "skill_package_not_available");
+    const before = await inspectSkillPackage(root);
+    const declaration = parseSkillDeclaration(value);
+    if (declaration.identity.name !== before.name || declaration.identity.description !== before.description) {
+      throw new LocalRuntimeConfigurationStoreError(409, "skill_identity_immutable");
+    }
+    const staging = join(this.uploadedPackageRoot, `.metadata-${randomUUID()}`);
+    await fs.cp(root, staging, { recursive: true, force: true });
+    try {
+      await makeWritableTree(staging);
+      await fs.writeFile(join(staging, "agentloop.skill.json"), serializeSkillDeclaration(declaration), { mode: 0o600 });
+      const edited = await inspectSkillPackage(staging);
+      const storageKey = `uploaded-${edited.packageHash}`;
+      const target = join(this.uploadedPackageRoot, storageKey);
+      if (edited.packageHash !== before.packageHash) {
+        const existing = await inspectSkillPackage(target).catch(() => undefined);
+        if (existing !== undefined && existing.packageHash !== edited.packageHash) throw new LocalRuntimeConfigurationStoreError(409, "skill_package_storage_conflict");
+        if (existing === undefined) await fs.rename(staging, target);
+      }
+      const finalRoot = edited.packageHash === before.packageHash ? root : target;
+      await makeSkillPackageReadOnly({ ...edited, root: finalRoot });
+      const newPackageId = `local_skill_${edited.packageHash.slice(0, 32)}`;
+      const now = Date.now();
+      const manifest = JSON.stringify(manifestForInspection(edited));
+      await this.database.transaction(async () => {
+        await this.database.prepare(`
+          INSERT INTO local_skill_packages(
+            package_id, skill_name, display_name, source_kind, storage_key, manifest_json,
+            validation_status, validation_detail, created_at, updated_at
+          ) VALUES (?, ?, ?, 'uploaded', ?, ?, 'valid', NULL, ?, ?)
+          ON CONFLICT(package_id) DO UPDATE SET
+            manifest_json = excluded.manifest_json,
+            validation_status = 'valid', validation_detail = NULL, updated_at = excluded.updated_at
+        `).run(newPackageId, edited.name, edited.name, storageKey, manifest, now, now);
+        if (newPackageId !== packageId) {
+          await this.database.prepare("UPDATE local_runtime_skill_bindings SET package_id = ? WHERE package_id = ?").run(newPackageId, packageId);
+          await this.database.prepare("UPDATE local_skill_packages SET validation_status = 'invalid', validation_detail = ?, updated_at = ? WHERE package_id = ?").run(`superseded_by:${newPackageId}`, now, packageId);
+        }
+      });
+      this.packageRoots.set(newPackageId, finalRoot);
+      return (await this.listSkillPackages()).find((skill) => skill.packageId === newPackageId)!;
+    } finally {
+      if (await pathExists(staging)) await removeSkillPackage(staging);
+    }
   }
 
   async allValidSkillPackageIds(): Promise<readonly string[]> {
@@ -673,6 +780,16 @@ export class LocalRuntimeConfigurationStore {
     }
   }
 
+  private async skillPackageRow(packageId: string): Promise<SkillPackageRow> {
+    const row = await this.database.prepare(`
+      SELECT package_id, skill_name, display_name, source_kind, storage_key, manifest_json,
+             validation_status, validation_detail, updated_at
+      FROM local_skill_packages WHERE package_id = ?
+    `).get(packageId) as SkillPackageRow | undefined;
+    if (row === undefined) throw new LocalRuntimeConfigurationStoreError(404, "skill_package_not_found");
+    return row;
+  }
+
   private async restoreUploadedPackages(): Promise<void> {
     if (this.uploadedPackageRoot === undefined) return;
     const rows = await this.database.prepare(`
@@ -863,8 +980,43 @@ function toSkillSummary(row: SkillPackageRow): LocalSkillPackageSummary {
     sourceKind: row.source_kind,
     validationStatus: row.validation_status,
     ...(row.validation_detail === null ? {} : { validationDetail: row.validation_detail }),
+    ...(manifest.metadataSource === "package" || manifest.metadataSource === "legacy-frontmatter" || manifest.metadataSource === "detected"
+      ? { metadataSource: manifest.metadataSource }
+      : {}),
+    metadataNeedsReview: manifest.metadataSource !== "package",
     updatedAt: row.updated_at,
   };
+}
+
+function manifestForInspection(inspection: {
+  readonly description: string;
+  readonly packageHash: string;
+  readonly fileCount: number;
+  readonly totalBytes: number;
+  readonly declarationSource?: string;
+  readonly agentLoop?: unknown;
+}): Record<string, unknown> {
+  return {
+    description: inspection.description,
+    packageHash: inspection.packageHash,
+    fileCount: inspection.fileCount,
+    totalBytes: inspection.totalBytes,
+    metadataSource: inspection.declarationSource ?? "package",
+    ...(inspection.agentLoop === undefined ? {} : { agentLoop: inspection.agentLoop }),
+  };
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  return await fs.stat(path).then(() => true).catch(() => false);
+}
+
+async function makeWritableTree(path: string): Promise<void> {
+  await fs.chmod(path, 0o700).catch(() => undefined);
+  for (const entry of await fs.readdir(path, { withFileTypes: true }).catch(() => [])) {
+    const child = join(path, entry.name);
+    if (entry.isDirectory()) await makeWritableTree(child);
+    else await fs.chmod(child, 0o600).catch(() => undefined);
+  }
 }
 
 function toPublicMcpServer(row: McpServerRow): LocalRuntimeMcpServerConfiguration {

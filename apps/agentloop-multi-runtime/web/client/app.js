@@ -64,6 +64,7 @@ let artifactPanelOpen = false;
 let artifactPanelWidth = loadArtifactPanelWidth();
 let resizeState;
 let localSkillPackages = [];
+let editingSkillPackageId;
 let availableModels = [];
 let modelsLoading = false;
 const modelSelection = createModelSelection();
@@ -151,6 +152,8 @@ document.querySelectorAll("[data-agent-settings-view]").forEach((button) => butt
 $("agent-install-cancel").addEventListener("click", closeLocalAgentInstall);
 $("runtime-config-cancel").addEventListener("click", closeConfigureLocalRuntime);
 $("runtime-config-form").addEventListener("submit", (event) => { event.preventDefault(); void saveLocalRuntimeConfiguration(); });
+$("skill-metadata-cancel").addEventListener("click", closeSkillMetadataEditor);
+$("skill-metadata-form").addEventListener("submit", (event) => { event.preventDefault(); void saveSkillMetadata(); });
 for (const prefix of ["runtime-create", "runtime-config"]) {
   const help = document.createElement("details");
   help.className = "local-model-json-help runtime-mcp-json-help";
@@ -834,6 +837,75 @@ async function loadRuntimeSkillOptions(containerId, selectedPackageIds) {
   container.innerHTML = localSkillPackages.length === 0
     ? '<span class="runtime-capability-empty">暂无可选的 Custom / 上传 Skill；仍可仅使用内核 Skills 创建。</span>'
     : localSkillPackages.map((skill) => `<label class="runtime-skill-option"><input type="checkbox" value="${escapeHtml(skill.packageId)}" ${selected.has(skill.packageId) ? "checked" : ""}/><span>${escapeHtml(skill.displayName)}<small>${escapeHtml(skill.description || skill.sourceKind || "")}</small></span></label>`).join("");
+  for (const skill of localSkillPackages) {
+    const input = [...container.querySelectorAll('input[type="checkbox"]')].find((item) => item.value === skill.packageId);
+    const span = input?.closest("label")?.querySelector("span");
+    if (!(span instanceof HTMLElement)) continue;
+    const status = document.createElement("small");
+    status.textContent = skill.metadataNeedsReview ? "待维护元数据" : "元数据已确认";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "runtime-skill-metadata-button";
+    button.dataset.editSkillMetadata = skill.packageId;
+    button.textContent = "维护元数据";
+    span.append(status, button);
+  }
+}
+
+for (const containerId of ["runtime-create-skills", "runtime-config-skills"]) {
+  $(containerId).addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-edit-skill-metadata]") : null;
+    if (!(button instanceof HTMLButtonElement)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void openSkillMetadataEditor(button.dataset.editSkillMetadata);
+  });
+}
+
+async function openSkillMetadataEditor(packageId) {
+  if (!packageId) return;
+  try {
+    const response = await localAgentFetch("/v1/local-skill-packages/" + encodeURIComponent(packageId) + "/metadata");
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "Local Agent HTTP " + response.status);
+    editingSkillPackageId = packageId;
+    $("skill-metadata-identity").textContent = body.name + " · " + (body.source === "detected" ? "系统识别，建议维护" : body.source === "legacy-frontmatter" ? "旧 frontmatter 迁移" : "包内声明");
+    $("skill-metadata-json").value = JSON.stringify(body.declaration, null, 2);
+    $("skill-metadata-error").textContent = "";
+    $("skill-metadata-modal").hidden = false;
+    $("skill-metadata-json").focus();
+  } catch (error) {
+    setStatus("读取 Skill 元数据失败：" + (error instanceof Error ? error.message : String(error)), "error");
+  }
+}
+
+function closeSkillMetadataEditor() {
+  editingSkillPackageId = undefined;
+  $("skill-metadata-modal").hidden = true;
+}
+
+async function saveSkillMetadata() {
+  if (!editingSkillPackageId) return;
+  const errorNode = $("skill-metadata-error");
+  try {
+    const declaration = JSON.parse($("skill-metadata-json").value);
+    const response = await localAgentFetch("/v1/local-skill-packages/" + encodeURIComponent(editingSkillPackageId) + "/metadata", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ declaration }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "Local Agent HTTP " + response.status);
+    const replacement = body.skill?.packageId;
+    const oldId = editingSkillPackageId;
+    closeSkillMetadataEditor();
+    const selected = ["runtime-create-skills", "runtime-config-skills"].flatMap((id) => [...$(id).querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value === oldId && replacement ? replacement : input.value));
+    await loadRuntimeSkillOptions("runtime-create-skills", selected);
+    await loadRuntimeSkillOptions("runtime-config-skills", selected);
+    setStatus("Skill 元数据已保存，已生成新的不可变包版本", "ok");
+  } catch (error) {
+    errorNode.textContent = "保存失败：" + (error instanceof Error ? error.message : String(error));
+  }
 }
 
 async function uploadRuntimeSkill(prefix, mode = "zip") {

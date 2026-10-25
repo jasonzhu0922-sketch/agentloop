@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import JSZip from "jszip";
+import { inspectSkillPackage } from "@zhujun/agentloop";
 import { LocalSkillPackageInstaller } from "../local-agent-runtime/src/service/local-skill-package-installer.ts";
 
 test("local Skill upload preserves user-owned private files and installs multiple Skills", async () => {
@@ -19,6 +20,7 @@ test("local Skill upload preserves user-owned private files and installs multipl
     zip.file("private-skill/certs/client.pem", "local-only-certificate");
     const installed = await installer.installZip(await zip.generateAsync({ type: "nodebuffer" }), "private-skill.zip");
     assert.equal(installed.length, 1);
+    assert.equal(installed[0]!.metadataSource, "detected");
     assert.equal(await readFile(join(installed[0]!.root, ".env"), "utf8"), "OA_DOC_TOKEN=local-only-token\n");
     assert.equal(await readFile(join(installed[0]!.root, "credentials.json"), "utf8"), '{"token":"local-only-token"}');
     assert.equal(await readFile(join(installed[0]!.root, "certs", "client.pem"), "utf8"), "local-only-certificate");
@@ -53,6 +55,40 @@ test("local Skill upload preserves user-owned private files and installs multipl
       installer.installZip(await invalidMixed.generateAsync({ type: "nodebuffer" }), "invalid-mixed.zip"),
       (error: unknown) => error instanceof Error && error.message === "skill_upload_package_layout_invalid",
     );
+  } finally {
+    await makeWritable(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("local Skill upload materializes a sidecar declaration and migrates legacy frontmatter", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-skill-metadata-"));
+  try {
+    const installer = new LocalSkillPackageInstaller(join(root, "packages"));
+    const zip = new JSZip();
+    zip.file("legacy/SKILL.md", [
+      "---",
+      "name: legacy",
+      "description: Legacy package",
+      "agentloop:",
+      "  roles:",
+      "    - primary_builder",
+      "  artifactKinds:",
+      "    - document",
+      "  sourceKinds: []",
+      "  qaKinds: []",
+      "---",
+      "# Legacy instructions",
+    ].join("\n"));
+    const [installed] = await installer.installZip(await zip.generateAsync({ type: "nodebuffer" }), "legacy.zip");
+    assert.ok(installed);
+    const sidecar = JSON.parse(await readFile(join(installed.root, "agentloop.skill.json"), "utf8")) as { schema: string; workflow: { roles: string[] } };
+    assert.equal(sidecar.schema, "agentloop.skillDeclaration/v1");
+    assert.deepEqual(sidecar.workflow.roles, ["primary_builder"]);
+    assert.equal((await readFile(join(installed.root, "SKILL.md"), "utf8")).includes("agentloop:"), false);
+    const inspection = await inspectSkillPackage(installed.root);
+    assert.equal(inspection.declarationSource, "package");
+    assert.equal(inspection.declaration?.identity.name, "legacy");
   } finally {
     await makeWritable(root);
     await rm(root, { recursive: true, force: true });

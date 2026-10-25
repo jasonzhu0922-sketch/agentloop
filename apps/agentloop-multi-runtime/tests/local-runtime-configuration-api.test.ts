@@ -104,12 +104,13 @@ test("loopback Runtime configuration supports empty extensions and redacts encry
     });
     assert.equal(uploadResponse.status, 201);
     const uploaded = await uploadResponse.json() as {
-      skills: Array<{ packageId: string; sourceKind: string }>;
+      skills: Array<{ packageId: string; sourceKind: string; metadataNeedsReview: boolean }>;
       skill: { packageId: string; sourceKind: string };
     };
     assert.equal(uploaded.skills.length, 1);
     assert.equal(uploaded.skills[0]!.packageId, uploaded.skill.packageId);
     assert.equal(uploaded.skill.sourceKind, "uploaded");
+    assert.equal(uploaded.skills[0]!.metadataNeedsReview, true);
     assert.equal(JSON.stringify(uploaded).includes("local-only-test-token"), false);
     const uploadedRoot = join(root, "skill-packages", "uploaded");
     const installedName = (await readdir(uploadedRoot)).find((name) => name.startsWith("uploaded-"));

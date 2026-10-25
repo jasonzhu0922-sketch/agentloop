@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
+    <title>云端 Skill 配置 · AgentLoop</title>
+    <link rel="stylesheet" href="/pages/cloud-skills.css" />
+  </head>
+  <body>
+    <header class="page-header"><a class="brand" href="/" aria-label="AgentLoop 工作区"><span class="brand-icon">A</span>AgentLoop</a><nav class="page-nav"><a class="back-link" href="/cloud-models">云端模型配置</a><a class="back-link" href="/">返回工作区 <span aria-hidden="true">↗</span></a></nav></header>
+    <main>
+      <section class="intro"><p class="eyebrow">CLOUD RUNTIME</p><h1>云端 Skill 配置</h1><p class="intro-copy">查看当前云端 Skill，上传经过校验的 Skill ZIP，并一次性应用到全部云端 Runtime。</p></section>
+      <section class="config-section credential-section"><label class="reload-credential">运维凭证<input id="operator-token" type="password" autocomplete="off" placeholder="读取、发布和查看状态时使用" /></label></section>
+      <section class="config-section">
+        <div class="section-heading"><div><h2>当前云端 Skills</h2><p>列表来自服务器实际挂载目录，不包含 Skill 文件内容或密钥。</p></div><button id="load-skills" type="button">读取当前配置</button></div>
+        <div id="skill-list" class="skill-list"><p class="empty">尚未读取配置。</p></div>
+      </section>
+      <section class="config-section upload-section">
+        <div class="section-heading"><div><h2>发布 Skill 包</h2><p>上传包含一个或多个 Skill 目录的 ZIP；每个目录必须包含 <code>SKILL.md</code>。</p></div></div>
+        <label class="file-picker">Skill ZIP<input id="skill-file" type="file" accept="application/zip,.zip" /></label>
+        <div id="file-summary" class="file-summary">未选择文件。</div>
+        <div class="policy"><strong>发布边界</strong><span>本次上传会替换服务器上的自定义 Skill 目录，并强制重建全部云端 Runtime。服务器已有的每个 Skill `.env` 会按同一路径保留；ZIP 不允许携带 `.env`、私钥或路径穿越文件。</span></div>
+        <div class="action-bar"><span id="status" role="status">尚未载入配置</span><button id="apply-skills" class="primary" type="button" disabled>上传并应用到生产</button></div>
+      </section>
+      <section class="config-section reload-section">
+        <div class="section-heading"><h2>发布状态</h2><p>操作期间请暂停新任务并等待已有任务结束；页面关闭后可重新填写凭证并查看状态。</p></div>
+        <div class="reload-actions"><button id="refresh-status" type="button">查看状态</button></div>
+        <p id="reload-status" role="status" aria-live="polite">尚未开始 Skill 发布。</p>
+      </section>
+    </main>
+    <script src="/runtime-config.js"></script><script type="module" src="/pages/cloud-skills.js"></script>
+  </body>
+</html>
+

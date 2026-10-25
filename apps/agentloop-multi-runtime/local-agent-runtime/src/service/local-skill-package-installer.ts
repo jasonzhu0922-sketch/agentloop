@@ -1,7 +1,15 @@
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import JSZip from "jszip";
-import { copySkillPackage, inspectSkillPackage, type SkillPackageInspection } from "@zhujun/agentloop";
+import {
+  copySkillPackage,
+  detectSkillDeclaration,
+  declarationFromLegacyMetadata,
+  inspectSkillPackage,
+  serializeSkillDeclaration,
+  type SkillDeclarationSource,
+  type SkillPackageInspection,
+} from "@zhujun/agentloop";
 
 const MAX_ARCHIVE_BYTES = 25 * 1024 * 1024;
 const MAX_FILES = 2_000;
@@ -13,6 +21,7 @@ export interface InstalledLocalSkillPackage {
   readonly storageKey: string;
   readonly root: string;
   readonly inspection: SkillPackageInspection;
+  readonly metadataSource: SkillDeclarationSource;
 }
 
 export interface LocalSkillUploadFile {
@@ -71,6 +80,7 @@ export class LocalSkillPackageInstaller {
         await writeFile(target, data, { mode: 0o600, flag: "wx" });
       }
       const sourceRoots = await packageSourceRoots(staging);
+      const metadataSources = await Promise.all(sourceRoots.map((sourceRoot) => materializeSkillDeclaration(sourceRoot)));
       const inspections = await Promise.all(sourceRoots.map(async (sourceRoot) => await inspectSkillPackage(sourceRoot).catch(() => {
         throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
       })));
@@ -90,17 +100,46 @@ export class LocalSkillPackageInstaller {
         const target = join(this.packageRoot, storageKey);
         const installed = await inspectSkillPackage(target).catch(() => undefined);
         if (installed !== undefined) {
-          installedPackages.push({ storageKey, root: installed.root, inspection: installed });
+          installedPackages.push({ storageKey, root: installed.root, inspection: installed, metadataSource: metadataSources[installedPackages.length] ?? "package" });
           continue;
         }
         const copied = await copySkillPackage(inspection, target);
-        installedPackages.push({ storageKey, root: copied.root, inspection: copied });
+        installedPackages.push({ storageKey, root: copied.root, inspection: copied, metadataSource: metadataSources[installedPackages.length] ?? "package" });
       }
       return installedPackages;
     } finally {
       await rm(staging, { recursive: true, force: true });
     }
   }
+}
+
+/**
+ * Uploads are the migration boundary. A package with no sidecar receives a
+ * deterministic declaration proposal before it is copied into the immutable
+ * package store. Legacy frontmatter is read once and removed from SKILL.md;
+ * the sidecar becomes the package-owned metadata authority.
+ */
+async function materializeSkillDeclaration(root: string): Promise<SkillDeclarationSource> {
+  const before = await inspectSkillPackage(root);
+  if (before.declarationSource === "package") return "package";
+  const declaration = before.agentLoop === undefined
+    ? detectSkillDeclaration(before.name, before.description, before.instructions, before.files, before.files.includes("agentloop.executors.json"))
+    : declarationFromLegacyMetadata(before.name, before.description, before.agentLoop, before.files.includes("agentloop.executors.json"));
+  await writeFile(join(root, "agentloop.skill.json"), serializeSkillDeclaration(declaration), { mode: 0o600 });
+  if (before.declarationSource === "legacy-frontmatter") {
+    await writeFile(join(root, "SKILL.md"), removeLegacyAgentLoopBlock(before.instructions), { mode: 0o600 });
+  }
+  return before.declarationSource === "legacy-frontmatter" ? "legacy-frontmatter" : "detected";
+}
+
+function removeLegacyAgentLoopBlock(source: string): string {
+  const lines = source.replaceAll("\r\n", "\n").split("\n");
+  const start = lines.findIndex((line) => /^agentloop:\s*$/u.test(line));
+  if (start < 0) return source;
+  let end = start + 1;
+  while (end < lines.length && (lines[end]!.trim().length === 0 || /^[ ]{2,}/u.test(lines[end]!))) end += 1;
+  const output = [...lines.slice(0, start), ...lines.slice(end)];
+  return output.join("\n");
 }
 
 export class LocalSkillPackageInstallError extends Error {
