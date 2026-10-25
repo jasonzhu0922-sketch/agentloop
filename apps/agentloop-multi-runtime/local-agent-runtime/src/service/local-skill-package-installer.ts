@@ -159,17 +159,18 @@ function assertInside(root: string, target: string): void {
 async function packageSourceRoots(staging: string): Promise<readonly string[]> {
   const skillFiles = await findSkillEntrypoints(staging);
   if (skillFiles.length === 0) throw new LocalSkillPackageInstallError(400, "skill_upload_package_layout_invalid");
-  const roots = skillFiles.map((path) => dirname(path));
-  if (roots.some((root, index) => roots.some((other, otherIndex) => index !== otherIndex && isPathInside(root, other)))) {
-    throw new LocalSkillPackageInstallError(400, "skill_upload_package_layout_invalid");
-  }
-  if (roots.length > 1) {
+  const roots = [...new Set(skillFiles.map((path) => dirname(path)))];
+  // A Skill may contain a nested SKILL.md as part of its own workflow/assets
+  // (for example yue2-music/instrumental/SKILL.md). Only the shallowest
+  // entrypoint roots are package roots; nested entrypoints remain package files.
+  const sourceRoots = roots.filter((root) => !roots.some((other) => other !== root && isPathInside(other, root)));
+  if (sourceRoots.length > 1) {
     const files = await listStagedFiles(staging);
-    if (files.some((file) => !roots.some((root) => isPathInside(root, file)))) {
+    if (files.some((file) => !sourceRoots.some((root) => isPathInside(root, file)))) {
       throw new LocalSkillPackageInstallError(400, "skill_upload_package_layout_invalid");
     }
   }
-  return roots;
+  return sourceRoots;
 }
 
 async function findSkillEntrypoints(root: string): Promise<readonly string[]> {

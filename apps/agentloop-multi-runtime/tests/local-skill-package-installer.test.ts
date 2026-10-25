@@ -45,6 +45,16 @@ test("local Skill upload preserves user-owned private files and installs multipl
     assert.equal(directoryInstalled.length, 1);
     assert.equal(await readFile(join(directoryInstalled[0]!.root, ".env"), "utf8"), "DIRECTORY_SECRET=local-only\n");
     assert.equal(await readFile(join(directoryInstalled[0]!.root, "scripts", "run.py"), "utf8"), "print('ok')\n");
+
+    const nestedWorkflow = new JSZip();
+    nestedWorkflow.file("yue2-music/SKILL.md", "---\nname: yue2-music\ndescription: music\n---\n");
+    nestedWorkflow.file("yue2-music/instrumental/SKILL.md", "---\nname: yue2-instrumental\ndescription: instrumental\n---\n");
+    nestedWorkflow.file("yue2-music/instrumental/scripts/run.py", "print('instrumental')\n");
+    const nestedInstalled = await installer.installZip(await nestedWorkflow.generateAsync({ type: "nodebuffer" }), "yue2-music.zip");
+    assert.equal(nestedInstalled.length, 1);
+    assert.equal(nestedInstalled[0]!.inspection.name, "yue2-music");
+    assert.equal(await readFile(join(nestedInstalled[0]!.root, "instrumental", "SKILL.md"), "utf8"), "---\nname: yue2-instrumental\ndescription: instrumental\n---\n");
+
     await assert.rejects(
       installer.installDirectory([{ path: "../escaped/SKILL.md", content: Buffer.from("invalid") }]),
       (error: unknown) => error instanceof Error && error.message === "skill_upload_invalid",
