@@ -119,11 +119,11 @@ npm run start:multi-runtime -- --runtimes 4
 
 ### MCP 配置
 
-Cloud Runtime Host 默认读取 `config/mcp-servers.json`，可通过 `MCP_SERVERS_CONFIG_PATH` 指向部署专用文件。该仓库提供的默认配置启用高德 MCP：服务地址、工具别名和能力元数据可以入库，`AMAP_MCP_KEY` 只能放在 Host 的 `.env` 或 secret store。每个 Cloud Host 都必须装载同一份 MCP 配置和对应密钥；连接或发现失败会记录为该 Host 的 MCP 启动诊断，其他已装载工具仍可运行。
+Cloud Runtime Host 默认读取 `config/mcp-servers.json`，可通过 `MCP_SERVERS_CONFIG_PATH` 指向部署专用文件。该仓库提供的默认配置保留可直接填写的 MCP key 占位符：`query_parameter` + `value` 用于 query 参数，`api_key_header` + `value` 用于 API-Key Header。生产部署仍建议使用环境变量形式（`query` + `secretEnv` 或 `headers_env` + `headerEnvs`），避免把真实密钥写入配置文件。每个 Cloud Host 都必须装载同一份 MCP 配置和对应密钥；连接或发现失败会记录为该 Host 的 MCP 启动诊断，其他已装载工具仍可运行。
 
-Local Runtime Agent 则读取设备配置根目录的 `config/mcp-servers.json`，可用 `LOCAL_AGENT_MCP_SERVERS_CONFIG_PATH` 覆盖。安装版首次启动会从包内种子创建该无密钥文件，且不会覆盖设备运维已经修改的版本；高德密钥仅从同目录 `.env` 读取，不会经过 Router、Planner 或模型上下文。
+Local Runtime Agent 则读取设备配置根目录的 `config/mcp-servers.json`，可用 `LOCAL_AGENT_MCP_SERVERS_CONFIG_PATH` 覆盖。安装版首次启动会从包内种子创建该文件，且不会覆盖设备运维已经修改的版本；文件中的直接值认证会在导入时写入本地加密 secret store，环境变量认证仍从同目录 `.env` 读取，不会经过 Router、Planner 或模型上下文。
 
-在同一个 `servers` 数组中注册多个服务即可。每项的 `key` 必须唯一：它决定工具名的 `mcp_<key>_<tool>` 命名空间和 ToolSource 身份。当前支持 HTTP MCP；每个服务可独立设置认证、信任级别、允许/阻止工具、别名和能力。示例：
+在同一个 `servers` 数组中注册多个服务即可。每项的 `key` 必须唯一：它决定工具名的 `mcp_<key>_<tool>` 命名空间和 ToolSource 身份。当前支持 HTTP MCP；每个服务可独立设置认证、信任级别、允许/阻止工具、别名和能力。直接值认证字段与 Local Agent 的运行时配置使用同一套语义，Local Agent 会在导入时加密保存，Cloud Host 则由同一个内核 MCP loader 直接解析。示例：
 
 ```json
 {
@@ -132,14 +132,14 @@ Local Runtime Agent 则读取设备配置根目录的 `config/mcp-servers.json`�
       "key": "amap-maps",
       "transport": "http",
       "url": "https://mcp.amap.com/mcp",
-      "auth": { "kind": "query", "name": "key", "secretEnv": "AMAP_MCP_KEY" },
+      "auth": { "kind": "query_parameter", "parameterName": "key", "value": "__FILL_AMAP_MCP_KEY_HERE__" },
       "aliases": ["高德", "amap"]
     },
     {
       "key": "weather",
       "transport": "http",
       "url": "https://weather.example.com/mcp",
-      "auth": { "kind": "bearer", "tokenEnv": "WEATHER_MCP_TOKEN" },
+      "auth": { "kind": "api_key_header", "headerName": "X-API-Key", "value": "__FILL_WEATHER_MCP_KEY_HERE__" },
       "aliases": ["天气"],
       "toolAllowlist": ["forecast"]
     }

@@ -636,6 +636,15 @@ export class LocalRuntimeConfigurationStore {
       const key = token === undefined ? undefined : await this.writeMigratedSecret({ token }, createdSecretKeys);
       return { auth: { kind: "bearer", ...(key === undefined ? {} : { secretStorageKey: key }) }, credentialConfigured: key !== undefined };
     }
+    if (auth.kind === "api_key_header") {
+      const key = await this.writeMigratedSecret({ value: auth.value }, createdSecretKeys);
+      return { auth: { kind: "api_key_header", headerName: auth.headerName, secretStorageKey: key }, credentialConfigured: true };
+    }
+    if (auth.kind === "query_parameter") {
+      const key = await this.writeMigratedSecret({ value: auth.value }, createdSecretKeys);
+      return { auth: { kind: "query_parameter", parameterName: auth.parameterName, secretStorageKey: key }, credentialConfigured: true };
+    }
+    if (auth.kind === "custom_headers") return this.storeLegacyHeaders(auth.headers, createdSecretKeys);
     if (auth.kind === "query") {
       const value = legacyEnvironmentValue(environment, auth.secretEnv);
       const key = value === undefined ? undefined : await this.writeMigratedSecret({ value }, createdSecretKeys);

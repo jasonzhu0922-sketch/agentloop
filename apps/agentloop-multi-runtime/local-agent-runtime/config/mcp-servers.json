@@ -6,9 +6,9 @@
       "transport": "http",
       "url": "https://mcp.amap.com/mcp",
       "auth": {
-        "kind": "query",
-        "name": "key",
-        "secretEnv": "AMAP_MCP_KEY"
+        "kind": "query_parameter",
+        "parameterName": "key",
+        "value": "__FILL_AMAP_MCP_KEY_HERE__"
       },
       "trust": "trusted",
       "timeoutMs": 15000,
@@ -28,10 +28,9 @@
       "url": "http://10.82.75.22:8082/mcp",
       "protocolVersion": "2024-11-05",
       "auth": {
-        "kind": "headers_env",
-        "headerEnvs": {
-          "X-API-Key": "ONTOFLOW_JTBC_API_KEY"
-        }
+        "kind": "api_key_header",
+        "headerName": "X-API-Key",
+        "value": "__FILL_ONTOFLOW_JTBC_API_KEY_HERE__"
       },
       "trust": "untrusted",
       "timeoutMs": 30000,

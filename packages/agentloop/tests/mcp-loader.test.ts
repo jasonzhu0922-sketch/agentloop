@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
-import { loadMcpToolsFromConfigWithFactory, parseMcpServersConfig, type McpSessionFactory } from "../src/mcp/mcp-loader.ts";
+import { loadMcpToolsFromConfig, loadMcpToolsFromConfigWithFactory, parseMcpServersConfig, type McpSessionFactory } from "../src/mcp/mcp-loader.ts";
 
 function executionContext(toolName: string) {
   return {
@@ -91,4 +91,45 @@ test("MCP tabular receipts do not fabricate semantic evidence without a capabili
   assert.equal(receipt.evidenceKinds.satisfied.includes("schema_summary"), false);
   assert.equal(receipt.evidenceKinds.satisfied.includes("record_counts"), false);
   assert.equal(receipt.facts.some((fact) => fact.kind === "structured_result_shape"), true);
+});
+
+test("direct Local Agent-style MCP credentials use the shared HTTP loader", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ readonly url: string; readonly headers: Headers; readonly method: string }> = [];
+  globalThis.fetch = async (input, init) => {
+    const headers = new Headers(init?.headers);
+    const method = JSON.parse(String(init?.body ?? "{}")).method as string;
+    requests.push({ url: String(input), headers, method });
+    if (method === "notifications/initialized") return new Response(null, { status: 202 });
+    const body = method === "tools/list"
+      ? { jsonrpc: "2.0", id: 2, result: { tools: [] } }
+      : { jsonrpc: "2.0", id: 1, result: { protocolVersion: "2025-06-18" } };
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const integration = await loadMcpToolsFromConfig(parseMcpServersConfig({
+      servers: [
+        {
+          key: "amap-maps",
+          transport: "http",
+          url: "https://mcp.example.test/amap",
+          auth: { kind: "query_parameter", parameterName: "key", value: "AMAP_DIRECT_KEY" },
+        },
+        {
+          key: "ontoflow-jtbc",
+          transport: "http",
+          url: "https://mcp.example.test/ontoflow",
+          auth: { kind: "api_key_header", headerName: "X-API-Key", value: "ONTOFLOW_DIRECT_KEY" },
+        },
+      ],
+    }));
+    assert.deepEqual(integration.failedServers, []);
+    assert.equal(integration.loadedServers.length, 2);
+    const amapInitialize = requests.find((request) => request.method === "initialize" && request.url.includes("/amap"));
+    const ontoflowInitialize = requests.find((request) => request.method === "initialize" && request.url.includes("/ontoflow"));
+    assert.equal(new URL(amapInitialize!.url).searchParams.get("key"), "AMAP_DIRECT_KEY");
+    assert.equal(ontoflowInitialize!.headers.get("X-API-Key"), "ONTOFLOW_DIRECT_KEY");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -38,7 +38,13 @@ export type McpAuthConfig =
   | { readonly kind: "headers"; readonly headers: Readonly<Record<string, string>> }
   /** Resolve each named HTTP header from a deployment-owned environment variable. */
   | { readonly kind: "headers_env"; readonly headerEnvs: Readonly<Record<string, string>> }
-  | { readonly kind: "query"; readonly name: string; readonly secretEnv: string };
+  | { readonly kind: "query"; readonly name: string; readonly secretEnv: string }
+  /** Direct API-key header value, using the same contract as Local Agent runtime configuration. */
+  | { readonly kind: "api_key_header"; readonly headerName: string; readonly value: string }
+  /** Direct query value, using the same contract as Local Agent runtime configuration. */
+  | { readonly kind: "query_parameter"; readonly parameterName: string; readonly value: string }
+  /** Direct custom header values, using the same contract as Local Agent runtime configuration. */
+  | { readonly kind: "custom_headers"; readonly headers: Readonly<Record<string, string>> };
 
 export interface LoadedMcpIntegration {
   readonly tools: readonly RuntimeTool<unknown>[];
@@ -187,7 +193,22 @@ function parseMcpAuthConfig(value: unknown, label: string): McpAuthConfig {
       secretEnv: requireString(record.secretEnv, `${label}.secretEnv`, { min: 1 }),
     };
   }
-  throw badRequest(`${label}.kind must be one of none|bearer|headers|query`);
+  if (kind === "api_key_header") {
+    return {
+      kind,
+      headerName: requireString(record.headerName, `${label}.headerName`, { min: 1 }),
+      value: requireString(record.value, `${label}.value`, { min: 1 }),
+    };
+  }
+  if (kind === "query_parameter") {
+    return {
+      kind,
+      parameterName: requireString(record.parameterName, `${label}.parameterName`, { min: 1 }),
+      value: requireString(record.value, `${label}.value`, { min: 1 }),
+    };
+  }
+  if (kind === "custom_headers") return { kind, headers: parseStringRecord(record.headers, `${label}.headers`) };
+  throw badRequest(`${label}.kind must be one of none|bearer|headers|headers_env|query|api_key_header|query_parameter|custom_headers`);
 }
 
 function applyToolFilters(server: McpServerRegistration, tools: readonly McpToolDefinition[]): readonly McpToolDefinition[] {
@@ -671,7 +692,8 @@ function resolveHttpAuthHeaders(server: McpServerRegistration, environment: Read
     }
     return { authorization: `Bearer ${token}` };
   }
-  if (auth.kind === "headers") return auth.headers;
+  if (auth.kind === "headers" || auth.kind === "custom_headers") return auth.headers;
+  if (auth.kind === "api_key_header") return { [auth.headerName]: auth.value };
   if (auth.kind === "headers_env") {
     const headers: Record<string, string> = {};
     for (const [header, envName] of Object.entries(auth.headerEnvs)) {
@@ -689,12 +711,14 @@ function resolveHttpAuthHeaders(server: McpServerRegistration, environment: Read
 function resolveHttpRequestUrl(server: McpServerRegistration, environment: Readonly<Record<string, string | undefined>>): URL {
   const url = new URL(server.url);
   const auth = server.auth;
-  if (auth === undefined || auth.kind !== "query") return url;
-  const token = environment[auth.secretEnv];
+  if (auth === undefined || (auth.kind !== "query" && auth.kind !== "query_parameter")) return url;
+  const parameterName = auth.kind === "query_parameter" ? auth.parameterName : auth.name;
+  const token = auth.kind === "query_parameter" ? auth.value : environment[auth.secretEnv];
   if (token === undefined || token.trim().length === 0) {
-    throw new AppError("MODEL_ERROR", `Missing MCP query secret env ${auth.secretEnv} for server ${server.key}`, 503);
+    const source = auth.kind === "query_parameter" ? "direct value" : `secret env ${auth.secretEnv}`;
+    throw new AppError("MODEL_ERROR", `Missing MCP query ${source} for server ${server.key}`, 503);
   }
-  url.searchParams.set(auth.name, token);
+  url.searchParams.set(parameterName, token);
   return url;
 }
 

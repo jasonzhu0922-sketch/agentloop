@@ -541,6 +541,45 @@ test("legacy device MCP configuration is materialized once with query auth and T
   }
 });
 
+test("direct MCP config credentials use the shared Local Agent authentication contract", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-runtime-direct-mcp-"));
+  const databasePath = join(root, "supervisor.db");
+  const secretRoot = join(root, "runtime-secrets");
+  await seedLegacySupervisorDatabase(databasePath, "direct-runtime");
+  const starts: ResolvedLocalRuntimeConfiguration[] = [];
+  const supervisor = legacySupervisor(databasePath, secretRoot, starts);
+  try {
+    await supervisor.ready("unused-default", {
+      mcpConfiguration: parseMcpServersConfig({ servers: [
+        {
+          key: "direct-query",
+          transport: "http",
+          url: "https://mcp.example.test/query",
+          auth: { kind: "query_parameter", parameterName: "key", value: "direct-query-secret" },
+        },
+        {
+          key: "direct-header",
+          transport: "http",
+          url: "https://mcp.example.test/header",
+          auth: { kind: "api_key_header", headerName: "X-API-Key", value: "direct-header-secret" },
+        },
+      ] }),
+    });
+    const publicConfiguration = await supervisor.configuration("direct-runtime");
+    assert.deepEqual(publicConfiguration.mcpServers.map((server) => server.auth), [
+      { kind: "api_key_header", headerName: "X-API-Key", credentialConfigured: true },
+      { kind: "query_parameter", parameterName: "key", credentialConfigured: true },
+    ]);
+    assert.equal(starts.length, 1);
+    assert.deepEqual(starts[0]!.mcpServers.map((server) => server.auth?.kind), ["headers_env", "query"]);
+    assert.ok(Object.values(starts[0]!.integrationEnvironment).includes("direct-query-secret"));
+    assert.ok(Object.values(starts[0]!.integrationEnvironment).includes("direct-header-secret"));
+  } finally {
+    await supervisor.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("legacy MCP credentials that cannot be resolved stop the Runtime until the user re-enters them", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-runtime-legacy-mcp-missing-"));
   const databasePath = join(root, "supervisor.db");

@@ -1,5 +1,57 @@
 {
   "defaultTrust": "untrusted",
   "servers": [
+    {
+      "key": "amap-maps",
+      "transport": "http",
+      "url": "https://mcp.amap.com/mcp",
+      "auth": {
+        "kind": "query_parameter",
+        "parameterName": "key",
+        "value": "__FILL_AMAP_MCP_KEY_HERE__"
+      },
+      "trust": "trusted",
+      "timeoutMs": 15000,
+      "aliases": ["高德", "amap"],
+      "capabilities": [
+        {
+          "id": "spatial_planning.route",
+          "category": "spatial_planning",
+          "label": "Route planning",
+          "description": "Plan routes and travel options using this map source."
+        }
+      ]
+    },
+    {
+      "key": "ontoflow-jtbc",
+      "transport": "http",
+      "url": "http://10.82.75.22:8082/mcp",
+      "protocolVersion": "2024-11-05",
+      "auth": {
+        "kind": "api_key_header",
+        "headerName": "X-API-Key",
+        "value": "__FILL_ONTOFLOW_JTBC_API_KEY_HERE__"
+      },
+      "trust": "untrusted",
+      "timeoutMs": 30000,
+      "toolAllowlist": [
+        "call_rdb_sql_api_query"
+      ],
+      "aliases": [
+        "数智域数据资产",
+        "ODS 建模",
+        "ontoflow-jtbc"
+      ],
+      "capabilities": [
+        {
+          "id": "data_asset.ods_read",
+          "category": "data_asset",
+          "label": "ODS metadata and sample reads",
+          "description": "Read approved DB2 ODS metadata and samples through the OntoFlow JTBC source.",
+          "producesEvidenceKinds": ["source_summary", "schema_summary", "record_counts", "explicit_caveats"],
+          "sourceKinds": ["database"]
+        }
+      ]
+    }
   ]
 }
