@@ -64,6 +64,7 @@ let artifactPanelOpen = false;
 let artifactPanelWidth = loadArtifactPanelWidth();
 let resizeState;
 let localSkillPackages = [];
+let localSkillPackagesLoaded = false;
 let editingSkillPackageId;
 let availableModels = [];
 let modelsLoading = false;
@@ -167,14 +168,10 @@ for (const prefix of ["runtime-create", "runtime-config"]) {
     $(`${prefix}-mcp-test-result`).textContent = "";
   });
 }
-$("runtime-create-skill-upload").addEventListener("click", () => $("runtime-create-skill-file").click());
-$("runtime-config-skill-upload").addEventListener("click", () => $("runtime-config-skill-file").click());
-$("runtime-create-skill-directory-upload").addEventListener("click", () => $("runtime-create-skill-directory").click());
-$("runtime-config-skill-directory-upload").addEventListener("click", () => $("runtime-config-skill-directory").click());
-$("runtime-create-skill-file").addEventListener("change", () => void uploadRuntimeSkill("runtime-create"));
-$("runtime-config-skill-file").addEventListener("change", () => void uploadRuntimeSkill("runtime-config"));
-$("runtime-create-skill-directory").addEventListener("change", () => void uploadRuntimeSkill("runtime-create", "directory"));
-$("runtime-config-skill-directory").addEventListener("change", () => void uploadRuntimeSkill("runtime-config", "directory"));
+$("local-skill-upload").addEventListener("click", () => $("local-skill-file").click());
+$("local-skill-directory-upload").addEventListener("click", () => $("local-skill-directory").click());
+$("local-skill-file").addEventListener("change", () => void uploadRuntimeSkill("local"));
+$("local-skill-directory").addEventListener("change", () => void uploadRuntimeSkill("local", "directory"));
 document.querySelectorAll("[data-runtime-capability-tab]").forEach((button) => {
   button.addEventListener("click", () => activateRuntimeCapabilityTab(button.closest(".runtime-capability-card"), button.dataset.runtimeCapabilityTab));
   button.addEventListener("keydown", (event) => {
@@ -320,6 +317,8 @@ function applyAuthenticatedIdentity(value) {
   if (sessionState.user?.id !== user.id) {
     conversationState.clear(); localRuntimeState.clear();
     clearLocalSession();
+    localSkillPackages = [];
+    localSkillPackagesLoaded = false;
   }
   sessionState.setUser(user);
   $("user-id").value = user.id; $("tenant-id").value = tenant.id; $("identity-label").textContent = user.email;
@@ -330,6 +329,8 @@ function applyAuthenticatedIdentity(value) {
 function clearAuthState() {
   sessionState.clearIdentity(); conversationState.clear();
   localRuntimeState.clear();
+  localSkillPackages = [];
+  localSkillPackagesLoaded = false;
   clearLocalSession();
   $("user-id").value = ""; $("tenant-id").value = ""; $("identity-label").textContent = "";
   redirectToLogin();
@@ -384,7 +385,12 @@ async function loadDevices() {
     const response = await routerClient.request("/v1/devices");
     if (!response.ok) return;
     const body = await response.json();
-    localRuntimeState.device = (body.devices || []).find((device) => device.id === localRuntimeState.agentHealth?.deviceId && device.status === "active");
+    const device = (body.devices || []).find((item) => item.id === localRuntimeState.agentHealth?.deviceId && item.status === "active");
+    if (device?.id !== localRuntimeState.device?.id) {
+      localSkillPackages = [];
+      localSkillPackagesLoaded = false;
+    }
+    localRuntimeState.device = device;
     if (localRuntimeState.device && localRuntimeState.agentStatus === "online") await connectRegisteredLocalAgent();
   } catch {}
   if (localRuntimeState.agentStatus === "router_disconnected") scheduleLocalAgentReprobe();
@@ -689,7 +695,6 @@ async function revokeLocalScope(scopeId) {
 
 async function openCreateLocalRuntime() {
   $("runtime-create-name").value = "";
-  $("runtime-create-skill-upload-status").textContent = "";
   $("runtime-create-mcp-json").value = "[]";
   $("runtime-create-mcp-error").textContent = "";
   $("runtime-create-mcp-test-result").textContent = "";
@@ -731,7 +736,6 @@ async function openConfigureLocalRuntime(runtimeId = localRuntimeState.runtimeId
   $("runtime-config-name").value = runtime.displayName;
   $("runtime-config-id").textContent = runtime.id;
   $("runtime-config-status").textContent = runtimeStatusLabel(runtime.status);
-  $("runtime-config-skill-upload-status").textContent = "";
   try {
     const response = await localAgentFetch(`/v1/local-runtimes/${encodeURIComponent(runtime.id)}/configuration`);
     const body = await response.json().catch(() => ({}));
@@ -828,40 +832,47 @@ async function saveLocalRuntimeConfiguration() {
   } catch (error) { setStatus(`更新 Runtime 配置失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
 }
 
-async function loadRuntimeSkillOptions(containerId, selectedPackageIds) {
+async function loadLocalSkillPackages(force = false) {
+  if (localSkillPackagesLoaded && !force) {
+    renderLocalSkillPackageManager();
+    return;
+  }
   const response = await localAgentFetch("/v1/local-skill-packages");
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
   localSkillPackages = Array.isArray(body.skills) ? body.skills.filter((skill) => skill.validationStatus === "valid") : [];
+  localSkillPackagesLoaded = true;
+  renderLocalSkillPackageManager();
+}
+
+function renderLocalSkillPackageManager() {
+  const container = $("local-skill-package-list");
+  if (!container) return;
+  container.innerHTML = localSkillPackages.length === 0
+    ? '<span class="runtime-capability-empty">暂无可管理的 Custom / 上传 Skill；Runtime 仍会加载全部内核 Skills。</span>'
+    : localSkillPackages.map((skill) => `<article class="local-skill-package"><div><strong>${escapeHtml(skill.displayName)}</strong><small>${escapeHtml(skill.description || skill.sourceKind || "")}</small><span class="local-skill-package-status">${skill.metadataNeedsReview ? "待维护元数据" : "元数据已确认"}</span></div><div class="local-skill-package-actions"><button type="button" data-edit-skill-metadata="${escapeHtml(skill.packageId)}">维护元数据</button></div></article>`).join("");
+}
+
+function renderRuntimeSkillOptions(containerId, selectedPackageIds) {
   const selected = new Set(selectedPackageIds);
   const container = $(containerId);
   container.innerHTML = localSkillPackages.length === 0
     ? '<span class="runtime-capability-empty">暂无可选的 Custom / 上传 Skill；仍可仅使用内核 Skills 创建。</span>'
     : localSkillPackages.map((skill) => `<label class="runtime-skill-option"><input type="checkbox" value="${escapeHtml(skill.packageId)}" ${selected.has(skill.packageId) ? "checked" : ""}/><span>${escapeHtml(skill.displayName)}<small>${escapeHtml(skill.description || skill.sourceKind || "")}</small></span></label>`).join("");
-  for (const skill of localSkillPackages) {
-    const input = [...container.querySelectorAll('input[type="checkbox"]')].find((item) => item.value === skill.packageId);
-    const span = input?.closest("label")?.querySelector("span");
-    if (!(span instanceof HTMLElement)) continue;
-    const status = document.createElement("small");
-    status.textContent = skill.metadataNeedsReview ? "待维护元数据" : "元数据已确认";
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "runtime-skill-metadata-button";
-    button.dataset.editSkillMetadata = skill.packageId;
-    button.textContent = "维护元数据";
-    span.append(status, button);
-  }
 }
 
-for (const containerId of ["runtime-create-skills", "runtime-config-skills"]) {
-  $(containerId).addEventListener("click", (event) => {
-    const button = event.target instanceof Element ? event.target.closest("[data-edit-skill-metadata]") : null;
-    if (!(button instanceof HTMLButtonElement)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    void openSkillMetadataEditor(button.dataset.editSkillMetadata);
-  });
+async function loadRuntimeSkillOptions(containerId, selectedPackageIds) {
+  await loadLocalSkillPackages();
+  renderRuntimeSkillOptions(containerId, selectedPackageIds);
 }
+
+$("local-skill-package-list").addEventListener("click", (event) => {
+  const button = event.target instanceof Element ? event.target.closest("[data-edit-skill-metadata]") : null;
+  if (!(button instanceof HTMLButtonElement)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  void openSkillMetadataEditor(button.dataset.editSkillMetadata);
+});
 
 async function openSkillMetadataEditor(packageId) {
   if (!packageId) return;
@@ -899,10 +910,10 @@ async function saveSkillMetadata() {
     if (!response.ok) throw new Error(body.error || "Local Agent HTTP " + response.status);
     const replacement = body.skill?.packageId;
     const oldId = editingSkillPackageId;
+    const selectedByContainer = new Map(["runtime-create-skills", "runtime-config-skills"].map((id) => [id, [...$(id).querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value === oldId && replacement ? replacement : input.value)]));
     closeSkillMetadataEditor();
-    const selected = ["runtime-create-skills", "runtime-config-skills"].flatMap((id) => [...$(id).querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value === oldId && replacement ? replacement : input.value));
-    await loadRuntimeSkillOptions("runtime-create-skills", selected);
-    await loadRuntimeSkillOptions("runtime-config-skills", selected);
+    await loadLocalSkillPackages(true);
+    for (const [id, selected] of selectedByContainer) renderRuntimeSkillOptions(id, selected);
     setStatus("Skill 元数据已保存，已生成新的不可变包版本", "ok");
   } catch (error) {
     errorNode.textContent = "保存失败：" + (error instanceof Error ? error.message : String(error));
@@ -917,6 +928,10 @@ async function uploadRuntimeSkill(prefix, mode = "zip") {
   const files = [...(input.files || [])];
   input.value = "";
   if (files.length === 0) return;
+  const selectedByContainer = new Map(["runtime-create-skills", "runtime-config-skills"].flatMap((id) => {
+    const container = $(id);
+    return container?.querySelectorAll ? [[id, [...container.querySelectorAll('input[type="checkbox"]:checked')].map((item) => item.value)]] : [];
+  }));
   const isDirectory = mode === "directory" || files.length > 1 || files.some((file) => file.webkitRelativePath);
   const file = files[0];
   button.disabled = true;
@@ -939,15 +954,21 @@ async function uploadRuntimeSkill(prefix, mode = "zip") {
       };
       throw new Error(messages[body.error] || body.error || `Local Agent HTTP ${response.status}`);
     }
-    const selected = [...$(`${prefix}-skills`).querySelectorAll('input[type="checkbox"]:checked')].map((item) => item.value);
     const skills = Array.isArray(body.skills) ? body.skills : (body.skill === undefined ? [] : [body.skill]);
     if (skills.length === 0) throw new Error("上传结果中没有可用 Skill");
-    selected.push(...skills.map((skill) => skill.packageId));
-    await loadRuntimeSkillOptions(`${prefix}-skills`, selected);
+    await loadLocalSkillPackages(true);
+    if (prefix !== "local") {
+      const runtimeContainer = $(`${prefix}-skills`);
+      const selected = runtimeContainer ? [...runtimeContainer.querySelectorAll('input[type="checkbox"]:checked')].map((item) => item.value) : [];
+      selected.push(...skills.map((skill) => skill.packageId));
+      renderRuntimeSkillOptions(`${prefix}-skills`, selected);
+    } else {
+      for (const [id, selected] of selectedByContainer) renderRuntimeSkillOptions(id, selected);
+    }
     const names = skills.map((skill) => skill.displayName).join("、");
     status.textContent = skills.length === 1
-      ? `已安装到本机：${names}。点击${prefix === "runtime-create" ? "创建" : "保存"}后应用到此 Runtime。`
-      : `已安装到本机（${skills.length} 个）：${names}。点击${prefix === "runtime-create" ? "创建" : "保存"}后应用到此 Runtime。`;
+      ? `已安装到本机：${names}。可在各 Runtime 配置中选择。`
+      : `已安装到本机（${skills.length} 个）：${names}。可在各 Runtime 配置中选择。`;
     status.dataset.tone = "ok";
   } catch (error) {
     status.textContent = `上传 Skill 失败：${error instanceof Error ? error.message : String(error)}`;
@@ -1059,7 +1080,7 @@ function defaultUploadStoragePath(sharedStoragePath) {
 
 async function openLocalAgentSettings() {
   if (!sessionState.localSessionToken) return;
-  await Promise.all([loadLocalAgentConfig(), loadLocalRuntimes(), loadLocalModelConfiguration()]);
+  await Promise.all([loadLocalAgentConfig(), loadLocalRuntimes(), loadLocalModelConfiguration(), loadLocalSkillPackages(true)]);
   renderLocalAgentConfig();
   syncLocalRuntimeManager();
   activateAgentSettingsView("models");
@@ -1072,7 +1093,7 @@ let activeAgentSettingsView = "models";
 async function loadLocalModelConfiguration() { await localModelSettings.load(); }
 
 function activateAgentSettingsView(view) {
-  if (view !== "models" && view !== "general" && view !== "runtimes") view = "models";
+  if (view !== "models" && view !== "skills" && view !== "general" && view !== "runtimes") view = "models";
   activeAgentSettingsView = view;
   const paired = localRuntimeState.agentStatus === "online"
     && Boolean(localRuntimeState.device && sessionState.localSessionToken);
@@ -1082,6 +1103,7 @@ function activateAgentSettingsView(view) {
 function syncAgentSettingsView(paired) {
   document.querySelectorAll("[data-agent-settings-view]").forEach((button) => button.classList.toggle("active", button.dataset.agentSettingsView === activeAgentSettingsView));
   $("agent-model-settings").hidden = activeAgentSettingsView !== "models";
+  $("agent-skill-settings").hidden = activeAgentSettingsView !== "skills";
   $("agent-general-settings").hidden = activeAgentSettingsView !== "general";
   $("local-runtime-manager").hidden = activeAgentSettingsView !== "runtimes" || !paired;
 }

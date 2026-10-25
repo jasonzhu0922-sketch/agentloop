@@ -7,7 +7,15 @@ const source = await readFile(new URL("../web/client/app.js", import.meta.url), 
 const uploadSource = source.slice(source.indexOf("async function uploadRuntimeSkill("), source.indexOf("function fileAsBase64("));
 const html = await readFile(new URL("../web/pages/app.html", import.meta.url), "utf8");
 
-for (const prefix of ["runtime-create", "runtime-config"]) {
+test("Skill package management is global while Runtime dialogs only select installed packages", () => {
+  assert.match(html, /data-agent-settings-view="skills">Skill 管理/);
+  assert.match(html, /id="agent-skill-settings"/);
+  assert.match(html, /id="local-skill-upload"/);
+  assert.doesNotMatch(html, /id="runtime-(?:create|config)-skill-upload"/);
+  assert.doesNotMatch(html, /id="runtime-(?:create|config)-skill-directory-upload"/);
+});
+
+for (const prefix of ["local"]) {
   test(`${prefix} shows local upload progress, selects the installed Skill and keeps existing selections`, async () => {
     const input = { files: [{ name: "private-skill.zip" }], value: "private-skill.zip" };
     const button = { disabled: false };
@@ -15,10 +23,10 @@ for (const prefix of ["runtime-create", "runtime-config"]) {
     const elements = {
       [`${prefix}-skill-file`]: input, [`${prefix}-skill-upload`]: button,
       [`${prefix}-skill-upload-status`]: status,
-      [`${prefix}-skills`]: { querySelectorAll: () => [{ value: "existing" }] },
+      "runtime-create-skills": { querySelectorAll: () => [{ value: "existing" }] },
+      "runtime-config-skills": { querySelectorAll: () => [{ value: "existing" }] },
     };
     let finish!: (value: Response) => void;
-    let loaded: unknown[] = [];
     const upload = vm.runInNewContext(`${uploadSource}\nuploadRuntimeSkill`, {
       Error, $: (id: string) => elements[id as keyof typeof elements],
       fileAsBase64: async () => "encoded-zip",
@@ -27,7 +35,8 @@ for (const prefix of ["runtime-create", "runtime-config"]) {
         assert.equal(JSON.parse(String(init.body)).originalName, "private-skill.zip");
         return new Promise<Response>((resolve) => { finish = resolve; });
       },
-      loadRuntimeSkillOptions: async (id: string, selected: string[]) => { loaded = [id, ...selected]; },
+      loadLocalSkillPackages: async () => undefined,
+      renderRuntimeSkillOptions: () => undefined,
     });
     assert.ok(html.includes(`id="${prefix}-skill-upload-status"`));
     assert.ok(html.includes(`id="${prefix}-skill-directory-upload"`));
@@ -43,8 +52,7 @@ for (const prefix of ["runtime-create", "runtime-config"]) {
     assert.equal(input.value, "");
     assert.equal(status.dataset.tone, "ok");
     assert.match(status.textContent, /已安装到本机：Private Skill/);
-    assert.match(status.textContent, prefix === "runtime-create" ? /创建后/ : /保存后/);
-    assert.deepEqual(loaded, [`${prefix}-skills`, "existing", "installed"]);
+    assert.match(status.textContent, /各 Runtime 配置中选择/);
   });
 
   test(`${prefix} shows actionable ZIP layout errors inside the dialog and permits retry`, async () => {
@@ -72,9 +80,9 @@ for (const prefix of ["runtime-create", "runtime-config"]) {
     const elements = {
       [`${prefix}-skill-file`]: input, [`${prefix}-skill-upload`]: button,
       [`${prefix}-skill-upload-status`]: status,
-      [`${prefix}-skills`]: { querySelectorAll: () => [{ value: "existing" }] },
+      "runtime-create-skills": { querySelectorAll: () => [{ value: "existing" }] },
+      "runtime-config-skills": { querySelectorAll: () => [{ value: "existing" }] },
     };
-    let loaded: unknown[] = [];
     const upload = vm.runInNewContext(`${uploadSource}\nuploadRuntimeSkill`, {
       Error, $: (id: string) => elements[id as keyof typeof elements],
       fileAsBase64: async () => "encoded-zip",
@@ -82,10 +90,10 @@ for (const prefix of ["runtime-create", "runtime-config"]) {
         { packageId: "first", displayName: "First Skill" },
         { packageId: "second", displayName: "Second Skill" },
       ] }, { status: 201 }),
-      loadRuntimeSkillOptions: async (id: string, selected: string[]) => { loaded = [id, ...selected]; },
+      loadLocalSkillPackages: async () => undefined,
+      renderRuntimeSkillOptions: () => undefined,
     });
     await upload(prefix);
-    assert.deepEqual(loaded, [`${prefix}-skills`, "existing", "first", "second"]);
     assert.match(status.textContent, /已安装到本机（2 个）：First Skill、Second Skill/);
   });
 
@@ -99,7 +107,8 @@ for (const prefix of ["runtime-create", "runtime-config"]) {
     const elements = {
       [`${prefix}-skill-directory`]: input, [`${prefix}-skill-directory-upload`]: button,
       [`${prefix}-skill-upload-status`]: status,
-      [`${prefix}-skills`]: { querySelectorAll: () => [] },
+      "runtime-create-skills": { querySelectorAll: () => [] },
+      "runtime-config-skills": { querySelectorAll: () => [] },
     };
     let request: Record<string, unknown> | undefined;
     const upload = vm.runInNewContext(`${uploadSource}\nuploadRuntimeSkill`, {
@@ -109,7 +118,8 @@ for (const prefix of ["runtime-create", "runtime-config"]) {
         request = JSON.parse(String(init.body)) as Record<string, unknown>;
         return Response.json({ skill: { packageId: "directory", displayName: "Directory Skill" } }, { status: 201 });
       },
-      loadRuntimeSkillOptions: async () => undefined,
+      loadLocalSkillPackages: async () => undefined,
+      renderRuntimeSkillOptions: () => undefined,
     });
     await upload(prefix, "directory");
     assert.deepEqual(request, { files: [
