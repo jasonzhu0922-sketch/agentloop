@@ -750,10 +750,22 @@ function extractTitle(html: string): string | undefined {
 }
 
 export function extractRedirectTarget(html: string): string | undefined {
-  const jsReplace = /window\.location\.(?:replace|assign)\(\s*["']([^"']+)["']\s*\)/i.exec(html);
-  if (jsReplace !== null) return jsReplace[1];
-  const jsHref = /window\.location\.href\s*=\s*["']([^"']+)["']/i.exec(html);
-  if (jsHref !== null) return jsHref[1];
+  // Only inspect executable script blocks. Scanning the whole HTML makes a
+  // normal click handler such as `onclick="window.location.href='next.html'"`
+  // look like an automatic page-load redirect.
+  const scriptPattern = /<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi;
+  let scriptMatch: RegExpExecArray | null;
+  while ((scriptMatch = scriptPattern.exec(html)) !== null) {
+    const script = scriptMatch[1];
+    // A location assignment inside an event handler is user-initiated, not a
+    // redirect of the fetched document. Keep the static detector conservative
+    // rather than following arbitrary page interactions.
+    if (/\b(?:function|addEventListener|onclick|onload|setTimeout|setInterval)\b/i.test(script)) continue;
+    const jsReplace = /window\.location\.(?:replace|assign)\(\s*["']([^"']+)["']\s*\)/i.exec(script);
+    if (jsReplace !== null) return jsReplace[1];
+    const jsHref = /window\.location\.href\s*=\s*["']([^"']+)["']/i.exec(script);
+    if (jsHref !== null) return jsHref[1];
+  }
   const metaPattern = /<meta\b[^>]*>/gi;
   let match: RegExpExecArray | null;
   while ((match = metaPattern.exec(html)) !== null) {

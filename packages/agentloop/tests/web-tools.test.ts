@@ -174,6 +174,21 @@ test("extractRedirectTarget detects JavaScript and meta-refresh redirects", () =
   assert.equal(extractRedirectTarget(`<html><body>no redirect here</body></html>`), undefined);
 });
 
+test("extractRedirectTarget ignores click-handler navigation embedded in page markup", () => {
+  assert.equal(
+    extractRedirectTarget(`<a onclick="window.location.href='kepu.html'">科技科普</a>`),
+    undefined,
+  );
+  assert.equal(
+    extractRedirectTarget(`<script>document.querySelector('a').addEventListener('click', () => { window.location.href = 'kepu.html'; });</script>`),
+    undefined,
+  );
+  assert.equal(
+    extractRedirectTarget(`<script>window.location.href = 'https://example.com/target';</script>`),
+    "https://example.com/target",
+  );
+});
+
 test("htmlToMarkdown extracts readable content and drops noise", () => {
   const html = `<!doctype html><html><head><title>宝武发布</title><style>.x{color:red}</style></head>
 <body><header>网站头部菜单</header><nav>导航</nav><h1>数据底座与超级智能体</h1>
@@ -291,6 +306,40 @@ test("webfetch follows a meta-refresh redirect and extracts readable content end
     assert.equal(result.evidenceReceipt.facts.some((fact) => fact.kind === "source_summary"), true);
     assert.deepEqual(result.evidenceReceipt.evidenceKinds.satisfied, ["source_read", "source_summary", "source_urls"]);
     assert.deepEqual(result.evidenceReceipt.evidenceKinds.caveated, ["explicit_caveats"]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("webfetch preserves a page containing a click-only navigation instead of following it", async () => {
+  const server = createServer((req, res) => {
+    if (req.url === "/") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html><html><head><title>今日要闻</title></head><body><h1>今日要闻</h1><div onclick="window.location.href='kepu.html'">科技科普</div></body></html>`);
+      return;
+    }
+    if (req.url === "/kepu.html") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html><html><head><title>科技科普</title></head><body><h1>不应被读取的页面</h1></body></html>`);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await listen(server);
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const allowed = new ToolRegistry(createWebTools({ allowPrivateTargets: true })).materialize(grant(["webfetch"]));
+    const prepared = allowed.prepare({ id: "fetch-click-page", name: "webfetch", arguments: { url: `http://127.0.0.1:${port}/` } });
+    const result = await prepared.tool.execute(grantContext(["webfetch"]), prepared.input) as {
+      url: string;
+      title: string | undefined;
+      content: string;
+    };
+    assert.ok(result.url.endsWith("/"));
+    assert.equal(result.title, "今日要闻");
+    assert.match(result.content, /今日要闻/);
+    assert.doesNotMatch(result.content, /不应被读取的页面/);
   } finally {
     await close(server);
   }
