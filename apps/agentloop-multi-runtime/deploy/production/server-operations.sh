@@ -80,6 +80,8 @@ print(values[0])
 PY
 )
 test -f "$environment_path"
+skills_path=$(docker inspect "${runtime_names[0]}" --format '{{range .Mounts}}{{if eq .Destination "/app/apps/agentloop-multi-runtime/custom-skills"}}{{.Source}}{{end}}{{end}}')
+test -n "$skills_path" && test -d "$skills_path"
 verify_models() {
   local name
   for name in "${runtime_names[@]}"; do
@@ -122,6 +124,9 @@ TOPOLOGY_PY
   fi
   cp -p "$config_path" "$backup/llm-providers.json"
   cp -p "$environment_path" "$backup/runtime.env"
+  if [ "$operation" = cloud ] || [ "$operation" = skills ] || [ "$operation" = skills-remove ]; then
+    cp -a "$skills_path" "$backup/custom-skills"
+  fi
   {
     echo '#!/usr/bin/env bash'
     echo 'set -euo pipefail'
@@ -131,6 +136,10 @@ TOPOLOGY_PY
     else
       printf 'cp -p %q %q\n' "$backup/llm-providers.json" "$config_path"
       printf 'cp -p %q %q\n' "$backup/runtime.env" "$environment_path"
+    fi
+    if [ "$operation" = cloud ] || [ "$operation" = skills ] || [ "$operation" = skills-remove ]; then
+      printf 'rm -rf %q\n' "$skills_path"
+      printf 'cp -a %q %q\n' "$backup/custom-skills" "$skills_path"
     fi
     printf 'docker compose --project-directory %q --env-file %q -f %q up -d --no-build' "$root" "$root/.env" "$previous_compose"
     if [ "$operation" = llm ]; then
@@ -202,6 +211,40 @@ PY
     touch "$release/BUILD_SUCCEEDED"
   fi
   docker image inspect "$image" >/dev/null
+  cloud_skill_archive=$source_dir/apps/agentloop-multi-runtime/custom-skills.zip
+  test -f "$cloud_skill_archive" || { echo "Published source is missing custom-skills.zip: $cloud_skill_archive" >&2; exit 1; }
+  cloud_validated_archive=$job/validated-cloud-custom-skills.zip
+  # Validate with the newly built image so a code release and its Skill
+  # contract are checked together. The old serving image may not contain the
+  # current canonical validator.
+  docker run --rm -i --entrypoint node "$image" \
+    /app/apps/agentloop-multi-runtime/deploy/production/validate-skill-archive.mjs \
+    < "$cloud_skill_archive" > "$cloud_validated_archive"
+  cloud_skill_root=$job/cloud-skill-root
+  rm -rf "$cloud_skill_root"
+  python3 - "$cloud_validated_archive" "$cloud_skill_root" "$skills_path" <<'PY'
+import shutil,sys,zipfile
+from pathlib import Path, PurePosixPath
+archive,stage,old=sys.argv[1:]
+stage=Path(stage); old=Path(old); stage.mkdir(parents=True)
+with zipfile.ZipFile(archive) as z:
+    for raw in z.namelist():
+        path=PurePosixPath(raw)
+        if raw.endswith('/'): continue
+        if path.is_absolute() or '..' in path.parts or '\\' in raw or not raw:
+            raise SystemExit('Invalid normalized custom Skill archive: unsafe path')
+        target=stage / path
+        target.parent.mkdir(parents=True,exist_ok=True)
+        with z.open(raw) as src, target.open('wb') as dst: shutil.copyfileobj(src,dst)
+# Production Skill credentials are server-owned and are deliberately not
+# committed. Preserve an existing .env only when that Skill still exists in
+# the committed archive; removed Skills and their secrets are not carried
+# forward.
+if old.is_dir():
+    for env in old.rglob('.env'):
+        relative=env.relative_to(old); destination=stage/relative
+        if destination.parent.is_dir() and not destination.exists(): shutil.copy2(env,destination)
+PY
   template_dir=$source_dir/apps/agentloop-multi-runtime/deploy/centos7
   compose_file=$(render_topology "$template_dir" "$root/.env")
   idle
@@ -221,6 +264,10 @@ t=p.with_name('.env.release-'+str(os.getpid()))
 t.write_text('\n'.join('MULTI_RUNTIME_IMAGE='+sys.argv[2] if l.startswith('MULTI_RUNTIME_IMAGE=') else l for l in lines)+'\n')
 t.chmod(0o600); t.replace(p)
 PY
+  rm -rf "$skills_path.previous"
+  mv "$skills_path" "$skills_path.previous"
+  cp -a "$cloud_skill_root" "$skills_path"
+  rm -rf "$skills_path.previous"
   dc config -q
   dc up -d --no-build --remove-orphans
   load_services
@@ -292,6 +339,119 @@ PY
   verify_models
   echo "Reloaded ${#runtime_services[@]} Runtime(s); readiness and effective model configuration checks passed."
   echo 'A fresh model-backed Run is a separate acceptance check.'
+  exit 0
+elif [ "$operation" = skills-configuration ]; then
+  python3 - "$skills_path" <<'PY'
+import hashlib,json,sys
+from pathlib import Path
+root=Path(sys.argv[1])
+items=[]
+for skill_dir in sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p:p.name):
+    entry=skill_dir/'SKILL.md'
+    if not entry.is_file(): continue
+    files=[p for p in skill_dir.rglob('*') if p.is_file()]
+    digest=hashlib.sha256(); total=0
+    for path in sorted(files):
+        data=path.read_bytes(); total+=len(data); digest.update(path.relative_to(skill_dir).as_posix().encode()); digest.update(b'\0'); digest.update(data)
+    description=''
+    for line in entry.read_text(errors='replace').splitlines():
+        if line.startswith('description:'):
+            description=line.split(':',1)[1].strip(); break
+    items.append(dict(name=skill_dir.name, description=description, packageHash=digest.hexdigest(), fileCount=len(files), totalBytes=total, hasEnvironment=(skill_dir/'.env').is_file()))
+print(json.dumps(items,ensure_ascii=False))
+PY
+  exit 0
+elif [ "$operation" = skills ] || [ "$operation" = skills-remove ]; then
+  if [ "$operation" = skills-remove ]; then
+    skill_name=$(cat "$job/skill-name")
+    [[ "$skill_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+    test -d "$skills_path/$skill_name" || { echo "Skill not found: $skill_name" >&2; exit 1; }
+    idle
+    umask 077
+    make_backup
+    trap rollback ERR
+    rm -rf "$skills_path.previous"
+    mv "$skills_path" "$skills_path.previous"
+    cp -a "$skills_path.previous" "$skills_path"
+    rm -rf "$skills_path/$skill_name"
+    rm -rf "$skills_path.previous"
+    dc up -d --no-deps --no-build --force-recreate "${runtime_services[@]}"
+    ready "${runtime_names[@]}"
+    python3 - "$skills_path" "$job/applied-skills.json" <<'PY'
+import hashlib,json,sys
+from pathlib import Path
+root=Path(sys.argv[1]); result=[]
+for d in sorted(p for p in root.iterdir() if p.is_dir()):
+    if not (d/'SKILL.md').is_file(): continue
+    files=[p for p in d.rglob('*') if p.is_file()]; h=hashlib.sha256(); total=0
+    for p in sorted(files):
+        data=p.read_bytes(); total+=len(data); h.update(p.relative_to(d).as_posix().encode()); h.update(b'\0'); h.update(data)
+    result.append(dict(name=d.name,packageHash=h.hexdigest(),fileCount=len(files),totalBytes=total))
+json.dump(result,open(sys.argv[2],'w'),ensure_ascii=False)
+PY
+    echo "Removed Skill $skill_name; reloaded ${#runtime_services[@]} Runtime(s); Skill package inventory and readiness checks passed."
+    exit 0
+  fi
+  archive=$job/custom-skills.zip
+  test -f "$archive"
+  dc config -q
+  dc config --format json > "$job/effective-compose.json"
+  for service in "${runtime_services[@]}"; do
+    expected_image=$(python3 - "$job/effective-compose.json" "$service" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))['services'][sys.argv[2]]['image'])
+PY
+)
+    actual_image=$(docker inspect "agentloop-$service-1" --format '{{.Config.Image}}')
+    test "$expected_image" = "$actual_image" || { echo 'Runtime image selection changed; use the code release procedure instead of Skill reload.' >&2; exit 1; }
+  done
+  validated_archive=$job/validated-custom-skills.zip
+  docker exec -i "${runtime_names[0]}" env SKILL_ARCHIVE_NAME=custom-skills.zip \
+    node /app/apps/agentloop-multi-runtime/deploy/production/validate-skill-archive.mjs \
+    < "$archive" > "$validated_archive"
+  python3 - "$validated_archive" "$job/skill-root" "$skills_path" <<'PY'
+import shutil,sys,zipfile
+from pathlib import Path, PurePosixPath
+archive,stage,old=sys.argv[1:]
+stage=Path(stage); old=Path(old); stage.mkdir(parents=True)
+with zipfile.ZipFile(archive) as z:
+    names=z.namelist(); files=[]
+    for raw in names:
+        path=PurePosixPath(raw)
+        if raw.endswith('/'): continue
+        if path.is_absolute() or '..' in path.parts or '\\' in raw:
+            raise SystemExit('Invalid normalized custom Skill archive: unsafe path')
+        files.append(raw)
+    for raw in files:
+        target=stage/raw; target.parent.mkdir(parents=True,exist_ok=True)
+        with z.open(raw) as src, target.open('wb') as dst: shutil.copyfileobj(src,dst)
+    for env in old.rglob('.env'):
+        relative=env.relative_to(old); destination=stage/relative
+        if destination.parent.is_dir() and not destination.exists(): shutil.copy2(env,destination)
+PY
+  idle
+  umask 077
+  make_backup
+  trap rollback ERR
+  rm -rf "$skills_path.previous"
+  mv "$skills_path" "$skills_path.previous"
+  mv "$job/skill-root" "$skills_path"
+  rm -rf "$skills_path.previous"
+  dc up -d --no-deps --no-build --force-recreate "${runtime_services[@]}"
+  ready "${runtime_names[@]}"
+  python3 - "$skills_path" "$job/applied-skills.json" <<'PY'
+import hashlib,json,sys
+from pathlib import Path
+root=Path(sys.argv[1]); result=[]
+for d in sorted(p for p in root.iterdir() if p.is_dir()):
+    if not (d/'SKILL.md').is_file(): continue
+    files=[p for p in d.rglob('*') if p.is_file()]; h=hashlib.sha256(); total=0
+    for p in sorted(files):
+        data=p.read_bytes(); total+=len(data); h.update(p.relative_to(d).as_posix().encode()); h.update(b'\0'); h.update(data)
+    result.append(dict(name=d.name,packageHash=h.hexdigest(),fileCount=len(files),totalBytes=total))
+json.dump(result,open(sys.argv[2],'w'),ensure_ascii=False)
+PY
+  echo "Reloaded ${#runtime_services[@]} Runtime(s); Skill package inventory and readiness checks passed."
   exit 0
 elif [ "$operation" = llm ]; then
   if [ -f "$job/credential-updates.json" ]; then

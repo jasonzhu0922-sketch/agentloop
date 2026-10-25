@@ -32,9 +32,11 @@ test("loopback Runtime configuration supports empty extensions and redacts encry
       device: { id: "device-local", agentToken: "device-token", displayName: "test device" },
     }));
     await mkdir(join(root, "empty-skills"));
+    await mkdir(join(root, "implicit-skills", "implicit-review"), { recursive: true });
+    await writeFile(join(root, "implicit-skills", "implicit-review", "SKILL.md"), "---\nname: implicit-review\ndescription: Must not auto-load.\n---\n");
     await writeFile(join(root, "skill-directories.json"), JSON.stringify({
       schema: "agentloop.skillDirectories/v1",
-      customSkillDirectories: [],
+      customSkillDirectories: [join(root, "implicit-skills")],
     }));
     const providerConfigPath = join(root, "llm-providers.json");
     await writeFile(providerConfigPath, JSON.stringify({
@@ -68,6 +70,10 @@ test("loopback Runtime configuration supports empty extensions and redacts encry
       ...init,
       headers: { origin: "http://web.test", "x-local-session": "s".repeat(32), ...init.headers },
     });
+
+    const initialSkills = await request("/v1/local-skill-packages");
+    assert.equal(initialSkills.status, 200);
+    assert.deepEqual((await initialSkills.json() as { skills: unknown[] }).skills, []);
 
     const skillZip = new JSZip();
     skillZip.file("uploaded-review/SKILL.md", [

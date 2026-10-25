@@ -6,6 +6,7 @@ import { resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serveInstaller } from "./installer-downloads.mjs";
 import { proxyRuntimeControl } from "./runtime-control-proxy.mjs";
+import { createDevRuntimeControl } from "./dev-runtime-control.mjs";
 import { localAgentUrl as resolveLocalAgentUrl } from "../src/shared/local-agent-endpoint.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)));
@@ -22,11 +23,11 @@ const routerPublicUrl = process.env.ROUTER_PUBLIC_URL ?? routerUrl;
 const localAgentUrl = resolveLocalAgentUrl();
 const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
 
-export function runtimeConfigScript(apiUrl, agentUrl = localAgentUrl) {
+export function runtimeConfigScript(apiUrl, agentUrl = localAgentUrl, runtimeControl = {}) {
   // Browser traffic stays same-origin even when Web and Router are separate
   // processes. The configured Router URL is consumed by this server's proxy,
   // not copied into browser state where port/CORS drift can break live Runs.
-  return `globalThis.AGENTLOOP_ROUTER_URL = "/api";\nglobalThis.AGENTLOOP_ROUTER_PUBLIC_URL = ${JSON.stringify(String(apiUrl).trim())};\nglobalThis.AGENTLOOP_LOCAL_AGENT_URL = ${JSON.stringify(String(agentUrl).trim())};\n`;
+  return `globalThis.AGENTLOOP_ROUTER_URL = "/api";\nglobalThis.AGENTLOOP_ROUTER_PUBLIC_URL = ${JSON.stringify(String(apiUrl).trim())};\nglobalThis.AGENTLOOP_LOCAL_AGENT_URL = ${JSON.stringify(String(agentUrl).trim())};\nglobalThis.AGENTLOOP_RUNTIME_CONTROL_DEV_MODE = ${runtimeControl.devMode === true ? "true" : "false"};\nglobalThis.AGENTLOOP_RUNTIME_CONTROL_DEV_TOKEN = ${JSON.stringify(runtimeControl.devToken ?? "")};\n`;
 }
 
 export function staticFilePath(pathname) {
@@ -36,21 +37,32 @@ export function staticFilePath(pathname) {
     : (decodedPathname === "/login" || decodedPathname === "/register" || decodedPathname === "/login.html"
       ? "pages/login.html"
       : decodedPathname === "/downloads" || decodedPathname === "/downloads/" ? "pages/downloads.html"
-        : decodedPathname === "/cloud-models" || decodedPathname === "/cloud-models/" ? "pages/cloud-models.html" : decodedPathname.slice(1));
+        : decodedPathname === "/cloud-models" || decodedPathname === "/cloud-models/" ? "pages/cloud-models.html"
+          : decodedPathname === "/cloud-skills" || decodedPathname === "/cloud-skills/" ? "pages/cloud-skills.html" : decodedPathname.slice(1));
   const file = resolve(root, requested);
   return file === root || file.startsWith(`${root}${sep}`) ? file : undefined;
 }
 
 export function createWebServer({ installerDirectory = process.env.LOCAL_AGENT_DOWNLOADS_DIR,
-  runtimeControlSocket = process.env.RUNTIME_CONTROL_SOCKET } = {}) {
+  runtimeControlSocket = process.env.RUNTIME_CONTROL_SOCKET,
+  runtimeControlDevMode = process.env.RUNTIME_CONTROL_DEV_MODE === "1",
+  runtimeControlDevRoot = process.env.RUNTIME_CONTROL_DEV_ROOT ?? "./data/local/cloud-skills",
+  runtimeControlDevSkillsRoot = process.env.RUNTIME_CONTROL_DEV_SKILLS_ROOT ?? resolve(root, "..", "custom-skills"),
+  runtimeControlDevToken = process.env.RUNTIME_CONTROL_DEV_TOKEN ?? "development-operator-token",
+  runtimeControlDevConfiguration = process.env.LLM_PROVIDER_CONFIG_PATH } = {}) {
+  const devRuntimeControl = runtimeControlDevMode && !runtimeControlSocket
+    ? createDevRuntimeControl({ root: runtimeControlDevRoot, skillsRoot: runtimeControlDevSkillsRoot, token: runtimeControlDevToken, configurationPath: runtimeControlDevConfiguration })
+    : undefined;
   return createServer(async (request, response) => {
     // This is the local control-plane UI.  Its browser state and Router
     // protocol evolve together, so a cached app.js can otherwise keep an old
     // SSE/recovery implementation alive after the Router has been restarted.
     response.setHeader("cache-control", "no-store");
     const pathname = new URL(request.url ?? "/", "http://web.local").pathname;
-    if (pathname === "/api/operations/runtime-reload" || pathname === "/api/operations/model-configuration") {
-      await proxyRuntimeControl(request, response, runtimeControlSocket, pathname.slice("/api/operations".length));
+    if (pathname === "/api/operations/runtime-reload" || pathname === "/api/operations/model-configuration" || pathname === "/api/operations/skill-configuration") {
+      const operationPath = pathname.slice("/api/operations".length);
+      if (devRuntimeControl) await devRuntimeControl.handle(request, response, operationPath);
+      else await proxyRuntimeControl(request, response, runtimeControlSocket, operationPath);
       return;
     }
     if (pathname.startsWith("/downloads/local-agent/")) {
@@ -64,7 +76,7 @@ export function createWebServer({ installerDirectory = process.env.LOCAL_AGENT_D
     if (pathname === "/runtime-config.js") {
       response.statusCode = 200;
       response.setHeader("content-type", types[".js"]);
-      response.end(runtimeConfigScript(routerPublicUrl, localAgentUrl));
+      response.end(runtimeConfigScript(routerPublicUrl, localAgentUrl, { devMode: Boolean(devRuntimeControl), devToken: devRuntimeControl ? runtimeControlDevToken : "" }));
       return;
     }
     if (pathname === "/artifact-preview.js") {

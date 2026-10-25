@@ -66,7 +66,7 @@ let resizeState;
 let localSkillPackages = [];
 let availableModels = [];
 let modelsLoading = false;
-const modelSelection = createModelSelection();
+const modelSelection = createModelSelection({ storage: localStorage });
 const liveUpdates = createCoalescedUpdater({ render: renderPendingLiveAssistantMessages, persist: saveSessions });
 
 const nativeFetch = window.fetch.bind(window);
@@ -120,7 +120,7 @@ $("new-chat").addEventListener("click", () => { conversationState.activeId = new
 $("composer").addEventListener("submit", (event) => { event.preventDefault(); void runComposerAction(); });
 $("submit").addEventListener("click", () => void runComposerAction());
 $("model-select").addEventListener("change", () => {
-  modelSelection.choose($("model-select").value);
+  modelSelection.choose($("model-select").value, modelCatalogContext());
   setStatus(modelSelectionStatus(availableModels, $("model-select").value), "ok");
 });
 $("messages").addEventListener("click", (event) => {
@@ -1598,7 +1598,7 @@ function mergeDetailEvents(currentEvents, incomingEvents) {
 
 function modelCatalogContext() {
   const local = isLocalExecution();
-  return { local, key: JSON.stringify([sessionState.user?.id, local ? "local" : "cloud", local ? localRuntimeState.device?.id : undefined, local ? Boolean(sessionState.localSessionToken) : Boolean(sessionState.authToken)]) };
+  return { local, userId: sessionState.user?.id, key: JSON.stringify([sessionState.user?.id, local ? "local" : "cloud", local ? localRuntimeState.device?.id : undefined, local ? Boolean(sessionState.localSessionToken) : Boolean(sessionState.authToken)]) };
 }
 
 function syncModelSelection() {

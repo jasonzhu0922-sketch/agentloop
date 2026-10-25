@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Host-owned Runtime operations. Web can request only a fixed reload operation."""
+"""Host-owned Runtime and Skill operations. Web can request only allowlisted operations."""
 import argparse
+import base64
+import binascii
 import hmac
 import json
 import os
@@ -48,11 +50,24 @@ class RuntimeControl:
             except ValueError:
                 return 500, {"error": "configuration_read_failed"}
 
+    def skills_configuration(self):
+        with tempfile.TemporaryDirectory(prefix="agentloop-skill-read-") as job:
+            result = subprocess.run(["bash", self.helper, "skills-configuration", job],
+                                    env=dict(os.environ, AGENTLOOP_DEPLOY_ROOT=str(self.root)),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            if result.returncode:
+                return 409, {"error": "skill_configuration_read_failed"}
+            try:
+                return 200, {"skills": json.loads(result.stdout)}
+            except ValueError:
+                return 500, {"error": "skill_configuration_read_failed"}
+
     def start(self, payload=None):
         with self.lock:
             if self.state["status"] == "running":
                 return 409, dict(self.state)
-            self.state = {"id": str(uuid.uuid4()), "operation": "apply" if payload is not None else "reload",
+            operation = ("skills" if "archiveBase64" in payload else "skills-remove" if "skillName" in payload else "apply") if payload is not None else "reload"
+            self.state = {"id": str(uuid.uuid4()), "operation": operation,
                           "status": "running", "phase": "validating", "startedAt": time.time()}
             self.update()
             threading.Thread(target=self.reload, args=(payload,), daemon=True).start()
@@ -65,12 +80,19 @@ class RuntimeControl:
                 env = dict(os.environ, AGENTLOOP_DEPLOY_ROOT=str(self.root))
                 operation = "reload"
                 if payload is not None:
-                    operation = "llm"
-                    Path(job, "llm-providers.json").write_text(json.dumps(payload["configuration"]))
-                    if "environment" in payload:
-                        Path(job, "runtime.env").write_text(payload["environment"])
-                    if payload.get("credentialUpdates"):
-                        Path(job, "credential-updates.json").write_text(json.dumps(payload["credentialUpdates"]))
+                    if "archiveBase64" in payload:
+                        operation = "skills"
+                        Path(job, "custom-skills.zip").write_bytes(base64.b64decode(payload["archiveBase64"], validate=True))
+                    elif "skillName" in payload:
+                        operation = "skills-remove"
+                        Path(job, "skill-name").write_text(payload["skillName"])
+                    else:
+                        operation = "llm"
+                        Path(job, "llm-providers.json").write_text(json.dumps(payload["configuration"]))
+                        if "environment" in payload:
+                            Path(job, "runtime.env").write_text(payload["environment"])
+                        if payload.get("credentialUpdates"):
+                            Path(job, "credential-updates.json").write_text(json.dumps(payload["credentialUpdates"]))
                 process = subprocess.Popen(["bash", self.helper, operation, job], env=env,
                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                            universal_newlines=True)
@@ -78,8 +100,10 @@ class RuntimeControl:
                 for line in process.stdout:
                     if "Active/nonterminal Runs:" in line:
                         phase = "active_runs"
-                    elif any(message in line for message in ["Invalid model configuration or missing credential", "Invalid LLM schema", "Model cannot be configured:"]):
+                    elif any(message in line for message in ["Invalid model configuration or missing credential", "Invalid LLM schema", "Model cannot be configured:", "Invalid custom Skill archive", "Skill package validation failed", "BadZipFile"]):
                         phase = "invalid_configuration"
+                    elif "Skill not found" in line:
+                        phase = "skill_not_found"
                     elif "Another production operation holds the lock" in line:
                         phase = "operation_locked"
                     elif "Container readiness timed out" in line:
@@ -88,10 +112,11 @@ class RuntimeControl:
                         with self.lock:
                             self.update(phase="checking_readiness")
                 code = process.wait()
-                models = json.loads(Path(job, "applied-models.json").read_text()) if code == 0 else []
+                models = json.loads(Path(job, "applied-models.json").read_text()) if code == 0 and Path(job, "applied-models.json").exists() else []
+                skills = json.loads(Path(job, "applied-skills.json").read_text()) if code == 0 and Path(job, "applied-skills.json").exists() else []
                 with self.lock:
                     self.update(status="succeeded" if code == 0 else "failed",
-                                phase="complete" if code == 0 else phase, models=models, finishedAt=time.time())
+                                phase="complete" if code == 0 else phase, models=models, skills=skills, finishedAt=time.time())
         except Exception:
             with self.lock:
                 self.update(status="failed", phase="reload_failed", finishedAt=time.time())
@@ -102,7 +127,7 @@ def serve(control, socket_path):
         def handle_operation(self):
             if not hmac.compare_digest(self.headers.get("Authorization", "").encode(), ("Bearer " + control.token).encode()):
                 return self.reply(401, {"error": "operator_unauthorized"})
-            if self.path not in ("/runtime-reload", "/model-configuration"):
+            if self.path not in ("/runtime-reload", "/model-configuration", "/skill-configuration"):
                 return self.reply(404, {"error": "not_found"})
             if self.path == "/model-configuration":
                 if self.command == "GET":
@@ -117,6 +142,23 @@ def serve(control, socket_path):
                         validate_payload(payload)
                     except (ValueError, TypeError, AttributeError):
                         return self.reply(400, {"error": "invalid_configuration_request"})
+                    code, state = control.start(payload)
+                    return self.reply(code, state)
+                return self.reply(405, {"error": "method_not_allowed"})
+            if self.path == "/skill-configuration":
+                if self.command == "GET":
+                    code, body = control.skills_configuration()
+                    return self.reply(code, body)
+                if self.command in ("POST", "DELETE"):
+                    try:
+                        size = int(self.headers.get("Content-Length", "0"))
+                        max_size = 128 * 1024 * 1024 if self.command == "POST" else 4096
+                        if self.headers.get("Transfer-Encoding") or not 0 < size <= max_size:
+                            raise ValueError()
+                        payload = json.loads(self.rfile.read(size).decode("utf8"))
+                        validate_skill_payload(payload) if self.command == "POST" else validate_skill_remove_payload(payload)
+                    except (ValueError, TypeError, AttributeError, binascii.Error):
+                        return self.reply(400, {"error": "invalid_skill_configuration_request"})
                     code, state = control.start(payload)
                     return self.reply(code, state)
                 return self.reply(405, {"error": "method_not_allowed"})
@@ -172,6 +214,31 @@ def validate_payload(payload):
     for key, value in updates.items():
         if key not in admitted or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key) or not isinstance(value, str) or not value or len(value) > 16384 or any(c in value for c in "\r\n\x00"):
             raise ValueError()
+
+
+def validate_skill_payload(payload):
+    if not isinstance(payload, dict) or set(payload) - {"archiveName", "archiveBase64"}:
+        raise ValueError()
+    name = payload.get("archiveName", "custom-skills.zip")
+    encoded = payload.get("archiveBase64")
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", name) or not name.lower().endswith(".zip"):
+        raise ValueError()
+    if not isinstance(encoded, str) or not encoded or len(encoded) > 120 * 1024 * 1024:
+        raise ValueError()
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError()
+    if not 1 <= len(decoded) <= 90 * 1024 * 1024 or not decoded.startswith(b"PK"):
+        raise ValueError()
+
+
+def validate_skill_remove_payload(payload):
+    if not isinstance(payload, dict) or set(payload) != {"skillName"}:
+        raise ValueError()
+    name = payload.get("skillName")
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name):
+        raise ValueError()
 
 
 if __name__ == "__main__":

@@ -17,6 +17,9 @@ test("local Skill upload preserves user-owned private files and installs multipl
     zip.file("private-skill/.env", "OA_DOC_TOKEN=local-only-token\n");
     zip.file("private-skill/credentials.json", '{"token":"local-only-token"}');
     zip.file("private-skill/certs/client.pem", "local-only-certificate");
+    zip.file("__MACOSX/._private-skill", "Finder metadata");
+    zip.file("__MACOSX/private-skill/._SKILL.md", "Finder metadata");
+    zip.file("private-skill/.DS_Store", "Finder metadata");
     const installed = await installer.installZip(await zip.generateAsync({ type: "nodebuffer" }), "private-skill.zip");
     assert.equal(installed.length, 1);
     assert.equal(await readFile(join(installed[0]!.root, ".env"), "utf8"), "OA_DOC_TOKEN=local-only-token\n");

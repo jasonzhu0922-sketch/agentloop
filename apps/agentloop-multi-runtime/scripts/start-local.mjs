@@ -176,6 +176,11 @@ children.push(start("web", "web/server.mjs", {
   WEB_PORT: String(webPort),
   ROUTER_URL: publicRouterUrl,
   LOCAL_AGENT_URL: process.env.LOCAL_AGENT_URL ?? `http://127.0.0.1:${localAgentPort}`,
+  LLM_PROVIDER_CONFIG_PATH: providerConfigPath,
+  RUNTIME_CONTROL_DEV_MODE: process.env.RUNTIME_CONTROL_DEV_MODE ?? "1",
+  RUNTIME_CONTROL_DEV_TOKEN: process.env.RUNTIME_CONTROL_DEV_TOKEN ?? "development-operator-token",
+  RUNTIME_CONTROL_DEV_ROOT: process.env.RUNTIME_CONTROL_DEV_ROOT ?? join(runtimeDataRoot, "cloud-skills"),
+  RUNTIME_CONTROL_DEV_SKILLS_ROOT: process.env.RUNTIME_CONTROL_DEV_SKILLS_ROOT ?? join(appRoot, "custom-skills"),
 }));
 
 process.stdout.write(`Starting multi-runtime locally with ${runtimeCount} Runtime Host(s).\n`);

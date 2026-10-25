@@ -8,6 +8,12 @@ const status = $("status");
 let envLines = [];
 let envLoaded = false;
 
+if (globalThis.AGENTLOOP_RUNTIME_CONTROL_DEV_MODE) {
+  $("operator-token").value = globalThis.AGENTLOOP_RUNTIME_CONTROL_DEV_TOKEN || "development-operator-token";
+  $("apply-production-config").textContent = "保存并应用到开发沙盒";
+  status.textContent = "开发态控制服务已启用：操作只写入本地沙盒，不会触及生产。";
+}
+
 $("config-file").addEventListener("change", async (event) => {
   const file = event.target.files?.[0];
   if (!file) return;

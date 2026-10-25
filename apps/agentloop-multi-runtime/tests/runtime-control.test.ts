@@ -26,9 +26,16 @@ test("Web -> Unix host control authenticates, tracks reload, rejects overlap and
   await writeFile(helper, `#!/bin/bash
 set -eu
 if [ "$1" = configuration ]; then echo '{"models":{"fixture":{}},"providers":{}}'; exit 0; fi
+if [ "$1" = skills-configuration ]; then echo '[{"name":"fixture-skill","description":"Fixture skill","packageHash":"hash","fileCount":1,"totalBytes":10,"hasEnvironment":false}]'; exit 0; fi
 if [ "$1" = llm ]; then
   cp "$2/llm-providers.json" '${root}/captured.json'
   cp "$2/credential-updates.json" '${root}/captured-credentials.json'
+elif [ "$1" = skills ]; then
+  cp "$2/custom-skills.zip" '${root}/captured-skills.zip'
+  printf '%s' '[{"name":"fixture-skill","packageHash":"hash"}]' > "$2/applied-skills.json"
+elif [ "$1" = skills-remove ]; then
+  cp "$2/skill-name" '${root}/removed-skill'
+  printf '%s' '[]' > "$2/applied-skills.json"
 elif [ "$1" != reload ]; then exit 1; fi
 echo started >> '${root}/starts'
 while [ ! -f '${root}/finish' ]; do sleep 0.02; done
@@ -90,6 +97,22 @@ printf '%s' '[{"key":"fixture","displayName":"Fixture"}]' > "$2/applied-models.j
   assert.deepEqual(applyState.models, [{ key: "fixture", displayName: "Fixture" }]);
   assert.deepEqual(JSON.parse(await readFile(join(root, "captured.json"), "utf8")), payload.configuration);
   assert.doesNotMatch(JSON.stringify(applyState), /provider-secret/);
+  const skillUrl = url.replace("runtime-reload", "skill-configuration");
+  const skillRead = await fetch(skillUrl, { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(skillRead.status, 200);
+  assert.equal((await skillRead.json()).skills[0].name, "fixture-skill");
+  const archive = Buffer.from("PK\\x03\\x04fixture").toString("base64");
+  const skillApply = await fetch(skillUrl, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ archiveName: "custom-skills.zip", archiveBase64: archive }) });
+  assert.equal(skillApply.status, 202);
+  const skillState = await until(async () => (await call()).json(), s => s.operation === "skills" && s.status !== "running");
+  assert.equal(skillState.status, "succeeded");
+  assert.deepEqual(skillState.skills, [{ name: "fixture-skill", packageHash: "hash" }]);
+  assert.equal((await readFile(join(root, "captured-skills.zip"))).toString(), "PK\\x03\\x04fixture");
+  const removeSkill = await fetch(skillUrl, { method: "DELETE", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ skillName: "fixture-skill" }) });
+  assert.equal(removeSkill.status, 202);
+  const removeState = await until(async () => (await call()).json(), s => s.operation === "skills-remove" && s.status !== "running");
+  assert.equal(removeState.status, "succeeded");
+  assert.equal(await readFile(join(root, "removed-skill"), "utf8"), "fixture-skill");
   await stop();
   assert.equal((await call()).status, 503);
   assert.equal(stderr, "");

@@ -11,7 +11,6 @@ import { LocalAgentStateStore, type LocalAgentState } from "../persistence/local
 import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, type LocalRuntimeMcpServerInput } from "../persistence/local-runtime-configuration-store.ts";
 import { LocalModelConfigurationStore, type LocalModelConfigurationInput } from "../persistence/local-model-configuration-store.ts";
 import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local-runtime-secret-store.ts";
-import { loadSkillDirectoriesConfig } from "../../../src/shared/config.ts";
 import { LocalSkillPackageInstaller, type LocalSkillUploadFile } from "./local-skill-package-installer.ts";
 import { LOCAL_AGENT_VERSION } from "../config/local-agent-version.ts";
 
@@ -62,10 +61,6 @@ export class LocalAgentService {
     // Router/Host database adapter is not a valid replacement at this boundary.
     const supervisorDatabasePath = input.supervisorDatabasePath ?? join(dirname(input.databasePath), "supervisor.db");
     const supervisorDatabase = new AppDatabase(supervisorDatabasePath);
-    const customSkillDirectories = await loadSkillDirectoriesConfig({
-      appRoot: input.appRoot,
-      configPath: input.skillDirectoriesConfigPath,
-    });
     const secretStore = new EncryptedLocalRuntimeSecretStore(join(dirname(supervisorDatabasePath), "runtime-secrets"));
     const modelSecretStore = new EncryptedLocalRuntimeSecretStore(join(dirname(supervisorDatabasePath), "model-secrets"));
     const modelConfigurations = new LocalModelConfigurationStore(supervisorDatabase, modelSecretStore);
@@ -73,7 +68,9 @@ export class LocalAgentService {
     const factory = new LocalRuntimeFactory(input, modelConfigurations);
     const uploadedSkillPackageRoot = join(input.skillPackageStoreRoot, "uploaded");
     const skillPackageInstaller = new LocalSkillPackageInstaller(uploadedSkillPackageRoot);
-    const configurations = new LocalRuntimeConfigurationStore(supervisorDatabase, secretStore, customSkillDirectories, uploadedSkillPackageRoot, modelConfigurations);
+    // Local Agent extensions are device-owned uploads. The cloud/development
+    // custom-skills directory is not an implicit Local Runtime source.
+    const configurations = new LocalRuntimeConfigurationStore(supervisorDatabase, secretStore, [], uploadedSkillPackageRoot, modelConfigurations);
     const supervisor = new LocalRuntimeSupervisor(
       supervisorDatabase,
       (definition, configuration) => factory.create(definition, configuration, sharedStorageRoot.value, uploadStorageRoot.value),

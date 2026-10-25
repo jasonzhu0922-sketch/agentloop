@@ -17,11 +17,30 @@ const history = (id: string, key: string) => ({ id, messages: [{ id: `${id}-turn
 test("new conversations default to the first model for the execution source", () => {
   const selection = createModelSelection();
   assert.equal(selection.resolve({ conversation: { id: "new-local" }, context: local, models: localModels, loading: false }), "local:first");
-  selection.choose("local:second");
-  assert.equal(selection.resolve({ conversation: { id: "another-local" }, context: local, models: localModels, loading: false }), "local:first");
+  selection.choose("local:second", local);
+  assert.equal(selection.resolve({ conversation: { id: "another-local" }, context: local, models: localModels, loading: false }), "local:second");
   assert.equal(selection.resolve({ conversation: { id: "new-cloud" }, context: cloud, models: cloudModels, loading: false }), "cloud-first");
   assert.equal(selection.resolve({ conversation: { id: "new-without-local-models" }, context: local, models: localModels.filter((m) => m.key.startsWith("cloud:")), loading: false }), "cloud:cloud-first");
   assert.equal(selection.resolve({ conversation: { id: "empty" }, context: local, models: [], loading: false }), "");
+});
+
+test("manual choices are remembered independently for local and cloud execution", () => {
+  const values = new Map<string, string>();
+  const storage = {
+    getItem(key: string) { return values.get(key) ?? null; },
+    setItem(key: string, value: string) { values.set(key, value); },
+  };
+  const first = createModelSelection({ storage });
+  assert.equal(first.resolve({ conversation: { id: "local-a" }, context: local, models: localModels, loading: false }), "local:first");
+  first.choose("local:second", local);
+  first.choose("cloud-second", cloud);
+  assert.equal(first.resolve({ conversation: { id: "local-b" }, context: local, models: localModels, loading: false }), "local:second");
+  assert.equal(first.resolve({ conversation: { id: "cloud-b" }, context: cloud, models: cloudModels, loading: false }), "cloud-second");
+
+  const restored = createModelSelection({ storage });
+  assert.equal(restored.resolve({ conversation: { id: "local-c" }, context: local, models: localModels, loading: false }), "local:second");
+  assert.equal(restored.resolve({ conversation: { id: "cloud-c" }, context: cloud, models: cloudModels, loading: false }), "cloud-second");
+  assert.equal(restored.resolve({ conversation: { id: "local-d" }, context: local, models: [{ key: "local:first" }], loading: false }), "local:first");
 });
 
 test("history restores the last turn selection and falls back within its model source", () => {
@@ -32,7 +51,7 @@ test("history restores the last turn selection and falls back within its model s
   assert.equal(resolve(conversation), "local:second");
   assert.equal(resolve(history("local-deleted", "local:deleted")), "local:first");
   assert.equal(resolve(history("cloud-on-local", "cloud:cloud-second")), "cloud:cloud-second");
-  assert.equal(resolve(history("cloud-deleted-on-local", "cloud:deleted")), "cloud:cloud-first");
+  assert.equal(resolve(history("cloud-deleted-on-local", "cloud:deleted")), "local:first");
   assert.equal(resolve(history("local-all-deleted", "local:deleted"), local, localModels.filter((m) => m.key.startsWith("cloud:"))), "cloud:cloud-first");
   assert.equal(resolve(history("cloud-history", "cloud-second"), cloud, cloudModels), "cloud-second");
   assert.equal(resolve(history("cloud-deleted", "removed"), cloud, cloudModels), "cloud-first");

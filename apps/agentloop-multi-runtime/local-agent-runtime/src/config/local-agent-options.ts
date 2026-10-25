@@ -16,6 +16,7 @@ export interface LocalAgentOptions {
   readonly runtimeDataRoot?: string;
   readonly supervisorDatabasePath?: string;
   readonly providerConfigPath: string;
+  /** Legacy launcher input retained for compatibility; Local Agent only loads uploaded Skill packages. */
   readonly skillDirectoriesConfigPath: string;
   readonly stepExecutionStrategyConfigPath: string;
   readonly practiceProfileConfigPath?: string;

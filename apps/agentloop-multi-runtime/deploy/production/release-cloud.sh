@@ -18,7 +18,7 @@ done
 [[ "$server" =~ ^[a-zA-Z0-9_.@-]+$ ]] || exit 2
 sha=$(git -C "$repo" rev-parse --verify "$ref^{commit}")
 printf 'Cloud release: %s -> %s:/opt/agentloop\n' "$sha" "$server"
-echo 'Uses committed source only; preserves production config, ports, secrets and custom Skills.'
+echo 'Uses committed source only; preserves production config, ports and secrets, and publishes committed custom Skills.'
 echo 'Builds with the previous release base-image digest and BuildKit cache; backs up PostgreSQL before switching.'
 if [ "$apply" = false ]; then echo 'Preview only. Add --apply to build and deploy.'; exit 0; fi
 job=$(mktemp -d "${TMPDIR:-/tmp}/agentloop-cloud-release.XXXXXX")

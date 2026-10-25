@@ -283,6 +283,7 @@ export class LocalRuntimeConfigurationStore {
 
   async synchronizeCustomDirectories(directories: readonly string[]): Promise<readonly LocalSkillPackageSummary[]> {
     const now = Date.now();
+    const discoveredPackageIds = new Set<string>();
     await this.database.prepare(`
       UPDATE local_skill_packages
       SET validation_status = 'invalid', validation_detail = 'skill_package_not_available', updated_at = ?
@@ -292,6 +293,7 @@ export class LocalRuntimeConfigurationStore {
       for (const entry of await discoverSkillDirectory(directory)) {
         const storageKey = `custom:${createHash("sha256").update(resolve(directory)).digest("hex")}:${entry.inspection.name}`;
         const packageId = `local_skill_${createHash("sha256").update(storageKey).digest("hex").slice(0, 32)}`;
+        discoveredPackageIds.add(packageId);
         this.packageRoots.set(packageId, entry.inspection.root);
         await this.database.prepare(`
           INSERT INTO local_skill_packages(
@@ -321,6 +323,18 @@ export class LocalRuntimeConfigurationStore {
           now,
         );
       }
+    }
+    const staleRows = await this.database.prepare(`
+      SELECT package_id FROM local_skill_packages
+      WHERE source_kind = 'custom_directory' AND validation_status = 'invalid'
+    `).all() as Array<{ package_id: string }>;
+    for (const row of staleRows) {
+      if (discoveredPackageIds.has(row.package_id)) continue;
+      await this.database.transaction(async () => {
+        await this.database.prepare("DELETE FROM local_runtime_skill_bindings WHERE package_id = ?").run(row.package_id);
+        await this.database.prepare("DELETE FROM local_skill_packages WHERE package_id = ?").run(row.package_id);
+      });
+      this.packageRoots.delete(row.package_id);
     }
     return this.listSkillPackages();
   }

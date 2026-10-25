@@ -115,6 +115,8 @@ npm run start:multi-runtime -- --runtimes 4
 
 `--runtime-count 4`、`-n 4` 和 `RUNTIME_COUNT=4` 等价。Host 使用 `general-01` 起始的独立端口，默认共用 `data/local/agentloop.db` 与 `data/local/workspace`；可通过 `AGENTLOOP_STATE_*` 和 `RUNTIME_WORKSPACE_ROOT` 分别指向共享状态库与同一个已挂载的物理工作区。启动器先等待 Router 健康后才启动 Host，避免本地共享 SQLite/WAL 的初始化竞争。可用 `RUNTIME_BASE_PORT`、`PORT`、`WEB_PORT`、`PUBLIC_HOST`、`ROUTER_URL`、`LLM_PROVIDER_CONFIG_PATH` 和 `STEP_EXECUTION_STRATEGY_CONFIG_PATH` 覆盖默认值。`PUBLIC_HOST`/`ROUTER_URL` 用于浏览器访问 Router；当 `HOST=0.0.0.0` 时启动器默认向浏览器公布 `127.0.0.1`。按 `Ctrl-C` 会同时停止所有子进程。
 
+开发态的 `/cloud-skills` 和 `/cloud-models` 会自动启用本地控制适配器，默认凭证为 `development-operator-token`（页面会自动填入）。Skill 发布会管理实际的 `custom-skills/` 目录，操作状态写入 `data/local/cloud-skills`，不会调用 Docker、生产数据库或服务器 Unix socket；可用 `RUNTIME_CONTROL_DEV_SKILLS_ROOT`、`RUNTIME_CONTROL_DEV_ROOT` 和 `RUNTIME_CONTROL_DEV_TOKEN` 覆盖目录与凭证。生产 Web 不设置 `RUNTIME_CONTROL_DEV_MODE`，仍只通过服务器 Runtime Control 服务执行。
+
 ### MCP 配置
 
 Cloud Runtime Host 默认读取 `config/mcp-servers.json`，可通过 `MCP_SERVERS_CONFIG_PATH` 指向部署专用文件。该仓库提供的默认配置启用高德 MCP：服务地址、工具别名和能力元数据可以入库，`AMAP_MCP_KEY` 只能放在 Host 的 `.env` 或 secret store。每个 Cloud Host 都必须装载同一份 MCP 配置和对应密钥；连接或发现失败会记录为该 Host 的 MCP 启动诊断，其他已装载工具仍可运行。
@@ -171,7 +173,7 @@ Local Runtime Agent 的模型、联网搜索和 Skill 集成配置属于设备�
 
 Local Agent 的源码也作为独立部署单元位于 `local-agent-runtime/src/`；它只依赖共享内核包及 Multi Runtime 的中立配置/契约，Router 和云端 Runtime Host 入口仍保留在 `src/`。`start:local-agent`、本地启动器和 macOS/Windows 打包器都以此目录的 `main.ts` 为唯一入口。
 
-Runtime 配置窗口的“上传 Skill”直接请求浏览器所在设备的 Local Agent，ZIP 或目录内容保存在该设备数据目录的 `skill-packages/uploaded/`，不经 Router 或云端转存。可以上传 ZIP，也可以选择 Skill 目录；目录上传会保留每个文件相对所选目录的路径。本地上传允许携带 Skill 自己的 `.env`、凭据和证书文件，仍校验路径、普通文件类型和解包/目录大小。一个 ZIP 或目录可以包含一个或多个 Skill：单 Skill 可将 `SKILL.md` 放在根目录或唯一 Skill 文件夹中，多 Skill 则应为每个 Skill 文件夹放置一个 `SKILL.md`。上传完成后需点击“保存”（新建时点击“创建”）应用到当前 Runtime。
+Runtime 配置窗口的“上传 Skill”直接请求浏览器所在设备的 Local Agent，ZIP 或目录内容保存在该设备数据目录的 `skill-packages/uploaded/`，不经 Router 或云端转存。Local Agent 启动时不会自动加载云端/开发态的 `custom-skills/` 目录；本机扩展 Skill 必须由用户上传后才会进入某个 Runtime。可以上传 ZIP，也可以选择 Skill 目录；目录上传会保留每个文件相对所选目录的路径。本地上传允许携带 Skill 自己的 `.env`、凭据和证书文件，仍校验路径、普通文件类型和解包/目录大小。一个 ZIP 或目录可以包含一个或多个 Skill：单 Skill 可将 `SKILL.md` 放在根目录或唯一 Skill 文件夹中，多 Skill 则应为每个 Skill 文件夹放置一个 `SKILL.md`。上传完成后需点击“保存”（新建时点击“创建”）应用到当前 Runtime。
 
 ### TiDB role databases
 
@@ -235,9 +237,9 @@ Host 会强制覆盖 `enabled=true`、`observeEnabled=true`、`mode=observe` 和
 
 ### Custom Skills
 
-每个 Runtime Host 在启动时读取 `config/skill-directories.json`（可用 `SKILL_DIRECTORIES_CONFIG_PATH` 指向另一份应用配置），把 `customSkillDirectories` 与 `@zhujun/agentloop-skills` 的内置目录合并后调用内核的 `syncSkillDirectories()`。相对路径始终相对本应用根目录解析，不从 Router、浏览器请求或任务中接收本机路径。
+云端 Runtime Host 在启动时读取 `config/skill-directories.json`（可用 `SKILL_DIRECTORIES_CONFIG_PATH` 指向另一份应用配置），把 `customSkillDirectories` 与 `@zhujun/agentloop-skills` 的内置目录合并后调用内核的 `syncSkillDirectories()`。相对路径始终相对本应用根目录解析，不从 Router、浏览器请求或任务中接收本机路径。开发态云端 Runtime 直接读取仓库中的 `custom-skills/`；生产 `release-cloud.sh` 会从同一提交的 `custom-skills.zip` 审核并更新宿主机挂载目录，再重建所有 Runtime，因此代码与自定义 Skill 版本一致。
 
-默认配置把 `./custom-skills` 作为显式扩展目录；该目录中的内容不会被 Git 跟踪。配置目录可改为任何由每个 Host 可读的绝对路径或应用相对路径：
+默认配置把 `./custom-skills` 作为显式扩展目录。配置目录可改为任何由每个 Host 可读的绝对路径或应用相对路径：
 
 ```json
 {
@@ -246,7 +248,7 @@ Host 会强制覆盖 `enabled=true`、`observeEnabled=true`、`mode=observe` 和
 }
 ```
 
-所有 Host 必须能读取同一组目录，否则 Router 的能力路由无法判断某个实例是否缺少某个 Skill；不存在目录、非法 Skill 包或跨目录重名都会在 Host 启动同步时明确失败。
+所有云端 Host 必须能读取同一组目录，否则 Router 的能力路由无法判断某个实例是否缺少某个 Skill；不存在目录、非法 Skill 包或跨目录重名都会在 Host 启动同步时明确失败。Local Agent 不读取云端或仓库的 `custom-skills/`，只加载用户通过 Runtime 配置页上传并保存的 Skill 包。
 
 ### Enterprise Info 直连配置
 

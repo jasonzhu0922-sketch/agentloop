@@ -8,7 +8,7 @@
     <link rel="stylesheet" href="/pages/cloud-models.css" />
   </head>
   <body>
-    <header class="page-header"><a class="brand" href="/" aria-label="AgentLoop 工作区"><span class="brand-icon">A</span>AgentLoop</a><a class="back-link" href="/">返回工作区 <span aria-hidden="true">↗</span></a></header>
+    <header class="page-header"><a class="brand" href="/" aria-label="AgentLoop 工作区"><span class="brand-icon">A</span>AgentLoop</a><nav class="page-nav"><a class="back-link" href="/cloud-skills">云端 Skill 配置</a><a class="back-link" href="/">返回工作区 <span aria-hidden="true">↗</span></a></nav></header>
     <main>
       <section class="intro"><p class="eyebrow">CLOUD RUNTIME</p><h1>云端模型配置</h1><p class="intro-copy">读取生产配置，编辑 Provider、模型参数和 API Key，保存并应用到云端 Runtime。</p></section>
       <section class="config-section credential-section"><label class="reload-credential">运维凭证<input id="operator-token" type="password" autocomplete="off" placeholder="读取、保存和重新加载时使用" /></label></section>
@@ -33,6 +33,6 @@
         <p id="reload-status" role="status" aria-live="polite">重新加载后将逐个检查 Runtime 就绪和有效模型配置。</p>
       </section>
     </main>
-    <script type="module" src="/pages/cloud-models.js"></script>
+    <script src="/runtime-config.js"></script><script type="module" src="/pages/cloud-models.js"></script>
   </body>
 </html>

@@ -65,7 +65,8 @@ export function mountRuntimeReload({ document, fetch, confirm, setTimeout, clear
       } else if (state.status === "succeeded") {
         const at = state.finishedAt ? `（${new Date(state.finishedAt * 1000).toLocaleString()}）` : "";
         const catalog = Array.isArray(state.models) ? `当前 ${state.models.length} 个模型：${state.models.map((model) => model.displayName || model.key).join("、")}。` : "";
-        show(`${state.operation === "apply" ? "已保存并应用到生产" : "重新加载完成"}${at}：所有云端 Runtime 已就绪，实际模型列表核对通过。${catalog}返回工作区后模型列表会重新读取。`);
+        const target = globalThis.AGENTLOOP_RUNTIME_CONTROL_DEV_MODE ? "开发沙盒" : "生产";
+        show(`${state.operation === "apply" ? `已保存并应用到${target}` : "重新加载完成"}${at}：所有云端 Runtime 已就绪，实际模型列表核对通过。${catalog}返回工作区后模型列表会重新读取。`);
       } else if (state.status === "failed") {
         show(messages[state.phase] ?? messages.reload_failed, true);
       } else { show("当前没有重新加载记录。"); }
@@ -82,7 +83,8 @@ export function mountRuntimeReload({ document, fetch, confirm, setTimeout, clear
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     if (!token.value.trim()) { show("请输入运维凭证。", true); return; }
-    if (!confirm("确认已将配置上传到服务器、暂停新任务并等待已有任务结束？将重新加载全部云端 Runtime。")) return;
+    const target = globalThis.AGENTLOOP_RUNTIME_CONTROL_DEV_MODE ? "开发沙盒" : "服务器";
+    if (!confirm(`确认已将配置上传到${target}、暂停新任务并等待已有任务结束？将重新加载全部云端 Runtime。`)) return;
     operationId = undefined;
     void request("POST");
   });
@@ -93,7 +95,8 @@ export function mountRuntimeReload({ document, fetch, confirm, setTimeout, clear
     let payload;
     try { payload = configurationInput(); } catch (error) { show(error.message, true); return; }
     const models = Object.keys(payload.configuration.models);
-    if (!confirm(`将生产模型列表替换为当前 JSON 中的 ${models.length} 个模型：${models.join("、")}。${payload.environment === undefined ? "保留其他服务器环境变量。" : "将完整替换 runtime.env。"}确认已暂停新任务并等待已有任务结束？`)) return;
+    const target = globalThis.AGENTLOOP_RUNTIME_CONTROL_DEV_MODE ? "开发沙盒模型列表" : "生产模型列表";
+    if (!confirm(`将${target}替换为当前 JSON 中的 ${models.length} 个模型：${models.join("、")}。${payload.environment === undefined ? "保留其他服务器环境变量。" : "将完整替换 runtime.env。"}确认已暂停新任务并等待已有任务结束？`)) return;
     operationId = undefined;
     void request("POST", payload);
   });

@@ -1,6 +1,7 @@
 export interface ModelCatalogContext {
   readonly key: string;
   readonly local: boolean;
+  readonly userId?: string;
 }
 
 export interface ModelCatalogState<TModel extends { readonly key: string } = { readonly key: string }> {

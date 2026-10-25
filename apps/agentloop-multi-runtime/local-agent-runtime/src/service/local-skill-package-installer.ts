@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
-import JSZip from "jszip";
 import { copySkillPackage, inspectSkillPackage, type SkillPackageInspection } from "@zhujun/agentloop";
+import { validateSkillArchive } from "../../../web/skill-archive-validator.mjs";
 
 const MAX_ARCHIVE_BYTES = 25 * 1024 * 1024;
 const MAX_FILES = 2_000;
@@ -27,19 +27,13 @@ export class LocalSkillPackageInstaller {
   constructor(packageRoot: string) { this.packageRoot = packageRoot; }
 
   async installZip(content: Buffer, originalName: string): Promise<readonly InstalledLocalSkillPackage[]> {
-    if (content.length < 1 || content.length > MAX_ARCHIVE_BYTES || !originalName.toLowerCase().endsWith(".zip")) {
-      throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
+    let audited: Awaited<ReturnType<typeof validateSkillArchive>>;
+    try {
+      audited = await validateSkillArchive(content, { originalName, allowPrivateFiles: true, limits: { maxArchiveBytes: MAX_ARCHIVE_BYTES, maxFiles: MAX_FILES, maxFileBytes: MAX_FILE_BYTES, maxTotalBytes: MAX_TOTAL_BYTES, maxCompressionRatio: MAX_COMPRESSION_RATIO } });
+    } catch (error) {
+      throw new LocalSkillPackageInstallError(400, error instanceof Error ? error.message : "skill_upload_invalid");
     }
-    const zip = await JSZip.loadAsync(content, { checkCRC32: true, createFolders: false }).catch(() => {
-      throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
-    });
-    const files = Object.values(zip.files).filter((entry) => !entry.dir);
-    if (files.length < 1 || files.length > MAX_FILES) throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
-    return await this.installFiles(files.map((entry) => ({
-      path: entry.unsafeOriginalName ?? entry.name,
-      content: entry.async("nodebuffer"),
-      zipEntry: entry,
-    })), content.length);
+    return await this.installFiles(audited.entries.map((entry) => ({ path: entry.path, content: entry.data })), content.length);
   }
 
   async installDirectory(files: readonly LocalSkillUploadFile[]): Promise<readonly InstalledLocalSkillPackage[]> {
@@ -47,7 +41,7 @@ export class LocalSkillPackageInstaller {
     return await this.installFiles(files.map((file) => ({ path: file.path, content: file.content })));
   }
 
-  private async installFiles(files: readonly { readonly path: string; readonly content: Buffer | Promise<Buffer>; readonly zipEntry?: JSZip.JSZipObject }[], compressedSize?: number): Promise<readonly InstalledLocalSkillPackage[]> {
+  private async installFiles(files: readonly { readonly path: string; readonly content: Buffer | Promise<Buffer> }[], compressedSize?: number): Promise<readonly InstalledLocalSkillPackage[]> {
     await mkdir(this.packageRoot, { recursive: true, mode: 0o700 });
     const stagingParent = join(this.packageRoot, ".staging");
     await mkdir(stagingParent, { recursive: true, mode: 0o700 });
@@ -58,7 +52,6 @@ export class LocalSkillPackageInstaller {
       for (const entry of files) {
         const packagePath = safePackagePath(entry.path);
         if (!stagedPaths.add(packagePath)) throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
-        if (entry.zipEntry !== undefined) assertRegularZipEntry(entry.zipEntry);
         const data = await entry.content;
         if (data.length > MAX_FILE_BYTES) throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
         totalBytes += data.length;
@@ -117,12 +110,6 @@ function safePackagePath(value: string): string {
     throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
   }
   return normalized;
-}
-
-function assertRegularZipEntry(entry: JSZip.JSZipObject): void {
-  const permissions = typeof entry.unixPermissions === "number" ? entry.unixPermissions : 0;
-  const fileType = permissions & 0o170000;
-  if (fileType !== 0 && fileType !== 0o100000) throw new LocalSkillPackageInstallError(400, "skill_upload_invalid");
 }
 
 function assertInside(root: string, target: string): void {

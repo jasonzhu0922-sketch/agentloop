@@ -27,13 +27,13 @@
 | `/opt/agentloop/.env` | Compose 插值：镜像、端口、URL、身份令牌、数据库、容量、配置文件路径 | Docker Compose；只有显式映射的值进入服务 |
 | `/opt/agentloop/secrets/runtime.env` | 模型、MCP 等 Runtime 环境变量；权限 `600` | 所有已部署 Runtime 的 `env_file`；不注入 Router / Web |
 | `/opt/agentloop/config/llm-providers.json` | Provider / 模型定义；`apiKeyEnv` 引用变量名 | 只读挂载到 Runtime 的 `/run/config/llm-providers.json` |
-| `/opt/agentloop/config/custom-skills/` | 部署维护的自定义 Skills | 只读挂载到各 Runtime |
+| `/opt/agentloop/config/custom-skills/` | 当前代码发布提交审核后的自定义 Skills；Skill 自有 `.env` 由服务器保留维护 | 只读挂载到各 Runtime |
 | `/opt/agentloop/data/workspace/` | 云端任务共享文件；实际路径由 `RUNTIME_WORKSPACE_HOST_PATH` 指定 | 各 Runtime |
-| `/opt/agentloop/releases/<SHA>/` | 不可变发布源码、镜像 manifest、构建记录 | 发布脚本 |
+| `/opt/agentloop/releases/<SHA>/` | 不可变发布源码（含 `custom-skills.zip`）、镜像 manifest、构建记录 | 发布脚本 |
 | `/opt/agentloop/backups/` | 配置 / 数据库备份及生成的回滚脚本 | 运维 |
 | `/opt/agentloop/deployments/topology-*/` | 每次部署生成的 Compose、Router 节点 JSON 和模板来源 manifest | Router 挂载 `runtimes.json` 到 `/run/topology/runtimes.json`；旧目录用于回滚 |
 
-仓库根 `.env`、应用开发 `.env`、用户设备的 Local Agent `.env` 都不是生产配置入口。应用发布不覆盖生产模型 JSON、密钥和自定义 Skills。
+仓库根 `.env`、应用开发 `.env`、用户设备的 Local Agent `.env` 都不是生产配置入口。代码发布不覆盖生产模型 JSON 和密钥；它会审核并替换 `/opt/agentloop/config/custom-skills/` 为该提交中的 `custom-skills.zip` 内容，同时保留仍存在 Skill 的服务器 `.env`。
 
 ### 2.2 为什么写进 .env 可能不生效
 
@@ -191,6 +191,12 @@ journalctl -u agentloop-runtime-control.service --since '10 minutes ago'
 ```
 
 未结束任务检查并不提供原子流量排空；操作期间须保持新任务入口暂停。
+
+### 3.4 网页管理云端 Skill
+
+生产 `/cloud-skills` 页提供「读取当前配置」和「上传并应用到生产」。页面读取的是服务器实际挂载的自定义 Skill 目录；上传 ZIP 后由宿主机控制服务在生产锁内调用应用内共享的 `web/skill-archive-validator.mjs` 审核，生成去除 macOS 元数据的规范化 ZIP，再替换该目录并强制重建全部 Runtime。开发态控制器和 Local Agent ZIP 上传也复用同一审核模块；仅 Local Agent 允许携带本机私有文件。每个 Skill 目录必须包含 `SKILL.md`；压缩包中的路径穿越、云端敏感文件和超限文件会在替换前拒绝。已有 Skill 的 `.env` 不从浏览器上传，若新包保留相同 Skill 路径，服务器会继续保留该文件。
+
+上传成功只表示目录校验、备份、Runtime 就绪和 Skill 清单检查通过。操作失败会自动恢复自定义 Skill 目录并重建 Runtime；新任务仍需单独验证实际 Skill 工具调用。页面和控制服务都不会回传 Skill 文件内容或环境变量值。
 
 ## 4. 修改部署 env、端口和数据库
 
@@ -388,7 +394,7 @@ bash "$S/release-cloud.sh" --ref HEAD --apply
 bash "$S/package-local-agent.sh" --ref HEAD --version 0.1.4
 ```
 
-生产发布复用上一版 manifest 中固定摘要的 Node 镜像和 BuildKit 缓存，备份两个 PostgreSQL 库后切换；“增量”指镜像层复用，不是差分源码包或零停机。首次部署、非当前 PostgreSQL 两库布局不适用；当前脚本动态覆盖全部已部署 Runtime。构建 / 服务就绪检查成功仍需第 9 节的新 Run 验收。
+生产发布复用上一版 manifest 中固定摘要的 Node 镜像和 BuildKit 缓存，备份两个 PostgreSQL 库后切换；“增量”指镜像层复用，不是差分源码包或零停机。发布会从同一提交的 `apps/agentloop-multi-runtime/custom-skills.zip` 使用新镜像内的共享审核器校验并替换宿主机 Skill 目录，再重建全部已部署 Runtime；仍存在 Skill 的服务器 `.env` 会保留，缺少归档或审核失败时不会切换任何生产文件。首次部署、非当前 PostgreSQL 两库布局不适用；当前脚本动态覆盖全部已部署 Runtime。构建 / 服务就绪检查成功仍需第 9 节的新 Run 验收。
 
 macOS 脚本要求 Apple Silicon、Node 26+、Xcode 命令行工具、Python 3 及依赖网络访问；在临时构建副本中修改版本。产物默认在 `release/local-agent/<版本>-<SHA前12位>/`，包含 PKG 和构建 manifest。
 
@@ -425,7 +431,7 @@ done
 
 排障时，模型 `401/403` 核对上游地址、凭据和权限；`429` 核对上游 RPM / TPM 和并发；心跳失败核对静态 ID、端点和共享令牌；启动失败先看 schema / 配置 / 挂载错误。保留原始错误和 Run 证据，再决定回滚。
 
-脚本生成的回滚在服务器执行，使用本次输出的确切备份路径；回滚后重新验证所有受影响服务和代表性新任务。LLM 回滚恢复 JSON 和完整 env；云端代码回滚恢复部署 `.env` 及旧 Compose 启动选择，不自动还原数据库。扩缩容回滚恢复原数量与匹配的 Router 清单；数据库迁移、Skills 和下载清单需单独恢复方案。两个独立数据库 dump 不是跨库原子快照，备份期间需暂停写入并保留配套文件数据。
+脚本生成的回滚在服务器执行，使用本次输出的确切备份路径；回滚后重新验证所有受影响服务和代表性新任务。LLM 回滚恢复 JSON 和完整 env；云端代码回滚恢复部署 `.env`、旧 Compose 启动选择和旧 `custom-skills/` 目录，不自动还原数据库。扩缩容回滚恢复原数量与匹配的 Router 清单；数据库迁移和下载清单需单独恢复方案。两个独立数据库 dump 不是跨库原子快照，备份期间需暂停写入并保留配套文件数据。
 
 不要把 `docker compose down -v`、数据库直接覆盖、`docker system prune` 或删除持久构建缓存加入日常发布。旧镜像、数据卷、配置与数据库备份至少保留到验收和回滚窗口结束。
 

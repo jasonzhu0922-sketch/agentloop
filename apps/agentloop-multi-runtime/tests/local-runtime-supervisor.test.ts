@@ -285,6 +285,32 @@ test("Runtime extensions are optional, isolated, and mutable only while stopped"
   }
 });
 
+test("removed custom-directory Skills are unbound during startup synchronization", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-runtime-stale-skill-"));
+  const customRoot = join(root, "custom-skills");
+  const packageRoot = join(customRoot, "contract-review");
+  const database = new AppDatabase(join(root, "supervisor.db"));
+  try {
+    await database.exec(`CREATE TABLE local_runtime_instances (runtime_id TEXT PRIMARY KEY); INSERT INTO local_runtime_instances(runtime_id) VALUES ('runtime')`);
+    await mkdir(packageRoot, { recursive: true });
+    await writeFile(join(packageRoot, "SKILL.md"), "---\nname: contract-review\ndescription: Reviews contracts.\n---\n");
+    const initial = new LocalRuntimeConfigurationStore(database, undefined, [customRoot]);
+    await initial.ready();
+    const packageId = (await initial.listSkillPackages())[0]!.packageId;
+    await initial.initialize("runtime", { skillPackageIds: [packageId] });
+    await rm(packageRoot, { recursive: true, force: true });
+
+    const restarted = new LocalRuntimeConfigurationStore(database, undefined, [customRoot]);
+    await restarted.ready();
+    assert.deepEqual(await restarted.listSkillPackages(), []);
+    assert.deepEqual((await restarted.configuration("runtime")).skills, []);
+    assert.deepEqual((await restarted.resolve("runtime")).customSkillDirectories, []);
+  } finally {
+    await database.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Runtime MCP credentials stay encrypted and are retained without being returned", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-runtime-secrets-"));
   const database = new AppDatabase(join(root, "supervisor.db"));

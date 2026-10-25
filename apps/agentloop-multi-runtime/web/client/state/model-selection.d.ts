@@ -10,8 +10,11 @@ export interface ModelSelectionConversation {
   }[];
 }
 
-export function createModelSelection(): {
-  choose(key: string): void;
+export function createModelSelection(input?: {
+  readonly storage?: Pick<Storage, "getItem" | "setItem">;
+  readonly storageKey?: string;
+}): {
+  choose(key: string, context?: ModelCatalogContext): void;
   resolve(input: {
     readonly conversation?: ModelSelectionConversation;
     readonly context: ModelCatalogContext;

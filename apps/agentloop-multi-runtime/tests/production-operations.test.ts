@@ -26,6 +26,9 @@ async function fixture(options: { invalid?: boolean; active?: boolean; failReady
   }
   await writeFile(config, '{"marker":"original","models":{"fixture":{"displayName":"Fixture","providerModel":"fixture"}}}\n');
   await writeFile(envFile, "MODEL_KEY=original-secret\nSKILL_KEY=preserved-secret\n", { mode: 0o600 });
+  await mkdir(join(root, "config/custom-skills/legacy-skill"));
+  await writeFile(join(root, "config/custom-skills/legacy-skill/SKILL.md"), "# Legacy\n");
+  await writeFile(join(root, "config/custom-skills/legacy-skill/.env"), "LEGACY_SECRET=keep-me\n", { mode: 0o600 });
   await writeFile(join(root, ".env"), `RUNTIME_COUNT=${options.desiredCount ?? options.count ?? 2}\nMULTI_RUNTIME_IMAGE=agentloop-multi-runtime:old\nRUNTIME_ENV_FILE=${envFile}\nWEB_PORT=13001\nROUTER_PORT=15001\n`);
   await writeFile(join(job, "llm-providers.json"), '{"marker":"candidate","models":{"fixture":{"displayName":"Fixture","providerModel":"fixture"}}}\n');
   await writeFile(join(previous, "release-manifest.env"), "NODE_IMAGE=example/node@sha256:" + "a".repeat(64) + "\nAPT_MIRROR=https://apt.example\nPIP_INDEX_URL=https://pip.example\nPIP_FALLBACK_INDEX_URL=https://fallback.example\n");
@@ -39,9 +42,13 @@ if(a[0]==='inspect'){
  const f=a[a.indexOf('--format')+1];
  if(f.includes('config_files')) console.log(fs.existsSync(p.join(root,'current-compose'))?fs.readFileSync(p.join(root,'current-compose'),'utf8'):process.env.FIXTURE_COMPOSE);
  else if(f.includes('/run/config/llm-providers.json')) console.log(p.join(root,'config/llm-providers.json'));
+ else if(f.includes('/app/apps/agentloop-multi-runtime/custom-skills')) console.log(p.join(root,'config/custom-skills'));
  else if(f.includes('.Config.Image')) console.log(fs.readFileSync(p.join(root,'.env'),'utf8').match(/^MULTI_RUNTIME_IMAGE=(.*)$/m)[1]);
+} else if(a[0]==='run'){
+ if(a.some(x=>x.includes('validate-skill-archive.mjs'))){const {spawnSync}=require('node:child_process');const result=spawnSync(process.execPath,[process.env.VALIDATOR_SCRIPT],{input:fs.readFileSync(0)});process.stdout.write(result.stdout);process.stderr.write(result.stderr);process.exitCode=result.status??1;}
 } else if(a[0]==='exec'){
  if(a.includes('printenv')) console.log('postgres');
+ else if(a.some(x=>x.includes('validate-skill-archive.mjs'))){const {spawnSync}=require('node:child_process');const result=spawnSync(process.execPath,[process.env.VALIDATOR_SCRIPT],{input:fs.readFileSync(0)});process.stdout.write(result.stdout);process.stderr.write(result.stderr);process.exitCode=result.status??1;}
  else if(a.includes('-i')){const input=JSON.parse(fs.readFileSync(0,'utf8'));if(input.updates){import(process.env.MERGE_MODULE).then(m=>process.stdout.write(m.mergeEnvLines(input.environment.split(/\\r?\\n/),Object.entries(input.updates)).join('\\n')+'\\n'));}else{if(!input.config)process.exit(2); if(process.env.INVALID_CONFIG==='1')process.exit(1);}}
  else if(a.some(x=>x.includes('Container readiness timed out')) && process.env.FAIL_READY==='1' && !fs.existsSync(p.join(root,'readiness-failed'))){fs.writeFileSync(p.join(root,'readiness-failed'),'1'); process.exit(1);}
  else if(a.some(x=>x.includes('Live Runtime model catalog does not match')) && process.env.MISMATCH_CATALOG==='1')process.exit(1);
@@ -65,7 +72,7 @@ else if(a.includes('pg_restore')) fs.readFileSync(0);
     await writeFile(join(bin, name), content);
     await chmod(join(bin, name), 0o755);
   }
-  const environment = { ...process.env, PATH: `${bin}:${process.env.PATH}`, AGENTLOOP_DEPLOY_ROOT: root, FIXTURE_ROOT: root, FIXTURE_COMPOSE: compose, INVALID_CONFIG: options.invalid ? "1" : "0", ACTIVE_RUNS: options.active ? "1" : "0", FAIL_READY: options.failReady ? "1" : "0", MISMATCH_CATALOG: options.mismatchCatalog ? "1" : "0", MERGE_MODULE: new URL("../web/pages/cloud-model-config.js", import.meta.url).href };
+  const environment = { ...process.env, PATH: `${bin}:${process.env.PATH}`, AGENTLOOP_DEPLOY_ROOT: root, FIXTURE_ROOT: root, FIXTURE_COMPOSE: compose, INVALID_CONFIG: options.invalid ? "1" : "0", ACTIVE_RUNS: options.active ? "1" : "0", FAIL_READY: options.failReady ? "1" : "0", MISMATCH_CATALOG: options.mismatchCatalog ? "1" : "0", MERGE_MODULE: new URL("../web/pages/cloud-model-config.js", import.meta.url).href, VALIDATOR_SCRIPT: join(scripts, "validate-skill-archive.mjs") };
   const run = (operation = "llm", extra: string[] = []) => spawnSync("bash", [helper, operation, job, ...extra], { env: environment, encoding: "utf8" });
   const commands = async (): Promise<string[][]> => (await readFile(join(root, "commands.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
   return { root, job, config, envFile, compose, environment, run, commands };
@@ -81,6 +88,50 @@ test("LLM config update preserves secrets and recreates only the two Runtime ser
   assert.equal(up.length, 1);
   assert.deepEqual(up[0].slice(-5), ["--no-deps", "--no-build", "--force-recreate", "runtime-general-01", "runtime-general-02"]);
   assert.doesNotMatch(result.stdout + result.stderr, /original-secret|preserved-secret/);
+});
+
+test("Skill configuration validates, preserves Skill env files, replaces the mounted directory, and recreates all Runtimes", async () => {
+  const f = await fixture();
+  const source = join(f.root, "skill-archive-source");
+  await mkdir(join(source, "custom-skills/candidate-skill"), { recursive: true });
+  await mkdir(join(source, "custom-skills/legacy-skill"), { recursive: true });
+  await mkdir(join(source, "__MACOSX/candidate-skill"), { recursive: true });
+  await writeFile(join(source, "custom-skills/candidate-skill/SKILL.md"), "# Candidate\n");
+  await writeFile(join(source, "custom-skills/legacy-skill/SKILL.md"), "# Legacy replacement\n");
+  await writeFile(join(source, "__MACOSX/._candidate-skill"), "Finder metadata\n");
+  await writeFile(join(source, "__MACOSX/candidate-skill/._SKILL.md"), "Finder metadata\n");
+  await writeFile(join(source, ".DS_Store"), "Finder metadata\n");
+  const archive = join(f.job, "custom-skills.zip");
+  execFileSync("zip", ["-qr", archive, "custom-skills"], { cwd: source });
+  const result = f.run("skills");
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(await readFile(join(f.root, "config/custom-skills/candidate-skill/SKILL.md"), "utf8"), "# Candidate\n");
+  assert.equal(await readFile(join(f.root, "config/custom-skills/legacy-skill/.env"), "utf8"), "LEGACY_SECRET=keep-me\n");
+  assert.equal((await f.commands()).filter(a => a[0] === "compose" && a.includes("up")).length, 1);
+  assert.match(result.stdout, /Skill package inventory and readiness checks passed/);
+});
+
+test("invalid Skill archives are rejected before replacing the mounted directory", async () => {
+  const f = await fixture();
+  const source = join(f.root, "invalid-skill-archive-source");
+  await mkdir(join(source, "custom-skills/candidate-skill"), { recursive: true });
+  await writeFile(join(source, "custom-skills/candidate-skill/SKILL.md"), "# Candidate\n");
+  await writeFile(join(source, "custom-skills/candidate-skill/.env"), "SHOULD_NOT_UPLOAD=secret\n");
+  execFileSync("zip", ["-qr", join(f.job, "custom-skills.zip"), "custom-skills"], { cwd: source });
+  const result = f.run("skills");
+  assert.notEqual(result.status, 0);
+  assert.equal(await readFile(join(f.root, "config/custom-skills/legacy-skill/SKILL.md"), "utf8"), "# Legacy\n");
+  assert.equal((await f.commands()).some(a => a.includes("up")), false);
+});
+
+test("Skill removal deletes only the requested directory, preserves its backup path, and recreates all Runtimes", async () => {
+  const f = await fixture();
+  await writeFile(join(f.job, "skill-name"), "legacy-skill\n");
+  const result = f.run("skills-remove");
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  await assert.rejects(() => readFile(join(f.root, "config/custom-skills/legacy-skill/SKILL.md")));
+  assert.equal((await f.commands()).filter(a => a[0] === "compose" && a.includes("up")).length, 1);
+  assert.match(result.stdout, /Removed Skill legacy-skill/);
 });
 
 test("LLM config rejects invalid candidate before replacing files or restarting services", async () => {
@@ -167,7 +218,15 @@ test("Runtime readiness failure restores both config and complete env file", asy
 async function cloudArchive(f: Awaited<ReturnType<typeof fixture>>) {
   const source = join(f.root, "archive-source");
   const centos = join(source, "apps/agentloop-multi-runtime/deploy/centos7");
+  const customSkills = join(source, "apps/agentloop-multi-runtime");
   await mkdir(centos, { recursive: true });
+  const skillSource = join(f.root, "cloud-skills-source/custom-skills");
+  await mkdir(join(skillSource, "candidate-skill"), { recursive: true });
+  await mkdir(join(skillSource, "legacy-skill"), { recursive: true });
+  await writeFile(join(skillSource, "candidate-skill/SKILL.md"), "# Candidate from code release\n");
+  await writeFile(join(skillSource, "legacy-skill/SKILL.md"), "# Legacy replacement from code release\n");
+  await mkdir(customSkills, { recursive: true });
+  execFileSync("zip", ["-qr", join(customSkills, "custom-skills.zip"), "custom-skills"], { cwd: join(f.root, "cloud-skills-source") });
   for (const name of ["compose.yaml", "runtime-host.yaml", "render-topology.py", "deploy.sh"]) {
     await copyFile(join(scripts, "../centos7", name), join(centos, name));
   }
@@ -194,6 +253,9 @@ test("cloud release reuses immutable build inputs and preserves deployed port co
   assert.match(env, new RegExp(`MULTI_RUNTIME_IMAGE=agentloop-multi-runtime:${sha}`));
   assert.match(env, /WEB_PORT=13001\nROUTER_PORT=15001/);
   assert.equal(await readFile(f.config, "utf8"), '{"marker":"original","models":{"fixture":{"displayName":"Fixture","providerModel":"fixture"}}}\n');
+  assert.equal(await readFile(join(f.root, "config/custom-skills/candidate-skill/SKILL.md"), "utf8"), "# Candidate from code release\n");
+  assert.equal(await readFile(join(f.root, "config/custom-skills/legacy-skill/SKILL.md"), "utf8"), "# Legacy replacement from code release\n");
+  assert.equal(await readFile(join(f.root, "config/custom-skills/legacy-skill/.env"), "utf8"), "LEGACY_SECRET=keep-me\n");
   const current = await readFile(join(f.root,"current-compose"),"utf8");
   assert.equal(JSON.parse(await readFile(join(dirname(current),"topology.json"),"utf8")).runtimeCount,4);
   assert.match(result.stdout, /Rollback: bash/);
@@ -304,6 +366,8 @@ test("cloud failure restores old image and actual topology count", async () => {
   const env = await readFile(join(f.root,".env"),"utf8");
   assert.match(env,/RUNTIME_COUNT=2\n/);
   assert.match(env,/MULTI_RUNTIME_IMAGE=agentloop-multi-runtime:old\n/);
+  assert.equal(await readFile(join(f.root, "config/custom-skills/legacy-skill/SKILL.md"), "utf8"), "# Legacy\n");
+  await assert.rejects(() => readFile(join(f.root, "config/custom-skills/candidate-skill/SKILL.md")));
 });
 
 test("code release after resize finds serving release build manifest", async () => {
