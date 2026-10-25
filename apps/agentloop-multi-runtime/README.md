@@ -171,7 +171,9 @@ Local Runtime Agent 的模型、联网搜索和 Skill 集成配置属于设备�
 
 Local Agent 的源码也作为独立部署单元位于 `local-agent-runtime/src/`；它只依赖共享内核包及 Multi Runtime 的中立配置/契约，Router 和云端 Runtime Host 入口仍保留在 `src/`。`start:local-agent`、本地启动器和 macOS/Windows 打包器都以此目录的 `main.ts` 为唯一入口。
 
-Runtime 配置窗口的“上传 Skill”直接请求浏览器所在设备的 Local Agent，ZIP 或目录内容保存在该设备数据目录的 `skill-packages/uploaded/`，不经 Router 或云端转存。可以上传 ZIP，也可以选择 Skill 目录；目录上传会保留每个文件相对所选目录的路径。本地上传允许携带 Skill 自己的 `.env`、凭据和证书文件，仍校验路径、普通文件类型和解包/目录大小。一个 ZIP 或目录可以包含一个或多个 Skill：单 Skill 可将 `SKILL.md` 放在根目录或唯一 Skill 文件夹中，多 Skill 则应为每个 Skill 文件夹放置一个 `SKILL.md`。上传完成后需点击“保存”（新建时点击“创建”）应用到当前 Runtime。
+Runtime 配置窗口的“上传 Skill”直接请求浏览器所在设备的 Local Agent，ZIP 或目录内容保存在该设备数据目录的 `skill-packages/uploaded/`，不经 Router 或云端转存。可以上传 ZIP，也可以选择 Skill 目录；目录上传会保留每个文件相对所选目录的路径。本地上传允许携带 Skill 自己的 `.env`、凭据和证书文件，仍校验路径、普通文件类型和解包/目录大小。一个 ZIP 或目录可以包含一个或多个 Skill：单 Skill 可将 `SKILL.md` 放在根目录或唯一 Skill 文件夹中，多 Skill 则应为每个 Skill 文件夹放置一个 `SKILL.md`。上传后会在每个 Skill 根目录生成 `agentloop.skill.json` 声明；旧 `SKILL.md` 中的 `agentloop:` 块只用于一次性迁移，并从正文移除。没有声明的包会得到可审阅的识别草稿，页面可通过“维护元数据”编辑；保存会生成新的不可变包版本，身份字段仍以 `SKILL.md` 的 `name`/`description` 为准。上传完成后需点击“保存”（新建时点击“创建”）应用到当前 Runtime。
+
+内核 bundled Skill 与 `custom-skills/` 使用同一个包内声明格式，但元数据文件随各自包根独立维护：内核声明来自 `@zhujun/agentloop-skills` 发布包，Custom 声明来自 `custom-skills.zip` 或部署挂载目录。两者都不再把 AgentLoop 规划/执行元数据写入 `SKILL.md`；启动同步会分别校验每个包的 sidecar 与 `SKILL.md` identity，缺少或冲突时 fail-closed。
 
 ### TiDB role databases
 
