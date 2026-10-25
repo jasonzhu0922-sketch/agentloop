@@ -20,7 +20,7 @@ export async function validateSkillArchive(content, { originalName, allowPrivate
   for (const entry of entries) {
     const sourcePath = entry.unsafeOriginalName ?? entry.name;
     const normalizedSourcePath = safeArchivePath(sourcePath);
-    if (!allowPrivateFiles && (/(^|\/)\.env(?:\.|$)/i.test(normalizedSourcePath) || /\.(?:pem|key)$/i.test(normalizedSourcePath))) throw invalid("skill_upload_invalid");
+    if (!allowPrivateFiles && (isPrivateEnvironmentPath(normalizedSourcePath) || /\.(?:pem|key)$/i.test(normalizedSourcePath))) throw invalid("skill_upload_invalid");
     if (paths.has(normalizedSourcePath)) throw invalid("skill_upload_invalid");
     paths.add(normalizedSourcePath);
     assertRegularZipEntry(entry);
@@ -45,6 +45,13 @@ export function safeArchivePath(value) {
   const parts = value.split("/");
   if (parts.some(part => part === "" || part === "." || part === "..")) throw invalid("skill_upload_invalid");
   return parts.join("/");
+}
+
+function isPrivateEnvironmentPath(value) {
+  const parts = value.split("/");
+  if (parts.some((part) => part.toLowerCase() === ".env")) return true;
+  const fileName = parts.at(-1)?.toLowerCase() ?? "";
+  return fileName.startsWith(".env.") && fileName !== ".env.example";
 }
 
 function assertRegularZipEntry(entry) {
