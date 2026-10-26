@@ -16,6 +16,7 @@ const messages = {
 // Injectable browser dependencies allow the actual request/polling workflow to
 // be exercised without a production Docker host.
 export function mountRuntimeReload({ document, fetch, confirm, setTimeout, clearTimeout, configurationInput, onConfiguration }) {
+  const operationsBase = `${String(globalThis.AGENTLOOP_ROUTER_URL || "/api").replace(/\/+$/, "")}/operations`;
   const form = document.getElementById("reload-form");
   const token = document.getElementById("operator-token");
   const button = document.getElementById("reload-runtime");
@@ -44,7 +45,7 @@ export function mountRuntimeReload({ document, fetch, confirm, setTimeout, clear
     let running = false;
     let uncertain = true;
     try {
-      const response = await fetch(payload ? "/api/operations/model-configuration" : "/api/operations/runtime-reload", {
+      const response = await fetch(payload ? `${operationsBase}/model-configuration` : `${operationsBase}/runtime-reload`, {
         method, headers: { authorization: `Bearer ${token.value.trim()}`, ...(payload ? { "content-type": "application/json" } : {}) },
         ...(payload ? { body: JSON.stringify(payload) } : {}), cache: "no-store",
         signal: AbortSignal.timeout(10000),
@@ -106,7 +107,7 @@ export function mountRuntimeReload({ document, fetch, confirm, setTimeout, clear
     if (!confirm("读取生产配置将替换当前 JSON 编辑内容和未保存的 Key 输入，是否继续？")) return;
     busy = true; load.disabled = true;
     try {
-      const response = await fetch("/api/operations/model-configuration", { headers: { authorization: `Bearer ${token.value.trim()}` }, cache: "no-store", signal: AbortSignal.timeout(10000) });
+      const response = await fetch(`${operationsBase}/model-configuration`, { headers: { authorization: `Bearer ${token.value.trim()}` }, cache: "no-store", signal: AbortSignal.timeout(10000) });
       const body = await response.json();
       if (!response.ok) throw new Error(messages[body.error] ?? "读取生产配置失败。");
       onConfiguration(body.configuration);

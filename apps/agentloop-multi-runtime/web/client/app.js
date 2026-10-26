@@ -4,7 +4,7 @@ import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, 
 import { conversationMessagesFromTurns } from "./projections/conversation-history.js";
 import { commandToolCallIds, executionActivities } from "./projections/execution-detail-projection.js";
 import { executionProvenanceParts } from "./projections/execution-provenance.js";
-import { artifactPreviewMode, openArtifactPreview, renderBlobPreview, renderMarkdown, renderStructuredPreview, updateArtifactPreviewMarkup } from "/artifact-preview.js";
+import { artifactPreviewMode, openArtifactPreview, renderBlobPreview, renderMarkdown, renderStructuredPreview, updateArtifactPreviewMarkup } from "../artifact-preview.js";
 import { isExecutionLogArtifact, isFinalDeliveryArtifact, artifactVerificationLabel } from "./presentation/artifact-display.js";
 import { assistantMessagePresentation, completedArtifactSummary, terminalAwarePlanStepStatus } from "./presentation/assistant-message-presentation.js";
 import { humanLoopResponseText } from "./presentation/human-loop-response.js";
@@ -32,6 +32,7 @@ import { localRuntimeListMarkup, localRuntimeOptions, localRuntimeViewModel } fr
 import { parseRuntimeMcpConfiguration, runtimeMcpConfigurationExample } from "./local-runtime/mcp-json-config.js";
 
 const api = String(globalThis.AGENTLOOP_ROUTER_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
+const basePath = String(globalThis.AGENTLOOP_BASE_PATH || "").replace(/\/+$/, "");
 const publicRouterUrl = String(globalThis.AGENTLOOP_ROUTER_PUBLIC_URL || (api.startsWith("http") ? api : location.origin)).replace(/\/+$/, "");
 const localAgentApi = String(globalThis.AGENTLOOP_LOCAL_AGENT_URL || "http://127.0.0.1:8790").replace(/\/+$/, "");
 const $ = (id) => document.getElementById(id);
@@ -468,7 +469,7 @@ async function offerLocalAgentInstall() {
   $("agent-install-description").textContent = "在下载页选择适合你的系统、芯片和版本。下载页将在新标签页打开，当前会话会保留。";
   $("agent-install-detail").innerHTML = "";
   const download = $("agent-install-download");
-  download.href = "/downloads";
+  download.href = `${basePath}/downloads`;
   download.target = "_blank";
   download.rel = "noopener noreferrer";
   download.removeAttribute("download");
@@ -1260,9 +1261,9 @@ function runtimeStatusLabel(status) {
 }
 
 function redirectToLogin() {
-  if (location.pathname === "/login" || location.pathname === "/register") return;
+  if (location.pathname === `${basePath}/login` || location.pathname === `${basePath}/register`) return;
   const next = `${location.pathname}${location.search}${location.hash}`;
-  location.replace(`/login?next=${encodeURIComponent(next)}`);
+  location.replace(`${basePath}/login?next=${encodeURIComponent(next)}`);
 }
 
 function loadArtifactPanelWidth() {

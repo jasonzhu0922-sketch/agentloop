@@ -24,10 +24,17 @@ const localAgentUrl = resolveLocalAgentUrl();
 const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
 
 export function runtimeConfigScript(apiUrl, agentUrl = localAgentUrl, runtimeControl = {}) {
+  const basePath = normalizeWebBasePath(runtimeControl.basePath ?? "");
   // Browser traffic stays same-origin even when Web and Router are separate
   // processes. The configured Router URL is consumed by this server's proxy,
   // not copied into browser state where port/CORS drift can break live Runs.
-  return `globalThis.AGENTLOOP_ROUTER_URL = "/api";\nglobalThis.AGENTLOOP_ROUTER_PUBLIC_URL = ${JSON.stringify(String(apiUrl).trim())};\nglobalThis.AGENTLOOP_LOCAL_AGENT_URL = ${JSON.stringify(String(agentUrl).trim())};\nglobalThis.AGENTLOOP_RUNTIME_CONTROL_DEV_MODE = ${runtimeControl.devMode === true ? "true" : "false"};\nglobalThis.AGENTLOOP_RUNTIME_CONTROL_DEV_TOKEN = ${JSON.stringify(runtimeControl.devToken ?? "")};\n`;
+  return `globalThis.AGENTLOOP_BASE_PATH = ${JSON.stringify(basePath)};\nglobalThis.AGENTLOOP_ROUTER_URL = ${JSON.stringify(`${basePath}/api`)};\nglobalThis.AGENTLOOP_ROUTER_PUBLIC_URL = ${JSON.stringify(String(apiUrl).trim())};\nglobalThis.AGENTLOOP_LOCAL_AGENT_URL = ${JSON.stringify(String(agentUrl).trim())};\nglobalThis.AGENTLOOP_RUNTIME_CONTROL_DEV_MODE = ${runtimeControl.devMode === true ? "true" : "false"};\nglobalThis.AGENTLOOP_RUNTIME_CONTROL_DEV_TOKEN = ${JSON.stringify(runtimeControl.devToken ?? "")};\n`;
+}
+
+function normalizeWebBasePath(value) {
+  const basePath = String(value).replace(/\/+$/, "");
+  if (basePath && !/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(basePath)) throw new Error("WEB_BASE_PATH must be an absolute path prefix");
+  return basePath;
 }
 
 export function staticFilePath(pathname) {
@@ -49,7 +56,9 @@ export function createWebServer({ installerDirectory = process.env.LOCAL_AGENT_D
   runtimeControlDevRoot = process.env.RUNTIME_CONTROL_DEV_ROOT ?? "./data/local/cloud-skills",
   runtimeControlDevSkillsRoot = process.env.RUNTIME_CONTROL_DEV_SKILLS_ROOT ?? resolve(root, "..", "custom-skills"),
   runtimeControlDevToken = process.env.RUNTIME_CONTROL_DEV_TOKEN ?? "development-operator-token",
-  runtimeControlDevConfiguration = process.env.LLM_PROVIDER_CONFIG_PATH } = {}) {
+  runtimeControlDevConfiguration = process.env.LLM_PROVIDER_CONFIG_PATH,
+  webBasePath = process.env.WEB_BASE_PATH ?? "" } = {}) {
+  const basePath = normalizeWebBasePath(webBasePath);
   const devRuntimeControl = runtimeControlDevMode && !runtimeControlSocket
     ? createDevRuntimeControl({ root: runtimeControlDevRoot, skillsRoot: runtimeControlDevSkillsRoot, token: runtimeControlDevToken, configurationPath: runtimeControlDevConfiguration })
     : undefined;
@@ -76,7 +85,7 @@ export function createWebServer({ installerDirectory = process.env.LOCAL_AGENT_D
     if (pathname === "/runtime-config.js") {
       response.statusCode = 200;
       response.setHeader("content-type", types[".js"]);
-      response.end(runtimeConfigScript(routerPublicUrl, localAgentUrl, { devMode: Boolean(devRuntimeControl), devToken: devRuntimeControl ? runtimeControlDevToken : "" }));
+      response.end(runtimeConfigScript(routerPublicUrl, localAgentUrl, { basePath, devMode: Boolean(devRuntimeControl), devToken: devRuntimeControl ? runtimeControlDevToken : "" }));
       return;
     }
     if (pathname === "/artifact-preview.js") {

@@ -1,4 +1,4 @@
-import { detectInstallerDevice, installerGroups, recommendedInstaller, safeInstallerUrl, LOCAL_AGENT_PROTOCOL } from "/client/local-runtime/release-selection.js";
+import { detectInstallerDevice, installerGroups, recommendedInstaller, safeInstallerUrl, LOCAL_AGENT_PROTOCOL } from "../client/local-runtime/release-selection.js";
 
 const $ = id => document.getElementById(id);
 let releases = [];
@@ -105,7 +105,7 @@ function render() {
 }
 
 function downloadLink(release, text) {
-  const url = safeInstallerUrl(release.downloadUrl, location.origin);
+  const url = safeInstallerUrl(release.downloadUrl, location.origin, globalThis.AGENTLOOP_BASE_PATH || "");
   if (!url) { const button = el("button", "download-button", "下载地址不可用"); button.disabled = true; return button; }
   const link = el("a", "download-button", text);
   link.href = url; link.download = release.fileName || "";

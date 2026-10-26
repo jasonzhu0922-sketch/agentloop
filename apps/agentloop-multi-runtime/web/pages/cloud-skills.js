@@ -1,4 +1,5 @@
 const $ = (id) => document.getElementById(id);
+const operationsBase = `${String(globalThis.AGENTLOOP_ROUTER_URL || "/api").replace(/\/+$/, "")}/operations`;
 const token = $("operator-token");
 const fileInput = $("skill-file");
 const list = $("skill-list");
@@ -51,7 +52,7 @@ async function loadSkills() {
   if (!token.value.trim()) return setStatus("请输入运维凭证。", true, status);
   const button = $("load-skills"); button.disabled = true;
   try {
-    const response = await fetch("/api/operations/skill-configuration", { headers: { authorization: `Bearer ${token.value.trim()}` }, cache: "no-store", signal: AbortSignal.timeout(10000) });
+    const response = await fetch(`${operationsBase}/skill-configuration`, { headers: { authorization: `Bearer ${token.value.trim()}` }, cache: "no-store", signal: AbortSignal.timeout(10000) });
     const body = await response.json();
     if (!response.ok) throw new Error(messages[body.error] ?? "读取 Skill 配置失败。");
     renderSkills(body.skills);
@@ -68,7 +69,7 @@ async function applySkills() {
   busy = true; apply.disabled = true; $("load-skills").disabled = true;
   try {
     const bytes = new Uint8Array(await selectedFile.arrayBuffer());
-    const response = await fetch("/api/operations/skill-configuration", {
+    const response = await fetch(`${operationsBase}/skill-configuration`, {
       method: "POST", headers: { authorization: `Bearer ${token.value.trim()}`, "content-type": "application/json" },
       body: JSON.stringify({ archiveName: selectedFile.name, archiveBase64: toBase64(bytes) }), cache: "no-store", signal: AbortSignal.timeout(30000),
     });
@@ -87,7 +88,7 @@ async function removeSkill(name) {
   if (!globalThis.confirm(`确认从${target} custom-skills 中移除「${name}」？操作会备份目录并重建全部云端 Runtime。`)) return;
   busy = true; apply.disabled = true; $("load-skills").disabled = true;
   try {
-    const response = await fetch("/api/operations/skill-configuration", {
+    const response = await fetch(`${operationsBase}/skill-configuration`, {
       method: "DELETE", headers: { authorization: `Bearer ${token.value.trim()}`, "content-type": "application/json" },
       body: JSON.stringify({ skillName: name }), cache: "no-store", signal: AbortSignal.timeout(30000),
     });
@@ -102,7 +103,7 @@ async function removeSkill(name) {
 async function poll(manual) {
   if (!token.value.trim()) return setOperationStatus("请输入运维凭证。", true);
   try {
-    const response = await fetch("/api/operations/runtime-reload", { headers: { authorization: `Bearer ${token.value.trim()}` }, cache: "no-store", signal: AbortSignal.timeout(10000) });
+    const response = await fetch(`${operationsBase}/runtime-reload`, { headers: { authorization: `Bearer ${token.value.trim()}` }, cache: "no-store", signal: AbortSignal.timeout(10000) });
     const body = await response.json();
     if (!response.ok) throw new Error(messages[body.error] ?? "读取发布状态失败。");
     if (!["skills", "skills-remove"].includes(body.operation)) {

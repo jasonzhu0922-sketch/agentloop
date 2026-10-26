@@ -1,8 +1,9 @@
 const api = String(globalThis.AGENTLOOP_ROUTER_URL || "/api").replace(/\/+$/, "");
+const basePath = String(globalThis.AGENTLOOP_BASE_PATH || "").replace(/\/+$/, "");
 const AUTH_TOKEN_KEY = "agentloop.multi-runtime.auth-token.v1";
 const ACTIVE_USER_KEY = "agentloop.multi-runtime.active-user.v1";
 const $ = (id) => document.getElementById(id);
-const registering = location.pathname === "/register";
+const registering = location.pathname === `${basePath}/register`;
 
 configureMode(registering);
 $("auth-form").addEventListener("submit", (event) => { event.preventDefault(); void authenticate(); });
@@ -15,7 +16,7 @@ function configureMode(isRegistering) {
   $("auth-submit").textContent = isRegistering ? "创建账号" : "登录";
   $("auth-switch-copy").textContent = isRegistering ? "已有账号？" : "还没有账号？";
   $("auth-mode-toggle").textContent = isRegistering ? "登录" : "创建账号";
-  $("auth-mode-toggle").href = isRegistering ? "/login" : "/register";
+  $("auth-mode-toggle").href = `${basePath}/${isRegistering ? "login" : "register"}`;
   $("auth-password").autocomplete = isRegistering ? "new-password" : "current-password";
 }
 
@@ -57,5 +58,6 @@ async function authenticate() {
 
 function safeNextLocation() {
   const next = new URLSearchParams(location.search).get("next");
-  return next !== null && next.startsWith("/") && !next.startsWith("//") ? next : "/";
+  const root = `${basePath}/`;
+  return next !== null && next.startsWith(root) && !next.startsWith("//") ? next : root;
 }

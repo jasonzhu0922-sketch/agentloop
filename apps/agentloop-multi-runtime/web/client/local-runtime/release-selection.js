@@ -41,10 +41,10 @@ export function installerGroups(releases, filters = { platform: "all", arch: "al
   });
 }
 
-export function safeInstallerUrl(value, origin) {
+export function safeInstallerUrl(value, origin, basePath = "") {
   if (typeof value !== "string") return undefined;
   if (value.startsWith("/downloads/local-agent/") && !/[?#%\\]/.test(value) && value.split("/").every(part => part !== "." && part !== "..")) {
-    const url = new URL(value, origin);
+    const url = new URL(`${String(basePath).replace(/\/+$/, "")}${value}`, origin);
     if (url.origin === origin && /\.(pkg|msi)$/.test(url.pathname)) return url.href;
   }
   try { const url = new URL(value); if (url.protocol === "https:" && !url.username && !url.password) return url.href; } catch {}

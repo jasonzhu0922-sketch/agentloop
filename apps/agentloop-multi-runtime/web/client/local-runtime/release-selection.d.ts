@@ -24,4 +24,4 @@ export function detectInstallerDevice(browser?: {
 }): Promise<InstallerDevice>;
 export function recommendedInstaller(release: InstallerRelease, device: InstallerDevice): boolean;
 export function installerGroups<T extends InstallerRelease>(releases: T[], filters?: { platform: string; arch: string }): Array<InstallerTarget & { current?: T; history: T[] }>;
-export function safeInstallerUrl(value: unknown, origin: string): string | undefined;
+export function safeInstallerUrl(value: unknown, origin: string, basePath?: string): string | undefined;
