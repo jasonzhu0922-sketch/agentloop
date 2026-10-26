@@ -48,6 +48,9 @@ WORKDIR /app/apps/agentloop-multi-runtime
 FROM application AS router
 CMD ["npm", "run", "start:router"]
 
+FROM application AS web
+CMD ["npm", "run", "start:web"]
+
 # Runtime execution dependencies belong only to the Host image. They are
 # installed while the image is built, never after a Host has accepted work.
 # Keep the package version explicit so an image can be rebuilt from the same
@@ -79,9 +82,6 @@ ENV RUNTIME_REQUIRED_COMMANDS=markitdown,pandoc,pdftoppm,pdftotext,pdfinfo,qpdf,
 ENV RUNTIME_REQUIRED_PYTHON_MODULES=anthropic,defusedxml,imageio,lxml,mcp,numpy,openpyxl,pandas,pdf2image,pdfplumber,PIL,pymysql,pypdf,pytesseract,reportlab
 ENV RUNTIME_REQUIRED_NODE_MODULES=docx,pptxgenjs,react,react-dom,react-icons,sharp,@zhujun/agentloop-plan-template
 CMD ["npm", "run", "start:runtime-host"]
-
-FROM application AS web
-CMD ["npm", "run", "start:web"]
 
 # Compose runs Router, Web, and Runtime Host from one local image.  Keep the
 # default target Host-capable so `docker compose up --build` cannot publish a
