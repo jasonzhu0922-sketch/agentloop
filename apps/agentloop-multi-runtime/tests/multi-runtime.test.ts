@@ -1820,6 +1820,32 @@ test("in-memory Router keeps a cloud conversation in the cloud pool while allowi
   assert.equal(third.runtimeId, "runtime-b");
 });
 
+test("in-memory Router does not use cloud capability advertisements to reject a Local Runtime", async () => {
+  const router = new MultiRuntimeRouter();
+  router.register(runtime("runtime-local", {
+    kind: "local",
+    deviceId: "device-a",
+    capabilities: [],
+  }), endpoint("run-local"));
+
+  const assignment = await router.submit({
+    ...task("user-a", "message-local-mcp"),
+    executionTarget: { kind: "local_device", deviceId: "device-a", runtimeId: "runtime-local" },
+    requiredCapabilities: ["spatial_planning.route"],
+    dataPolicy: { mode: "local" },
+  });
+  assert.equal(assignment.runtimeId, "runtime-local");
+});
+
+test("in-memory Router still filters cloud Hosts by advertised capabilities", async () => {
+  const router = new MultiRuntimeRouter();
+  router.register(runtime("runtime-cloud", { kind: "cloud", capabilities: [] }), endpoint("run-cloud"));
+  await assert.rejects(
+    () => router.submit({ ...task("user-a", "message-cloud-mcp"), requiredCapabilities: ["spatial_planning.route"] }),
+    RuntimeCapacityError,
+  );
+});
+
 test("in-memory Router rejects a second conversation turn while the binding dispatch is unresolved", async () => {
   const router = new MultiRuntimeRouter();
   let acceptDispatch!: (value: { remoteRunId: string }) => void;
@@ -2738,6 +2764,36 @@ test("an unavailable Local Runtime-bound conversation does not spill to another 
     }, { heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 203 }),
     (error: unknown) => error instanceof ConversationRuntimeBindingError && error.code === "conversation_runtime_unavailable",
   );
+  await database.close();
+});
+
+test("persistent Router does not use cloud capability advertisements to reject a Local Runtime", async () => {
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  await store.registerLocalRuntime({
+    runtimeId: "runtime-local-mcp",
+    deviceId: "device-mcp",
+    tenantId: "tenant",
+    ownerUserId: "user-a",
+    connectionId: "connection-mcp",
+    connectionEpoch: 1,
+    profile: "general",
+    capabilities: [],
+    maxConcurrentRuns: 1,
+    status: "ready",
+    catalogVersion: "1",
+    leaseExpiresAt: 2_000,
+    now: 100,
+  });
+
+  const assignment = await store.reserve({
+    ...task("user-a", "message-local-mcp-persistent"),
+    executionTarget: { kind: "local_device", deviceId: "device-mcp", runtimeId: "runtime-local-mcp" },
+    requiredCapabilities: ["spatial_planning.route"],
+    dataPolicy: { mode: "local" },
+  }, { heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 200 });
+  assert.equal(assignment.runtimeId, "runtime-local-mcp");
   await database.close();
 });
 

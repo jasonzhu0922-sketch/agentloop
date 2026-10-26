@@ -180,7 +180,10 @@ export class MultiRuntimeRouter {
           ? instance.kind === "local" && instance.deviceId === target.deviceId && instance.id === target.runtimeId
           : instance.kind !== "local")
         && (profile === undefined || instance.profile === profile)
-        && required.every((capability) => instance.capabilities.includes(capability))
+        // Local MCP/Skill admission belongs to the local Runtime. Router
+        // capability advertisements are scheduling metadata for cloud Hosts,
+        // not the authority for a device-local dispatch.
+        && (target.kind === "local_device" || required.every((capability) => instance.capabilities.includes(capability)))
         && instance.activeRunCount + reservedRuns < instance.maxConcurrentRuns,
       )
       .sort((left, right) =>

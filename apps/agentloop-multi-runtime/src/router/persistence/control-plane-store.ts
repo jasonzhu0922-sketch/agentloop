@@ -879,7 +879,12 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         : node.kind === "cloud" && (selectedRuntimeId === null || node.id === selectedRuntimeId))
         && (affinity === undefined || affinityLocation === "cloud" || node.id === affinity.runtime_id)
         && (task.requested_profile === null || node.profile === task.requested_profile)
-        && required.every((capability) => (JSON.parse(node.capabilities_json) as string[]).includes(capability)))
+        // A Local Runtime owns its live MCP/Skill admission. Its Router
+        // registration is intentionally only an identity/readiness/capacity
+        // record, so a stale or deliberately opaque capability advertisement
+        // must not reject a local dispatch before the local Planner runs.
+        && (executionTarget.kind === "local_device"
+          || required.every((capability) => (JSON.parse(node.capabilities_json) as string[]).includes(capability))))
       .filter((node) => node.active_run_count + Number(node.pending_admissions) < node.max_concurrent_runs)
       .sort((left, right) => score(left) - score(right) || left.id.localeCompare(right.id));
     const selected = eligible[0];
