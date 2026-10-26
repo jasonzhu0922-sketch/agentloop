@@ -42,6 +42,18 @@ enum LocalRuntimeInstallation {
     try checkedCommand(launchctl, ["kickstart", "-k", service])
   }
 
+  static func stopAgent(label: String, uid: UInt32, launchctl: URL = URL(fileURLWithPath: "/bin/launchctl")) throws {
+    let service = "gui/\(uid)/\(label)"
+    // The LaunchAgent owns the long-lived process and has KeepAlive enabled.
+    // Unloading it before terminating the tray prevents launchd from bringing
+    // the Local Agent straight back after the user chose Quit.
+    guard try command(launchctl, ["print", service]).status == 0 else { return }
+    try checkedCommand(launchctl, ["bootout", service])
+    guard try command(launchctl, ["print", service]).status != 0 else {
+      throw NSError(domain: "AgentLoop.LocalRuntime.Shutdown", code: 1, userInfo: [NSLocalizedDescriptionKey: "LaunchAgent remained loaded after bootout"])
+    }
+  }
+
   private static func checkedCommand(_ executable: URL, _ arguments: [String]) throws {
     let result = try command(executable, arguments)
     guard result.status == 0 else {

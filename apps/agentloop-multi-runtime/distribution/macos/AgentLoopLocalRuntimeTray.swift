@@ -83,7 +83,17 @@ final class AgentLoopLocalRuntimeTray: NSObject, NSApplicationDelegate {
     } catch { statusItem.button?.title = "AgentLoop !" }
   }
   @objc private func openLogs() { NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/AgentLoop Local Runtime/logs")) }
-  @objc private func quit() { NSApplication.shared.terminate(nil) }
+  @objc private func quit() {
+    do {
+      try LocalRuntimeInstallation.stopAgent(label: label, uid: getuid())
+      NSApplication.shared.terminate(nil)
+    } catch {
+      let alert = NSAlert()
+      alert.messageText = "Local Runtime Agent 停止失败"
+      alert.informativeText = error.localizedDescription
+      alert.runModal()
+    }
+  }
 
   private func run(_ executable: String, _ arguments: [String], allowFailure: Bool) {
     let process = Process(); process.executableURL = URL(fileURLWithPath: executable); process.arguments = arguments

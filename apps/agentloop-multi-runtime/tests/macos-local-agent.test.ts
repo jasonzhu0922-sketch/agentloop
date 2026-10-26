@@ -49,6 +49,43 @@ print("release origin and per-user LaunchAgent verified")
   }
 });
 
+test("macOS tray shutdown unloads the KeepAlive LaunchAgent before quitting", { skip: process.platform !== "darwin" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-macos-shutdown-"));
+  try {
+    const statePath = join(root, "state.json");
+    await writeFile(statePath, JSON.stringify({ loaded: true, calls: [] }));
+    const launchctl = join(root, "launchctl");
+    await writeFile(launchctl, `#!${process.execPath}
+const fs = require("node:fs");
+const statePath = ${JSON.stringify(statePath)};
+const state = JSON.parse(fs.readFileSync(statePath));
+const command = process.argv[2];
+state.calls.push([command, ...process.argv.slice(3)]);
+let status = 0;
+if (command === "print") status = state.loaded ? 0 : 1;
+if (command === "bootout") state.loaded = false;
+fs.writeFileSync(statePath, JSON.stringify(state));
+process.exit(status);
+`);
+    await chmod(launchctl, 0o755);
+    const harness = join(root, "main.swift");
+    await writeFile(harness, `import Foundation
+let launchctl = URL(fileURLWithPath: CommandLine.arguments[1])
+try LocalRuntimeInstallation.stopAgent(label: "com.agentloop.local-runtime-agent", uid: 501, launchctl: launchctl)
+print("LaunchAgent unloaded before tray quit")
+`);
+    const source = fileURLToPath(new URL("../distribution/macos/LocalRuntimeInstallation.swift", import.meta.url));
+    const executable = join(root, "verify");
+    execFileSync("/usr/bin/swiftc", ["-module-cache-path", join(root, "modules"), source, harness, "-o", executable], { stdio: "pipe" });
+    assert.match(execFileSync(executable, [launchctl], { encoding: "utf8" }), /LaunchAgent unloaded before tray quit/);
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    assert.equal(state.loaded, false);
+    assert.deepEqual(state.calls.map((call: string[]) => call[0]), ["print", "bootout", "print"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("macOS PKG includes an upgrade cleanup script without deleting runtime state", async () => {
   const [preinstall, postinstall] = await Promise.all([
     readFile(new URL("../distribution/macos/scripts/preinstall", import.meta.url), "utf8"),
