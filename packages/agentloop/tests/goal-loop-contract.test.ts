@@ -293,6 +293,16 @@ test("Recovery parsing treats a null sourceConstraint as absent while rejecting 
   }
 });
 
+test("Recovery parsing rejects delivery criteria that Admission derives from target ownership", () => {
+  const { state, proposal } = fixture();
+  const targetId = "delivery-target";
+  assert.throws(() => parseRecoveryDecision({ id: "recovery-derived-target", name: "submit_recovery_decision", arguments: {
+    actionId: "action", expectedActionRevision: 1, decision: "revise_plan", rationale: "Repair the result", evidenceRefs: [],
+    planRevision: { ...proposal, shape: "recovery_patch", steps: [{ ...proposal.steps[0], id: "repair", targetIds: [targetId],
+      successCriteria: [{ id: `delivery_target:${targetId}`, description: "Derived target criterion", source: "task" }] }] },
+  } }, state), /Runtime-derived delivery_target:delivery-target/);
+});
+
 test("an invalid Recovery response commits a stopped Outcome and retains the open Gap", async () => {
   const database = new AppDatabase(":memory:");
   try {

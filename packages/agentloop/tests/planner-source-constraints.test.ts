@@ -8,7 +8,7 @@ import { understandTask } from "../src/runtime/task-intent.ts";
 import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
 import type { PrivateSkill } from "../src/skills/skill-service.ts";
 import { planningCapabilitiesFromSkills, planningCapabilitiesFromToolNames, skillSourceProviderCapabilityId } from "../src/planning/step-execution-binding.ts";
-import { ModelRecoveryPlanner } from "../src/runtime/recovery-planning.ts";
+import { ModelRecoveryPlanner, type RecoveryPlannerInput } from "../src/runtime/recovery-planning.ts";
 import { recoveryProposalSuccessCriteria } from "../src/runtime/run-service.ts";
 
 class RedundantSourceConstraintPlannerModel implements ModelAdapter {
@@ -707,6 +707,54 @@ function webpageSummaryPlanningFixture() {
     },
   };
 }
+
+test("Recovery Planner retries a duplicate-criterion proposal with parser feedback", async () => {
+  const fixture = webpageSummaryPlanningFixture();
+  let calls = 0;
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 40_000, maxOutputTokens: 4_096 },
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 2) assert.match(request.systemPrompt, /duplicate ids/);
+      const criterion = { id: "repair-result", description: "Deliver the repaired result.", source: "planner" };
+      return {
+        content: "",
+        finishReason: "tool_calls" as const,
+        toolCalls: [{
+          id: `recovery-${calls}`,
+          name: "submit_recovery_decision",
+          arguments: calls === 1 ? {
+            actionId: "recovery-action", expectedActionRevision: 1, decision: "revise_plan",
+            rationale: "Repair the malformed proposal.", evidenceRefs: [],
+            planRevision: {
+              goal: fixture.task.canonicalState.intent.userInput,
+              shape: "recovery_patch", selectedSkillIds: [],
+              steps: [{ id: "repair", objective: "Repair the result.", dependencies: [], skillIds: [],
+                requiredCapabilities: [], targetIds: [], successCriteria: [criterion, criterion] }],
+            },
+          } : {
+            actionId: "recovery-action", expectedActionRevision: 1, decision: "fail",
+            rationale: "No valid continuation remains.", evidenceRefs: [],
+          },
+        }],
+      };
+    },
+  };
+  const input: RecoveryPlannerInput = {
+    runId: fixture.task.runId,
+    userInput: fixture.task.canonicalState.intent.userInput,
+    action: {
+      id: "recovery-action", runId: fixture.task.runId, kind: "recovery_review", state: "recovery_required",
+      attempt: 1, maxAttempts: 3, replayPolicy: "safe", fence: 1, revision: 1,
+      metadata: {}, effectState: "not_started", createdAt: 1, updatedAt: 1,
+    },
+    canonicalState: fixture.task.canonicalState,
+    events: [], userResponses: [],
+  };
+  const decision = await new ModelRecoveryPlanner(model).decide(input);
+  assert.equal(decision.decision, "fail");
+  assert.equal(calls, 2);
+});
 
 test("webpage summary provenance is Runtime-bound and both live paraphrases are rejected as model fields", async (t) => {
   for (const requirement of [undefined, "向用户提供该网页内容的中文摘要", "输出为中文摘要"]) {

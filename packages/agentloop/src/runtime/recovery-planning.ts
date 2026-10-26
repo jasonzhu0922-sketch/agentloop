@@ -18,7 +18,7 @@ import type {
   PlanningToolSummary,
 } from "../planning/contracts.ts";
 import type { CanonicalGoalGap, CanonicalRunState } from "./canonical-run-state.ts";
-import type { ModelAdapter, ModelToolCall, RuntimeContextSnapshot } from "./contracts.ts";
+import type { ModelAdapter, ModelInvocation, ModelToolCall, RuntimeContextSnapshot } from "./contracts.ts";
 import type { RuntimeActionRecord } from "./runtime-action-repository.ts";
 
 export type RecoveryDecisionKind = "resume_step" | "revise_plan" | "ask_user" | "fail";
@@ -102,30 +102,48 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
   }
 
   async decide(input: RecoveryPlannerInput, signal?: AbortSignal): Promise<RecoveryDecisionProposal> {
-    const response = await this.model.complete({
-      runId: input.runId,
-      phase: "planning",
-      systemPrompt: [
-        "You are the recovery planner in a plan-first runtime.",
-        "You cannot execute tools, declare completion, or alter recovery facts.",
-        "For assessment_failed_boundary, choose revise_plan, ask_user or fail. resume_step is reserved for interrupted execution and cannot restart an exhausted candidate loop.",
-        "Choose exactly one structured recovery decision. replayPolicy=unsafe never permits resume_step.",
-        "A Plan revision retires a Step from future scheduling only. It never erases, authorizes, compensates for, or replays an Action already recorded for that Step. If a retired Action has an unknown external effect, preserve that fact and choose a continuation that neither relies on nor repeats that effect, or fail when no such continuation exists.",
-        "If the failed boundary shows the current Plan's evidence contract is wrong for the evidence that actually exists, prefer revise_plan and repair the Plan boundary rather than resubmitting the same step.",
-        "planRevision is a complete replacement proposal, not a patch. Every step must explicitly declare targetIds, dependencies, skillIds, requiredCapabilities and successCriteria. Current bindings are in currentPlan.steps[].executionBinding.targetIds. Preserve every canonical delivery target exactly once on its producing or adopting leaf; use targetIds: [] for a prerequisite that owns no user-visible target. Do not infer ownership from criteria or requiredFacts[].basis.targetIds: those basis references may support targets owned by downstream dependent leaves. Preserve required facts and their exact user-input provenance when correcting execution methods or unsupported criteria. Runtime regenerates delivery_target criteria from targetIds; omit those derived criteria from the proposal.",
-        "Submit basis metadata (kind, intentId, targetIds, rationale) only. Omit basis.requirement, including when copying currentPlan criteria or facts: Runtime binds it from canonicalState.intent.userInput. A rationale must justify the condition; binding provenance does not prove that a derived condition is necessary.",
-        "Use failedBoundary.unmetCriteria to identify the actual result gap and any contractIssue. Choose a continuation that can change that cause, considering previously attempted strategies, available capabilities and the remaining gap budget in runtimeContext. A locally stalled turn does not prove global exhaustion. Never repeat unchanged work or weaken an explicit user requirement to obtain approval.",
-        "Do not ask the user to authorize a Plan revision, confirm whether a recorded Action had an effect, or accept a candidate as evidence that it meets a result criterion. Those are Runtime recovery and assessment obligations. Use ask_user only for a concrete, missing input that only the user can supply and that an execution continuation will consume; a missing capability to observe or verify the requested result is not such an input. When the available capabilities cannot change or verify a remaining result gap, choose fail and retain the stage artifact and its evidence.",
-      ].join("\n"),
-      runtimeContext: recoveryRuntimeContext(input),
-      messages: [{ role: "user", content: input.userInput }],
-      tools: [SUBMIT_RECOVERY_DECISION_TOOL],
-      toolChoice: { name: SUBMIT_RECOVERY_DECISION_TOOL.name },
-    }, signal);
-    if (response.finishReason === "length" || response.toolCalls.length !== 1 || response.toolCalls[0].name !== SUBMIT_RECOVERY_DECISION_TOOL.name) {
-      throw new AppError("PLANNING_ERROR", "Recovery Planner must submit exactly one structured recovery decision", 422);
+    const baseSystemPrompt = [
+      "You are the recovery planner in a plan-first runtime.",
+      "You cannot execute tools, declare completion, or alter recovery facts.",
+      "For assessment_failed_boundary, choose revise_plan, ask_user or fail. resume_step is reserved for interrupted execution and cannot restart an exhausted candidate loop.",
+      "Choose exactly one structured recovery decision. replayPolicy=unsafe never permits resume_step.",
+      "A Plan revision retires a Step from future scheduling only. It never erases, authorizes, compensates for, or replays an Action already recorded for that Step. If a retired Action has an unknown external effect, preserve that fact and choose a continuation that neither relies on nor repeats that effect, or fail when no such continuation exists.",
+      "If the failed boundary shows the current Plan's evidence contract is wrong for the evidence that actually exists, prefer revise_plan and repair the Plan boundary rather than resubmitting the same step.",
+      "planRevision is a complete replacement proposal, not a patch. Every step must explicitly declare targetIds, dependencies, skillIds, requiredCapabilities and successCriteria. Current bindings are in currentPlan.steps[].executionBinding.targetIds. Preserve every canonical delivery target exactly once on its producing or adopting leaf; use targetIds: [] for a prerequisite that owns no user-visible target. Do not infer ownership from criteria or requiredFacts[].basis.targetIds: those basis references may support targets owned by downstream dependent leaves. Preserve required facts and their exact user-input provenance when correcting execution methods or unsupported criteria. Runtime regenerates delivery_target criteria from targetIds; omit those derived criteria from the proposal.",
+      "Submit basis metadata (kind, intentId, targetIds, rationale) only. Omit basis.requirement, including when copying currentPlan criteria or facts: Runtime binds it from canonicalState.intent.userInput. A rationale must justify the condition; binding provenance does not prove that a derived condition is necessary.",
+      "Within every revised Step, each success criterion id must appear exactly once. Copy each existing criterion at most once; do not duplicate a criterion while adding or preserving a delivery condition. Runtime derives delivery_target:<targetId> criteria from targetIds, so never submit those criteria in successCriteria.",
+      "Use failedBoundary.unmetCriteria to identify the actual result gap and any contractIssue. Choose a continuation that can change that cause, considering previously attempted strategies, available capabilities and the remaining gap budget in runtimeContext. A locally stalled turn does not prove global exhaustion. Never repeat unchanged work or weaken an explicit user requirement to obtain approval.",
+      "Do not ask the user to authorize a Plan revision, confirm whether a recorded Action had an effect, or accept a candidate as evidence that it meets a result criterion. Those are Runtime recovery and assessment obligations. Use ask_user only for a concrete, missing input that only the user can supply and that an execution continuation will consume; a missing capability to observe or verify the requested result is not such an input. When the available capabilities cannot change or verify a remaining result gap, choose fail and retain the stage artifact and its evidence.",
+    ].join("\n");
+    const messages: ModelInvocation["messages"] = [{ role: "user", content: input.userInput }];
+    let validationError: AppError | undefined;
+    // A malformed recovery proposal must not be silently repaired by Runtime,
+    // because criteria are semantic obligations. Give the model one bounded
+    // contract-repair turn with the exact parser/admission feedback instead.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const systemPrompt = validationError === undefined
+        ? baseSystemPrompt
+        : `${baseSystemPrompt}\nThe previous recovery decision was rejected by Runtime validation: ${validationError.message}\nSubmit a corrected decision now. Preserve all valid obligations and remove only the malformed fields.`;
+      const response = await this.model.complete({
+        runId: input.runId,
+        phase: "planning",
+        systemPrompt,
+        runtimeContext: recoveryRuntimeContext(input),
+        messages,
+        tools: [SUBMIT_RECOVERY_DECISION_TOOL],
+        toolChoice: { name: SUBMIT_RECOVERY_DECISION_TOOL.name },
+      }, signal);
+      try {
+        if (response.finishReason === "length" || response.toolCalls.length !== 1 || response.toolCalls[0].name !== SUBMIT_RECOVERY_DECISION_TOOL.name) {
+          throw new AppError("PLANNING_ERROR", "Recovery Planner must submit exactly one structured recovery decision", 422);
+        }
+        return parseRecoveryDecision(response.toolCalls[0], input.canonicalState);
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== "PLANNING_ERROR" || attempt === 2) throw error;
+        validationError = error;
+      }
     }
-    return parseRecoveryDecision(response.toolCalls[0], input.canonicalState);
+    throw validationError ?? new AppError("PLANNING_ERROR", "Recovery Planner did not produce a valid recovery decision", 422);
   }
 }
 
@@ -258,8 +276,30 @@ function parseStep(value: unknown, index: number, canonicalState: CanonicalRunSt
   if (!Array.isArray(record.targetIds)) {
     throw badRequest(`planRevision.steps[${index}].targetIds must be an array; use [] for a prerequisite that owns no canonical target`);
   }
+  const targetIds = requireStringArray(record.targetIds, `planRevision.steps[${index}].targetIds`, 100);
   if (!Array.isArray(record.successCriteria) || record.successCriteria.length === 0 || record.successCriteria.length > 50) {
     throw badRequest(`planRevision.steps[${index}].successCriteria must contain between 1 and 50 entries`);
+  }
+  const successCriteria = record.successCriteria.map((criterion, criterionIndex): SuccessCriterion => {
+    const row = requireRecord(criterion, `planRevision.steps[${index}].successCriteria[${criterionIndex}]`);
+    return {
+      id: requireString(row.id, "criterion id", { max: 128 }),
+      description: requireString(row.description, "criterion description", { max: 2_000 }),
+      source: row.source === "task" ? "task" : "planner",
+      ...(row.targetId === undefined ? {} : { targetId: requireString(row.targetId, "criterion targetId", { max: 128 }) }),
+      ...(row.basis === undefined ? {} : { basis: parseModelCriterionBasis(row.basis, "criterion basis", canonicalState) }),
+      ...(row.blocking === undefined ? {} : { blocking: parseBoolean(row.blocking, "criterion blocking") }),
+      ...(row.verification === undefined ? {} : { verification: parseCriterionVerification(row.verification) }),
+    };
+  });
+  const criterionIds = successCriteria.map((criterion) => criterion.id);
+  if (new Set(criterionIds).size !== criterionIds.length) {
+    throw badRequest(`planRevision.steps[${index}].successCriteria must not contain duplicate ids`);
+  }
+  for (const criterion of successCriteria) {
+    if (criterion.id.startsWith("delivery_target:") && targetIds.includes(criterion.id.slice("delivery_target:".length))) {
+      throw badRequest(`planRevision.steps[${index}].successCriteria must omit Runtime-derived ${criterion.id}`);
+    }
   }
   return {
     id: requireString(record.id, `planRevision.steps[${index}].id`, { max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }),
@@ -271,22 +311,11 @@ function parseStep(value: unknown, index: number, canonicalState: CanonicalRunSt
     ...(record.refinementState === undefined ? {} : { refinementState: parseRefinementState(record.refinementState, index) }),
     skillIds: requireStringArray(record.skillIds, `planRevision.steps[${index}].skillIds`, 100),
     requiredCapabilities: requireStringArray(record.requiredCapabilities, `planRevision.steps[${index}].requiredCapabilities`, 100),
-    targetIds: requireStringArray(record.targetIds, `planRevision.steps[${index}].targetIds`, 100),
+    targetIds,
     ...(record.sourceConstraint === undefined || record.sourceConstraint === null ? {} : { sourceConstraint: parseRecoverySourceConstraint(record.sourceConstraint) }),
     ...(record.requiredFacts === undefined ? {} : { requiredFacts: parseRecoveryRequiredFacts(record.requiredFacts, canonicalState) }),
     ...(record.evidenceContract === undefined ? {} : { evidenceContract: parseEvidenceContract(record.evidenceContract, index) }),
-    successCriteria: record.successCriteria.map((criterion, criterionIndex): SuccessCriterion => {
-      const row = requireRecord(criterion, `planRevision.steps[${index}].successCriteria[${criterionIndex}]`);
-      return {
-        id: requireString(row.id, "criterion id", { max: 128 }),
-        description: requireString(row.description, "criterion description", { max: 2_000 }),
-        source: row.source === "task" ? "task" : "planner",
-        ...(row.targetId === undefined ? {} : { targetId: requireString(row.targetId, "criterion targetId", { max: 128 }) }),
-        ...(row.basis === undefined ? {} : { basis: parseModelCriterionBasis(row.basis, "criterion basis", canonicalState) }),
-        ...(row.blocking === undefined ? {} : { blocking: parseBoolean(row.blocking, "criterion blocking") }),
-        ...(row.verification === undefined ? {} : { verification: parseCriterionVerification(row.verification) }),
-      };
-    }),
+    successCriteria,
   };
 }
 
