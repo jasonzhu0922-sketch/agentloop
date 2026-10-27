@@ -9,6 +9,7 @@ export interface LocalRuntimeState {
   agentHealth: Record<string, unknown> | undefined;
   agentConfig: Record<string, unknown> | undefined;
   agentStatus: string;
+  deviceAccessChecked: boolean;
   agentInstallPoll: ReturnType<typeof setInterval> | undefined;
   agentReprobe: ReturnType<typeof setTimeout> | undefined;
   hydratedPreferenceKey: string;

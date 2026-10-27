@@ -13,6 +13,7 @@ test("local runtime state keeps device, Runtime, scope, and Agent lifecycle toge
   state.scopes = [{ id: "scope-1", status: "active" }];
   state.agentStatus = "online";
   state.agentHealth = { registered: true };
+  state.deviceAccessChecked = true;
   state.hydratedPreferenceKey = "user-1:device-1";
   state.clear();
   assert.equal(state.device, undefined);
@@ -22,6 +23,7 @@ test("local runtime state keeps device, Runtime, scope, and Agent lifecycle toge
   assert.deepEqual(state.scopes, []);
   assert.equal(state.agentStatus, "checking");
   assert.equal(state.agentHealth, undefined);
+  assert.equal(state.deviceAccessChecked, false);
   assert.equal(state.hydratedPreferenceKey, "");
 });
 
@@ -45,7 +47,7 @@ test("settings preserve the active tab across Agent refreshes and reopen on mode
     dataset: { agentSettingsView: view },
     classList: { toggle(_name: string, active: boolean) { if (active) selectedTab = view; } },
   }));
-  const state = { agentStatus: "online", device: {}, runtimes: [] };
+  const state = { agentStatus: "online", device: { id: "device-1" }, runtimes: [] };
   const controls = runInNewContext(`
     let activeAgentSettingsView = "models";
     ${sourceBetween("function updateLocalControls()", "async function addDirectoryScope()")}
@@ -85,4 +87,57 @@ test("settings preserve the active tab across Agent refreshes and reopen on mode
   assert.equal(element("agent-settings-modal").hidden, false);
   assert.equal(element("agent-model-settings").hidden, false);
   assert.equal(element("local-runtime-manager").hidden, true);
+});
+
+test("a device registered to another account does not appear ready, and settings explain why", async () => {
+  const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  const loadDevicesSource = app.slice(app.indexOf("async function loadDevices()"), app.indexOf("function scheduleLocalAgentReprobe()"));
+  const settingsSource = app.slice(app.indexOf("async function openLocalAgentSettings()"), app.indexOf("const localModelSettings"));
+  const state = {
+    agentStatus: "online", agentHealth: { registered: true, deviceId: "someone-elses-device" },
+    device: undefined, deviceAccessChecked: false,
+  };
+  let renderedStatus = "";
+  let message = "";
+  let toast = "";
+  const controls = runInNewContext(`${loadDevicesSource}\n${settingsSource}\n({ loadDevices, openLocalAgentSettings })`, {
+    localRuntimeState: state,
+    localSkillPackages: [], localSkillPackagesLoaded: false,
+    probeLocalAgent: async () => undefined,
+    routerClient: { request: async () => Response.json({ devices: [] }) },
+    renderLocalAgentState: () => { renderedStatus = state.agentStatus; },
+    updateLocalControls: () => undefined,
+    setStatus: (value: string) => { message = value; },
+    showToast: (value: string) => { toast = value; },
+  });
+  await controls.loadDevices();
+  assert.equal(state.deviceAccessChecked, true);
+  assert.equal(renderedStatus, "paired_elsewhere");
+  await controls.openLocalAgentSettings();
+  assert.match(message, /已绑定其他账号/);
+  assert.equal(toast, message);
+});
+
+test("settings renew a missing local session for the paired account", async () => {
+  const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  const settingsSource = app.slice(app.indexOf("async function openLocalAgentSettings()"), app.indexOf("const localModelSettings"));
+  const modal = { hidden: true };
+  const sessionState = { localSessionToken: "" };
+  let refreshed = 0;
+  const { openLocalAgentSettings } = runInNewContext(`${settingsSource}\n({ openLocalAgentSettings })`, {
+    localRuntimeState: { device: { id: "device-1" }, agentStatus: "online" },
+    sessionState,
+    refreshLocalSessionOnce: async () => { refreshed++; sessionState.localSessionToken = "new-session"; },
+    loadLocalAgentConfig: async () => undefined,
+    loadLocalRuntimes: async () => undefined,
+    loadLocalModelConfiguration: async () => undefined,
+    loadLocalSkillPackages: async () => undefined,
+    renderLocalAgentConfig: () => undefined,
+    syncLocalRuntimeManager: () => undefined,
+    activateAgentSettingsView: () => undefined,
+    $: () => modal,
+  });
+  await openLocalAgentSettings();
+  assert.equal(refreshed, 1);
+  assert.equal(modal.hidden, false);
 });

@@ -17,6 +17,7 @@ export function createLocalRuntimeState() {
     agentHealth: undefined,
     agentConfig: undefined,
     agentStatus: "checking",
+    deviceAccessChecked: false,
     agentInstallPoll: undefined,
     agentReprobe: undefined,
     hydratedPreferenceKey: "",
@@ -31,7 +32,9 @@ export function createLocalRuntimeState() {
       this.agentHealth = undefined;
       this.agentConfig = undefined;
       this.agentStatus = "checking";
+      this.deviceAccessChecked = false;
       this.agentInstallPoll = undefined;
+      if (this.agentReprobe) clearTimeout(this.agentReprobe);
       this.agentReprobe = undefined;
       this.hydratedPreferenceKey = "";
     },

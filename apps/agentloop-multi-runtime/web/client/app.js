@@ -358,6 +358,7 @@ async function enableLocalRuntime() {
       return;
     }
     if (localRuntimeState.agentStatus === "incompatible") { await offerLocalAgentInstall(); return; }
+    if (localRuntimeState.agentStatus === "paired_elsewhere") throw new Error("本机 Agent 已绑定其他账号；请用已配对账号登录后打开设置");
     if (localRuntimeState.agentStatus !== "online_unpaired" && localRuntimeState.agentStatus !== "online") throw new Error("Local Runtime Agent 尚未就绪");
     if (localRuntimeState.agentHealth?.registered === true) {
       await connectRegisteredLocalAgent();
@@ -382,19 +383,23 @@ async function enableLocalRuntime() {
 
 async function loadDevices() {
   await probeLocalAgent();
+  if (localRuntimeState.agentStatus === "unreachable" || localRuntimeState.agentStatus === "router_disconnected") scheduleLocalAgentReprobe();
   try {
     const response = await routerClient.request("/v1/devices");
     if (!response.ok) return;
     const body = await response.json();
     const device = (body.devices || []).find((item) => item.id === localRuntimeState.agentHealth?.deviceId && item.status === "active");
+    localRuntimeState.deviceAccessChecked = true;
     if (device?.id !== localRuntimeState.device?.id) {
       localSkillPackages = [];
       localSkillPackagesLoaded = false;
+      if (localRuntimeState.device) clearLocalSession();
     }
     localRuntimeState.device = device;
+    if (localRuntimeState.agentStatus === "online" && !device) localRuntimeState.agentStatus = "paired_elsewhere";
+    renderLocalAgentState();
     if (localRuntimeState.device && localRuntimeState.agentStatus === "online") await connectRegisteredLocalAgent();
   } catch {}
-  if (localRuntimeState.agentStatus === "router_disconnected") scheduleLocalAgentReprobe();
   updateLocalControls();
 }
 
@@ -404,8 +409,8 @@ function scheduleLocalAgentReprobe() {
     localRuntimeState.agentReprobe = undefined;
     await probeLocalAgent();
     if (localRuntimeState.agentStatus === "online") await loadDevices();
-    else if (localRuntimeState.agentStatus === "router_disconnected") scheduleLocalAgentReprobe();
-  })(), 1_500);
+    else if (localRuntimeState.agentStatus === "unreachable" || localRuntimeState.agentStatus === "router_disconnected") scheduleLocalAgentReprobe();
+  })(), localRuntimeState.agentStatus === "unreachable" ? 5_000 : 1_500);
 }
 
 async function connectRegisteredLocalAgent() {
@@ -432,7 +437,8 @@ async function probeLocalAgent() {
     localRuntimeState.agentStatus = body.protocolVersion !== LOCAL_AGENT_PROTOCOL_VERSION ? "incompatible"
       : !body.router?.configured ? "router_not_configured"
       : !body.registered ? "online_unpaired"
-      : body.routerConnected ? "online" : "router_disconnected";
+      : !body.routerConnected ? "router_disconnected"
+      : localRuntimeState.deviceAccessChecked && !localRuntimeState.device ? "paired_elsewhere" : "online";
   } catch {
     localRuntimeState.agentHealth = undefined;
     localRuntimeState.agentStatus = "unreachable";
@@ -451,6 +457,7 @@ function renderLocalAgentState() {
     installed_stopped: ["未启动 · 启动", "已安装的 Agent 将通过系统启动协议恢复。"],
     unreachable: ["无法访问 · 重试", "无法从当前浏览器访问本机 Agent；请确认 Agent 正在运行并重试。"],
     online_unpaired: ["未配对 · 配对", "配对后 Router 才可调度本机 Runtime。"],
+    paired_elsewhere: ["账号未配对", "本机 Agent 已绑定其他账号，请使用已配对账号登录。"],
     online: ["已就绪", "本机 Agent 已连接；本机目录和产物默认不上传云端。"],
     router_disconnected: ["连接中断 · 重试", "Agent 正在自动重连 Router；恢复后才可调度本机 Runtime。"],
     incompatible: ["需更新", "当前 Agent 与 Web 控制协议不兼容。"],
@@ -461,7 +468,8 @@ function renderLocalAgentState() {
   $("local-agent-state-dot").className = localRuntimeState.agentStatus;
   $("local-agent-version").textContent = localRuntimeState.agentHealth?.agentVersion ? `v${localRuntimeState.agentHealth.agentVersion}` : "";
   $("enable-local-runtime").classList.toggle("ready", localRuntimeState.agentStatus === "online");
-  $("local-agent-settings").disabled = localRuntimeState.agentStatus !== "online";
+  $("local-agent-settings").disabled = localRuntimeState.agentStatus === "checking";
+  $("local-agent-settings").title = copy[1];
 }
 
 async function offerLocalAgentInstall() {
@@ -1080,12 +1088,26 @@ function defaultUploadStoragePath(sharedStoragePath) {
 }
 
 async function openLocalAgentSettings() {
-  if (!sessionState.localSessionToken) return;
-  await Promise.all([loadLocalAgentConfig(), loadLocalRuntimes(), loadLocalModelConfiguration(), loadLocalSkillPackages(true)]);
-  renderLocalAgentConfig();
-  syncLocalRuntimeManager();
-  activateAgentSettingsView("models");
-  $("agent-settings-modal").hidden = false;
+  if (!localRuntimeState.device?.id) {
+    const message = localRuntimeState.agentStatus === "paired_elsewhere"
+      ? "本机 Agent 已绑定其他账号；请用已配对账号登录后打开设置"
+      : "本机 Agent 尚未与当前账号配对，请先点击本机能力状态完成配对";
+    setStatus(message, "error");
+    showToast(message, "error");
+    return;
+  }
+  try {
+    if (!sessionState.localSessionToken) await refreshLocalSessionOnce();
+    await Promise.all([loadLocalAgentConfig(), loadLocalRuntimes(), loadLocalModelConfiguration(), loadLocalSkillPackages(true)]);
+    renderLocalAgentConfig();
+    syncLocalRuntimeManager();
+    activateAgentSettingsView("models");
+    $("agent-settings-modal").hidden = false;
+  } catch (error) {
+    const message = `无法打开本机设置：${error instanceof Error ? error.message : String(error)}`;
+    setStatus(message, "error");
+    showToast(message, "error");
+  }
 }
 
 const localModelSettings = createLocalModelSettings({ getElement: $, request: localAgentFetch, onSaved: loadModels, notify: showToast });
