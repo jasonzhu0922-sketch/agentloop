@@ -32,7 +32,7 @@ for name in ["First Installer", "Other User & Device"] {
   precondition(plist["StandardOutPath"] as? String == logs.appendingPathComponent("agent.out.log").path)
   precondition(plist["StandardErrorPath"] as? String == logs.appendingPathComponent("agent.err.log").path)
   precondition(FileManager.default.fileExists(atPath: logs.path))
-  precondition((plist["ProgramArguments"] as! [String])[0] == root.appendingPathComponent("agentloop-local-runtime-agent").path)
+  precondition((plist["ProgramArguments"] as! [String])[0] == root.appendingPathComponent("agentloop-local-runtime-launcher").path)
   try Data("stale previous installation".utf8).write(to: target)
   _ = try LocalRuntimeInstallation.launchAgentPath(resources: root, home: home, label: "com.agentloop.local-runtime-agent")
   _ = try PropertyListSerialization.propertyList(from: Data(contentsOf: target), format: nil)
@@ -123,6 +123,7 @@ test("macOS PKG includes an upgrade cleanup script without deleting runtime stat
   assert.match(packager, /preparePackagedPythonRuntime/);
   assert.match(packager, /copyPackagedNodeModules/);
   assert.match(packager, /agentloop-local-runtime-node/);
+  assert.match(packager, /rotating-log-launcher/);
   assert.match(packager, /nodeModules/);
   for (const name of ["preinstall", "postinstall"]) {
     assert.equal(execFileSync("/bin/sh", [new URL(`../distribution/macos/scripts/${name}`, import.meta.url).pathname, "/tmp/AgentLoop.pkg", "/Applications", "/Volumes/Other"], { encoding: "utf8" }), "");

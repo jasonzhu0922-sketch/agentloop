@@ -24,6 +24,7 @@ const seaBundle = join(buildRoot, "agentloop-local-runtime-agent-sea.cjs");
 const seaConfig = join(buildRoot, "sea-config.json");
 const seaBlob = join(buildRoot, "sea-prep.blob");
 const executable = join(resources, "agentloop-local-runtime-agent");
+const launcher = join(resources, "agentloop-local-runtime-launcher");
 const packagedPythonRoot = requiredPackagedPythonRoot();
 const pkg = join(releaseRoot, `AgentLoop-Local-Runtime-${version}-macos-arm64.pkg`);
 const releaseEnvironment = process.env.AGENTLOOP_RELEASE_ENV ?? "development";
@@ -107,6 +108,14 @@ if (!existsSync(runtimeNode)) {
   await bundleMacRuntimeLibraries(process.execPath, runtimeNode, join(resources, "lib"));
 }
 if (!existsSync(join(resources, "node"))) await symlink("agentloop-local-runtime-node", join(resources, "node"));
+await cp(join(appRoot, "distribution/rotating-log-launcher.mjs"), join(resources, "rotating-log-launcher.mjs"));
+await writeFile(launcher, `#!/bin/sh
+set -eu
+RESOURCE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+LOG_ROOT="$HOME/Library/Application Support/AgentLoop Local Runtime/logs"
+exec "$RESOURCE_ROOT/agentloop-local-runtime-node" "$RESOURCE_ROOT/rotating-log-launcher.mjs" --log-root "$LOG_ROOT" -- "$RESOURCE_ROOT/agentloop-local-runtime-agent" "$@"
+`, { mode: 0o755 });
+await chmod(launcher, 0o755);
 await cp(join(repositoryRoot, "packages/agentloop-skills/skills"), join(resources, "skills"), { recursive: true });
 await cp(join(appRoot, "local-agent-runtime"), join(resources, "agent-loop-runtime"), { recursive: true });
 await preparePackagedPythonRuntime({

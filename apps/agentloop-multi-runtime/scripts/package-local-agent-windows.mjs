@@ -100,10 +100,11 @@ async function writeLauncher(seaInjected) {
   const invoke = seaInjected
     ? `"%RESOURCE_ROOT%agentloop-local-runtime-agent.exe" %*`
     : `"%RESOURCE_ROOT%agentloop-local-runtime-node.exe" "%RESOURCE_ROOT%agentloop-local-runtime-agent.mjs" %*`;
-  await writeFile(launcher, `@echo off\r\nsetlocal\r\nset "RESOURCE_ROOT=%~dp0"\r\nset "LOG_ROOT=%LOCALAPPDATA%\\AgentLoop Local Runtime\\logs"\r\nif not exist "%LOG_ROOT%" mkdir "%LOG_ROOT%"\r\nset "AGENTLOOP_AGENT_PACKAGED=1"\r\nset "AGENTLOOP_AGENT_APP_ROOT=%RESOURCE_ROOT%"\r\nset "AGENTLOOP_BUNDLED_SKILL_DIRECTORIES=%RESOURCE_ROOT%skills"\r\n${invoke} >> "%LOG_ROOT%\\agent.out.log" 2>> "%LOG_ROOT%\\agent.err.log"\r\n`, "utf8");
+  await writeFile(launcher, `@echo off\r\nsetlocal\r\nset "RESOURCE_ROOT=%~dp0"\r\nset "LOG_ROOT=%LOCALAPPDATA%\\AgentLoop Local Runtime\\logs"\r\nif not exist "%LOG_ROOT%" mkdir "%LOG_ROOT%"\r\nset "AGENTLOOP_AGENT_PACKAGED=1"\r\nset "AGENTLOOP_AGENT_APP_ROOT=%RESOURCE_ROOT%"\r\nset "AGENTLOOP_BUNDLED_SKILL_DIRECTORIES=%RESOURCE_ROOT%skills"\r\n"%RESOURCE_ROOT%agentloop-local-runtime-node.exe" "%RESOURCE_ROOT%rotating-log-launcher.mjs" --log-root "%LOG_ROOT%" -- ${invoke}\r\n`, "utf8");
 }
 
 async function copyRuntimePayload() {
+  await cp(join(appRoot, "distribution/rotating-log-launcher.mjs"), join(resources, "rotating-log-launcher.mjs"));
   await cp(join(repositoryRoot, "packages/agentloop-skills/skills"), join(resources, "skills"), { recursive: true });
   await cp(join(appRoot, "local-agent-runtime"), join(resources, "agent-loop-runtime"), { recursive: true });
   const runtimeNode = join(resources, "agentloop-local-runtime-node.exe");

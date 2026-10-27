@@ -16,7 +16,7 @@ enum LocalRuntimeInstallation {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
     guard var plist = try PropertyListSerialization.propertyList(from: Data(contentsOf: source), format: nil) as? [String: Any] else { throw CocoaError(.propertyListReadCorrupt) }
-    let executable = resources.appendingPathComponent("agentloop-local-runtime-agent").path
+    let executable = resources.appendingPathComponent("agentloop-local-runtime-launcher").path
     plist["ProgramArguments"] = [executable]
     // A previous job definition may contain Program as well as ProgramArguments.
     plist.removeValue(forKey: "Program")
