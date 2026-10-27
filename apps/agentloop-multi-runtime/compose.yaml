@@ -127,6 +127,7 @@ services:
       # Local Runtime Agents receive this external address from the browser
       # bootstrap flow; never expose the Compose-only `router` hostname.
       ROUTER_PUBLIC_URL: ${ROUTER_PUBLIC_URL:-http://localhost:8788}
+      LOCAL_AGENT_URL: ${LOCAL_AGENT_URL:-http://127.0.0.1:18790}
     ports: ["5174:5174"]
 
 volumes:

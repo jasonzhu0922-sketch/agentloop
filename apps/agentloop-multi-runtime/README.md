@@ -369,6 +369,14 @@ Router 提供可断线续读的事件查询以及 `GET /v1/assignments/:assignme
 
 ### 打包 Local Runtime Agent（macOS Apple Silicon）
 
+测试页 `http://10.251.40.44/agentloop/` 的“本机能力”使用安装版 Agent 的
+`127.0.0.1:18790`。在仓库根目录运行 `npm run package:app:mac`，可生成针对该
+测试页的 `.pkg`；脚本会通过 `uv` 准备独立 Python 3.12，并把测试 Router
+`http://10.251.40.44` 与 Web 来源 `http://10.251.40.44` 写入包内。
+部署该 Web 时，`LOCAL_AGENT_URL` 应为 `http://127.0.0.1:18790`，
+`ROUTER_PUBLIC_URL` 应为浏览器和设备都能访问的 Router 根地址；
+Nginx 还需将根路径 `/v1/`（包括 WebSocket）代理至 Router。
+
 Local Runtime Agent 优先使用 Node SEA 打包为后台可执行程序，配合一个很小的 Swift 托盘壳，不包含 Electron/Chromium。若构建机的 Node 二进制没有 SEA fuse（例如当前 Homebrew Node 26），打包器会自动改为随包携带 Node runtime 及其 macOS 动态库依赖；两种产物使用同一个 Agent bundle 和协议。生产包还必须显式提供可重定位的 Python 3.12 runtime 目录；打包器会把 requirements.txt 安装进随包 Python 前缀并验证 Runtime 模块，避免安装后回退到用户的 `python3` 或联网建 venv。包内还带有同版本 Node runtime、Skill 脚本需要的 Node 模块，启动时通过 `PATH` 和 `NODE_PATH` 交给 Local Runtime，并设置 `PYTHONNOUSERSITE=1` 隔离用户级 Python 包。`pandoc`、`qpdf`、`tesseract` 等系统工具仍由目标设备提供，安装包不会伪装成已包含它们。打包命令会先构建 kernel 和 bundled Skills：
 
 ```bash
