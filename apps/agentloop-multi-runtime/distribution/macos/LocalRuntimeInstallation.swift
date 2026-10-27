@@ -4,7 +4,7 @@ enum LocalRuntimeInstallation {
   static func webURL(resources: URL) throws -> URL {
     let manifest = resources.appendingPathComponent("agentloop-local-runtime.manifest.json")
     let release = try JSONDecoder().decode(Release.self, from: Data(contentsOf: manifest))
-    guard let url = URL(string: release.webOrigin), ["http", "https"].contains(url.scheme), url.host != nil else { throw URLError(.badURL) }
+    guard let url = URL(string: release.webUrl ?? release.webOrigin), ["http", "https"].contains(url.scheme), url.host != nil else { throw URLError(.badURL) }
     return url
   }
 
@@ -76,5 +76,6 @@ enum LocalRuntimeInstallation {
 
   private struct Release: Decodable {
     let webOrigin: String
+    let webUrl: String?
   }
 }

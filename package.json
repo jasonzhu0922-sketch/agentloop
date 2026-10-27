@@ -22,6 +22,8 @@
     "pack:skills": "npm run build:skills && npm pack ./packages/agentloop-skills",
     "pack:plan-template": "npm run build:kernel && npm run build:plan-template && npm pack ./packages/agentloop-plan-template",
     "build:web": "npm run build --prefix apps/agentloop-app/web",
+    "package:app:mac": "node apps/agentloop-multi-runtime/scripts/package-connected-macos.mjs",
+    "package:reference-app:mac": "npm run package:mac --workspace agentloop-app",
     "build": "npm run build:kernel && npm run build:artifact-preview && npm run build:skills && npm run build:plan-template && npm run build:web",
     "start:multi-runtime": "MAX_CONCURRENT_RUNS=20 npm run start:local --workspace agentloop-multi-runtime --",
     "start:multi-runtime:build": "npm run build:kernel && npm run build:artifact-preview && npm run build:skills && npm run build:plan-template && npm run start:local --workspace agentloop-multi-runtime --",

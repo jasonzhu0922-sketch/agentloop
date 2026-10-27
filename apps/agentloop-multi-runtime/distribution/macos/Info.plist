@@ -7,6 +7,7 @@
   <key>CFBundleVersion</key><string>__VERSION__</string>
   <key>CFBundleShortVersionString</key><string>__VERSION__</string>
   <key>CFBundleExecutable</key><string>AgentLoop Local Runtime</string>
+  <key>CFBundleIconFile</key><string>AgentLoop.icns</string>
   <key>LSUIElement</key><true/>
   <key>CFBundleURLTypes</key><array><dict>
     <key>CFBundleURLName</key><string>AgentLoop Local Runtime</string>

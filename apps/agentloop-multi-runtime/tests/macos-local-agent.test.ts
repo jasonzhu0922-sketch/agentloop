@@ -20,6 +20,9 @@ for origin in ["http://203.0.113.7:3001", "https://web.example.test"] {
   let actual = try LocalRuntimeInstallation.webURL(resources: root).absoluteString
   precondition(actual == origin)
 }
+try JSONSerialization.data(withJSONObject: ["webOrigin": "http://10.251.40.44", "webUrl": "http://10.251.40.44/agentloop/"]).write(to: manifest)
+let page = try LocalRuntimeInstallation.webURL(resources: root).absoluteString
+precondition(page == "http://10.251.40.44/agentloop/")
 for invalid in ["file:///tmp/wrong", "not-a-url"] {
   try JSONSerialization.data(withJSONObject: ["webOrigin": invalid]).write(to: manifest)
   do { _ = try LocalRuntimeInstallation.webURL(resources: root); fatalError("invalid origin accepted") } catch {}

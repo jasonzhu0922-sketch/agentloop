@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, extname, isAbsolute, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { BatchService, LlmProviderRegistry, RunService, SkillService } from "@zhujun/agentloop";
 import { AppError, asAppError, badRequest, notFound } from "@zhujun/agentloop";
@@ -29,6 +29,8 @@ export interface AgentLoopServerOptions {
    * Access-Control-Allow-Origin header is emitted (same-origin only).
    */
   readonly webOrigins?: readonly string[];
+  /** Built frontend directory for the packaged single-origin desktop app. */
+  readonly webRoot?: string;
 }
 
 export function createAgentLoopServer(
@@ -55,7 +57,10 @@ export function createAgentLoopServer(
         return sendJson(response, 200, { status: "ok" });
       }
       if (request.method === "GET" && url.pathname === "/favicon.ico") {
-        return sendJson(response, 204, undefined);
+        if (options.webRoot === undefined) return sendJson(response, 204, undefined);
+      }
+      if (request.method === "GET" && options.webRoot !== undefined && !url.pathname.startsWith("/v1/")) {
+        return await serveWebAsset(response, options.webRoot, url.pathname);
       }
       if (!url.pathname.startsWith("/v1/")) throw notFound("Route");
 
@@ -577,6 +582,43 @@ function setSecurityHeaders(response: ServerResponse, traceId: string, allowedOr
     response.setHeader("access-control-allow-credentials", "true");
     response.setHeader("vary", "origin");
   }
+}
+
+async function serveWebAsset(response: ServerResponse, webRoot: string, pathname: string): Promise<void> {
+  const root = resolve(webRoot);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    throw badRequest("Invalid web path");
+  }
+  const candidate = resolve(root, `.${decoded}`);
+  if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) throw notFound("Route");
+  const file = extname(candidate) === "" ? resolve(root, "index.html") : candidate;
+  let content: Buffer;
+  try {
+    content = await fs.readFile(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "EISDIR") {
+      throw notFound("Route");
+    }
+    throw error;
+  }
+  const mime = ({
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
+    ".json": "application/json; charset=utf-8",
+  } as Record<string, string>)[extname(file)] ?? "application/octet-stream";
+  response.statusCode = 200;
+  response.setHeader("content-type", mime);
+  response.setHeader("content-security-policy", "default-src 'self' data: blob:; connect-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'");
+  response.setHeader("cache-control", extname(file) === ".html" ? "no-cache" : "public, max-age=31536000, immutable");
+  response.end(content);
 }
 
 function allowOrigin(origin: string | undefined, allowlist: readonly string[] | undefined): string | undefined {

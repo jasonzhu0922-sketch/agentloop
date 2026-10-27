@@ -113,7 +113,10 @@ const recoveryMonitor = setInterval(() => {
 }, 10_000);
 const batches = new BatchService(database, runs);
 
-const server = createAgentLoopServer({ auth, skills, runs, batches, providers }, { webOrigins });
+const server = createAgentLoopServer({ auth, skills, runs, batches, providers }, {
+  webOrigins,
+  ...(process.env.AGENTLOOP_WEB_DIST === undefined ? {} : { webRoot: process.env.AGENTLOOP_WEB_DIST }),
+});
 server.listen(port, host, () => {
   process.stdout.write(
     `AgentLoop API listening on http://${host}:${port}; discovered ${skillDirectorySync.discoveredSkills.length} Skill package(s) from ${skillDirectories.join(", ")}; pruned ${skillDirectorySync.prunedLegacySkillCount} stale package Skill(s); refreshed ${skillDirectorySync.refreshedInstalledSkillCount} installed Skill package(s); queued ${reconciledRunCount} recovery review(s)\n`,

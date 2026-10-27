@@ -20,6 +20,7 @@
   },
   "scripts": {
     "init-db": "node scripts/init-db.ts",
+    "package:mac": "node scripts/package-macos.mjs",
     "start": "node --env-file-if-exists=.env src/main.ts",
     "test": "node --test --test-isolation=process tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.json"

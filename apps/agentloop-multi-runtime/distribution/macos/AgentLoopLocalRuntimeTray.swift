@@ -17,6 +17,12 @@ final class AgentLoopLocalRuntimeTray: NSObject, NSApplicationDelegate {
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    if let iconURL = Bundle.main.url(forResource: "AgentLoop", withExtension: "icns"),
+       let icon = NSImage(contentsOf: iconURL) {
+      icon.size = NSSize(width: 18, height: 18)
+      statusItem.button?.image = icon
+      statusItem.button?.imagePosition = .imageLeft
+    }
     statusItem.button?.title = "AgentLoop"
     let menu = NSMenu()
     menu.addItem(NSMenuItem(title: "Local Runtime Agent", action: nil, keyEquivalent: ""))

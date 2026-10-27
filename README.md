@@ -336,6 +336,8 @@ npm run build:kernel
 npm run build:skills
 npm run build:plan-template
 npm run build:web
+npm run package:app:mac              # Apple Silicon: Local Runtime Agent .pkg（供 /agentloop/ 本机能力发现）
+npm run package:reference-app:mac    # 独立参考应用 .app + .dmg
 npm run test                         # Unit + SQLite Kernel + Multi Runtime contracts
 npm run test:unit
 npm run test:kernel
@@ -348,6 +350,22 @@ npm start
 npm run start:multi-runtime
 npm run start:multi-runtime -- --runtimes 4
 ```
+
+Local Runtime Agent 的测试环境 Mac 安装包使用 `npm run package:app:mac` 构建，
+产物位于 `apps/agentloop-multi-runtime/release/local-agent/macos-arm64/`。
+打包器会用 `uv` 准备可重定位 Python 3.12（可通过
+`AGENTLOOP_PACKAGED_PYTHON_ROOT` 指定已有目录），默认连接测试 Web
+`http://10.251.40.44/agentloop/` 和 Router `http://10.251.40.44`，安装后监听
+`127.0.0.1:18790`，由测试页面的“本机能力”按钮探测和配对。
+
+独立参考应用的 macOS 桌面包使用 `npm run package:reference-app:mac` 构建，产物位于
+`apps/agentloop-app/release/macos-arm64/`。构建需要 Apple Silicon Mac、Node 26、
+Swift 编译器以及已安装的仓库依赖。包内包含 Web UI、本地 API 和 Node 运行时；
+首次运行会在 `~/Library/Application Support/AgentLoop/` 创建数据库、工作区、
+`config/llm-providers.json` 与权限为 `0600` 的 `.env`。在该 `.env` 中填写模型密钥后
+重新启动应用。打包器只使用仓库内的公开示例配置，不复制开发机现有的 `.env`、
+模型配置或数据。默认使用临时签名，供本机使用；对外分发需使用
+`APPLE_CODESIGN_IDENTITY` 指定 Developer ID Application 身份并完成 Apple 公证。
 
 ## 上游来源
 

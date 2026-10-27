@@ -38,12 +38,15 @@ const webOrigin = process.env.AGENTLOOP_WEB_ORIGIN ?? ({
   production: process.env.AGENTLOOP_WEB_ORIGIN_PRODUCTION,
 }[releaseEnvironment]);
 if (typeof routerUrl !== "string" || typeof webOrigin !== "string") throw new Error(`Missing fixed Router/Web URL for release environment: ${releaseEnvironment}`);
+const webUrl = process.env.AGENTLOOP_WEB_URL ?? webOrigin;
+if (new URL(webUrl).origin !== new URL(webOrigin).origin) throw new Error(`Web page URL must share the configured Web origin: ${webUrl}`);
 
 if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error("package-local-agent-macos must run on an Apple Silicon Mac");
 if (Number(process.versions.node.split(".")[0]) !== PACKAGED_NODE_MAJOR) throw new Error(`Node ${PACKAGED_NODE_MAJOR}.x is required; got ${process.versions.node}`);
 await mkdir(releaseRoot, { recursive: true });
 await mkdir(resources, { recursive: true });
 await mkdir(swiftModuleCache, { recursive: true });
+await cp(join(repositoryRoot, "assets/AgentLoop.icns"), join(resources, "AgentLoop.icns"));
 
 await build({
   entryPoints: [join(appRoot, "local-agent-runtime/src/main.ts")],
@@ -78,16 +81,22 @@ await build({
   },
 });
 await writeFile(seaConfig, JSON.stringify({ main: seaBundle, output: seaBlob }, null, 2));
-run(process.execPath, ["--experimental-sea-config", seaConfig]);
-await cp(process.execPath, executable);
-await chmod(executable, 0o755);
-run("/usr/bin/codesign", ["--remove-signature", executable], true);
-let seaInjected = true;
-try {
-  run(join(repositoryRoot, "node_modules/.bin/postject"), [executable, "NODE_SEA_BLOB", seaBlob, "NODE_OPTIONS=--no-addons", "--sentinel-fuse", "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2"]);
-} catch (error) {
-  seaInjected = false;
-  process.stderr.write(`Node executable has no SEA fuse; using bundled Node fallback: ${error instanceof Error ? error.message : String(error)}\n`);
+const seaPreparation = spawnSync(process.execPath, ["--experimental-sea-config", seaConfig], { encoding: "utf8" });
+let seaInjected = seaPreparation.status === 0;
+if (seaInjected) {
+  await cp(process.execPath, executable);
+  await chmod(executable, 0o755);
+  run("/usr/bin/codesign", ["--remove-signature", executable], true);
+  try {
+    run(join(repositoryRoot, "node_modules/.bin/postject"), [executable, "NODE_SEA_BLOB", seaBlob, "NODE_OPTIONS=--no-addons", "--sentinel-fuse", "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2"]);
+  } catch (error) {
+    seaInjected = false;
+    process.stderr.write(`Node executable has no SEA fuse; using bundled Node fallback: ${error instanceof Error ? error.message : String(error)}\n`);
+  }
+} else {
+  process.stderr.write(`Node SEA unavailable; using bundled Node fallback: ${(seaPreparation.stderr || seaPreparation.stdout || "unknown error").trim()}\n`);
+}
+if (!seaInjected) {
   const nodeRuntime = join(resources, "agentloop-local-runtime-node");
   const runtimeLibDir = join(resources, "lib");
   const agentScript = join(resources, "agentloop-local-runtime-agent.mjs");
@@ -125,7 +134,7 @@ await writeFile(join(resources, "config/skill-directories.json"), JSON.stringify
 }, null, 2));
 await cp(join(appRoot, "config/step-execution-strategy.json"), join(resources, "config/step-execution-strategy.json"));
 await cp(join(appRoot, "config/practice-profiles.json"), join(resources, "config/practice-profiles.json"));
-await writeFile(join(resources, "agentloop-local-runtime.manifest.json"), `${JSON.stringify({ schema: "agentloop.localRuntimeRelease/v1", routerUrl, webOrigin, localAgentPort: PACKAGED_LOCAL_AGENT_PORT, nodeVersion: process.versions.node, pythonVersion: "3.12", runtimeNode: "agentloop-local-runtime-node", runtimePython: "runtime-python/bin/python3.12", nodeModules: "node_modules" }, null, 2)}\n`);
+await writeFile(join(resources, "agentloop-local-runtime.manifest.json"), `${JSON.stringify({ schema: "agentloop.localRuntimeRelease/v1", routerUrl, webOrigin, webUrl, localAgentPort: PACKAGED_LOCAL_AGENT_PORT, nodeVersion: process.versions.node, pythonVersion: "3.12", runtimeNode: "agentloop-local-runtime-node", runtimePython: "runtime-python/bin/python3.12", nodeModules: "node_modules" }, null, 2)}\n`);
 await cp(join(appRoot, "distribution/macos/com.agentloop.local-runtime-agent.plist"), join(resources, "com.agentloop.local-runtime-agent.plist"));
 await mkdir(macOS, { recursive: true });
 run("/usr/bin/swiftc", [
