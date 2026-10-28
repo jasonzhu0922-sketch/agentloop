@@ -7335,6 +7335,7 @@ async function resolveConversationTurn(
   const runtimeContextId = `conversation-turn-context:${randomUUID()}`;
   let repairFeedback: string | undefined;
   let semanticFeedback: string | undefined;
+  let nonExecutableArtifactResolution: ConversationTurnResolution | undefined;
   for (let attempt = 1; attempt <= CONVERSATION_TURN_RESOLUTION_ATTEMPTS; attempt += 1) {
     const resolverTool = conversationTurnTool(context);
     const response = await model.completeWithRequestTelemetry({
@@ -7365,6 +7366,22 @@ async function resolveConversationTurn(
       const inherited = inheritContinuedConversationIntent(relationBound, context.conversationWorkingSet);
       const inheritedBinding = inheritPriorWorkProductBinding(inherited, context.conversationWorkingSet);
       const resultBound = bindUnambiguousPriorResult(inheritedBinding, input, context.conversationWorkingSet);
+      const nonExecutableArtifactFeedback = conversationTurnNonExecutableArtifactFeedback(resultBound);
+      if (nonExecutableArtifactFeedback !== undefined) {
+        nonExecutableArtifactResolution = resultBound;
+        semanticFeedback = nonExecutableArtifactFeedback;
+        repairFeedback = nonExecutableArtifactFeedback;
+        await emit({
+          type: "conversation.turn.resolution_rejected",
+          data: {
+            resolverAttempt: attempt,
+            category: "semantic_contract",
+            feedback: nonExecutableArtifactFeedback,
+            ...conversationTurnResolutionAttemptSummary(response),
+          },
+        });
+        continue;
+      }
       semanticFeedback = conversationTurnSemanticFeedback(resultBound, input, context.conversationWorkingSet);
       if (semanticFeedback === undefined) {
         return applyConversationTurnDirectReplyFloor(
@@ -7401,6 +7418,9 @@ async function resolveConversationTurn(
         ...conversationTurnResolutionAttemptSummary(response),
       },
     });
+  }
+  if (nonExecutableArtifactResolution !== undefined) {
+    return clarifyAfterNonExecutableArtifactResolution(nonExecutableArtifactResolution);
   }
   if (semanticFeedback !== undefined) {
     return {
@@ -7669,6 +7689,64 @@ function conversationTurnSemanticFeedback(
   return unsupportedPriorArtifactDeliverableFeedback(resolution, input, workset);
 }
 
+/**
+ * Reply and clarification turns are deliberately tool-free.  A model may
+ * still describe the user's pending file request in its semantic frame, but
+ * it must not make that file a terminal deliverable for the current Run.
+ */
+function conversationTurnNonExecutableArtifactFeedback(
+  resolution: ConversationTurnResolution,
+): string | undefined {
+  if (resolution.mode === "execute") return undefined;
+  const invalid = resolution.taskIntent.deliverables.filter((deliverable) =>
+    deliverable.surface !== "conversation"
+    || deliverable.action !== "none"
+    || deliverable.kind !== "none"
+    || deliverable.format !== undefined,
+  );
+  if (invalid.length === 0) return undefined;
+  return `mode=${resolution.mode} cannot declare workspace or artifact deliverables. Keep this turn conversation-only with action=none, kind=none, surface=conversation, and omit format; preserve any pending artifact request in effectiveGoal or userConstraints and ask for the missing requirements before execution.`;
+}
+
+/** Preserve the pending artifact intent while making the current turn safe to execute. */
+function clarifyAfterNonExecutableArtifactResolution(
+  resolution: ConversationTurnResolution,
+): ConversationTurnResolution {
+  const pending = resolution.taskIntent.deliverables
+    .filter((deliverable) => deliverable.surface === "workspace_artifact" || deliverable.kind !== "none")
+    .map((deliverable) => deliverable.format === undefined ? deliverable.kind : `${deliverable.kind} (${deliverable.format})`)
+    .join(", ");
+  return {
+    ...resolution,
+    mode: "clarify",
+    inputMode: "none",
+    targetArtifact: undefined,
+    targetResult: undefined,
+    evidenceStrategy: "none",
+    sourceBinding: noConversationSourceBinding(),
+    evidenceDemand: "none",
+    userConstraints: uniqueConversationConstraints([
+      ...resolution.userConstraints,
+      `Pending artifact request: ${pending || "the requested file"}. Ask for the missing requirements before producing it; do not claim the artifact was generated in this turn.`,
+    ]),
+    requiredCapabilityReferences: [],
+    taskIntent: {
+      schema: "agentloop.conversationTaskIntent/v1",
+      operation: "answer",
+      requiresExecution: false,
+      deliverables: [{
+        targetId: "clarification",
+        purpose: "Clarify the requirements before producing the requested artifact",
+        expectedArtifactCount: 1,
+        action: "none",
+        kind: "none",
+        surface: "conversation",
+      }],
+    },
+    source: "model_guarded",
+  };
+}
+
 function unsupportedPriorArtifactDeliverableFeedback(
   resolution: ConversationTurnResolution,
   input: string,
@@ -7881,6 +7959,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "Also return taskIntent as a semantic frame: operation, requiresExecution, and every terminal output family the user requested with stable targetId, user-visible purpose, exact expectedArtifactCount, action, semantic kind, optional concrete format, and delivery surface. targetId/purpose are the immutable identity and acceptance intent of each output family, never a filename. expectedArtifactCount is required, must be a positive integer, and must preserve an explicit requested cardinality; use 1 only when exactly one output is requested. Derive these fields from the full transcript and prior work context, not from isolated action words.",
       "taskIntent.deliverables is an acceptance contract, not an implementation plan. Never promote a helper script, temporary file, manifest, intermediate representation, source summary, or verification output into deliverables merely because execution may create or use it. Include code plus a rendered artifact only when the user explicitly requests both as terminal outputs.",
       "taskIntent.requiresExecution must agree with mode=execute. Preserve every explicitly requested terminal output instead of choosing one because it appears first.",
+      "reply and clarify are tool-free conversation boundaries: every taskIntent deliverable in those modes must use surface=conversation, action=none, kind=none, and omit format. If the user is asking for a file but its requirements are unresolved, keep the pending artifact request in effectiveGoal or userConstraints and return a conversation-only clarification; never declare a workspace_artifact deliverable for that turn.",
       "visibleDirectories are merely Runtime-authorized candidates, not automatic input. Use sourceBinding.mode=none and visibleDirectoryIds=[] unless the user explicitly refers to a candidate or the requested object, period, and subject have a high-confidence match to one unique candidate.",
       "When a visible directory is the primary data input, set sourceBinding.mode=primary_data, select only its opaque IDs from visibleDirectories, and set evidenceStrategy=bound_visible_sources. A primary-data binding can never use evidenceStrategy=none.",
       "When multiple visible directories could plausibly satisfy the goal and the transcript does not distinguish one, return clarify rather than guessing. Do not bind a directory merely because it is available.",

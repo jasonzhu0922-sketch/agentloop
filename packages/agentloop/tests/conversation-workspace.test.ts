@@ -1096,6 +1096,129 @@ test("clarification turns do not misrepresent their intentionally tool-free step
   }
 });
 
+test("non-executable artifact deliverables are repaired before Planner admission", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    let resolverAttempts = 0;
+    const repairPrompts: string[] = [];
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request: ModelInvocation): Promise<ModelResponse> => {
+        if (request.runId.startsWith("conversation-turn:")) {
+          resolverAttempts += 1;
+          if (resolverAttempts > 1) repairPrompts.push(request.systemPrompt);
+          const repaired = resolverAttempts > 1;
+          return {
+            content: "",
+            finishReason: "tool_calls",
+            toolCalls: [{
+              id: `resolution-${resolverAttempts}`,
+              name: "resolve_conversation_turn",
+              arguments: {
+                mode: "clarify",
+                relation: "new_goal",
+                inputMode: "none",
+                effectiveGoal: "在制作 PPT 前澄清主题、页数和风格要求。",
+                evidenceStrategy: "none",
+                sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+                userConstraints: ["用户希望制作一份 PPT，但具体要求尚未明确。"],
+                requiredCapabilityReferences: [],
+                taskIntent: {
+                  schema: "agentloop.conversationTaskIntent/v1",
+                  operation: "answer",
+                  requiresExecution: false,
+                  deliverables: repaired
+                    ? [{ targetId: "clarification", purpose: "澄清 PPT 制作要求", expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }]
+                    : [{ targetId: "deck", purpose: "制作 PPT 文件", expectedArtifactCount: 1, action: "create", kind: "presentation", format: "pptx", surface: "workspace_artifact" }],
+                },
+              },
+            }],
+          };
+        }
+        return { content: "请补充 PPT 的主题、页数和风格。", finishReason: "stop", toolCalls: [] };
+      },
+    };
+    const runs = new RunService({ database, skills: new SkillService(database), modelFactory: () => model, assessorFactory: () => approvingTestAssessor() });
+
+    const run = await runs.executeConversation(owner.user.id, "能做PPT吗");
+
+    assert.equal(run.status, "completed");
+    assert.equal(resolverAttempts, 2);
+    assert.match(repairPrompts[0] ?? "", /mode=clarify cannot declare workspace or artifact deliverables/);
+    const events = await runs.events(owner.user.id, run.id);
+    assert.equal(events.filter((event) => event.type === "conversation.turn.resolution_rejected").length, 1);
+    const resolved = events.find((event) => event.type === "conversation.turn.resolved");
+    assert.equal(resolved?.data.mode, "clarify");
+    assert.deepEqual(resolved?.data.taskIntent, {
+      schema: "agentloop.conversationTaskIntent/v1",
+      operation: "answer",
+      requiresExecution: false,
+      deliverables: [{ targetId: "clarification", purpose: "澄清 PPT 制作要求", expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }],
+    });
+  } finally {
+    await database.close();
+  }
+});
+
+test("persistent non-executable artifact deliverables fall back to a safe clarification", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    let resolverAttempts = 0;
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request: ModelInvocation): Promise<ModelResponse> => {
+        if (request.runId.startsWith("conversation-turn:")) {
+          resolverAttempts += 1;
+          return {
+            content: "",
+            finishReason: "tool_calls",
+            toolCalls: [{
+              id: `resolution-${resolverAttempts}`,
+              name: "resolve_conversation_turn",
+              arguments: {
+                mode: "clarify",
+                relation: "new_goal",
+                inputMode: "none",
+                effectiveGoal: "制作一份 PPT 文件。",
+                evidenceStrategy: "none",
+                sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+                userConstraints: [],
+                requiredCapabilityReferences: [],
+                taskIntent: {
+                  schema: "agentloop.conversationTaskIntent/v1",
+                  operation: "create_artifact",
+                  requiresExecution: false,
+                  deliverables: [{ targetId: "deck", purpose: "制作 PPT 文件", expectedArtifactCount: 1, action: "create", kind: "presentation", format: "pptx", surface: "workspace_artifact" }],
+                },
+              },
+            }],
+          };
+        }
+        return { content: "请补充 PPT 的主题、页数和风格。", finishReason: "stop", toolCalls: [] };
+      },
+    };
+    const runs = new RunService({ database, skills: new SkillService(database), modelFactory: () => model, assessorFactory: () => approvingTestAssessor() });
+
+    const run = await runs.executeConversation(owner.user.id, "帮我做一份 PPT");
+
+    assert.equal(run.status, "completed");
+    assert.equal(resolverAttempts, 3);
+    assert.match(run.output ?? "", /请补充 PPT/);
+    const events = await runs.events(owner.user.id, run.id);
+    assert.equal(events.filter((event) => event.type === "conversation.turn.resolution_rejected").length, 3);
+    const resolved = events.find((event) => event.type === "conversation.turn.resolved");
+    assert.equal(resolved?.data.mode, "clarify");
+    assert.equal(resolved?.data.taskIntent?.operation, "answer");
+    assert.equal(resolved?.data.taskIntent?.deliverables[0]?.surface, "conversation");
+    assert.match(String(resolved?.data.userConstraints), /Pending artifact request/);
+    assert.equal(events.some((event) => event.type === "run.failed"), false);
+  } finally {
+    await database.close();
+  }
+});
+
 test("Generic Run execution does not opt into conversation intent classification", async () => {
   const database = new AppDatabase(":memory:");
   try {
