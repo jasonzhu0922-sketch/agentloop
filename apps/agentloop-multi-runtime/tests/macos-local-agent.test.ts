@@ -162,6 +162,8 @@ test("macOS PKG includes an upgrade cleanup script without deleting runtime stat
   assert.match(packager, /copyPackagedNodeModules/);
   assert.match(packager, /agentloop-local-runtime-node/);
   assert.match(packager, /use-system-ca/);
+  assert.match(packager, /\\\$\{NODE_OPTIONS:-\}/);
+  assert.match(packager, /\\\$\{NODE_OPTIONS:\+\$NODE_OPTIONS \}/);
   assert.match(packager, /rotating-log-launcher/);
   assert.match(packager, /nodeModules/);
   assert.match(plist, /NODE_OPTIONS/);
