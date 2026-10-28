@@ -1,8 +1,13 @@
 # AgentLoop 用户级 Memory 设计方案
 
-版本：v0.2
-日期：2026-10-09
-状态：设计稿，尚未实施
+版本：v0.3
+日期：2026-10-28
+状态：Local Agent 专属设计改进稿；现有 episode/procedure、异步 settlement、SQLite 和可选本地模型是基础实现，Task Group 级语义沉淀、历史融合和 MEMORY.md 导出仍待实现
+
+当前实现入口：`packages/agentloop-memory`（Local Agent 插件、本地 SQLite Store、episode/procedure settlement 与进程内测试实现）与
+`packages/agentloop/src/runtime/memory-plugin.ts`（Kernel-owned SPI）。
+
+本设计借鉴 Codex Memory 的 `Task Group` 范式：一次 Run 只产生可审计的 episode；长期可复用知识必须归属于一个持续修订的 Task Group。Task Group 的 Markdown 是可读导出视图，SQLite revision 和来源引用仍是本地权威。
 
 相关设计：
 
@@ -32,14 +37,22 @@ tenantId + ownerUserId
    Memory Intake
           |
           v
- Candidate -> Policy -> Revisioned Memory Store
+   Candidate -> Policy -> Revisioned Memory Store
                             |
-             +--------------+----------------+
-             |              |                |
-             v              v                v
-     Interaction Profile  Context Recall  Experience Consolidation
-             |              |                |
-             +--------------+----------------+
+             +--------------+-----------------------------+
+             |                                            |
+             v                                            v
+     Interaction Profile                         Experience Settlement
+                                                          |
+                                         +----------------+----------------+
+                                         |                                 |
+                                         v                                 v
+                                  Episode Ledger                    Task Group Memory
+                                         |                                 |
+                                         +----------------+----------------+
+                                                          |
+                                                          v
+                                                   Planner Projection
                             |
                             v
                    Typed Memory Projection
@@ -55,14 +68,17 @@ tenantId + ownerUserId
 1. Memory 一级类型收敛为偏好、事实、经验；具体应用由 subtype 和正交属性决定。
 2. 常驻交互偏好必须按用户主键确定性加载，不能依赖向量召回。
 3. 私人事实只在任务确实相关时召回；秘密永不进入 Memory。
-4. 历史成功 Run 先形成 `experience/episode`，多次独立验证后才能晋升为 `experience/procedure`。
-5. maturity=`procedure` 的经验只提供 Planner 建议，不直接创建 canonical Plan，不授予 Tool/Skill/Capability，不改变 Assessment 和完成条件。
-6. 成熟、稳定的 Plan skeleton 应晋升到现有 PlanTemplate 体系，Memory 不再实现第二套模板实例化和 Admission 旁路。
-7. Markdown 是模型可读内容和用户可导出视图；结构化数据库记录才是权限、版本、冲突、删除与应用语义的权威。
-8. 每次实际使用 Memory 都必须生成带版本和原因的投影记录，保证 Run 可复现、可解释。
-9. 不同 AgentLoop Kernel 实例通过同一 `AgentLoopMemoryPlugin` SPI 消费同一用户级权威 Memory；实例之间只共享 revision 语义，不共享可变 Prompt 状态或数据库连接。
-10. Memory 通过专用 `AgentLoopMemoryPlugin` SPI 接入 Kernel；它不是 Skill、Tool 或 `PlanningExtension`。Kernel 固化调用时机与优先级，插件实现召回、沉淀和持久化，Runtime 只负责启动时注册插件。
-11. Loop 终局后 AgentLoop 只异步调用 `enqueueSettlement(runId, terminalCommitRef)`；该接口只能完成持久化入队，Plugin worker 再联合 Router 与 canonical Run 数据完成提炼、归并和写入，AgentLoop 不传递一份自造的“执行总结”。
+4. 历史 Run 先形成 `experience/episode`；任务结束后的本地 LLM 根据完整证据总结本次经验，再从本地索引检索相似 Task Group，判断是否融合。
+5. `Task Group` 是长期经验的第一类组织单元，必须包含 `scope`、`applies_to`、`reuse_rule`、`keywords`、经典路径、工具/Skill、可复用知识、失败与改进、验证状态和来源引用。
+6. Task Group 至少由两个独立、verified-success episode 支持后，才能生成 Planner 可用的 `experience/procedure` 投影；失败 episode 只能补充 warning/lesson。
+7. LLM 只能提出总结和融合 proposal，不能决定 Run 成功、授予权限、绕过 Admission 或直接写入未经校验的工具/事实。
+8. maturity=`procedure` 的经验只提供 Planner 建议，不直接创建 canonical Plan，不授予 Tool/Skill/Capability，不改变 Assessment 和完成条件。
+9. 成熟、稳定的 Plan skeleton 应晋升到现有 PlanTemplate 体系，Memory 不再实现第二套模板实例化和 Admission 旁路。
+10. Markdown 是模型可读内容和用户可导出视图；结构化数据库记录才是权限、版本、冲突、删除与应用语义的权威。
+11. 每次实际使用 Memory 都必须生成带版本和原因的投影记录，保证 Run 可复现、可解释。
+12. 不同 AgentLoop Kernel 实例通过同一 `AgentLoopMemoryPlugin` SPI 消费同一用户级权威 Memory；实例之间只共享 revision 语义，不共享可变 Prompt 状态或数据库连接。
+13. Memory 通过专用 `AgentLoopMemoryPlugin` SPI 接入 Kernel；它不是 Skill、Tool 或 `PlanningExtension`。Kernel 固化调用时机与优先级，插件实现召回、沉淀和持久化，Runtime 只负责启动时注册插件。
+14. Loop 终局后 AgentLoop 只异步调用 `enqueueSettlement(runId, terminalCommitRef)`；Local Agent worker 再读取本机 canonical Run/Outcome/Assessment，调用本地配置模型完成总结、相似记忆检索、融合校验和写入。云端 Router/Runtime 不注册 Memory、不开 Memory 表，也不接收 Memory 内容。
 
 一句话约束：
 
@@ -137,7 +153,7 @@ tenantId + ownerUserId
 
 ## 4. 概念分层
 
-Memory 系统包含五层，不能压缩成单一文本表。
+Memory 系统包含六层，不能压缩成单一文本表。
 
 ```text
 Source
@@ -148,6 +164,9 @@ Candidate
 
 Memory Record / Revision
   经过策略验证的权威用户级记录
+
+Task Group Memory
+  围绕稳定目标族持续修订的长期经验档案
 
 Retrieval Artifact
   搜索关键词、embedding、派生 chunk、聚合指标
@@ -161,6 +180,7 @@ Projection
 - Source 是事实依据。
 - Candidate 是提炼结果，不具备应用权威。
 - Revision 是 Memory 的持久化权威。
+- Task Group 是跨多个 episode 的经验组织层，承载 Codex 风格的适用范围、复用规则、关键词、可复用知识和失败改进。
 - Chunk/embedding 是可重建索引，不是 Memory 本体。
 - Projection 是对单次执行的不可变快照，不会因后续 Memory 更新而改变。
 
@@ -567,11 +587,118 @@ interface ExecutionEpisode {
 }
 ```
 
-Experience Episode 只保存可复用的执行结构和指标，完整 Action/Event/Evidence 仍保留在 canonical Run 存储中。
+Experience Episode 只保存可复用的执行结构和指标，完整 Action/Event/Evidence 仍保留在 canonical Run 存储中。Episode 必须保留足够的任务理解输入：去实体化的目标摘要、目标关键词、计划角色、证据契约、实际工具摘要、恢复过程和用户纠正关系；不能因为隐私约束而把目标语义一并丢掉。
 
-### 7.6 Experience Procedure 与 PlanningPrior
+实现层把 Episode 的沉淀输入固定为 `agentloop.experienceSettlement/v1` 范式，避免把一次运行压扁成一段“成功总结”。范式与 Codex rollout 记忆的结构对应如下：
 
-`ProcedureMemory` 是 `kind=experience`、`experienceMaturity=procedure` 的专用视图。它不引入新的一级 MemoryKind。
+```text
+Outcome                 -> verified_success / failure / mixed
+Classic path            -> 去实体化的有序目标、角色、所需/产出证据类型与成功标准
+Tool usage              -> 每个步骤实际/推荐使用的 Skill、Tool、Capability（仅建议，不授予权限）
+Cautions                -> 前置事实、口径、缺失证据、交付验收等注意事项
+Reusable knowledge      -> 仅允许显式结构化规则、适用条件、排除条件；不从 plan_goal 派生
+Failures and correction -> 失败教训、下次应如何做
+Preference signals      -> 明确偏好、纠正、约束及其来源
+Verification            -> Terminal / Assessment / Artifact / correction / dispute
+References              -> Run、Outcome、Plan、Assessment 等 canonical sourceRef
+```
+
+`episode` 是一次 Run 的可审计事实记录，不是可直接复用的 Planner 经验。它必须经过后续 Task Group 聚合才有资格形成 `procedure`；因此单个 episode 不会生成 `PlanningPrior`。
+
+### 7.6 Task Group Memory
+
+Task Group 是借鉴 Codex Memory 后新增的长期经验组织层。它不是某次 Run 的别名，也不是简单的 procedure 字段并集，而是围绕一个稳定目标族持续修订的经验档案。
+
+```ts
+interface TaskGroupMemory {
+  readonly schema: "agentloop.taskGroupMemory/v1";
+  readonly id: string;
+  readonly tenantId: string;
+  readonly ownerUserId: string;
+  readonly title: string;
+  readonly scope: string;
+  readonly appliesTo: {
+    readonly taskKinds: readonly string[];
+    readonly domains: readonly string[];
+    readonly artifactKinds: readonly string[];
+    readonly sourceKinds: readonly string[];
+  };
+  /** 什么时候可以复用，什么时候必须重新验证。 */
+  readonly reuseRule: string;
+  readonly keywords: readonly string[];
+  readonly goalSummary: string;
+  readonly userPreferences: readonly Readonly<Record<string, unknown>>[];
+  readonly classicPath: readonly Readonly<Record<string, unknown>>[];
+  readonly toolUsage: readonly Readonly<Record<string, unknown>>[];
+  readonly reusableKnowledge: readonly Readonly<Record<string, unknown>>[];
+  readonly cautions: readonly string[];
+  readonly failureLessons: readonly Readonly<Record<string, unknown>>[];
+  readonly verification: {
+    readonly status: "candidate" | "partial" | "verified" | "stale" | "conflicted";
+    readonly successfulEpisodeCount: number;
+    readonly failedEpisodeCount: number;
+    readonly correctionCount: number;
+    readonly disputeCount: number;
+    readonly lastVerifiedAt?: number;
+  };
+  readonly supportingEpisodeRevisionIds: readonly string[];
+  readonly sourceRefs: readonly MemorySourceRef[];
+  readonly revision: number;
+}
+```
+
+Task Group 对应 Codex Memory 的以下结构：
+
+```text
+Task Group title
+scope
+applies_to
+reuse_rule
+keywords
+task history / source refs
+user preferences
+reusable knowledge
+classic path
+failures and how to do differently
+verification status
+```
+
+`experience/procedure` 不再是独立的知识源，而是 Task Group 在 Planner 目标下的受限投影。Task Group 可以处于 `candidate` 或 `partial`，但只有满足成功证据门槛的部分才可投影为 procedure。
+
+Task Group 的导出形态示例：
+
+```markdown
+# Task Group: 员工画像 HTML 分析与交付
+
+scope: Local Agent user scope
+applies_to: composite + data_analysis + html
+reuse_rule: 只有来源事实、统计口径和 HTML 验收证据均可验证时复用
+
+## Keywords
+
+员工画像、HTML 报告、hr-report-analysis、hr-report-data、artifact acceptance
+
+## Classic path
+
+1. 获取并验证来源事实和统计口径。
+2. 生成 HTML 报告，并验证文件存在、可打开、格式正确且通过验收。
+
+## Reusable knowledge
+
+- 先固定统计口径，再生成报告。
+- 交付前必须验证 HTML 产物，而不能只确认模型生成过文件。
+
+## Failures and how to do differently
+
+- 计划未覆盖数据源 capability 时，先修正 Skill/capability closure，再重新提交计划。
+- 有过程缺口的 completed Run 不作为成功路径，只作为验收警告。
+```
+
+这段 Markdown 是 Task Group 的可读投影；每条规则仍必须能回溯到 episode、Outcome、Assessment 或用户反馈。
+
+### 7.7 Experience Procedure 与 PlanningPrior
+
+`ProcedureMemory` 是 Task Group 的 `kind=experience`、`experienceMaturity=procedure` 专用视图。它不引入新的一级 MemoryKind，也不拥有独立于 Task Group 的来源和生命周期。
 
 ```ts
 interface ProcedureMemory {
@@ -585,7 +712,9 @@ interface ProcedureMemory {
     readonly conditions: readonly string[];
     readonly exclusions: readonly string[];
   };
-  readonly strategy: string;
+  readonly classicPath: readonly Readonly<Record<string, unknown>>[];
+  readonly toolUsage: readonly Readonly<Record<string, unknown>>[];
+  readonly cautions: readonly string[];
   readonly suggestedPlanSkeleton: readonly Readonly<Record<string, unknown>>[];
   readonly decisionRules: readonly string[];
   readonly evidenceExpectations: readonly string[];
@@ -597,6 +726,7 @@ interface ProcedureMemory {
     readonly correctionCount: number;
   };
   readonly sourceEpisodeIds: readonly string[];
+  readonly taskGroupRevisionId: string;
 }
 
 interface PlanningPrior {
@@ -615,7 +745,11 @@ interface PlanningPrior {
 
 `PlanningPrior` 是 Planner 的统一消费契约。PlanTemplate 与 Memory 通过同一个先验输入面协作，但保持各自生命周期。
 
-### 7.7 MemoryProjection
+经验沉淀不得把一次任务的企业名、文件名、URL、用户原句或其他实体直接当作可复用规则。沉淀器应把 canonical `plan_goal`、当前 intent、`plan_steps`、Tool/Action 结果和 Evidence 摘要交给本地 settlement model，由模型生成去实体化的 `goalSummary`、`classicPath`、`keywords`、`reuseRule`、`reusableKnowledge` 和 `failureLessons`。具体任务实体只留在 episode 的可审计 sourceRef/canonical Run 中；Task Group 只保留完成同类目标所必需的抽象语义。
+
+模型不得凭空补充工具、Skill、Capability、Evidence kind 或事实。所有模型输出必须经过 source-bound validator；不合法时保留确定性 episode，拒绝本次 Task Group 融合。
+
+### 7.8 MemoryProjection
 
 ```ts
 interface MemoryProjectionBase {
@@ -686,7 +820,7 @@ Projection 必须按 target 使用可辨识联合类型，而不是只提供一�
 ```text
 显式用户意图       -> 同步写入链
 Run 终态与反馈      -> 异步 Experience Episode 提炼链
-多个历史 Memory    -> 周期性归并链
+Episode + 历史 Task Group -> 本地检索与 LLM 融合链
 ```
 
 三条链共享同一个 `MemoryPolicy` 和 `MemoryWriter`，不能各自直接写表。
@@ -720,9 +854,35 @@ Kernel 不解析 Memory subtype，也不直接写表；显式意图识别和写�
 
 显式写入成功后，应使当前 Turn 后续用户可见生成应用新偏好；已经开始流式输出的内容不做中途重写。
 
-### 8.3 Run 终态后的经验提炼
+### 8.3 Run 终态后的 LLM 经验提炼
 
-`experience/episode` 提炼必须在 canonical Outcome 后异步执行，不能占用或阻塞用户交付路径。Kernel 只向 post-commit executor 提交 `plugin.enqueueSettlement(runId, terminalCommitRef)`；该方法完成 durable enqueue 后立即返回，Plugin worker 再自行读取以下持久化事实，不由 Kernel 拼装一份经验 payload。
+`experience/episode` 提炼必须在 canonical Outcome 后异步执行，不能占用或阻塞用户交付路径。Kernel 只向 post-commit executor 提交 `plugin.enqueueSettlement(runId, terminalCommitRef)`；该方法完成 durable enqueue 后立即返回，Plugin worker 再自行读取持久化事实，不由 Kernel 拼装一份经验 payload。
+
+Settlement worker 的职责分成两个阶段：
+
+```text
+canonical Run/Outcome/Assessment
+  -> deterministic evidence normalization
+  -> local settlement model 总结本次经验
+  -> source-bound validation
+  -> episode revision
+  -> local retrieval 找候选 Task Group
+  -> local settlement model 判断同一目标族并提出 merge proposal
+  -> deterministic merge policy / conflict check
+  -> Task Group revision
+  -> procedure / PlanningPrior projection
+```
+
+本地 settlement model 的输入必须包含目标理解所需的中性证据：
+
+- 去实体化的用户目标和 canonical `plan_goal`；
+- 计划步骤、角色、依赖关系、工具和 Skill 绑定；
+- 关键 Tool/Action 成功失败摘要；
+- Evidence kind、Assessment、Artifact/Delivery 验收；
+- 恢复、重试、纠正和争议关系；
+- 当前 task fingerprint 和环境约束。
+
+输入不得包含不必要的原始会话、秘密、Token、Cookie、完整文件内容或无界模型输出。
 
 正向经验候选至少检查：
 
@@ -749,21 +909,73 @@ TerminalCommitter 已提交 completed/caveated Outcome
 - Delivery/Outcome
 - 用户反馈与后续纠正关系
 
-模型 prose、文件存在或 `completed` 字符串本身均不足以证明高质量成功。
+模型 prose、文件存在或 `completed` 字符串本身均不足以证明高质量成功。模型只负责理解、归纳和提出经验，不负责判定成功。
 
-### 8.4 周期性归并
-
-Consolidator 对相似的 experience revisions 做聚类与冲突检查：
+Settlement model 的结构化输出至少包含：
 
 ```text
-多个独立成功 experience/episode
-  -> 相同适用条件
-  -> 相似策略和证据结构
-  -> 排除环境偶然性
-  -> experience/pattern
-  -> experience/procedure Candidate
-  -> Policy / 人工或用户确认
-  -> active experience revision
+title
+goalSummary
+keywords
+appliesTo
+reuseRule
+classicPath
+toolUsage
+cautions
+reusableKnowledge
+failureLessons { lesson, doDifferently }
+preferenceSignals
+sameGoalFamily（仅用于融合阶段）
+conflicts
+recheckRules
+```
+
+输出校验至少检查：
+
+1. 每个工具、Skill、Capability 和 Evidence kind 都必须存在于输入证据中。
+2. 不能把一次任务中的具体实体写入长期复用规则。
+3. 不能把失败 Run 归纳为 verified success。
+4. 每条知识、教训和路径都必须带可追溯 sourceRef。
+5. 目标族不确定或存在冲突时只能保留 episode，不得强制融合。
+
+### 8.4 历史 Task Group 检索与语义融合
+
+经验归并不是简单地按 fingerprint 合并数组，而是“检索候选 + LLM 目标族判断 + 确定性校验”的三段式流程。
+
+第一步由本地索引检索候选 Task Group：
+
+```text
+tenantId + ownerUserId 强隔离
+  -> active / valid / target 过滤
+  -> taskKind / domain / artifactKind 粗筛
+  -> title / goalSummary / keywords / Skill / Tool 的 FTS 检索
+  -> TaskFingerprint 和历史来源相似度排序
+  -> 取有界 Top-K Task Group
+```
+
+第二步把本次 episode 和 Top-K 历史 Task Group 交给本地 settlement model，模型只能返回：
+
+```text
+new_task_group
+merge_into_existing
+refine_existing
+reject_as_different_goal
+mark_conflicted
+```
+
+第三步由确定性策略决定是否落库，并追加 Task Group revision。
+
+聚合目标是形成类似 Codex Memory 的可读任务组：
+
+```text
+多个独立 experience/episode
+  -> 检索相似 Task Group
+  -> LLM 判断是否为同一 Goal Family
+  -> 融合 classic path、tools、knowledge、cautions、failures
+  -> 记录新增、修订、冲突和 recheck rule
+  -> Task Group revision
+  -> 两次以上独立 verified-success 后生成 procedure projection
+  -> Planner 只消费 PlanningPrior
 ```
 
 禁止自我强化：
@@ -776,15 +988,24 @@ Memory 被召回
 
 这条链不算独立证据。只有新的用户确认、独立执行事实、Assessment 或 Outcome 才能强化可靠性。
 
-### 8.5 冲突和修订
+当前聚合门槛是：
+
+- 至少两个不同 `runId` 的 verified-success episode；
+- 当双方都存在 `taskKind` 时必须一致；domain 等目标维度不一致时默认拒绝融合；artifact/source 等次要维度可以由模型判断是否属于同一目标族；
+- 仅有相似工具名、相同文件格式或相同 domain 不能证明是同一 Goal Family；
+- 失败 episode 只形成 warning/lesson，不参与 procedure 晋升；
+- 同类失败 episode 的 lesson 可以附着到已由成功 episode 晋升的 procedure，作为 Planner warning；失败次数不计入成功可靠性；
+- procedure 只作为 Planner context，仍必须经过当前 PlanAdmission、Assessment 和 TerminalCommitter。
+
+### 8.5 Task Group revision 与冲突
 
 Candidate 与现有 Memory 比较后只能产生四种结果：
 
 ```text
-new         -> 创建 MemoryItem + revision 1
-reinforce   -> 创建新 revision，追加独立 sourceRef 和评估信息
-refine      -> 创建新 revision，补充适用条件或例外
-contradict  -> 创建新 revision，并 supersede 旧 revision
+new         -> 创建 Task Group MemoryItem + revision 1
+reinforce   -> 创建新 Task Group revision，追加独立 sourceRef 和评估信息
+refine      -> 创建新 Task Group revision，补充适用条件或例外
+contradict  -> 创建新 Task Group revision，并 supersede 旧 revision 或标记冲突
 ```
 
 不允许原地覆盖历史 revision。
@@ -850,7 +1071,8 @@ Pinned Memory
 Retrieved Memory
   task_match preference / fact / experience
   -> 类型、权限、有效期和适用条件过滤
-  -> 关键词 / TaskFingerprint / embedding 排序
+  -> Task Group title / keywords / goalSummary / TaskFingerprint / embedding 排序
+  -> Task Group 先验投影为 PlanningPrior
 ```
 
 常驻偏好不得进入向量召回路径，否则会出现同一偏好在不同任务中忽有忽无。
@@ -1071,6 +1293,31 @@ Run 结束后，Evaluator 可以判断该 Prior 是否真正被 Plan 采用以�
 + 可导出的用户级 MEMORY.md
 ```
 
+`MEMORY.md` 是 Task Group 的人类可读导出，不是把每次 episode 原样拼接起来。导出格式借鉴 Codex Memory：
+
+```markdown
+# Task Group: <title>
+
+scope: <作用域>
+applies_to: <适用条件>
+reuse_rule: <复用和重新验证规则>
+
+## Task history
+- source Run / Outcome / Assessment
+
+## User preferences
+- 与该任务组相关的显式偏好和纠正
+
+## Reusable knowledge
+- 可跨 Run 复用的规则、工具边界和判断方法
+
+## Failures and how to do differently
+- 失败根因
+- 下次的具体做法
+```
+
+导出时只写入已通过 Policy 的去实体化内容，并保留 revision/source 引用。任务组 Markdown 只用于阅读、调试、导出和模型上下文构造；权限、版本、删除、冲突和召回仍以本地 SQLite 为准。
+
 不采用：
 
 ```text
@@ -1145,8 +1392,8 @@ Memory 不定义为“Router 插件”或“Runtime 插件”，而是注册在 
 | --- | --- | --- |
 | AgentLoop Kernel | `AgentLoopMemoryPlugin` SPI、可信 Run scope、各 phase 调用点、优先级和失败语义 | Store、索引、检索算法和 Memory 提炼实现 |
 | Memory Plugin | Revision、Policy、Retrieval、Mutation、Consolidation、Projection、Audit | PlanAdmission、Tool 授权、Assessment 和 Outcome 权威 |
-| Runtime/Application | 从配置加载并注册一个 Plugin 实现 | Memory 调用时序、召回内容解释和沉淀判断 |
-| Router | 认证用户并把 tenant/user subject 绑定到 Run admission | Memory 生命周期；除非所选 Plugin 的后端恰好部署在 Router |
+| Local Agent | 打开用户本机 SQLite、加载并注册唯一 Plugin 实现 | Memory 调用时序、召回内容解释和沉淀判断 |
+| 云端 Router / Runtime Host | 继续拥有云端认证、Assignment、Conversation 和 Run | Memory 生命周期、Memory 表、Projection、Candidate、Revision |
 
 依赖方向变为：
 
@@ -1159,15 +1406,21 @@ AgentLoop Kernel Run lifecycle
   -> plugin.commitExplicit(...)
   -> postCommitExecutor.submit(plugin.enqueueSettlement(...))
 
-Plugin implementation
-  -> local shared store OR remote Memory Service
+Local Memory Plugin implementation
+  -> user-local SQLite store
 ```
 
 是否启用以及选择哪个实现可以配置，但调用时机和 Projection 应用规则是 Kernel 契约。例如插件不能决定把 response preference 注入 Assessment，也不能改变 Memory 与当前用户指令的优先级。
 
 ### 12.1 AgentLoopMemoryPlugin SPI
 
-AgentLoop 在 Run 创建、规划、执行、用户回复和终态提交等既有生命周期点调用同一个注册插件。Plugin 实现可以使用共享数据库，也可以调用独立 Memory Service；Kernel 和 Runtime 均不感知后端部署位置。
+本 SPI 只由 Local Agent 使用。云端 Runtime Host、Router 和云端任务路径不得注册
+`AgentLoopMemoryPlugin`，不得创建 Memory 表，也不得把 Memory Projection、Candidate、
+Revision 或本地 Memory 数据上传到云端。Kernel 中保留协议类型只是为了让 Local Agent
+可以复用同一生命周期契约，不表示云端启用该功能。
+
+AgentLoop 在 Local Agent 的 Run 创建、规划、执行、用户回复和终态提交等既有生命周期点调用同一个注册插件。
+Plugin 实现只使用用户本机 SQLite；云端 Runtime 不调用这些 hook。
 
 插件负责：
 
@@ -1181,6 +1434,9 @@ AgentLoop 在 Run 创建、规划、执行、用户回复和终态提交等既�
 Kernel 不直接读写 Memory 表，也不解释 Plugin 的 Store schema。
 
 ### 12.2 可信 Run Scope
+
+在 Local Agent 中，`tenantId + ownerUserId` 是本地配对/登录主体的 opaque 标识，
+只用于本机数据库隔离，不作为 Memory 网络同步键，也不发送给云端模型或 Router。
 
 `runId` 是 Kernel 与插件之间的主关联键，但不能单独作为用户授权边界。Run admission 必须持久化 canonical subject；插件收到 `runId` 后从可信 Run 数据源解析该 scope：
 
@@ -1297,7 +1553,7 @@ Run admitted and canonical subject persisted
   -> committed mutation raises memoryEpoch before later model calls
   -> Kernel derives preliminary TaskFingerprint
   -> Kernel calls recall(runId, planner, fingerprint, budget)
-  -> Plugin resolves tenant/user from canonical Run/Router data
+  -> Local plugin resolves tenant/user from the local canonical Run
   -> Plugin returns PlanningMemoryProjection
   -> Planner builds a fresh PlanProposal from PlanningPrior
   -> PlanAdmission remains unchanged
@@ -1309,7 +1565,7 @@ TerminalCommitter commits Outcome
   -> Kernel submits plugin.enqueueSettlement(...) to postCommitExecutor
   -> user delivery continues without waiting for extraction
   -> Plugin durably enqueues or de-duplicates the trigger
-  -> Plugin worker independently reads Router + canonical Run records
+  -> Local plugin worker independently reads local canonical Run/Plan/Assessment/Outcome records
   -> Plugin worker extracts Candidate and commits Memory revisions
 ```
 
@@ -1327,26 +1583,23 @@ TerminalCommitter commits Outcome
 
 Planner 应增加一等字段 `planningPriors`，不要把 Memory 伪装成普通 `PlanningExtension`；执行与产物阶段可以复用现有 `RuntimePromptAugmentation`，但需增加 `target`、`projectionId`、`memoryEpoch` 和 `contentHash`，并由 `ContextAssembler` 按 phase 过滤。所有 Memory 内容都是 server-authored context，不能伪装成 user message。
 
-### 12.5 Runtime/Application 只负责装配
+### 12.5 Local Agent 只负责装配
 
-Runtime/Application 是 composition root，只在启动时选择、构造和注册插件，不参与每个 Run 的 Memory 召回、应用和沉淀决策：
+只有 Local Agent 是 Memory 的 composition root。它在启动时打开用户本机 SQLite，构造并注册插件；
+云端 Runtime Host 不执行下面的装配，也不接受 Memory 配置：
 
 ```yaml
-memoryPlugin:
+memory:
   enabled: true
-  module: "@agentloop/memory-plugin"
-  factory: "createAgentLoopMemoryPlugin"
-  optionsPath: "./config/memory.json"
+  databasePath: "./data/local-agent/agentloop.db"
 ```
 
-插件自己的配置可以包含其后端连接和预算，例如：
+插件自己的配置只包含本地 SQLite 路径和预算，例如：
 
 ```yaml
-backend:
-  kind: "control_plane" # control_plane | shared_database
-  endpoint: "http://router:8788"
-  serviceCredentialEnv: "AGENTLOOP_MEMORY_SERVICE_TOKEN"
-requestTimeoutMs: 1200
+storage:
+  kind: "local_sqlite"
+  databasePath: "./data/local-agent/agentloop.db"
 budgets:
   planner: { maxItems: 8, maxTokens: 1200 }
   execution: { maxItems: 4, maxTokens: 600 }
@@ -1358,15 +1611,17 @@ budgets:
 装配链只有一次：
 
 ```text
-Runtime/Application config
-  -> load plugin module and factory
-  -> create AgentLoopMemoryPlugin(plugin options and backend clients)
+Local Agent config
+  -> open local SQLite
+  -> createLocalMemoryPlugin({ database, resolveRunScope })
   -> new RunService({ memoryPlugin })
   -> Kernel owns all per-Run hook invocation
 ```
 
 ```ts
-const memoryPlugin = await loadMemoryPlugin(runtimeConfig.memoryPlugin);
+const memoryPlugin = runtimeConfig.memory.enabled
+  ? await createLocalMemoryPlugin({ database, resolveRunScope })
+  : undefined;
 
 const runs = new RunService({
   ...kernelDependencies,
@@ -1376,13 +1631,17 @@ const runs = new RunService({
 
 必须区分：
 
-- `module/factory/optionsPath` 是应用装配配置，不是 Kernel Memory 语义。
-- endpoint、service credential、数据库连接和 Router client 都封装在具体插件实现内部，不进入 `RunService.startConversation` 参数。
-- `tenantId/ownerUserId` 不是配置项，也不由 Kernel recall 参数提供；插件从可信 Run/Router 关系解析。
+- `memory.enabled/settlementModelKey` 是 Local Agent 装配配置，不是 Kernel Memory 语义。
+- 数据库连接只指向用户本机 SQLite，不存在 control-plane endpoint、Memory service credential 或远程 Memory adapter。
+- `tenantId/ownerUserId` 不是配置项，也不由 Kernel recall 参数提供；插件从可信本地 Run scope 解析。
 - 插件实例可以是进程级对象，但所有 Projection、缓存和审计必须以 Run 及其解析出的 subject 隔离。
-- `enabled=false` 表示明确不注册插件；`enabled=true` 但插件加载失败时应启动失败，不能静默退化成另一套本地用户存储。
+- `enabled=false` 表示明确不注册插件；`enabled=true` 但本地 Store 加载失败时应启动失败，不能静默退化成进程内或另一套用户存储。
 
-这使 Memory 与 Runtime 生命周期实现无关：Single Runtime、Multi Runtime 和未来其他宿主只要能注册同一 SPI，就不需要分别实现 Memory session、dispatch binding 或 prompt 注入流程。
+云端 Runtime Host 必须保持 `memoryPlugin` 未注册；云端构建/部署可以共享 Kernel 的类型，
+但不得初始化 `@zhujun/agentloop-memory`、Memory 表或 Memory worker。
+
+这使 Memory 与 Local Agent 内部 Runtime 生命周期实现解耦：同一设备上的多个 Local Runtime
+只要注册同一 SPI，就不需要分别实现 Memory session、dispatch binding 或 prompt 注入流程；云端宿主不注册 SPI。
 
 ### 12.6 终局触发与插件内沉淀
 
@@ -1395,13 +1654,15 @@ canonical Outcome committed
   -> enqueue receipt returned; no extraction has run yet
   -> Plugin worker resolves Run subject
   -> Plugin worker reads canonical Run / Plan / Action / Evidence / Assessment / Outcome
-  -> Plugin worker joins Router assignment / conversation / feedback when needed
+  -> Plugin worker reads local conversation / feedback when available
   -> experience Candidate
   -> policy / consolidation
   -> new Memory revision when admitted
 ```
 
-因此“结合 Router 数据沉淀”是插件实现能力，而不是 Router 或 Runtime 的 Memory 生命周期职责。一个插件可以直接访问共享数据库，也可以使用 Router 内部 API；两种实现对 Kernel 都表现为相同 SPI。
+因此“结合本地 Run 数据沉淀”是插件实现能力，而不是云端 Router 的 Memory 生命周期职责。
+Local Agent 插件直接读取本机 canonical Run/Plan/Action/Evidence/Assessment/Outcome 数据；云端
+Router/Runtime 不参与 settlement，也不接收本地 Memory 内容。
 
 `enqueueSettlement` 必须满足：
 
@@ -1414,16 +1675,43 @@ canonical Outcome committed
 - 沉淀失败只影响 Memory 学习并产生可观测事件，不反向修改、撤销或伪造已经提交的 Outcome。
 - 后续 correction、dispute 或反馈变化可以让插件重新评价已有 episode，并通过新 revision 修订，不能原地覆盖。
 
+### 12.6.1 默认关闭与本地语义模型
+
+Memory 的启用配置属于 Local Agent Runtime：
+
+```json
+{
+  "memory": {
+    "enabled": true,
+    "settlementModelKey": "local:memory-compactor"
+  }
+}
+```
+
+默认 `enabled=false`。关闭时 Local Agent 不创建 `memory.db`、Memory Plugin、settlement worker 或定时器；
+Cloud Router/Runtime 没有这组配置，也不能启用 Memory。`settlementModelKey` 只能引用 Local Agent 本地模型目录中的
+`local:<key>`，`cloud:<key>` 在配置层拒绝。
+
+语义模型只负责四类不具权威的工作：判断相似目标族、抽象经典路径、归纳可复用知识与失败教训。它接收
+确定性代码筛选出的 fingerprint、当前 episode 和相似历史 episode 的结构化子集，不接收完整会话、原始文件、
+秘密或未验证成功描述。模型输出必须通过 JSON/schema、来源集合和 Tool/Skill/Capability 白名单校验；canonical
+Outcome、Assessment、用户 scope、至少两个独立成功 Run 的晋升门槛以及最终 Memory 写入仍由确定性代码控制。
+
+模型不可用或输出不合规时，worker 记录 fallback/validation 状态并使用确定性 settlement，不影响当前 Run 的
+Outcome 或交付。Procedure revision 记录模型 key、prompt schema、输入 episode revision IDs、输出 hash 和校验结果，
+便于本地审计与重放。
+
 这里的“异步”不等于进程内 fire-and-forget。仅执行 `void plugin.enqueueSettlement(...)` 而没有 durable job，会在进程退出时丢失沉淀请求。插件可以使用数据库 outbox/job table、消息队列或等价的可靠任务设施，但必须具备持久化状态、attempt、backoff、dead-letter/人工重放和幂等键。
 
-### 12.7 多 Kernel 一致性与降级
+### 12.7 同一设备内多 Local Runtime 一致性与降级
 
-多个 Kernel 实例共享 Memory 的条件不是共享进程对象，而是它们注册的插件实现指向同一个权威后端，并遵守同一 revision/epoch 协议：
+同一设备内多个 Local Runtime 实例共享 Memory 的条件不是共享进程对象，而是它们通过同一个本地 SQLite
+Store，并遵守同一 revision/epoch 协议：
 
 ```text
-Kernel A -> Memory Plugin A --+
-                              +-> shared Memory authority
-Kernel B -> Memory Plugin B --+
+Local Runtime A -> Memory Plugin A --+
+                                  +-> user-local SQLite authority
+Local Runtime B -> Memory Plugin B --+
 ```
 
 一致性和失败规则：
@@ -1435,7 +1723,8 @@ Kernel B -> Memory Plugin B --+
 - settlement enqueue 失败应记录 `memory.settlement.enqueue_failed` 并允许幂等重试，但不得把已提交任务改判失败。
 - 删除成功后，旧 Projection 内容不得用于本 Run 的后续模型调用；审计可以保留 ID/hash，不能保留已删除内容副本。
 - 数据驻留或 sensitivity policy 不允许内容离开某边界时，插件返回空/受限 Projection；不能降级泄露到其他后端。
-- 配置为共享后端却不可用时，不能偷偷回退到某个本地 `memory.md` 或另一套用户存储。
+- 本地 SQLite 不可用时，不能偷偷回退到某个本地 `memory.md`、进程内 Store 或另一套用户存储。
+- 云端 Runtime 不参与降级；云端永远视为未启用 Memory。
 
 ### 12.8 包边界建议
 
@@ -1447,19 +1736,28 @@ packages/agentloop
 packages/agentloop-memory
   提供一个可注册的 AgentLoopMemoryPlugin 实现；拥有 schema、migration、
   store、policy、extractor、retriever、consolidator、applicator、projection
-  compiler，以及 Router/canonical Run 数据读取 adapter。
+  compiler，以及 Local Agent canonical Run 数据读取 adapter。
 
-apps/agentloop-app / runtime-host / local-agent-runtime
-  只负责从配置加载插件模块、构造后端依赖并在创建 RunService 时注册。
+apps/agentloop-multi-runtime/local-agent-runtime
+  只负责打开用户本机 SQLite、构造 `createLocalMemoryPlugin` 并在创建 RunService 时注册。
 
-apps/agentloop-multi-runtime/router
-  继续拥有认证、Assignment、Conversation、反馈和用户管理 API；可以向某个
-  Memory Plugin 实现提供可信数据 API，但不拥有 Kernel hook 时序。
+apps/agentloop-multi-runtime/src/runtime-host / router
+  不注册 Memory，不拥有 Memory 表、worker、Projection 或用户 Memory API；云端
+  只处理自己的 Run/Assignment/Conversation 数据。
 ```
 
-`packages/agentloop-memory` 是否独立发布、直接连接数据库还是远程调用 Memory Service，可在实施阶段决定。这些都是插件内部部署选择，不改变 Kernel SPI，也不能把 Memory SQL 和领域生命周期散落进 Router handler、Runtime Host 或 `ContextAssembler`。
+`packages/agentloop-memory` 作为 Local Agent 插件包，直接连接用户本机 SQLite。它不提供远程
+Memory Service adapter，也不能把 Memory SQL 和领域生命周期散落进 Router handler、云端 Runtime Host
+或 `ContextAssembler`。
 
 ## 13. 持久化建议
+
+Memory 持久化只发生在 Local Agent 用户本机的 SQLite 文件中（默认与本地 Agent 数据目录同源，
+也可配置为受保护的独立文件）。云端 Router/Runtime 数据库不得创建以下表，也不得复制这些记录。
+
+当前实现使用设备级 `memory.db`：同一设备的多个 Local Runtime 连接共享 Memory 表；每个 Runtime
+只读取自己的 canonical Run/Outcome/Assessment 作为证据，settlement worker 通过本机 Runtime
+数据库注册表路由到正确的 Run，避免跨 Runtime 或跨用户串数据。
 
 建议最小表组：
 
@@ -1472,6 +1770,9 @@ user_memory_chunks
 user_memory_suppressions
 user_interaction_profiles
 user_memory_experience_episodes
+user_memory_task_groups
+user_memory_task_group_revisions
+user_memory_search_index
 memory_settlement_jobs
 memory_projections
 memory_usage_feedback
@@ -1484,6 +1785,8 @@ memory_usage_feedback
 - Revision 通过 `(memory_id, revision)` 唯一，并以 CAS 更新 current revision。
 - Settlement job 通过 `(run_id, terminal_commit_ref)` 唯一，至少记录 `queued/processing/succeeded/failed/dead_letter`、attempt、next attempt 和错误摘要。
 - Chunk、Profile 和 embedding 都是可重建派生状态。
+- Task Group 可以复用 `user_memories`/`user_memory_revisions` 保存权威版本，也可以使用专用 task-group 表；无论实现选择如何，Task Group revision 必须与 episode sourceRefs、模型输入/输出 hash 和 validation result 关联。
+- `user_memory_search_index` 只保存 title、goalSummary、keywords、工具/Skill 名称等去实体化索引字段；它是可重建派生状态，不是新的 Memory 权威。
 - SourceRef 只保存 opaque ID 和最小必要引用，不复制秘密或完整日志。
 - Memory schema 通过现有版本化 migration 体系管理，并分别验证 SQLite/PostgreSQL/TiDB 语义。
 - 删除 active Memory 和刷新物化 Profile 必须处于同一事务，避免已删除偏好继续被加载。
@@ -1502,34 +1805,28 @@ PATCH  /api/v1/memories/:id
 DELETE /api/v1/memories/:id
 GET    /api/v1/memory-profile
 GET    /api/v1/memory-projections?conversationId=...&runId=...
+GET    /api/v1/memory-task-groups
+GET    /api/v1/memory-task-groups/:id
+GET    /api/v1/memory-task-groups/:id/export?format=markdown
+GET    /api/v1/memory-settlement-jobs/:id
 POST   /api/v1/memory-candidates/:id/confirm
 POST   /api/v1/memory-candidates/:id/reject
 ```
 
 所有 ID 都通过当前 Principal 推导用户范围，不接受调用方用 request body 覆盖 `tenantId/ownerUserId`。
 
-### 14.2 插件后端 API
+### 14.2 本地插件存储边界
 
-Kernel SPI 不规定 HTTP，也不要求 Memory 部署在 Router。若某个 `AgentLoopMemoryPlugin` 实现采用远程 Memory Service，它可以在插件内部使用类似接口：
+Local Agent 插件直接使用本机 SQLite，不提供 HTTP Memory Service，也不向 Router 暴露
+Memory 内部 API。用户管理 API 如果需要展示 Memory，必须在 Local Agent loopback 边界内
+完成，并由当前本地主体推导 scope；云端 API 不增加 Memory 路由。
 
-```text
-POST /internal/v1/memory/runs/:runId/recall
-POST /internal/v1/memory/runs/:runId/explicit-commit
-POST /internal/v1/memory/runs/:runId/settlement-jobs
-```
+本地 Store 必须：
 
-这些接口是具体插件实现的私有 transport，不是 Runtime Host、Router dispatch 或 AgentLoop Kernel 的公共契约。直接连接共享数据库的插件可以完全没有这些 API。
-
-远程实现必须：
-
-- 使用插件自身的可信 service identity，并验证其对当前 Run 的访问权。
-- 从 canonical Run/Assignment 关系解析 `tenantId + ownerUserId`，拒绝 request body 覆盖用户身份。
-- `recall` 只返回请求 target 对应的 `MemoryProjection`，不返回完整用户 Memory 列表。
-- `explicit-commit` 返回可验证的同步 receipt，写入失败不得伪造成功。
-- `settlement-jobs` 只接收 `runId + terminalCommitRef`，同步部分仅做校验、幂等判断和 durable enqueue；服务端 worker 再自行读取 canonical records 并异步提炼。
-- 对 service credential、私人字段和最小来源片段做日志脱敏。
-
-因此 Router 可以承载 Memory Service，也可以只提供 Run/Assignment/Feedback 查询 API；它是否承载后端不改变 Kernel 注册和调用插件的方式。
+- 对每次读写同时校验 `(tenantId, ownerUserId)` 和可信 `runId` 绑定。
+- 将 Projection、settlement job 和 revision 记录写入带 scope 的本地表。
+- 使用本地文件权限、SQLite 加密/磁盘保护能力（由宿主环境提供）保护用户数据。
+- 在数据库不可用时 fail closed，不回退到进程内存或 `memory.md`。
 
 ### 14.3 UI
 
@@ -1597,6 +1894,11 @@ memory.settlement.succeeded
 memory.settlement.retry_scheduled
 memory.settlement.dead_lettered
 memory.experience.episode.created
+memory.task_group.candidates_retrieved
+memory.task_group.merge_proposed
+memory.task_group.merge_rejected
+memory.task_group.revision_committed
+memory.task_group.exported
 memory.experience.procedure.promoted
 memory.plan_template_promotion.proposed
 ```
@@ -1609,6 +1911,7 @@ memory.plan_template_promotion.proposed
 - 决策原因和拒绝原因。
 - source refs 的 ID，不记录秘密或完整文本。
 - revision/hash。
+- settlement model key、prompt schema version、input episode/task-group revision IDs、output hash 和 validation result。
 - latency 和 token/候选数量等运行指标。
 
 关键指标：
@@ -1618,6 +1921,9 @@ memory.plan_template_promotion.proposed
 - Memory correction/delete 率。
 - always-on Profile 加载一致性。
 - contextual recall 命中和最终采用率。
+- Task Group 候选召回命中率、目标族判断接受/拒绝率和误合并率。
+- settlement model 不可用、超时、无效输出和 source-bound validation 拒绝率。
+- Task Group revision 的新增知识、失败教训、冲突和 recheck rule 数量。
 - settlement enqueue latency、队列深度、处理延迟、重试率和 dead-letter 数量。
 - experience/procedure 使用后的成功、repair、dispute 和用户反馈变化。
 - stale/private Memory 被过滤数量。
@@ -1656,7 +1962,8 @@ memory.plan_template_promotion.proposed
 - planning/execution/artifact/response/HIL Projection 只进入匹配 phase，不发生跨 target 泄露。
 - 不同 Kernel 注册的插件对同一 revision 和 target 得到同 schema、epoch 和 content hash 的 Projection。
 - 两个并发 Run 的 Projection 缓存、epoch 和 usage attribution 不串联。
-- Runtime 启动配置不接受 tenant/user 或 Memory 内容；共享后端故障不回退本地用户存储。
+- Local Agent 启动配置不接受调用方传入 tenant/user 或 Memory 内容；SQLite 故障不回退进程内存储。
+- 云端 Runtime Host 不注册 Memory，云端 Run 不生成 Projection、Candidate、Revision 或 settlement job。
 - 普通 recall 失败无个性化继续，显式 mutation 失败不得确认成功。
 - 显式删除提高 memoryEpoch，同一 Run 的下一次模型调用也不能继续使用旧内容。
 
@@ -1674,6 +1981,12 @@ memory.plan_template_promotion.proposed
 - 相同 `runId + terminalCommitRef` 重复 enqueue 不会生成重复 job 或 episode。
 - 进程在 enqueue receipt 后、worker 执行前退出，重启后仍能继续处理 durable job。
 - 超过重试上限的 job 进入 dead-letter 并可审计、重放，不能静默丢弃。
+- Settlement model 输出无效、越权或引用未出现的 Tool/Skill/Evidence 时，保留 episode、拒绝本次 Task Group 融合，并记录可诊断原因。
+- 两个相同 domain 但不同 taskKind 的成功 Run 不得自动合并为同一 Task Group。
+- 新 Run 能通过 title、goalSummary、keywords 和 TaskFingerprint 找到正确历史 Task Group，不依赖完全相同的自然语言 goal。
+- 新 episode 与历史 Task Group 目标族不一致时必须创建新组或保持未归并，不能为了达到 procedure 门槛强行合并。
+- Task Group 的每次 LLM 融合都产生 revision、输入 episode revision IDs、输出 hash 和 validation result。
+- 导出的 Task Group Markdown 与 SQLite 当前 revision 一致，不能把过期或 deleted revision 导出为当前经验。
 
 ### 17.5 Prompt 安全
 
@@ -1685,13 +1998,16 @@ memory.plan_template_promotion.proposed
 
 至少验证：
 
-1. 用户 A 保存称呼偏好，新 Conversation 和不同 Runtime Host 都稳定应用。
+1. 用户 A 保存称呼偏好，新 Conversation 和同一设备内不同 Local Runtime 实例都稳定应用。
 2. 用户 B 不会看到用户 A 的偏好。
 3. 用户 A 临时覆盖一次后，下一个 Conversation 恢复持久偏好。
 4. 用户删除偏好后，新 Turn 不再应用，旧 Run 仍可审计当时 Projection。
 5. 一个高质量 Run 生成 experience/episode；单次 experience 不直接晋升为 procedure。
-6. 多个独立成功 experience/episode 形成 experience/procedure candidate，并作为 Planner context 使用。
-7. 使用 experience/procedure 的新 Plan 仍经过 PlanAdmission、Assessment 和 TerminalCommitter。
+6. 多个独立成功 experience/episode 经过本地模型总结和历史检索，形成一个 Task Group revision。
+7. Task Group 满足成功证据门槛后形成 experience/procedure candidate，并作为 Planner context 使用。
+8. 同一 domain 但不同目标族的 Run 不会被合并；相同目标但不同表达可正确找到历史 Task Group。
+9. 使用 experience/procedure 的新 Plan 仍经过 PlanAdmission、Assessment 和 TerminalCommitter。
+10. Task Group 可以导出为类似 Codex Memory 的 Markdown，包含 scope、applies_to、reuse_rule、keywords、User preferences、Reusable knowledge 和 Failures and how to do differently。
 
 ## 18. 分阶段实施
 
@@ -1718,7 +2034,7 @@ memory.plan_template_promotion.proposed
 - 只向 response/HIL 生成受控 Projection。
 - 提供查看、修改、删除 UI/API。
 
-退出标准：跨 Conversation、跨 Host 稳定应用；写入失败不虚假确认；删除立即停止后续应用。
+退出标准：跨 Conversation、跨同设备 Local Runtime 实例稳定应用；写入失败不虚假确认；删除立即停止后续应用。
 
 ### Phase 2：事实记忆、时效和隐私
 
@@ -1740,17 +2056,21 @@ memory.plan_template_promotion.proposed
 
 ### Phase 4：Experience Procedure 与 Planner Context
 
-- 实现 experience/episode consolidation 和 pattern 归并。
-- 使用现有 TaskFingerprint 做 experience/procedure 检索。
-- 输出 `PlanningPrior`，只采用 planner_context 模式。
-- 记录 Prior 的选择、采用和执行结果。
+- 扩展 canonical settlement evidence，保留去实体化的 `plan_goal`、intent、Tool/Action 摘要、恢复过程、用户纠正和结果证据。
+- 增加本地 settlement model 适配器和严格的 `agentloop.semanticSettlement/v1` 输出校验。
+- 为 Task Group 增加 `title`、`goalSummary`、`keywords`、`scope`、`appliesTo`、`reuseRule`、`userPreferences`、`reusableKnowledge` 和 `failureLessons`。
+- 实现基于 tenant/user、结构化 fingerprint、关键词/FTS 的候选 Task Group 检索。
+- 由本地模型判断同一 Goal Family，并输出 new/merge/refine/reject/conflict proposal；确定性策略负责落库和 revision。
+- 只有两个独立 verified-success episode 支持的 Task Group 才生成 `experience/procedure` Planner projection。
+- 输出 `PlanningPrior`，只采用 planner_context 模式，并记录 Prior 的选择、采用和执行结果。
+- 增加 Task Group Markdown 导出，使用 Codex Memory 风格的任务组章节。
 
-退出标准：相似任务获得有界规划建议，低匹配或环境不兼容时正常走原 Planner，Runtime 权威链不变。
+退出标准：相同目标的不同表达可以融合为同一 Task Group；不同目标不会因共享 domain/tool/artifact 而误合并；Planner 获得有界规划建议，低匹配、模型不可用或融合冲突时正常走原 Planner，Runtime 权威链不变。
 
 ### Phase 5：与 PlanTemplate 晋升闭环
 
 - 为 PlanTemplate Store 增加严格的 user scope，或明确拒绝个性化晋升。
-- 将 maturity=template_candidate 的稳定 experience 提议为 PlanTemplate candidate。
+- 将经过多个 Task Group revision 验证、maturity=template_candidate 的稳定 experience 提议为 PlanTemplate candidate。
 - 复用现有 matcher、constraint verifier、instantiator 和 evaluator。
 - direct_use 仍按 PlanTemplate 自身门槛和开关控制。
 
@@ -1758,9 +2078,10 @@ memory.plan_template_promotion.proposed
 
 ### Phase 6：索引和规模化
 
-- 在结构化过滤和关键词检索不足时引入 embedding。
+- 在结构化过滤和关键词/FTS 检索不足时引入 embedding；embedding 只能用于软排序，不能替代 Task Group scope、reuseRule 和 Goal Family 校验。
 - 评估 sqlite-vec、PostgreSQL 向量扩展或独立索引。
 - 增加分层缓存、归档、重新索引和配额策略。
+- 支持按 Task Group、revision、sourceRefs 和本地导出文件进行可解释重建。
 
 退出标准：规模化没有改变 Memory 权威、删除、隔离和应用语义。
 
@@ -1773,9 +2094,11 @@ memory.plan_template_promotion.proposed
 3. 不同类型 Memory 只影响其拥有的模型调用和阶段。
 4. 私人信息没有因为相似度命中而出现在无关任务中。
 5. 每个 Run 能说明使用了哪些 Memory、哪个 revision、为什么使用。
-6. 历史执行经验按 episode -> pattern -> procedure 成熟，不从一次成功直接推广。
-7. maturity=procedure 的 experience 只提供 PlanningPrior，PlanAdmission 和 Runtime 权威链保持不变。
-8. 删除、跨用户隔离和 Prompt Injection 防护经过真实 E2E 验证。
+6. 历史执行经验按 episode -> Task Group -> procedure 成熟，不从一次成功直接推广。
+7. Task Group 的每次融合都能说明使用了哪些历史 episode、哪些关键词/指纹命中、模型提出了什么变更以及校验是否通过。
+8. 同一目标的不同表达可融合，不同目标不会因粗粒度 fingerprint 误合并。
+9. maturity=procedure 的 experience 只提供 PlanningPrior，PlanAdmission 和 Runtime 权威链保持不变。
+10. 删除、跨用户隔离、Task Group 导出一致性和 Prompt Injection 防护经过真实 E2E 验证。
 
 ## 20. 待实施前确认的决策
 
@@ -1787,5 +2110,8 @@ memory.plan_template_promotion.proposed
 4. 用户反馈的等待窗口：点赞后多久、出现何种 correction/dispute 时重新评价 experience/episode。
 5. PlanTemplate Store 的 user scope 改造时机；在此之前 experience/procedure 只允许 planner_context。
 6. Memory 导出格式是否直接采用 Markdown + JSON manifest 的组合。
+7. Local Agent 可用哪些 settlement model；默认仍关闭 Memory 和 settlement model，启用后只能选择 `local:` 模型，云端模型不得接收本地 Memory 内容。
+8. Task Group 的模型融合是否在每个 episode 结束后立即执行，还是先积累本地队列再批量执行；两种模式都必须保留 durable job、幂等和 revision 审计。
+9. Task Group 的 `reuseRule` 和 `recheckRules` 是否由模型提出后需要用户确认；在未确认前可以保存为 candidate，但不得作为 Planner procedure。
 
 这些决定不得改变已经确定的核心契约：身份边界是 `tenantId + ownerUserId`，一级类型固定为 preference/fact/experience，subtype 和正交属性决定具体应用方式，Memory 不成为 Runtime 权威，历史 experience/procedure 不复制 PlanTemplate 执行链。
