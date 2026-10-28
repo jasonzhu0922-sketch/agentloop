@@ -65,8 +65,12 @@ export function mountRuntimeReload({ document, fetch, confirm, setTimeout, clear
       } else if (state.status === "succeeded") {
         const at = state.finishedAt ? `（${new Date(state.finishedAt * 1000).toLocaleString()}）` : "";
         const catalog = Array.isArray(state.models) ? `当前 ${state.models.length} 个模型：${state.models.map((model) => model.displayName || model.key).join("、")}。` : "";
-        const target = globalThis.AGENTLOOP_RUNTIME_CONTROL_DEV_MODE ? "开发沙盒" : "生产";
-        show(`${state.operation === "apply" ? `已保存并应用到${target}` : "重新加载完成"}${at}：所有云端 Runtime 已就绪，实际模型列表核对通过。${catalog}返回工作区后模型列表会重新读取。`);
+        if (globalThis.AGENTLOOP_RUNTIME_CONTROL_DEV_MODE && state.operation === "apply") {
+          show(`已保存到开发沙盒${at}：${catalog}工作区重新读取模型列表时会自动刷新 Runtime。`);
+        } else {
+          const target = globalThis.AGENTLOOP_RUNTIME_CONTROL_DEV_MODE ? "开发沙盒" : "生产";
+          show(`${state.operation === "apply" ? `已保存并应用到${target}` : "重新加载完成"}${at}：所有云端 Runtime 已就绪，实际模型列表核对通过。${catalog}返回工作区后模型列表会重新读取。`);
+        }
       } else if (state.status === "failed") {
         show(messages[state.phase] ?? messages.reload_failed, true);
       } else { show("当前没有重新加载记录。"); }

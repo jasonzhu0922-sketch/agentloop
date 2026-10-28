@@ -23,6 +23,7 @@ import {
   planningCapabilitiesFromToolNames,
   planningCapabilitiesFromTools,
   skillSourceProviderCapabilityId,
+  sourceProviderSkillIdFromCapabilityId,
 } from "./step-execution-binding.ts";
 
 const FILE_PRODUCER_TOOL_NAMES = new Set([
@@ -305,6 +306,21 @@ export function admitPlan(input: {
       availableCapabilities,
       evidenceContract: completionEvidenceContract,
     });
+    const capabilityById = new Map(availableCapabilities.map((capability) => [capability.id, capability]));
+    const unboundSourceProviderCapabilities = executionBinding.requiredCapabilities.flatMap((capabilityId) => {
+      const capability = capabilityById.get(capabilityId);
+      if (capability?.category !== "skill_source_provider") return [];
+      const declaringSkillId = sourceProviderSkillIdFromCapabilityId(capabilityId);
+      if (declaringSkillId === undefined || stepSkillIds.includes(declaringSkillId)) return [];
+      return [{ capabilityId, declaringSkillId }];
+    });
+    if (unboundSourceProviderCapabilities.length > 0) {
+      reject(
+        `Step ${step.id} requires source-provider capability(ies) without binding the declaring Skill: ${unboundSourceProviderCapabilities
+          .map((item) => `${item.capabilityId} (Skill ${item.declaringSkillId})`)
+          .join(", ")}`,
+      );
+    }
     const unknownCapabilities = unknownPlanningCapabilities(
       executionBinding.requiredCapabilities,
       input.availableTools,

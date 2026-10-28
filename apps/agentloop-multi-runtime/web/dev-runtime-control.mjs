@@ -107,6 +107,15 @@ export function createDevRuntimeControl({ root, skillsRoot, token = "development
     if (!value || typeof value !== "object" || !value.configuration || typeof value.configuration !== "object") {
       return reply(response, 400, { error: "invalid_configuration_request" });
     }
+    if (modelPath) {
+      // Runtime Hosts read this file at startup. Persist the development
+      // configuration so a launcher restart uses the same catalog the UI
+      // reported as applied.
+      const temporaryPath = `${modelPath}.${process.pid}.tmp`;
+      await mkdir(dirname(modelPath), { recursive: true, mode: 0o700 });
+      await writeFile(temporaryPath, `${JSON.stringify(value.configuration, null, 2)}\n`, { mode: 0o600 });
+      await rename(temporaryPath, modelPath);
+    }
     configuration = value.configuration;
     state = { id: cryptoRandomId(), operation: "apply", status: "succeeded", phase: "complete", models: Object.entries(configuration.models ?? {}).map(([key, model]) => ({ key, displayName: model?.displayName ?? key })), finishedAt: Date.now() / 1000 };
     await persistState();

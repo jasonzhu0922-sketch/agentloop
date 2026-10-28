@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { colorizeTerminalLogLabel, colorizeTerminalLogLine, createStepExecutionStrategyProfile, createWebTools, DEFAULT_MAX_PLANNING_TURNS, DEFAULT_MAX_STEPS, LlmProviderRegistry, loadOptionalMcpToolsFromConfigFile, MAX_SUPPORTED_PLANNING_TURNS, MAX_SUPPORTED_STEP_TURNS, RunService, SkillService } from "@zhujun/agentloop";
@@ -82,7 +83,8 @@ const database = await openStateDatabase(stateDatabaseConfigFromEnvironment({
 await migrateRuntimeState(database);
 const dispatchStore = new HostDispatchStore(database, runtimeId);
 await dispatchStore.ready();
-const providers = await LlmProviderRegistry.fromConfigFile(providerConfigPath);
+let providers = await LlmProviderRegistry.fromConfigFile(providerConfigPath);
+let providerConfigMtimeMs = (await stat(providerConfigPath)).mtimeMs;
 const skills = new SkillService(database, {
   // Do not make Skill package synchronization contend on the shared task volume.
   packageStoreRoot: skillPackageStoreRoot,
@@ -117,6 +119,16 @@ const runs = new RunService({
   ...(planTemplateObserver === undefined ? {} : { planningExtensions: [planTemplateObserver.extension()] }),
   runEventLogSink: (line) => process.stdout.write(`${runtimeLogLabel} ${colorizeTerminalLogLine(line, logColorOptions)}\n`),
 });
+async function refreshProviderConfiguration(): Promise<LlmProviderRegistry> {
+  const currentMtimeMs = (await stat(providerConfigPath)).mtimeMs;
+  if (currentMtimeMs === providerConfigMtimeMs) return providers;
+  const next = await LlmProviderRegistry.fromConfigFile(providerConfigPath);
+  providers = next;
+  providerConfigMtimeMs = currentMtimeMs;
+  runs.setModelKeys(next.modelKeys());
+  process.stdout.write(`${runtimeLogLabel} Reloaded ${next.modelKeys().length} model(s) from ${providerConfigPath}\n`);
+  return providers;
+}
 const reconcileOwnedRuns = async (): Promise<void> => {
   await runs.reconcileInterruptedRuns(await dispatchStore.ownedRunIds());
 };
@@ -125,7 +137,12 @@ const runtimeHost = new RuntimeHostService(new AgentLoopRuntimeRunPort(runs), ne
   maxConcurrentRuns,
   activeRunCount: activeRunCount,
 }, dispatchStore);
-const server = createRuntimeHostHttpServer(runtimeHost, { dispatchToken: runtimeDispatchToken, providers, models: providers.modelCatalog().map(({ key, displayName }) => ({ key, displayName })) });
+const server = createRuntimeHostHttpServer(runtimeHost, {
+  dispatchToken: runtimeDispatchToken,
+  refresh: refreshProviderConfiguration,
+  providers: refreshProviderConfiguration,
+  models: async () => (await refreshProviderConfiguration()).modelCatalog().map(({ key, displayName }) => ({ key, displayName })),
+});
 server.listen(port, host, () => {
   process.stdout.write(`AgentLoop Runtime Host ${runtimeId} listening on http://${host}:${port}; discovered ${skillDirectorySync.discoveredSkills.length} Skill package(s) from ${skillDirectories.join(", ")}\n`);
   void sendHeartbeat();

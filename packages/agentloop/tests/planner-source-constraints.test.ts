@@ -84,6 +84,102 @@ function planningRetryTask(): TaskSpec {
   };
 }
 
+test("Planner previews a proposal against the selected Skill capability closure", async () => {
+  const selectedSource = {
+    id: "discovered:selected-source",
+    name: "selected-source",
+    description: "Read the requested source records.",
+    instructions: "Read the requested source records.",
+    sourceKind: "package",
+    version: 1,
+    contentHash: "selected-source",
+    updatedAt: 1,
+    agentLoop: {
+      roles: ["source_provider"], artifactKinds: ["none"], sourceKinds: ["database"], qaKinds: [],
+      executionProfiles: ["local_script"], producesEvidenceKinds: ["source_summary"],
+    },
+  } as PrivateSkill;
+  const unselectedSource = {
+    id: "discovered:unselected-source",
+    name: "unselected-source",
+    description: "Read a different source namespace.",
+    instructions: "Read a different source namespace.",
+    sourceKind: "package",
+    version: 1,
+    contentHash: "unselected-source",
+    updatedAt: 1,
+    agentLoop: {
+      roles: ["source_provider"], artifactKinds: ["none"], sourceKinds: ["database"], qaKinds: [],
+      executionProfiles: ["local_script"], producesEvidenceKinds: ["source_summary"],
+    },
+  } as PrivateSkill;
+  const selectedCapability = skillSourceProviderCapabilityId(selectedSource.id, "database");
+  const unselectedCapability = skillSourceProviderCapabilityId(unselectedSource.id, "database");
+  const runId = "run-planner-selected-skill-capability-closure";
+  const understanding = understandTask({ objective: "Read the requested source records." });
+  const task: TaskSpec = {
+    runId,
+    canonicalState: createCanonicalRunState({ runId, userInput: "Read the requested source records.", understanding, now: 1 }),
+    availableSkills: [selectedSource, unselectedSource],
+    selectedSkillRoles: [
+      { skillId: selectedSource.id, role: "source_provider", reason: "Candidate source." },
+      { skillId: unselectedSource.id, role: "source_provider", reason: "Candidate source." },
+    ],
+    availableToolNames: ["load_skill", "computer_run_command"],
+    availableCapabilities: [
+      ...planningCapabilitiesFromToolNames(["load_skill", "computer_run_command"]),
+      ...planningCapabilitiesFromSkills([selectedSource, unselectedSource]),
+    ],
+  };
+  let calls = 0;
+  const failures: string[] = [];
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
+    async complete(): Promise<ModelResponse> {
+      calls += 1;
+      const requiredCapabilities = calls === 1
+        ? [selectedCapability, unselectedCapability]
+        : [selectedCapability];
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: `plan-${calls}`,
+          name: "submit_outcome_plan",
+          arguments: {
+            schema: "agentloop.outcomePlan/v2",
+            goal: "Read the requested source records.",
+            shape: "single_leaf",
+            selectedSkillRoles: [{ skillId: selectedSource.id, role: "source_provider", reason: "Use the requested source." }],
+            leaves: [{
+              id: "source-facts",
+              objective: "Read the requested source records.",
+              dependsOn: [],
+              role: "fact_acquisition",
+              skillIds: [selectedSource.id],
+              requiredCapabilities,
+              sourceConstraint: null,
+              targetIds: [],
+              requiredFacts: [],
+              evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "mark_unverified_facts" },
+              successCriteria: [{ id: "source_summary", description: "Source records are observed.", source: "planner" }],
+            }],
+          },
+        }],
+      };
+    },
+  };
+
+  const proposal = await new ModelPlanner(model, { maxPlanningTurns: 2 }).plan(task, undefined, async (event) => {
+    if (event.type === "planning.contract_failed") failures.push(String(event.data.validationError));
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(failures.length, 1);
+  assert.match(failures[0]!, /requires unknown capabilities: .*discovered:unselected-source/);
+  assert.deepEqual(proposal.steps[0]?.requiredCapabilities, [selectedCapability]);
+});
+
 function retryingPlannerModel(): { readonly model: ModelAdapter; readonly calls: () => number } {
   let count = 0;
   return {

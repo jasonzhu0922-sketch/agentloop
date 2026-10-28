@@ -113,6 +113,10 @@ await writeFile(launcher, `#!/bin/sh
 set -eu
 RESOURCE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 LOG_ROOT="$HOME/Library/Application Support/AgentLoop Local Runtime/logs"
+case " ${NODE_OPTIONS:-} " in
+  *" --use-system-ca "*) ;;
+  *) export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--use-system-ca" ;;
+esac
 exec "$RESOURCE_ROOT/agentloop-local-runtime-node" "$RESOURCE_ROOT/rotating-log-launcher.mjs" --log-root "$LOG_ROOT" -- "$RESOURCE_ROOT/agentloop-local-runtime-agent" "$@"
 `, { mode: 0o755 });
 await chmod(launcher, 0o755);

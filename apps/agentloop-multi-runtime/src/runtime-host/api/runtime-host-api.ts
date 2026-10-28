@@ -4,15 +4,20 @@ import type { LlmProviderRegistry } from "@zhujun/agentloop";
 import type { RuntimeModelSummary } from "../../shared/contracts.ts";
 import { invocationFrom, responseAbortSignal, writeModelRecord } from "../../shared/model-proxy.ts";
 
+type ModelCatalogSource = readonly RuntimeModelSummary[] | (() => readonly RuntimeModelSummary[] | Promise<readonly RuntimeModelSummary[]>);
+type ProviderSource = LlmProviderRegistry | (() => LlmProviderRegistry | Promise<LlmProviderRegistry>);
+
 /** Private Router-to-Host transport. It is not exposed as a browser API. */
-export function createRuntimeHostHttpServer(host: RuntimeHostService, options: { readonly dispatchToken?: string; readonly models?: readonly RuntimeModelSummary[]; readonly providers?: LlmProviderRegistry } = {}): Server {
+export function createRuntimeHostHttpServer(host: RuntimeHostService, options: { readonly dispatchToken?: string; readonly models?: ModelCatalogSource; readonly providers?: ProviderSource; readonly refresh?: () => void | Promise<void> } = {}): Server {
   return createServer(async (request, response) => {
     try {
       if (request.method === "GET" && request.url === "/healthz") return json(response, 200, { status: "ok" });
-      if (request.method === "GET" && request.url === "/v1/models") return json(response, 200, { models: options.models ?? [] });
+      await options.refresh?.();
+      if (request.method === "GET" && request.url === "/v1/models") return json(response, 200, { models: await resolveModels(options.models) });
       if (request.method === "POST" && request.url === "/v1/model-completions") {
         if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) return json(response, 401, { error: "runtime_dispatch_unauthorized" });
-        if (options.providers === undefined) return json(response, 503, { error: "model_invocation_unavailable" });
+        const providers = await resolveProviders(options.providers);
+        if (providers === undefined) return json(response, 503, { error: "model_invocation_unavailable" });
         const body = readRecord(await readJson(request));
         if (typeof body.modelKey !== "string" || body.invocation === undefined) return json(response, 400, { error: "model_invocation_invalid" });
         const invocation = invocationFrom(body.invocation);
@@ -21,7 +26,7 @@ export function createRuntimeHostHttpServer(host: RuntimeHostService, options: {
         response.setHeader("cache-control", "no-store");
         const signal = responseAbortSignal(response);
         try {
-          const model = options.providers.create(body.modelKey, async (info) => { await writeModelRecord(response, { type: "retry", info }); });
+          const model = providers.create(body.modelKey, async (info) => { await writeModelRecord(response, { type: "retry", info }); });
           const result = model.streamComplete === undefined
             ? await model.complete(invocation, signal)
             : await model.streamComplete(invocation, async (event) => { await writeModelRecord(response, { type: "delta", event }); }, signal);
@@ -145,6 +150,16 @@ export function createRuntimeHostHttpServer(host: RuntimeHostService, options: {
       return json(response, 400, { error: error instanceof Error ? error.message : String(error) });
     }
   });
+}
+
+async function resolveModels(value: ModelCatalogSource | undefined): Promise<readonly RuntimeModelSummary[]> {
+  if (value === undefined) return [];
+  return typeof value === "function" ? await value() : value;
+}
+
+async function resolveProviders(value: ProviderSource | undefined): Promise<LlmProviderRegistry | undefined> {
+  if (value === undefined) return undefined;
+  return typeof value === "function" ? await value() : value;
 }
 
 async function readJson(request: import("node:http").IncomingMessage): Promise<unknown> {

@@ -3,7 +3,9 @@ import test from "node:test";
 import { admitPlan } from "../src/planning/admission.ts";
 import {
   planningCapabilitiesFromSkills,
+  planningCapabilitiesFromToolNames,
   planningCapabilitiesFromTools,
+  skillSourceProviderCapabilityId,
   requiredToolSourceIdsForConversationTurn,
   resolveToolNamesForCapabilities,
   reusableToolSourceIdsForContinuation,
@@ -111,6 +113,67 @@ test("a local-script source provider executes in a conversation leaf without req
   assert.deepEqual(plan.steps[0]?.executionBinding.evidenceProducers.filter((producer) => producer.evidenceKind === "source_summary"), [{
     evidenceKind: "source_summary", capabilityId, resolvedToolNames: ["computer_run_command"], skillId: skill.id,
   }]);
+});
+
+test("Admission rejects a Skill source capability whose declaring Skill is not bound to the leaf", () => {
+  const selectedSource = {
+    id: "discovered:selected-source",
+    name: "selected-source",
+    description: "Read the requested source records.",
+    agentLoop: {
+      roles: ["source_provider"],
+      artifactKinds: ["none"],
+      sourceKinds: ["database"],
+      qaKinds: [],
+      executionProfiles: ["local_script"],
+      producesEvidenceKinds: ["source_summary"],
+    },
+  } as PrivateSkill;
+  const unboundSource = {
+    id: "discovered:unbound-source",
+    name: "unbound-source",
+    description: "Read a different source namespace.",
+    agentLoop: {
+      roles: ["source_provider"],
+      artifactKinds: ["none"],
+      sourceKinds: ["database"],
+      qaKinds: [],
+      executionProfiles: ["local_script"],
+      producesEvidenceKinds: ["source_summary"],
+    },
+  } as PrivateSkill;
+  const runId = "run-unbound-skill-source-capability";
+  const unboundCapability = skillSourceProviderCapabilityId(unboundSource.id, "database");
+
+  assert.throws(() => admitPlan({
+    runId,
+    proposal: {
+      goal: "Read the requested source records.",
+      selectedSkillIds: [selectedSource.id],
+      steps: [{
+        id: "source-facts",
+        objective: "Read the requested source records.",
+        dependencies: [],
+        role: "fact_acquisition",
+        skillIds: [selectedSource.id],
+        requiredCapabilities: [unboundCapability],
+        evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "mark_unverified_facts" },
+        successCriteria: [{ id: "source_summary", description: "Source records are observed.", source: "planner" }],
+      }],
+    },
+    availableSkills: [selectedSource, unboundSource],
+    availableToolNames: new Set(["load_skill", "computer_run_command"]),
+    availableCapabilities: [
+      ...planningCapabilitiesFromToolNames(["load_skill", "computer_run_command"]),
+      ...planningCapabilitiesFromSkills([selectedSource, unboundSource]),
+    ],
+    canonicalState: createCanonicalRunState({
+      runId,
+      userInput: "Read the requested source records.",
+      understanding: understandTask({ objective: "Read the requested source records." }),
+      now: 1,
+    }),
+  }), /requires source-provider capability\(ies\) without binding the declaring Skill: .*discovered:unbound-source/);
 });
 
 test("continued Runs reuse only ToolSources backed by published completed Step Results", () => {

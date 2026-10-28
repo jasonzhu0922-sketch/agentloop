@@ -242,8 +242,41 @@ export function planningCapabilitiesFromSkills(skills: readonly PrivateSkill[]):
   });
 }
 
+/**
+ * Builds the capability catalog for one concrete Plan selection.  Candidate
+ * Skills may be visible during planning, but only selected Skills authorize
+ * Skill-owned capabilities at Admission.  Keeping this closure shared by the
+ * Planner preview and Runtime Admission prevents the two boundaries from
+ * validating different capability sets.
+ */
+export function planningCapabilitiesForSelectedSkills(input: {
+  readonly selectedSkillIds: readonly string[];
+  readonly availableSkills: readonly PrivateSkill[];
+  readonly availableToolNames: readonly string[];
+  readonly availableTools?: readonly PlanningToolSummary[];
+  readonly sources?: readonly UploadedSourceSummary[];
+}): PlanningCapability[] {
+  const selected = new Set(input.selectedSkillIds);
+  const selectedSkills = input.availableSkills.filter((skill) =>
+    selected.has(skill.id) || selected.has(skill.name)
+  );
+  const toolCapabilities = input.availableTools === undefined
+    ? planningCapabilitiesFromToolNames(input.availableToolNames, input.sources)
+    : planningCapabilitiesFromTools(input.availableTools, input.sources);
+  return [...toolCapabilities, ...planningCapabilitiesFromSkills(selectedSkills)];
+}
+
 export function skillSourceProviderCapabilityId(skillId: string, sourceKind: string): string {
   return `${SKILL_SOURCE_PROVIDER_CAPABILITY_PREFIX}${sourceKind}.${skillId}`;
+}
+
+/** Returns the declaring Skill ID encoded in a Skill source-provider capability. */
+export function sourceProviderSkillIdFromCapabilityId(capabilityId: string): string | undefined {
+  if (!capabilityId.startsWith(SKILL_SOURCE_PROVIDER_CAPABILITY_PREFIX)) return undefined;
+  const remainder = capabilityId.slice(SKILL_SOURCE_PROVIDER_CAPABILITY_PREFIX.length);
+  const separator = remainder.indexOf(".");
+  if (separator <= 0 || separator === remainder.length - 1) return undefined;
+  return remainder.slice(separator + 1);
 }
 
 /**
