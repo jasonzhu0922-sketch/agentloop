@@ -852,6 +852,56 @@ test("Recovery Planner retries a duplicate-criterion proposal with parser feedba
   assert.equal(calls, 2);
 });
 
+test("Recovery Planner requires a complete plan revision for revise_plan", async () => {
+  const fixture = webpageSummaryPlanningFixture();
+  let calls = 0;
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 40_000, maxOutputTokens: 4_096 },
+    complete: async (request) => {
+      calls += 1;
+      const schema = request.tools[0]!.inputSchema as any;
+      assert.equal(schema.oneOf.length, 4);
+      const revisePlanVariant = schema.oneOf.find((variant: any) => variant.properties.decision.enum[0] === "revise_plan");
+      assert.ok(revisePlanVariant);
+      assert.ok(revisePlanVariant.required.includes("planRevision"));
+      assert.equal(revisePlanVariant.properties.planRevision, schema.properties.planRevision);
+      const failVariant = schema.oneOf.find((variant: any) => variant.properties.decision.enum[0] === "fail");
+      assert.ok(failVariant);
+      assert.equal(failVariant.properties.planRevision, undefined);
+      if (calls === 2) assert.match(request.systemPrompt, /planRevision is required for revise_plan/);
+      return {
+        content: "",
+        finishReason: "tool_calls" as const,
+        toolCalls: [{
+          id: `recovery-${calls}`,
+          name: "submit_recovery_decision",
+          arguments: calls === 1 ? {
+            actionId: "recovery-action", expectedActionRevision: 1, decision: "revise_plan",
+            rationale: "The replacement plan was not available.", evidenceRefs: [],
+          } : {
+            actionId: "recovery-action", expectedActionRevision: 1, decision: "fail",
+            rationale: "No complete replacement plan is available.", evidenceRefs: [],
+          },
+        }],
+      };
+    },
+  };
+  const input: RecoveryPlannerInput = {
+    runId: fixture.task.runId,
+    userInput: fixture.task.canonicalState.intent.userInput,
+    action: {
+      id: "recovery-action", runId: fixture.task.runId, kind: "recovery_review", state: "recovery_required",
+      attempt: 1, maxAttempts: 3, replayPolicy: "safe", fence: 1, revision: 1,
+      metadata: {}, effectState: "not_started", createdAt: 1, updatedAt: 1,
+    },
+    canonicalState: fixture.task.canonicalState,
+    events: [], userResponses: [],
+  };
+  const decision = await new ModelRecoveryPlanner(model).decide(input);
+  assert.equal(decision.decision, "fail");
+  assert.equal(calls, 2);
+});
+
 test("webpage summary provenance is Runtime-bound and both live paraphrases are rejected as model fields", async (t) => {
   for (const requirement of [undefined, "向用户提供该网页内容的中文摘要", "输出为中文摘要"]) {
     await t.test(requirement ?? "model omits the Runtime-owned field", async () => {

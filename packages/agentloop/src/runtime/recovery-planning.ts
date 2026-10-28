@@ -63,20 +63,7 @@ export interface RecoveryPlanner {
 const SUBMIT_RECOVERY_DECISION_TOOL = {
   name: "submit_recovery_decision",
   description: "Submit the only valid recovery decision. Do not use prose for recovery control.",
-  inputSchema: {
-    type: "object",
-    additionalProperties: false,
-    required: ["actionId", "expectedActionRevision", "decision", "rationale", "evidenceRefs"],
-    properties: {
-      actionId: { type: "string" },
-      expectedActionRevision: { type: "integer", minimum: 1 },
-      decision: { enum: ["resume_step", "revise_plan", "ask_user", "fail"] },
-      rationale: { type: "string" },
-      evidenceRefs: { type: "array", items: { type: "string" } },
-      planRevision: planProposalSchema(),
-      question: { type: "string" },
-    },
-  },
+  inputSchema: recoveryDecisionSchema(),
 } as const;
 
 const SUBMIT_PLAN_REVISION_ASSESSMENT_TOOL = {
@@ -107,6 +94,7 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
       "You cannot execute tools, declare completion, or alter recovery facts.",
       "For assessment_failed_boundary, choose revise_plan, ask_user or fail. resume_step is reserved for interrupted execution and cannot restart an exhausted candidate loop.",
       "Choose exactly one structured recovery decision. replayPolicy=unsafe never permits resume_step.",
+      "When choosing revise_plan, submit a complete planRevision in the same decision. If you cannot produce a complete valid replacement Plan, choose fail instead.",
       "A Plan revision retires a Step from future scheduling only. It never erases, authorizes, compensates for, or replays an Action already recorded for that Step. If a retired Action has an unknown external effect, preserve that fact and choose a continuation that neither relies on nor repeats that effect, or fail when no such continuation exists.",
       "If the failed boundary shows the current Plan's evidence contract is wrong for the evidence that actually exists, prefer revise_plan and repair the Plan boundary rather than resubmitting the same step.",
       "planRevision is a complete replacement proposal, not a patch. Every step must explicitly declare targetIds, dependencies, skillIds, requiredCapabilities and successCriteria. Current bindings are in currentPlan.steps[].executionBinding.targetIds. Preserve every canonical delivery target exactly once on its producing or adopting leaf; use targetIds: [] for a prerequisite that owns no user-visible target. Do not infer ownership from criteria or requiredFacts[].basis.targetIds: those basis references may support targets owned by downstream dependent leaves. Preserve required facts and their exact user-input provenance when correcting execution methods or unsupported criteria. Runtime regenerates delivery_target criteria from targetIds; omit those derived criteria from the proposal.",
@@ -347,6 +335,44 @@ function parseBoolean(value: unknown, name: string): boolean {
 function parseCriterionVerification(value: unknown): NonNullable<SuccessCriterion["verification"]> {
   if (value === "deterministic" || value === "model_judged" || value === "decision_context") return value;
   throw badRequest("criterion verification is invalid");
+}
+
+function recoveryDecisionSchema(): Record<string, unknown> {
+  const commonProperties = {
+    actionId: { type: "string" },
+    expectedActionRevision: { type: "integer", minimum: 1 },
+    rationale: { type: "string" },
+    evidenceRefs: { type: "array", items: { type: "string" } },
+  };
+  const commonRequired = ["actionId", "expectedActionRevision", "decision", "rationale", "evidenceRefs"];
+  const variant = (decision: RecoveryDecisionKind, extraProperties: Record<string, unknown> = {}, extraRequired: readonly string[] = []) => ({
+    type: "object",
+    additionalProperties: false,
+    required: [...commonRequired, ...extraRequired],
+    properties: {
+      ...commonProperties,
+      decision: { type: "string", enum: [decision] },
+      ...extraProperties,
+    },
+  });
+  const planRevision = planProposalSchema();
+  const question = { type: "string" };
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      ...commonProperties,
+      decision: { type: "string", enum: ["resume_step", "revise_plan", "ask_user", "fail"] },
+      planRevision,
+      question,
+    },
+    oneOf: [
+      variant("resume_step"),
+      variant("revise_plan", { planRevision }, ["planRevision"]),
+      variant("ask_user", { question }, ["question"]),
+      variant("fail"),
+    ],
+  };
 }
 
 function planProposalSchema(): Record<string, unknown> {
