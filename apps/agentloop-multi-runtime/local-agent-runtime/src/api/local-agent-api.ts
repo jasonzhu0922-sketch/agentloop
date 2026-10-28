@@ -22,6 +22,27 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
         const registered = await service.registerDevice(origin, stringValue((await body(request)).registrationToken, "registrationToken"));
         return json(response, alreadyRegistered(registered) ? 200 : 201, registered);
       }
+      if (request.method === "POST" && url.pathname === "/v1/agent/reconnect") {
+        await session(request, service);
+        return json(response, 202, await service.reconnect());
+      }
+
+      if (request.method === "GET" && url.pathname === "/v1/local-runtimes") {
+        await session(request, service);
+        return json(response, 200, await service.localRuntimes());
+      }
+      if (request.method === "GET" && url.pathname === "/v1/agent/config") {
+        await session(request, service);
+        return json(response, 200, await service.agentConfiguration());
+      }
+      if (request.method === "POST" && url.pathname === "/v1/agent/config/shared-storage/pick") {
+        await session(request, service);
+        return json(response, 200, await service.pickSharedStorage());
+      }
+      if (request.method === "POST" && url.pathname === "/v1/agent/config/upload-storage/pick") {
+        await session(request, service);
+        return json(response, 200, await service.pickUploadStorage());
+      }
 
       if (request.method === "GET" && url.pathname === "/v1/local-skill-packages") {
         await session(request, service);
@@ -89,13 +110,20 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
           value.displayName === undefined ? undefined : stringValue(value.displayName, "displayName"),
         ));
       }
-      const runtimeLifecycle = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)\/(start|stop)$/);
+      const runtimeDelete = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)$/);
+      if (request.method === "DELETE" && runtimeDelete !== null) {
+        await session(request, service);
+        return json(response, 200, await service.removeLocalRuntime(decodeURIComponent(runtimeDelete[1])));
+      }
+      const runtimeLifecycle = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)\/(start|stop|drain|restart)$/);
       if (request.method === "POST" && runtimeLifecycle !== null) {
         await session(request, service);
         const runtimeId = decodeURIComponent(runtimeLifecycle[1]);
-        return json(response, 200, runtimeLifecycle[2] === "start"
-          ? await service.startLocalRuntime(runtimeId)
-          : await service.stopLocalRuntime(runtimeId));
+        const action = runtimeLifecycle[2];
+        if (action === "start") return json(response, 200, await service.startLocalRuntime(runtimeId));
+        if (action === "stop") return json(response, 200, await service.stopLocalRuntime(runtimeId));
+        if (action === "drain") return json(response, 200, await service.drainLocalRuntime(runtimeId));
+        return json(response, 200, await service.restartLocalRuntime(runtimeId));
       }
 
       if (request.method === "GET" && url.pathname === "/v1/directory-scopes") { await session(request, service); return json(response, 200, await service.listDirectoryScopes(queryRuntimeId(url))); }

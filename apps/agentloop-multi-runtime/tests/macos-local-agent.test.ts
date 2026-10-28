@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-test("macOS tray preserves release Web origin and installs LaunchAgent for the current user", { skip: process.platform !== "darwin" }, async () => {
+test("macOS launcher preserves release Web origin and installs LaunchAgent for the current user", { skip: process.platform !== "darwin" }, async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-macos-installation-"));
   try {
     const harness = join(root, "main.swift");
@@ -49,7 +49,7 @@ print("release origin and per-user LaunchAgent verified")
   }
 });
 
-test("macOS tray shutdown unloads the KeepAlive LaunchAgent before quitting", { skip: process.platform !== "darwin" }, async () => {
+test("macOS service shutdown unloads the KeepAlive LaunchAgent before quitting", { skip: process.platform !== "darwin" }, async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-macos-shutdown-"));
   try {
     const statePath = join(root, "state.json");
@@ -86,10 +86,47 @@ print("LaunchAgent unloaded before tray quit")
   }
 });
 
+test("macOS Agent restart reuses a loaded LaunchAgent instead of bootstrapping it again", { skip: process.platform !== "darwin" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-macos-restart-"));
+  try {
+    const statePath = join(root, "state.json");
+    await writeFile(statePath, JSON.stringify({ loaded: true, calls: [] }));
+    const launchctl = join(root, "launchctl");
+    await writeFile(launchctl, `#!${process.execPath}
+const fs = require("node:fs");
+const statePath = ${JSON.stringify(statePath)};
+const state = JSON.parse(fs.readFileSync(statePath));
+const command = process.argv[2];
+state.calls.push([command, ...process.argv.slice(3)]);
+let status = 0;
+if (command === "print") status = state.loaded ? 0 : 1;
+if (command === "bootstrap") state.loaded = true;
+fs.writeFileSync(statePath, JSON.stringify(state));
+process.exit(status);
+`);
+    await chmod(launchctl, 0o755);
+    const harness = join(root, "main.swift");
+    await writeFile(harness, `import Foundation
+let launchctl = URL(fileURLWithPath: CommandLine.arguments[1])
+try LocalRuntimeInstallation.restartAgent(plist: URL(fileURLWithPath: "/tmp/agent.plist"), label: "com.agentloop.local-runtime-agent", uid: 501, launchctl: launchctl)
+print("LaunchAgent restarted")
+`);
+    const source = fileURLToPath(new URL("../distribution/macos/LocalRuntimeInstallation.swift", import.meta.url));
+    const executable = join(root, "verify");
+    execFileSync("/usr/bin/swiftc", ["-module-cache-path", join(root, "modules"), source, harness, "-o", executable], { stdio: "pipe" });
+    assert.match(execFileSync(executable, [launchctl], { encoding: "utf8" }), /LaunchAgent restarted/);
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    assert.deepEqual(state.calls.map((call: string[]) => call[0]), ["print", "kickstart"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("macOS PKG includes an upgrade cleanup script without deleting runtime state", async () => {
-  const [preinstall, postinstall] = await Promise.all([
+  const [preinstall, postinstall, launcher] = await Promise.all([
     readFile(new URL("../distribution/macos/scripts/preinstall", import.meta.url), "utf8"),
     readFile(new URL("../distribution/macos/scripts/postinstall", import.meta.url), "utf8"),
+    readFile(new URL("../distribution/macos/AgentLoopLocalRuntimeTray.swift", import.meta.url), "utf8"),
   ]);
   assert.match(preinstall, /launchctl bootout/);
   assert.match(preinstall, /\$\{3:-\/\}/);
@@ -116,6 +153,7 @@ test("macOS PKG includes an upgrade cleanup script without deleting runtime stat
   assert.match(postinstall, /open -a/);
   assert.doesNotMatch(postinstall, /Application Support\/AgentLoop Local Runtime.*rm|rm .*Application Support\/AgentLoop Local Runtime/);
   const packager = await readFile(new URL("../scripts/package-local-agent-macos.mjs", import.meta.url), "utf8");
+  const plist = await readFile(new URL("../distribution/macos/com.agentloop.local-runtime-agent.plist", import.meta.url), "utf8");
   assert.match(packager, /["']--scripts["']/);
   assert.match(packager, /distribution\/macos\/scripts/);
   assert.match(packager, /AGENTLOOP_PACKAGED_PYTHON_ROOT/);
@@ -123,8 +161,17 @@ test("macOS PKG includes an upgrade cleanup script without deleting runtime stat
   assert.match(packager, /preparePackagedPythonRuntime/);
   assert.match(packager, /copyPackagedNodeModules/);
   assert.match(packager, /agentloop-local-runtime-node/);
+  assert.match(packager, /use-system-ca/);
   assert.match(packager, /rotating-log-launcher/);
   assert.match(packager, /nodeModules/);
+  assert.match(plist, /NODE_OPTIONS/);
+  assert.match(plist, /--use-system-ca/);
+  assert.match(launcher, /setActivationPolicy\(\.accessory\)/);
+  assert.match(launcher, /NSStatusItem/);
+  assert.match(launcher, /启动或重连/);
+  assert.match(launcher, /打开 AgentLoop Web/);
+  assert.match(launcher, /查看本地日志/);
+  assert.match(launcher, /退出/);
   for (const name of ["preinstall", "postinstall"]) {
     assert.equal(execFileSync("/bin/sh", [new URL(`../distribution/macos/scripts/${name}`, import.meta.url).pathname, "/tmp/AgentLoop.pkg", "/Applications", "/Volumes/Other"], { encoding: "utf8" }), "");
   }

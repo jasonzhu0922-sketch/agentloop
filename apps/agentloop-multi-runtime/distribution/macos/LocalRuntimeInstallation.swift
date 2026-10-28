@@ -34,9 +34,13 @@ enum LocalRuntimeInstallation {
   static func restartAgent(plist: URL, label: String, uid: UInt32, launchctl: URL = URL(fileURLWithPath: "/bin/launchctl")) throws {
     let domain = "gui/\(uid)"
     let service = "\(domain)/\(label)"
-    // bootstrap does not replace a loaded job, even after its plist changes.
+    // The installed Local Runtime is one long-lived per-user service. Reusing
+    // the loaded job avoids tearing down and re-registering launchd on every
+    // browser-triggered start/reconnect, which is where macOS commonly returns
+    // the opaque "Bootstrap failed: 5" error.
     if try command(launchctl, ["print", service]).status == 0 {
-      try checkedCommand(launchctl, ["bootout", service])
+      try checkedCommand(launchctl, ["kickstart", "-k", service])
+      return
     }
     try checkedCommand(launchctl, ["bootstrap", domain, plist.path])
     try checkedCommand(launchctl, ["kickstart", "-k", service])

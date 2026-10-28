@@ -101,6 +101,40 @@ export class LocalAgentService {
 
   async health(): Promise<unknown> { return await this.status(await this.stateStore.read()); }
 
+  /** Keep Router connectivity under Agent ownership; the browser only asks
+   * the loopback service to reconnect and then observes health. */
+  async reconnect(): Promise<unknown> {
+    this.connection?.reconnectNow();
+    return { accepted: true, routerConnected: this.connection?.isConnected() ?? false };
+  }
+
+  async localRuntimes(): Promise<unknown> {
+    return { runtimes: await this.supervisor.list() };
+  }
+
+  async removeLocalRuntime(runtimeId: string): Promise<unknown> {
+    return await this.supervisor.remove(runtimeId);
+  }
+
+  async agentConfiguration(): Promise<unknown> {
+    return {
+      agentVersion: LOCAL_AGENT_VERSION,
+      protocolVersion: LOCAL_AGENT_PROTOCOL_VERSION,
+      router: { configured: this.input.routerUrl !== undefined, ...(this.input.routerUrl === undefined ? {} : { url: this.input.routerUrl }) },
+      sharedStorage: { path: this.sharedStorageRoot.value, displayName: basename(this.sharedStorageRoot.value) },
+      uploadStorage: { path: this.uploadStorageRoot.value, displayName: basename(this.uploadStorageRoot.value) },
+      skillLoading: { mode: "runtime_startup", packageStoreRoot: this.input.skillPackageStoreRoot },
+    };
+  }
+
+  async pickSharedStorage(): Promise<unknown> {
+    return await this.pickStorage("shared");
+  }
+
+  async pickUploadStorage(): Promise<unknown> {
+    return await this.pickStorage("upload");
+  }
+
   async localModelConfiguration(): Promise<unknown> {
     return { configuration: await this.modelConfigurations.read() };
   }
@@ -284,6 +318,14 @@ export class LocalAgentService {
     return { runtime: await this.supervisor.stop(runtimeId) };
   }
 
+  async drainLocalRuntime(runtimeId: string): Promise<unknown> {
+    return { runtime: await this.supervisor.drain(runtimeId) };
+  }
+
+  async restartLocalRuntime(runtimeId: string): Promise<unknown> {
+    return { runtime: await this.supervisor.restart(runtimeId) };
+  }
+
   async upload(session: LocalSession, value: { runtimeId: string; conversationId: string; originalName: string; content: Buffer; mediaType?: string }): Promise<unknown> {
     const runtime = this.supervisor.runtime(value.runtimeId, true);
     await runtime.runs.ensureConversation(session.ownerUserId, value.conversationId, `已上传文件：${value.originalName}`);
@@ -365,15 +407,9 @@ export class LocalAgentService {
       if (action !== "drain" && action !== "restart" && action !== "stop" && action !== "start") throw new LocalRuntimeSupervisorError(400, "runtime_lifecycle_action_invalid");
       return { runtime: await this.supervisor[action](requiredString(payload.runtimeId, "runtimeId")) };
     }
-    if (method === "agent.config.get") return {
-      agentVersion: LOCAL_AGENT_VERSION, protocolVersion: LOCAL_AGENT_PROTOCOL_VERSION,
-      router: { configured: this.input.routerUrl !== undefined, ...(this.input.routerUrl === undefined ? {} : { url: this.input.routerUrl }) },
-      sharedStorage: { path: this.sharedStorageRoot.value, displayName: basename(this.sharedStorageRoot.value) },
-      uploadStorage: { path: this.uploadStorageRoot.value, displayName: basename(this.uploadStorageRoot.value) },
-      skillLoading: { mode: "runtime_startup", packageStoreRoot: this.input.skillPackageStoreRoot },
-    };
-    if (method === "agent.config.sharedStorage.pick") return await this.pickStorage("shared");
-    if (method === "agent.config.uploadStorage.pick") return await this.pickStorage("upload");
+    if (method === "agent.config.get") return await this.agentConfiguration();
+    if (method === "agent.config.sharedStorage.pick") return await this.pickSharedStorage();
+    if (method === "agent.config.uploadStorage.pick") return await this.pickUploadStorage();
     if (method === "agent.reconnect") { this.connection?.reconnectNow(); return { accepted: true }; }
     throw new LocalAgentApplicationError(404, "agent_control_method_not_found");
   }

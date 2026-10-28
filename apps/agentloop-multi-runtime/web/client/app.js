@@ -369,6 +369,7 @@ async function enableLocalRuntime() {
     if (!response.ok || typeof body.device?.id !== "string") throw new Error(typeof body.error === "string" ? body.error : `Local Agent HTTP ${response.status}`);
     localRuntimeState.device = body.device;
     await refreshLocalSession();
+    await localAgentFetch("/v1/agent/reconnect", { method: "POST" });
     await loadLocalRuntimes();
     await loadLocalScopes();
     updateLocalControls();
@@ -410,6 +411,7 @@ function scheduleLocalAgentReprobe() {
 async function connectRegisteredLocalAgent() {
   if (!localRuntimeState.device?.id) return;
   await refreshLocalSession();
+  await localAgentFetch("/v1/agent/reconnect", { method: "POST" });
   await loadLocalRuntimes();
   await loadLocalScopes();
   await reconcileStrictLocalRuns();
@@ -573,7 +575,7 @@ async function agentAwareFetch(endpoint, init = {}) {
 
 async function loadLocalRuntimes() {
   if (!localRuntimeState.device?.id) return;
-  const response = await routerClient.request(localAgentRouterPath("/runtimes"));
+  const response = await localAgentFetch("/v1/local-runtimes");
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
   localRuntimeState.runtimes = Array.isArray(body.runtimes) ? body.runtimes : [];
@@ -1043,7 +1045,7 @@ async function deleteLocalRuntime(runtimeId = localRuntimeState.runtimeId) {
   if (runtime.isDefault) { setStatus("默认 Runtime 不能删除", "error"); return; }
   if (!confirm(`删除“${runtime.displayName}”？该 Runtime 必须没有活动任务；确认后会停止并回收其独立运行记录与目录授权。设备级共享产物和 Skill 不会删除。`)) return;
   try {
-    const response = await routerClient.request(localAgentRouterPath(`/runtimes/${encodeURIComponent(runtime.id)}`), { method: "DELETE" });
+    const response = await localAgentFetch(`/v1/local-runtimes/${encodeURIComponent(runtime.id)}`, { method: "DELETE" });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
     localRuntimeState.runtimeId = "";
@@ -1055,7 +1057,7 @@ async function deleteLocalRuntime(runtimeId = localRuntimeState.runtimeId) {
 
 async function loadLocalAgentConfig() {
   if (!localRuntimeState.device?.id) return;
-  const response = await routerClient.request(localAgentRouterPath("/config"));
+  const response = await localAgentFetch("/v1/agent/config");
   if (!response.ok) return;
   localRuntimeState.agentConfig = await response.json().catch(() => undefined);
   renderLocalAgentConfig();
@@ -1117,7 +1119,7 @@ function closeLocalAgentSettings() {
 
 async function pickSharedStorage() {
   try {
-    const response = await routerClient.postJson(localAgentRouterPath("/config/shared-storage/pick"), {});
+    const response = await localAgentFetch("/v1/agent/config/shared-storage/pick", { method: "POST" });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
     if (body.cancelled) return;
@@ -1131,7 +1133,7 @@ async function pickSharedStorage() {
 
 async function pickUploadStorage() {
   try {
-    const response = await routerClient.postJson(localAgentRouterPath("/config/upload-storage/pick"), {});
+    const response = await localAgentFetch("/v1/agent/config/upload-storage/pick", { method: "POST" });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
     if (body.cancelled) return;
@@ -1178,7 +1180,7 @@ async function applyLocalRuntimeLifecycle(action, runtimeId = localRuntimeState.
   setStatus(pendingMessage, "running");
   setLocalRuntimeLifecycleStatus(runtimeId, pendingMessage, "running", true);
   try {
-    const response = await routerClient.request(localAgentRouterPath(`/runtimes/${encodeURIComponent(runtimeId)}/${action}`), { method: "POST" });
+    const response = await localAgentFetch(`/v1/local-runtimes/${encodeURIComponent(runtimeId)}/${action}`, { method: "POST" });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
     await loadLocalRuntimes();
@@ -1244,6 +1246,8 @@ function runtimeBindingMessage(binding) {
 }
 
 function localHeaders(json = false) { return { ...(json ? { "content-type": "application/json" } : {}), "x-local-session": sessionState.localSessionToken }; }
+// Kept as a compatibility helper for older page integrations. New browser
+// controls use the loopback Local Agent API directly and do not call it.
 function localAgentRouterPath(suffix) {
   if (!localRuntimeState.device?.id) throw new Error("本机 Agent 尚未配对");
   return `/v1/devices/${encodeURIComponent(localRuntimeState.device.id)}/local-agent${suffix}`;

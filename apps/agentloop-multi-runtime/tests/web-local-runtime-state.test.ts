@@ -32,6 +32,31 @@ test("browser does not report a failed Local Agent health probe as uninstalled",
   assert.doesNotMatch(app, /agentStatus = localStorage\.getItem\("agentloop\.local-agent-seen\.v1"\)/);
 });
 
+test("browser keeps Agent reconnect and Runtime lifecycle on the loopback service", async () => {
+  const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  assert.match(app, /localAgentFetch\("\/v1\/agent\/reconnect", \{ method: "POST" \}\)/);
+  assert.match(app, /localAgentFetch\("\/v1\/local-runtimes"\)/);
+  assert.match(app, /localAgentFetch\(`\/v1\/local-runtimes\/\$\{encodeURIComponent\(runtimeId\)\}\/\$\{action\}`/);
+  assert.doesNotMatch(app, /routerClient\.request\(localAgentRouterPath\("\/runtimes"\)\)/);
+});
+
+test("browser keeps Agent settings and Runtime deletion on the loopback service", async () => {
+  const [app, api] = await Promise.all([
+    readFile(new URL("../web/client/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../local-agent-runtime/src/api/local-agent-api.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(app, /localAgentFetch\(`\/v1\/local-runtimes\/\$\{encodeURIComponent\(runtime\.id\)\}`, \{ method: "DELETE" \}\)/);
+  assert.match(app, /localAgentFetch\("\/v1\/agent\/config"\)/);
+  assert.match(app, /localAgentFetch\("\/v1\/agent\/config\/shared-storage\/pick", \{ method: "POST" \}\)/);
+  assert.match(app, /localAgentFetch\("\/v1\/agent\/config\/upload-storage\/pick", \{ method: "POST" \}\)/);
+  assert.doesNotMatch(app, /routerClient\.(request|postJson)\(localAgentRouterPath\("\/(?:config|config\/shared-storage\/pick|config\/upload-storage\/pick)"\)/);
+  assert.match(api, /url\.pathname === "\/v1\/agent\/config"/);
+  assert.match(api, /url\.pathname === "\/v1\/agent\/config\/shared-storage\/pick"/);
+  assert.match(api, /url\.pathname === "\/v1\/agent\/config\/upload-storage\/pick"/);
+  assert.match(api, /request\.method === "DELETE" && runtimeDelete !== null/);
+  assert.match(api, /\(start\|stop\|drain\|restart\)/);
+});
+
 test("settings preserve the active tab across Agent refreshes and reopen on models", async () => {
   const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
   const sourceBetween = (start: string, end: string) => app.slice(app.indexOf(start), app.indexOf(end, app.indexOf(start)));

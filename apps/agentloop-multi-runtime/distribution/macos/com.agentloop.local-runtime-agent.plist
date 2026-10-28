@@ -10,6 +10,7 @@
     <key>AGENTLOOP_AGENT_PACKAGED</key><string>1</string>
     <key>AGENTLOOP_AGENT_APP_ROOT</key><string>/Applications/AgentLoop Local Runtime.app/Contents/Resources</string>
     <key>AGENTLOOP_BUNDLED_SKILL_DIRECTORIES</key><string>/Applications/AgentLoop Local Runtime.app/Contents/Resources/skills</string>
+    <key>NODE_OPTIONS</key><string>--use-system-ca</string>
   </dict>
   <key>StandardOutPath</key><string>__LOG_ROOT__/agent.out.log</string>
   <key>StandardErrorPath</key><string>__LOG_ROOT__/agent.err.log</string>
