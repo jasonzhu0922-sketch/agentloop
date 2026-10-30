@@ -14,6 +14,7 @@ import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local
 import { LocalSkillPackageInstaller, type LocalSkillUploadFile } from "./local-skill-package-installer.ts";
 import { generateSkillMetadata, type SkillMetadataModelInvoker } from "./local-skill-metadata-generator.ts";
 import { LOCAL_AGENT_VERSION } from "../config/local-agent-version.ts";
+import { LocalRuntimeArtifactReadPlane } from "../persistence/local-runtime-artifact-read-plane.ts";
 
 export { LOCAL_AGENT_VERSION };
 export const LOCAL_AGENT_PROTOCOL_VERSION = "1";
@@ -38,13 +39,14 @@ export class LocalAgentService {
   private readonly picker: () => Promise<string | undefined>;
   private readonly sharedStorageRoot: { value: string };
   private readonly uploadStorageRoot: { value: string };
+  private readonly artifactReadPlane: LocalRuntimeArtifactReadPlane;
   private constructor(
     input: LocalAgentOptions, stateStore: LocalAgentStateStore,
     supervisor: LocalRuntimeSupervisor, configurations: LocalRuntimeConfigurationStore, modelConfigurations: LocalModelConfigurationStore, skillPackageInstaller: LocalSkillPackageInstaller, picker: () => Promise<string | undefined>,
-    sharedStorageRoot: { value: string }, uploadStorageRoot: { value: string },
+    sharedStorageRoot: { value: string }, uploadStorageRoot: { value: string }, artifactReadPlane: LocalRuntimeArtifactReadPlane,
   ) {
     this.input = input; this.stateStore = stateStore;
-    this.supervisor = supervisor; this.configurations = configurations; this.modelConfigurations = modelConfigurations; this.skillPackageInstaller = skillPackageInstaller; this.picker = picker; this.sharedStorageRoot = sharedStorageRoot; this.uploadStorageRoot = uploadStorageRoot;
+    this.supervisor = supervisor; this.configurations = configurations; this.modelConfigurations = modelConfigurations; this.skillPackageInstaller = skillPackageInstaller; this.picker = picker; this.sharedStorageRoot = sharedStorageRoot; this.uploadStorageRoot = uploadStorageRoot; this.artifactReadPlane = artifactReadPlane;
   }
 
   static async create(input: LocalAgentOptions): Promise<LocalAgentService> {
@@ -87,7 +89,12 @@ export class LocalAgentService {
       mcpConfiguration: await readLegacyLocalMcpConfiguration(input.mcpServersConfigPath),
       integrationEnvironment: input.integrationEnvironment,
     });
-    const service = new LocalAgentService(input, stateStore, supervisor, configurations, modelConfigurations, skillPackageInstaller, input.directoryPicker ?? pickNativeDirectory, sharedStorageRoot, uploadStorageRoot);
+    const artifactReadPlane = new LocalRuntimeArtifactReadPlane({
+      databasePath: input.databasePath,
+      runtimeDataRoot: input.runtimeDataRoot,
+      workspaceRoot: () => sharedStorageRoot.value,
+    });
+    const service = new LocalAgentService(input, stateStore, supervisor, configurations, modelConfigurations, skillPackageInstaller, input.directoryPicker ?? pickNativeDirectory, sharedStorageRoot, uploadStorageRoot, artifactReadPlane);
     service.connection = new RuntimeConnectionClient(input.routerUrl, supervisor, (method, payload) => service.agentControl(method, payload));
     await service.connection.ready();
     if (state.device !== undefined) service.connection.setDevice(state.device);
@@ -384,19 +391,38 @@ export class LocalAgentService {
   }
 
   async artifacts(session: LocalSession, runtimeId: string, runId: string): Promise<unknown> {
-    const artifacts = await this.supervisor.runtime(runtimeId).runs.processArtifacts(session.ownerUserId, runId);
+    const runtime = await this.runtimeDefinition(runtimeId);
+    const artifacts = await this.artifactReadPlane.list(runtime, runId, session.ownerUserId);
     return { artifacts: artifacts.map((artifact) => ({ ...artifact, path: `local-artifact:${artifact.id}`, location: "local" })) };
   }
 
   async previewArtifact(session: LocalSession, runtimeId: string, runId: string, artifactId: string): Promise<unknown> {
-    return await this.supervisor.runtime(runtimeId).runs.previewProcessArtifact(session.ownerUserId, runId, artifactId);
+    return await this.artifactReadPlane.preview(await this.runtimeDefinition(runtimeId), runId, artifactId, session.ownerUserId);
   }
 
   async readArtifact(session: LocalSession, runtimeId: string, runId: string, artifactId: string) {
-    return await this.supervisor.runtime(runtimeId).runs.readProcessArtifact(session.ownerUserId, runId, artifactId);
+    return await this.artifactReadPlane.read(await this.runtimeDefinition(runtimeId), runId, artifactId, session.ownerUserId);
+  }
+
+  private async runtimeDefinition(runtimeId: string): Promise<LocalRuntimeDefinition> {
+    const runtime = (await this.supervisor.list()).find((item) => item.id === runtimeId);
+    if (runtime === undefined) throw new LocalRuntimeSupervisorError(404, "runtime_not_found");
+    return runtime;
   }
 
   private async agentControl(method: string, payload: Record<string, unknown>): Promise<unknown> {
+    if (method === "runtime.artifacts" || method === "runtime.readArtifact" || method === "runtime.previewArtifact") {
+      const runtime = await this.runtimeDefinition(requiredString(payload.runtimeId, "runtimeId"));
+      const runId = requiredString(payload.remoteRunId, "remoteRunId");
+      if (method === "runtime.artifacts") {
+        const artifacts = await this.artifactReadPlane.list(runtime, runId);
+        return artifacts.map((artifact) => ({ ...artifact, path: `local-artifact:${artifact.id}`, location: "local" }));
+      }
+      const artifactId = requiredString(payload.artifactId, "artifactId");
+      if (method === "runtime.previewArtifact") return await this.artifactReadPlane.preview(runtime, runId, artifactId);
+      const result = await this.artifactReadPlane.read(runtime, runId, artifactId);
+      return { artifact: { ...result.artifact, path: `local-artifact:${result.artifact.id}`, location: "local" }, contentBase64: result.content.toString("base64") };
+    }
     if (method === "agent.status") return await this.health();
     if (method === "agent.runtimes.list") return { runtimes: await this.supervisor.list() };
     if (method === "agent.runtimes.create") return { runtime: await this.supervisor.create(requiredString(payload.displayName, "displayName")) };

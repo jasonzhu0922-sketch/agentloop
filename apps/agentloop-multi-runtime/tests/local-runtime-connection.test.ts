@@ -141,6 +141,17 @@ test("Router dispatches a local Assignment through the authenticated device conn
     const read = await router.readArtifact(assignment.id, "local-artifact-1");
     assert.equal(read?.artifact.name, "local-report.txt");
     assert.equal(Buffer.from(read?.content ?? []).toString("utf8"), "local artifact bytes");
+
+    // Stopping the Runtime removes it from the scheduling catalog, but the
+    // authenticated device connection must remain usable for historical
+    // artifact reads.
+    const stoppedCatalogAck = nextMessage(socket);
+    socket.send(JSON.stringify({ type: "agent.hello", deviceId: device.id, runtimes: [] }));
+    assert.equal((await stoppedCatalogAck).type, "agent.hello.ack");
+    assert.equal((await store.runtimeCatalog(owner.principal.tenantId, owner.principal.userId)).find((runtime) => runtime.id === runtimeId)?.status, "offline");
+    assert.deepEqual((await router.artifacts(assignment.id))?.artifacts.map((artifact) => artifact.id), ["local-artifact-1"]);
+    const stoppedRead = await router.readArtifact(assignment.id, "local-artifact-1");
+    assert.equal(Buffer.from(stoppedRead?.content ?? []).toString("utf8"), "local artifact bytes");
   } finally {
     if (socket !== undefined && socket.readyState !== WebSocket.CLOSED) {
       const closed = once(socket, "close");

@@ -2174,14 +2174,61 @@ function isArtifactProjectionEvent(event) {
 }
 
 async function refreshArtifacts(assignmentId, assistant, tenantId, userId) {
+  let routerArtifactsLoaded = false;
+  let artifactFailure;
+  const currentArtifacts = () => Array.isArray(assistant.artifacts) ? assistant.artifacts : [];
   try {
     const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assignmentId)}/artifacts`, { headers: { "x-tenant-id": tenantId, "x-user-id": userId } });
-    if (!response.ok) return;
-    const body = await response.json();
-    assistant.artifacts = Array.isArray(body.artifacts) ? body.artifacts : [];
+    if (response.ok) {
+      const body = await response.json();
+      assistant.artifacts = Array.isArray(body.artifacts) ? body.artifacts : [];
+      routerArtifactsLoaded = true;
+    } else {
+      artifactFailure = `Router 产物查询失败（HTTP ${response.status}）`;
+    }
+  } catch (error) {
+    artifactFailure = error instanceof Error ? error.message : "Router 产物查询失败";
+  }
+
+  // Normal local-device Assignments are Router-owned, but their bytes and
+  // artifact projection still live in the paired Local Agent. If the Router
+  // connection is briefly unavailable (or returns an empty projection while
+  // the Agent has already settled the Run), recover through that same local
+  // data plane instead of silently rendering a text-only answer.
+  if (assistant.executionLocation === "local"
+    && assistant.localRuntimeId
+    && assistant.remoteRunId
+    && sessionState.localSessionToken
+    && (!routerArtifactsLoaded || currentArtifacts().length === 0)) {
+    try {
+      const response = await localAgentFetch(`/v1/local-runtimes/${encodeURIComponent(assistant.localRuntimeId)}/runs/${encodeURIComponent(assistant.remoteRunId)}/artifacts`);
+      if (response.ok) {
+        const body = await response.json();
+        if (Array.isArray(body.artifacts) && body.artifacts.length > 0) {
+          assistant.artifacts = body.artifacts.map((artifact) => ({ ...artifact, location: "local" }));
+        }
+        artifactFailure = undefined;
+      } else {
+        artifactFailure = `本机 Runtime 产物查询失败（HTTP ${response.status}）`;
+      }
+    } catch (error) {
+      artifactFailure = error instanceof Error ? error.message : "本机 Runtime 产物查询失败";
+    }
+  }
+  if (currentArtifacts().length > 0) {
+    assistant.artifactState = "available";
+    delete assistant.artifactError;
+  } else if (artifactFailure) {
+    assistant.artifactState = "unavailable";
+    assistant.artifactError = artifactFailure;
+  } else if (routerArtifactsLoaded) {
+    assistant.artifactState = "empty";
+    delete assistant.artifactError;
+  }
+  if (routerArtifactsLoaded || currentArtifacts().length > 0 || artifactFailure) {
     saveSessions();
     render();
-  } catch {}
+  }
 }
 
 async function cancelActive() {
@@ -2559,7 +2606,12 @@ function renderInlineArtifacts(assistant) {
   const otherArtifacts = artifacts.filter((artifact) => !isFinalDeliveryArtifact(artifact));
   const events = assistant.detailEvents || assistant.events || [];
   const skills = executionActivities(events, assistant.commandEvidence).skills.filter((skill) => ["completed", "bound", "selected"].includes(skill.status));
-  if (!finalArtifacts.length && !otherArtifacts.length && !skills.length) return "";
+  if (!finalArtifacts.length && !otherArtifacts.length && !skills.length) {
+    if (assistant.artifactState === "unavailable") {
+      return `<section class="inline-artifacts" aria-label="本轮产物状态"><div class="artifact-inline-error">产物暂不可用：${escapeHtml(assistant.artifactError || "本地 Runtime 当前不可用，请启动后重试")}</div></section>`;
+    }
+    return "";
+  }
   const failed = assistant.status === "failed";
   const artifactBlock = finalArtifacts.length ? `<div class="inline-artifacts-head"><span>${failed ? "已生成文件" : "最终产物"}</span><small>${failed ? "尚未完成最终验收" : `${finalArtifacts.length} 个文件`}</small></div><div class="artifact-list">${finalArtifacts.map((artifact) => renderArtifactCard(artifact, assistant.id, assistant.status)).join("")}</div>` : "";
   const generatedBlock = assistant.status !== "completed" && otherArtifacts.length

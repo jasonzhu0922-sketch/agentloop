@@ -39,6 +39,9 @@ export function conversationMessagesFromTurns(turns, models = []) {
         status: finalTurn.status,
         assignmentId: assignment.id,
         runtimeId: assignment.runtimeId,
+        ...(assignment.executionLocation === "local" && typeof assignment.runtimeId === "string"
+          ? { localRuntimeId: assignment.runtimeId }
+          : {}),
         ...(typeof assignment.runtimeDisplayName === "string" ? { runtimeDisplayName: assignment.runtimeDisplayName } : {}),
         ...(typeof assignment.executionLocation === "string" ? { executionLocation: assignment.executionLocation } : {}),
         ...(typeof finalTurn.modelKey === "string" ? { modelKey: finalTurn.modelKey } : {}),
@@ -63,6 +66,9 @@ export function conversationMessagesFromTurns(turns, models = []) {
       status: "running",
       assignmentId: assignment.id,
       runtimeId: assignment.runtimeId,
+      ...(assignment.executionLocation === "local" && typeof assignment.runtimeId === "string"
+        ? { localRuntimeId: assignment.runtimeId }
+        : {}),
       ...(typeof assignment.runtimeDisplayName === "string" ? { runtimeDisplayName: assignment.runtimeDisplayName } : {}),
       ...(typeof assignment.executionLocation === "string" ? { executionLocation: assignment.executionLocation } : {}),
       ...(typeof assignment.remoteRunId === "string" ? { remoteRunId: assignment.remoteRunId } : {}),

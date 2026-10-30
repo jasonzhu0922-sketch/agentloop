@@ -128,6 +128,13 @@ export class RuntimeConnectionClient {
       if (!method.startsWith("agent.") || this.agentControl === undefined) throw new Error("local_agent_method_unsupported");
       return await this.agentControl(method, payload);
     }
+    // Historical artifact reads are a device data-plane operation, not a
+    // Runtime admission operation. The Runtime may be stopped and therefore
+    // absent from the ready catalog while its durable Run/workspace remains
+    // readable by the Local Agent.
+    if ((method === "artifacts" || method === "readArtifact" || method === "previewArtifact") && this.agentControl !== undefined) {
+      return await this.agentControl(`runtime.${method}`, { ...payload, runtimeId });
+    }
     const runtime = this.supervisor.runtime(runtimeId);
     if (method === "dispatch") return await this.dispatch(runtime, payload as unknown as RuntimeDispatchEnvelope);
     if (method === "models") return runtime.modelKeys.map((key) => ({ key, displayName: key }));

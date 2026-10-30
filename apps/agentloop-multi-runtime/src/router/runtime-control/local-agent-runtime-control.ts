@@ -28,6 +28,8 @@ interface ConnectionState {
 export class LocalAgentRuntimeControl {
   private readonly connections = new Map<string, ConnectionState>();
   private readonly runtimeConnections = new Map<string, ConnectionState>();
+  /** Device connection retained for read-only history access after Runtime stop. */
+  private readonly runtimeReadConnections = new Map<string, ConnectionState>();
   private readonly server = new WebSocketServer({ noServer: true });
   private readonly leaseMs: number;
   private readonly devices: Pick<DeviceRepository, "authenticateAgent">;
@@ -60,15 +62,15 @@ export class LocalAgentRuntimeControl {
       events: (remoteRunId, afterSeq) => rpc("events", { remoteRunId, afterSeq }),
       latestEvent: (remoteRunId) => rpc("latestEvent", { remoteRunId }),
       cancelRun: (remoteRunId) => rpc("cancelRun", { remoteRunId }),
-      artifacts: (remoteRunId) => rpc("artifacts", { remoteRunId }),
+      artifacts: (remoteRunId) => this.rpcRead(runtimeId, "artifacts", { remoteRunId }),
       readArtifact: async (remoteRunId, artifactId) => {
-        const result = await rpc<{ readonly artifact: RuntimeArtifact; readonly contentBase64: string }>("readArtifact", { remoteRunId, artifactId });
+        const result = await this.rpcRead<{ readonly artifact: RuntimeArtifact; readonly contentBase64: string }>(runtimeId, "readArtifact", { remoteRunId, artifactId });
         if (result === null || typeof result !== "object" || typeof result.contentBase64 !== "string" || result.artifact === undefined) {
           throw new TypeError("local_runtime_artifact_response_invalid");
         }
         return { artifact: result.artifact, content: new Uint8Array(Buffer.from(result.contentBase64, "base64")) };
       },
-      previewArtifact: (remoteRunId, artifactId) => rpc<RuntimeArtifactPreview>("previewArtifact", { remoteRunId, artifactId }),
+      previewArtifact: (remoteRunId, artifactId) => this.rpcRead<RuntimeArtifactPreview>(runtimeId, "previewArtifact", { remoteRunId, artifactId }),
       commandOutput: (remoteRunId, toolCallId, stream) => rpc("commandOutput", { remoteRunId, toolCallId, stream }),
       toolArguments: (remoteRunId, toolCallId) => rpc("toolArguments", { remoteRunId, toolCallId }),
       currentHumanLoop: (remoteRunId) => rpc("currentHumanLoop", { remoteRunId }),
@@ -164,6 +166,7 @@ export class LocalAgentRuntimeControl {
       });
       if (previous !== undefined && previous !== state) previous.socket.close(4001, "connection_replaced");
       this.runtimeConnections.set(value.runtimeId, state);
+      this.runtimeReadConnections.set(value.runtimeId, state);
       state.runtimeIds.add(value.runtimeId);
     }
   }
@@ -172,6 +175,9 @@ export class LocalAgentRuntimeControl {
     this.connections.delete(state.id);
     for (const runtimeId of state.runtimeIds) {
       if (this.runtimeConnections.get(runtimeId) === state) this.runtimeConnections.delete(runtimeId);
+    }
+    for (const [runtimeId, connection] of this.runtimeReadConnections) {
+      if (connection === state) this.runtimeReadConnections.delete(runtimeId);
     }
     for (const pending of state.pending.values()) {
       clearTimeout(pending.timer);
@@ -185,6 +191,22 @@ export class LocalAgentRuntimeControl {
 
   private rpc<T>(runtimeId: string, method: string, payload: unknown): Promise<T> {
     const state = this.runtimeConnections.get(runtimeId);
+    if (state === undefined || state.socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error("device_unavailable"));
+    return this.rpcOnConnection<T>(state, runtimeId, method, payload);
+  }
+
+  private async rpcRead<T>(runtimeId: string, method: string, payload: unknown): Promise<T> {
+    let state = this.runtimeConnections.get(runtimeId) ?? this.runtimeReadConnections.get(runtimeId);
+    // After a Router restart, a stopped Runtime is intentionally absent from
+    // the Agent's ready advertisement. Recover the device connection from the
+    // durable Runtime catalog so history reads still work without re-admitting
+    // the Runtime for scheduling.
+    if (state === undefined) {
+      const catalogEntry = (await this.store.runtimeCatalog()).find((runtime) => runtime.id === runtimeId && runtime.kind === "local");
+      if (catalogEntry?.deviceId !== undefined) {
+        state = [...this.connections.values()].find((candidate) => candidate.device.deviceId === catalogEntry.deviceId);
+      }
+    }
     if (state === undefined || state.socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error("device_unavailable"));
     return this.rpcOnConnection<T>(state, runtimeId, method, payload);
   }

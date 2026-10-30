@@ -4,6 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 import { observeAssignment } from "../web/client/api/assignment-stream.js";
 import { projectAssistantEvent } from "../web/client/projections/assistant-event-projection.js";
+import { conversationMessagesFromTurns } from "../web/client/projections/conversation-history.js";
 
 const event = (seq: number, type: string, data = {}) => ({ seq, type, data, createdAt: seq });
 const packet = (value: ReturnType<typeof event>) => `id: ${value.seq}\nevent: ${value.type}\ndata: ${JSON.stringify(value)}\n\n`;
@@ -132,6 +133,66 @@ test("actual app error handler no longer converts connection errors into termina
   const assistant = { status: "running", text: "work remains visible", reasoning: "progress" };
   assert.equal(context.onEvent({ type: "error", data: { error: "fetch failed" } }, {}, assistant), false);
   assert.deepEqual(assistant, { status: "running", text: "work remains visible", reasoning: "progress" });
+});
+
+test("local artifact refresh recovers through the paired Agent when Router artifact projection is unavailable", async () => {
+  const source = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  let saved = 0;
+  let rendered = 0;
+  const localArtifact = { id: "artifact-local", runId: "run-local", name: "report.html", path: "local-artifact:artifact-local", bytes: 12, mimeType: "text/html", role: "final", sourceTool: "computer_write_file", previewable: true };
+  const context = vm.createContext({
+    api: "/api",
+    encodeURIComponent,
+    fetch: async () => new Response(JSON.stringify({ error: "router_unavailable" }), { status: 503 }),
+    localAgentFetch: async () => new Response(JSON.stringify({ artifacts: [localArtifact] }), { status: 200 }),
+    saveSessions: () => { saved += 1; },
+    render: () => { rendered += 1; },
+  });
+  vm.runInContext('const sessionState = { localSessionToken: "local-session" };', context);
+  const start = source.indexOf("async function refreshArtifacts(");
+  const end = source.indexOf("async function cancelActive(");
+  vm.runInContext(source.slice(start, end), context);
+  const assistant = { executionLocation: "local", localRuntimeId: "runtime-local", remoteRunId: "run-local", artifacts: [] };
+  await context.refreshArtifacts("assignment-local", assistant, "tenant", "owner");
+  assert.equal(assistant.artifacts[0].location, "local");
+  assert.equal(assistant.artifacts[0].id, "artifact-local");
+  assert.equal(saved, 1);
+  assert.equal(rendered, 1);
+});
+
+test("local artifact refresh preserves an explicit unavailable state instead of rendering an empty result", async () => {
+  const source = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  let rendered = 0;
+  const context = vm.createContext({
+    api: "/api",
+    encodeURIComponent,
+    fetch: async () => new Response(JSON.stringify({ error: "runtime_not_running" }), { status: 409 }),
+    localAgentFetch: async () => new Response(JSON.stringify({ error: "runtime_not_running" }), { status: 409 }),
+    sessionState: { localSessionToken: "local-session" },
+    saveSessions: () => {},
+    render: () => { rendered += 1; },
+  });
+  const start = source.indexOf("async function refreshArtifacts(");
+  const end = source.indexOf("async function cancelActive(");
+  vm.runInContext(source.slice(start, end), context);
+  const assistant = { executionLocation: "local", localRuntimeId: "runtime-local", remoteRunId: "run-local", artifacts: [] };
+  await context.refreshArtifacts("assignment-local", assistant, "tenant", "owner");
+  assert.equal(assistant.artifactState, "unavailable");
+  assert.match(assistant.artifactError, /Runtime 产物查询失败/);
+  assert.equal(rendered, 1);
+});
+
+test("historical local Assignments retain the Runtime identity needed for artifact recovery", () => {
+  const [user, assistant] = conversationMessagesFromTurns([{
+    clientMessageId: "message-local",
+    input: "生成本地报告",
+    createdAt: 1,
+    assignment: { id: "assignment-local", runtimeId: "runtime-local", executionLocation: "local", remoteRunId: "run-local", hasRun: true },
+    finalTurn: { status: "completed", assistantOutput: "done", completedAt: 2 },
+  }]);
+  assert.equal(user.role, "user");
+  assert.equal(assistant.localRuntimeId, "runtime-local");
+  assert.equal(assistant.remoteRunId, "run-local");
 });
 
 test("a persisted pre-admission failure completes the submitted message without opening SSE", async () => {

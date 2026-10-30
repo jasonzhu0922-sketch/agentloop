@@ -141,6 +141,10 @@ export type {
   PptxPreviewElement,
   PptxPreviewTextRun,
 } from "./runtime/process-artifacts.ts";
+export { RuntimeArtifactQueryService } from "./runtime/runtime-artifact-query-service.ts";
+export type { ArtifactQueryEvent, ArtifactQueryRun } from "./runtime/runtime-artifact-query-service.ts";
+export { RuntimeWorkspaceService } from "./runtime/runtime-workspace-service.ts";
+export { RuntimeEventQueryService } from "./runtime/runtime-event-query-service.ts";
 export { RuntimeActionRepository } from "./runtime/runtime-action-repository.ts";
 export { RuntimeResultRepository } from "./runtime/runtime-result-repository.ts";
 export { requestedArtifactTargets, understandTask } from "./runtime/task-intent.ts";
