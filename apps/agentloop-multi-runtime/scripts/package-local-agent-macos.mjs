@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { PACKAGED_LOCAL_AGENT_PORT } from "../src/shared/local-agent-endpoint.mjs";
-import { copyPackagedNodeModules, PACKAGED_NODE_MAJOR, preparePackagedPythonRuntime } from "./package-local-agent-runtime.mjs";
+import { copyPackagedAgentRuntimeSupportFiles, copyPackagedNodeModules, PACKAGED_NODE_MAJOR, preparePackagedPythonRuntime } from "./package-local-agent-runtime.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(appRoot, "../..");
@@ -27,6 +27,7 @@ const executable = join(resources, "agentloop-local-runtime-agent");
 const launcher = join(resources, "agentloop-local-runtime-launcher");
 const packagedPythonRoot = requiredPackagedPythonRoot();
 const pkg = join(releaseRoot, `AgentLoop-Local-Runtime-${version}-macos-arm64.pkg`);
+const packagedRequirements = join(appRoot, "requirements.local-agent.txt");
 const releaseEnvironment = process.env.AGENTLOOP_RELEASE_ENV ?? "development";
 const routerUrl = process.env.AGENTLOOP_ROUTER_URL ?? ({
   development: "http://127.0.0.1:8788",
@@ -113,6 +114,12 @@ await writeFile(launcher, `#!/bin/sh
 set -eu
 RESOURCE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 LOG_ROOT="$HOME/Library/Application Support/AgentLoop Local Runtime/logs"
+# The bundled Node runtime may not discover the macOS trust store through
+# --use-system-ca alone. Reuse the system PEM bundle when it is available,
+# while preserving an explicitly configured bundle for managed environments.
+if [ -z "\${NODE_EXTRA_CA_CERTS:-}" ] && [ -r /etc/ssl/cert.pem ]; then
+  export NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem
+fi
 case " \${NODE_OPTIONS:-} " in
   *" --use-system-ca "*) ;;
   *) export NODE_OPTIONS="\${NODE_OPTIONS:+$NODE_OPTIONS }--use-system-ca" ;;
@@ -121,17 +128,20 @@ exec "$RESOURCE_ROOT/agentloop-local-runtime-node" "$RESOURCE_ROOT/rotating-log-
 `, { mode: 0o755 });
 await chmod(launcher, 0o755);
 await cp(join(repositoryRoot, "packages/agentloop-skills/skills"), join(resources, "skills"), { recursive: true });
-await cp(join(appRoot, "local-agent-runtime"), join(resources, "agent-loop-runtime"), { recursive: true });
+await copyPackagedAgentRuntimeSupportFiles({ appRoot, destinationRoot: resources });
 await preparePackagedPythonRuntime({
   sourceRoot: packagedPythonRoot,
   destinationRoot: join(resources, "runtime-python"),
-  requirementsPath: join(appRoot, "requirements.txt"),
+  requirementsPath: packagedRequirements,
 });
 await copyPackagedNodeModules({ repositoryRoot, destinationRoot: resources });
-await cp(join(appRoot, "requirements.txt"), join(resources, "requirements.txt"));
+await cp(packagedRequirements, join(resources, "requirements.txt"));
 await cp(join(repositoryRoot, "packages/agentloop/src/assets"), join(contents, "assets"), { recursive: true });
+// Keep the brand asset inside the installed bundle so the app icon and the
+// menu-bar status item come from the same source image as the Web UI.
+await cp(join(repositoryRoot, "xuanwu-mascot-icon.png"), join(resources, "xuanwu-mascot-icon.png"));
+await cp(join(appRoot, "distribution/macos/xuanwu-mascot-icon.icns"), join(resources, "xuanwu-mascot-icon.icns"));
 await mkdir(join(resources, "config"), { recursive: true });
-await cp(join(appRoot, "config/llm-providers.example.json"), join(resources, "config/llm-providers.json"));
 await writeFile(join(resources, "config/skill-directories.json"), JSON.stringify({
   schema: "agentloop.skillDirectories/v1",
   customSkillDirectories: [],

@@ -29,6 +29,30 @@ test("fromConfigObject resolves secrets from the injected environment lookup", (
   assert.throws(() => registry.create(), /not configured/);
 });
 
+test("fromConfigObject accepts a directly configured local apiKey", () => {
+  const registry = LlmProviderRegistry.fromConfigObject({
+    defaultProvider: "local",
+    defaultModelKey: "local-model",
+    providers: {
+      local: {
+        kind: "openai-compatible",
+        baseUrl: "https://api.example.com",
+        apiKey: "local-test-secret",
+        defaultModel: "local-model",
+      },
+    },
+    models: { "local-model": { providerKey: "local", providerModel: "local-model" } },
+  });
+  assert.equal(registry.defaultModelKey, "local-model");
+  assert.equal(typeof registry.create().complete, "function");
+});
+
+test("provider credentials require exactly one of apiKey or apiKeyEnv", () => {
+  const base = { kind: "openai-compatible", baseUrl: "https://api.example.com", defaultModel: "demo-chat" };
+  assert.throws(() => LlmProviderRegistry.fromConfigObject({ providers: { local: { ...base } } }), /exactly one of apiKey or apiKeyEnv/);
+  assert.throws(() => LlmProviderRegistry.fromConfigObject({ providers: { local: { ...base, apiKey: "local-test-secret", apiKeyEnv: "MODEL_KEY" } } }), /exactly one of apiKey or apiKeyEnv/);
+});
+
 test("fromConfigObject derives the legacy default provider when defaultProvider is omitted", () => {
   const registry = LlmProviderRegistry.fromConfigObject({
     defaultModelKey: "demo-chat",

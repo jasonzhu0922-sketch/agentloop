@@ -7,7 +7,7 @@ export function Sidebar(): React.ReactNode {
   return (
     <aside className="sidebar">
       <div className="brand">
-        <div className="logo">A</div>
+        <img className="logo logo-image" src="/xuanwu-mascot-icon.png" alt="玄武" />
         <div className="brand-text">
           <strong>AgentLoop</strong>
           <small>智能助手</small>

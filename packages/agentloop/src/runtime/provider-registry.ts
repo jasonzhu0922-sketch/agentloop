@@ -33,7 +33,8 @@ export interface LlmModelSummary {
 
 interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
   readonly baseUrl: string;
-  readonly apiKeyEnv: string;
+  readonly apiKey?: string;
+  readonly apiKeyEnv?: string;
   readonly contextWindowTokens: number;
   readonly maxOutputTokens: number;
   readonly timeoutMs: number;
@@ -56,7 +57,8 @@ interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
 
 interface OpenAICompatibleModelConfig extends LlmModelSummary {
   readonly baseUrl: string;
-  readonly apiKeyEnv: string;
+  readonly apiKey?: string;
+  readonly apiKeyEnv?: string;
   readonly contextWindowTokens: number;
   readonly maxOutputTokens: number;
   readonly timeoutMs: number;
@@ -203,7 +205,7 @@ export class LlmProviderRegistry {
     if (model === undefined) {
       throw new AppError("MODEL_ERROR", `Unknown server-side model key: ${modelKey}`, 400);
     }
-    const apiKey = this.environment[model.apiKeyEnv];
+    const apiKey = model.apiKey ?? (model.apiKeyEnv === undefined ? undefined : this.environment[model.apiKeyEnv]);
     if (apiKey === undefined || apiKey.trim().length === 0) {
       throw new AppError("MODEL_ERROR", `LLM model "${model.key}" is not configured`, 503);
     }
@@ -296,6 +298,7 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     [
       "kind",
       "baseUrl",
+      "apiKey",
       "apiKeyEnv",
       "defaultModel",
       "contextWindowTokens",
@@ -323,7 +326,11 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     throw new Error(`${label} has unsupported kind`);
   }
   const baseUrl = requireHttpUrl(config.baseUrl, `${label}.baseUrl`);
-  const apiKeyEnv = requireEnvironmentKey(config.apiKeyEnv, `${label}.apiKeyEnv`);
+  const apiKey = config.apiKey === undefined ? undefined : requireNonEmptyString(config.apiKey, `${label}.apiKey`, 8_192);
+  const apiKeyEnv = config.apiKeyEnv === undefined ? undefined : requireEnvironmentKey(config.apiKeyEnv, `${label}.apiKeyEnv`);
+  if ((apiKey === undefined) === (apiKeyEnv === undefined)) {
+    throw new Error(`${label} must configure exactly one of apiKey or apiKeyEnv`);
+  }
   const defaultModel = requireNonEmptyString(config.defaultModel, `${label}.defaultModel`, 160);
   const contextWindowTokens = optionalInteger(
     config.contextWindowTokens,
@@ -395,7 +402,8 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     key: providerKey,
     kind: "openai-compatible",
     baseUrl,
-    apiKeyEnv,
+    ...(apiKey === undefined ? {} : { apiKey }),
+    ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
     defaultModel,
     contextWindowTokens,
     maxOutputTokens,
@@ -533,7 +541,8 @@ function parseModel(
     providerModel,
     kind: provider.kind,
     baseUrl: provider.baseUrl,
-    apiKeyEnv: provider.apiKeyEnv,
+    ...(provider.apiKey === undefined ? {} : { apiKey: provider.apiKey }),
+    ...(provider.apiKeyEnv === undefined ? {} : { apiKeyEnv: provider.apiKeyEnv }),
     contextWindowTokens,
     maxOutputTokens: optionalInteger(
       config.maxOutputTokens,

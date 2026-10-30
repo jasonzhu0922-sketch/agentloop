@@ -19,3 +19,10 @@ export function copyPackagedNodeModules(options: {
   repositoryRoot: string;
   destinationRoot: string;
 }): Promise<string[]>;
+
+export function copyPackagedAgentRuntimeSupportFiles(options: {
+  appRoot: string;
+  destinationRoot: string;
+}): Promise<void>;
+
+export function prunePackagedPythonRuntime(destination: string): Promise<void>;

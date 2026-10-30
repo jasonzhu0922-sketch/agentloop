@@ -28,6 +28,12 @@ run `d122954c-c894-4240-af9d-6f281a30689f` 因 `RUN_LIMIT_EXCEEDED` 失败：模
 - Token 效率上限：标题 120 字符、摘要 300 字符、结果数默认 5 / 最大 10；百度 snippet 用 `trimBaiduNoise` 清除内嵌 JSON 噪音。
 - 环境变量：`WEB_SEARCH_PROVIDER` / `WEB_SEARCH_ENDPOINT` / `WEB_SEARCH_API_KEY`（`.env.example` 已补充说明）。
 
+### 2.3 Bocha endpoint
+
+- 当 `WEB_SEARCH_PROVIDER=bocha`，或 endpoint 主机为 `api.bochaai.com` 时，Runtime 使用 Bocha 请求字段：`query`、`count`、`freshness=noLimit`、`summary=true`。
+- Bocha 响应按 `data.webPages.value` 归一化，并在 `webSearch` 结果和 `evidenceReceipt` 中记录 `backend=bocha`，便于从 Run 事件确认实际后端。
+- 本地单元测试覆盖请求体、Bocha 响应归一化和 backend provenance；真实生产 endpoint smoke test 仍需在具备部署凭据的 Host 上执行。
+
 ## 3. 测试与静态验证
 
 - `tests/web-tools.test.ts`：12 个用例全过（schema 校验、SSRF、重定向、HTML→markdown 噪音剥离、RSS/Baidu 解析、normalize 多后端形状、验证页检测、端到端 meta-refresh + 正文提取、HTTP 错误）。

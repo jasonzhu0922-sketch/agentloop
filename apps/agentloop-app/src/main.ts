@@ -220,7 +220,7 @@ function uniqueStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
 }
 
-function parseSearchProvider(value: string): "baidu" | "bing" {
-  if (value === "baidu" || value === "bing") return value;
-  throw new Error("WEB_SEARCH_PROVIDER must be either \"baidu\" or \"bing\"");
+function parseSearchProvider(value: string): "bocha" | "baidu" | "bing" {
+  if (value === "bocha" || value === "baidu" || value === "bing") return value;
+  throw new Error("WEB_SEARCH_PROVIDER must be \"bocha\", \"baidu\", or \"bing\"");
 }

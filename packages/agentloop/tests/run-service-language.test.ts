@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ModelAdapter } from "../src/runtime/contracts.ts";
-import { DEFAULT_MAX_STEPS, DEFAULT_RUNNER_SYSTEM_PROMPT, MAX_SUPPORTED_STEP_TURNS, recoveryTargetBinding, repairLeafForFailedBoundary, RunService, selectPlanningSkillRoles } from "../src/runtime/run-service.ts";
+import { DEFAULT_MAX_STEPS, DEFAULT_RUNNER_SYSTEM_PROMPT, MAX_SUPPORTED_STEP_TURNS, memorySettlementCommitRef, recoveryTargetBinding, repairLeafForFailedBoundary, RunService, selectPlanningSkillRoles } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import type { PrivateSkill } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { classifyTaskIntent, understandTask } from "../src/runtime/task-intent.ts";
+import type { AgentLoopMemoryPlugin, ExplicitMemoryCommitRequest, PlanningMemoryProjection } from "../src/runtime/memory-plugin.ts";
 import {
   approvingTestAssessor,
   singleStepTestPlanner,
@@ -31,6 +32,94 @@ test("Evidence strength, output format and available web tools do not select the
   assert.equal(selectedDatabase.sourceNeed, "source_grounded");
   const mixed = classifyTaskIntent({ objective: "核实报告中的人员任职", evidenceDemand: "source_grounded", selectedSourceKinds: ["api", "web"] });
   assert.ok(mixed.researchPolicy);
+});
+
+test("Run resolves a structured preference before committing Local Memory", async () => {
+  const database = new AppDatabase(":memory:");
+  const skills = new SkillService(database);
+  let resolverFinished = false;
+  let commitRequest: ExplicitMemoryCommitRequest | undefined;
+  let responseProjectionApplied = false;
+  const memory: AgentLoopMemoryPlugin = {
+    name: "test-memory",
+    commitExplicit: async (input) => {
+      assert.equal(resolverFinished, true);
+      commitRequest = input;
+      return { kind: "not_applicable" };
+    },
+    recall: async () => ({
+      schema: "agentloop.memoryProjection/v1",
+      id: "projection-test",
+      runId: "run-test",
+      target: "response",
+      memoryEpoch: 1,
+      memoryRevisionIds: ["revision-test"],
+      retrievalReasons: ["preference:interaction.address"],
+      contentHash: "hash-test",
+      createdAt: 1,
+      expiresAt: 2,
+      guidance: { preferredAddress: "俊爷" },
+      promptMarkdown: "称呼偏好：俊爷",
+    }),
+    enqueueSettlement: async () => ({ kind: "enqueued", settlementJobId: "settlement-test", enqueuedAt: 1 }),
+  };
+  const input = "你以后回复我都称呼我为俊爷";
+  try {
+    const runs = new RunService({
+      database,
+      skills,
+      memory,
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        assert.ok(request.runId.startsWith("conversation-turn:"));
+        resolverFinished = true;
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "intent", name: "resolve_conversation_turn", arguments: {
+            mode: "reply", relation: "new_goal", inputMode: "none", effectiveGoal: input,
+            taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "answer", requiresExecution: false,
+              deliverables: [{ targetId: "answer", purpose: input, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
+            evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [],
+            memoryIntents: [{ schema: "agentloop.memoryIntentCandidate/v1", kind: "preference", subtype: "interaction.address", canonicalKey: "interaction.address",
+              value: { preferredAddress: "俊爷" }, persistenceIntent: "explicit", sensitivity: "normal", applicationTargets: ["response", "human_loop"], confidence: 0.99 }],
+          } }],
+        };
+      } }),
+      plannerFactory: () => ({ plan: async (task) => {
+        responseProjectionApplied = task.memoryProjection?.target === "response"
+          && task.memoryProjection.promptMarkdown.includes("俊爷");
+        throw new Error("planner-boundary-observed");
+      } }),
+    });
+    await assert.rejects(runs.executeConversation("owner", input), /Run failed/);
+    assert.equal(commitRequest?.memoryIntents?.[0]?.value.preferredAddress, "俊爷");
+    assert.equal(responseProjectionApplied, true);
+  } finally {
+    await database.close();
+  }
+});
+
+test("Memory settlement uses the committed Runtime result reference", () => {
+  assert.equal(memorySettlementCommitRef("run-1", {
+    status: "completed",
+    reasonCode: "plan_assessed_and_completed",
+    committedAt: 100,
+    result: {
+      schema: "agentloop.runtimeResult/v1",
+      ref: { schema: "agentloop.resultRef/v1", resultId: "rr_00000000-0000-4000-8000-000000000001" },
+      kind: "run",
+      producer: { runId: "run-1", planId: "plan-1" },
+      inputs: [],
+      publication: { status: "published" },
+      payload: { content: "ok", contentFormat: "text", characters: 2, bytes: 2, sha256: "hash" },
+      createdAt: 100,
+    },
+  }), "rr_00000000-0000-4000-8000-000000000001");
+  assert.equal(memorySettlementCommitRef("run-2", {
+    status: "failed",
+    reasonCode: "MODEL_ERROR",
+    committedAt: 200,
+  }), "run-2:200");
 });
 
 for (const explicitlyNamed of [false, true]) {
@@ -134,6 +223,50 @@ test("source-grounded lookup does not nominate every no-artifact primary builder
     id: registry.id,
     role: "source_provider",
   }]);
+});
+
+test("planning Memory suggestions are applied before Skill selection but only for eligible catalog Skills", () => {
+  const currentSkill = {
+    id: "discovered:current-analysis",
+    name: "current-analysis",
+    description: "Analyze sales data and summarize the current business result.",
+    agentLoop: {
+      roles: ["primary_builder"], artifactKinds: ["none"], sourceKinds: [], qaKinds: [],
+      semanticTags: ["sales-analysis"],
+    },
+  } as PrivateSkill;
+  const historicalSkill = {
+    id: "discovered:historical-analysis",
+    name: "historical-analysis",
+    description: "Analyze business data and summarize reusable historical patterns.",
+    agentLoop: {
+      roles: ["primary_builder"], artifactKinds: ["none"], sourceKinds: [], qaKinds: [],
+      semanticTags: ["business-analysis"],
+    },
+  } as PrivateSkill;
+  const understanding = understandTask({ objective: "分析销售数据并输出结论", evidenceDemand: "none" });
+  const projection = {
+    schema: "agentloop.memoryProjection/v1",
+    target: "planner",
+    planningPriors: [{
+      schema: "agentloop.planningPrior/v1",
+      source: "experience_procedure",
+      applicability: "同类销售数据分析任务",
+      strategy: "优先复用历史分析 Skill",
+      suggestedSteps: [],
+      skillSuggestions: [historicalSkill.id],
+      evidenceExpectations: [],
+      warnings: [],
+      confidence: 0.9,
+      sourceRefs: ["memory-revision-1"],
+    }],
+  } as unknown as PlanningMemoryProjection;
+
+  const withoutMemory = selectPlanningSkillRoles([currentSkill, historicalSkill], understanding, []);
+  const withMemory = selectPlanningSkillRoles([currentSkill, historicalSkill], understanding, [], [], projection);
+
+  assert.equal(withoutMemory[0]?.skill.id, currentSkill.id);
+  assert.equal(withMemory[0]?.skill.id, historicalSkill.id);
 });
 
 test("recovery plan projection retains canonical delivery target ownership", () => {

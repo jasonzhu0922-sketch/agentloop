@@ -29,6 +29,10 @@ const providerConfigPath = resolve(
   appRoot,
   process.env.LLM_PROVIDER_CONFIG_PATH ?? "./config/llm-providers.json",
 );
+const mcpConfigurationPath = resolve(
+  appRoot,
+  process.env.MCP_SERVERS_CONFIG_PATH ?? "./config/mcp-servers.json",
+);
 if (!existsSync(providerConfigPath)) {
   throw new Error(`LLM_PROVIDER_CONFIG_PATH does not exist: ${providerConfigPath}. Copy config/llm-providers.example.json first.`);
 }
@@ -141,6 +145,7 @@ children.push(start("local-agent", "local-agent-runtime/src/main.ts", {
   LOCAL_AGENT_RUNTIME_DATA_ROOT: process.env.LOCAL_AGENT_RUNTIME_DATA_ROOT ?? join(runtimeDataRoot, "local-agent", "runtimes"),
   LOCAL_AGENT_SUPERVISOR_DATABASE_PATH: process.env.LOCAL_AGENT_SUPERVISOR_DATABASE_PATH ?? join(runtimeDataRoot, "local-agent", "supervisor.db"),
   LLM_PROVIDER_CONFIG_PATH: providerConfigPath,
+  MCP_SERVERS_CONFIG_PATH: mcpConfigurationPath,
   STEP_EXECUTION_STRATEGY_CONFIG_PATH: stepExecutionStrategyConfigPath,
   PRACTICE_PROFILE_CONFIG_PATH: practiceProfileConfigPath,
   SKILL_DIRECTORIES_CONFIG_PATH: process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? "./config/skill-directories.json",
@@ -163,6 +168,7 @@ for (let index = 0; index < runtimeCount; index += 1) {
     RUNTIME_ID: runtimeId,
     ROUTER_URL: publicRouterUrl,
     LLM_PROVIDER_CONFIG_PATH: providerConfigPath,
+    MCP_SERVERS_CONFIG_PATH: mcpConfigurationPath,
     STEP_EXECUTION_STRATEGY_CONFIG_PATH: stepExecutionStrategyConfigPath,
     AGENTLOOP_STATE_DRIVER: process.env.AGENTLOOP_STATE_DRIVER ?? "sqlite",
     AGENTLOOP_STATE_SQLITE_PATH: sharedStateDatabasePath,
@@ -177,6 +183,7 @@ children.push(start("web", "web/server.mjs", {
   ROUTER_URL: publicRouterUrl,
   LOCAL_AGENT_URL: process.env.LOCAL_AGENT_URL ?? `http://127.0.0.1:${localAgentPort}`,
   LLM_PROVIDER_CONFIG_PATH: providerConfigPath,
+  MCP_SERVERS_CONFIG_PATH: mcpConfigurationPath,
   RUNTIME_CONTROL_DEV_MODE: process.env.RUNTIME_CONTROL_DEV_MODE ?? "1",
   RUNTIME_CONTROL_DEV_TOKEN: process.env.RUNTIME_CONTROL_DEV_TOKEN ?? "development-operator-token",
   RUNTIME_CONTROL_DEV_ROOT: process.env.RUNTIME_CONTROL_DEV_ROOT ?? join(runtimeDataRoot, "cloud-skills"),

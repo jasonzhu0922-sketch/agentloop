@@ -185,10 +185,32 @@ test("loopback Runtime configuration supports empty extensions and redacts encry
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ displayName: "Contract Runtime" }),
     });
-    assert.equal(createdResponse.status, 201);
+    assert.equal(createdResponse.status, 201, await createdResponse.clone().text());
     const created = await createdResponse.json() as { runtime: { id: string }; configuration: { skills: unknown[]; mcpServers: unknown[] } };
     assert.deepEqual(created.configuration.skills, []);
     assert.deepEqual(created.configuration.mcpServers, []);
+
+    const modelConfig = await request("/v1/local-models/configuration", {
+      method: "PUT", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reuseCloudModels: false, providers: [{ key: "test", displayName: "Test", baseUrl: "http://127.0.0.1:9/v1", apiKey: "test-key", models: [{ key: "compactor", displayName: "Compactor", providerModel: "test-model", temperature: 0.2, maxAttempts: 1 }] }] }),
+    });
+    assert.equal(modelConfig.status, 200, await modelConfig.clone().text());
+    const modelKey = "local:compactor";
+    const memoryResponse = await request("/v1/local-memory/configuration", {
+      method: "PUT", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: true, settlementModelKey: modelKey }),
+    });
+    assert.equal(memoryResponse.status, 200, await memoryResponse.clone().text());
+    for (const id of [defaultRuntimeId, created.runtime.id]) {
+      const response = await request(`/v1/local-runtimes/${id}/configuration`);
+      assert.equal(response.status, 200);
+      assert.deepEqual((await response.json() as { configuration: { memory: unknown } }).configuration.memory,
+        { enabled: true, settlementModelKey: modelKey });
+    }
+    const disableMemory = await request("/v1/local-memory/configuration", {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: false }),
+    });
+    assert.equal(disableMemory.status, 200, await disableMemory.clone().text());
 
     const specializedResponse = await request("/v1/local-runtimes", {
       method: "POST",

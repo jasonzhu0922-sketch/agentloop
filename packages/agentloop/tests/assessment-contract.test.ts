@@ -69,6 +69,32 @@ test("assessment uses one strict explicit-state schema, including nullable failu
   } }).assess(input);
 });
 
+test("a JSON-encoded assessment is rejected with shape diagnostics and repaired as a root object", async () => {
+  const input = assessmentInput();
+  let calls = 0;
+  const events: RuntimeEvent[] = [];
+  const result = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
+    calls += 1;
+    if (calls === 1) {
+      const valid = submission(input).toolCalls[0]!;
+      return { content: "", finishReason: "tool_calls", toolCalls: [{
+        ...valid,
+        arguments: JSON.stringify(valid.arguments),
+      }] };
+    }
+    const directive = request.runtimeContext!.content;
+    assert.match(directive, /root JSON object/);
+    assert.match(directive, /argumentShape/);
+    assert.match(directive, /characters/);
+    return submission(input);
+  } }).assess(input, undefined, async (event) => { events.push(event); });
+
+  assert.equal(calls, 2);
+  assert.equal(result.approved, true);
+  const rejected = events.find((event) => event.type === "assessment.validation.rejected")!;
+  assert.deepEqual(rejected.data.argumentShape, { topLevelType: "string", characters: JSON.stringify(submission(input).toolCalls[0]!.arguments).length });
+});
+
 for (const rationale of ["None.", "No unsupported requirement was added.", "该条件忠实反映用户要求，没有契约问题。", "This condition is necessary for the original goal."]) {
   test(`a valid contract check cannot become a conflict because of explanatory prose: ${rationale}`, async () => {
     const input = assessmentInput();

@@ -2,13 +2,14 @@ import { basename, dirname, join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { AppDatabase, loadMcpToolsFromConfig, parseMcpServersConfig, type McpServerRegistration, type McpServersConfig } from "@zhujun/agentloop";
+import { memorySafeText, type MemoryStore } from "@zhujun/agentloop-memory";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
 import { CloudProxyModel, LocalRuntimeFactory, redactMcpDiagnostic } from "./local-runtime-factory.ts";
 import { LocalRuntimeSupervisor, LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
 import { RuntimeConnectionClient } from "../connection/router-runtime-control-client.ts";
 import { pickNativeDirectory } from "../infrastructure/native-directory-picker.ts";
 import { LocalAgentStateStore, type LocalAgentState } from "../persistence/local-agent-state-store.ts";
-import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, type LocalRuntimeMcpServerInput } from "../persistence/local-runtime-configuration-store.ts";
+import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, type LocalRuntimeMemoryConfigurationInput, type LocalRuntimeMcpServerInput } from "../persistence/local-runtime-configuration-store.ts";
 import { LocalModelConfigurationStore, type LocalModelConfigurationInput } from "../persistence/local-model-configuration-store.ts";
 import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local-runtime-secret-store.ts";
 import { LocalSkillPackageInstaller, type LocalSkillUploadFile } from "./local-skill-package-installer.ts";
@@ -312,6 +313,71 @@ export class LocalAgentService {
     return { configuration: await this.supervisor.configuration(runtimeId) };
   }
 
+  async localMemoryConfiguration(): Promise<unknown> {
+    return { memory: await this.configurations.deviceMemoryConfiguration() };
+  }
+
+  async updateLocalMemoryConfiguration(memory: LocalRuntimeMemoryConfigurationInput): Promise<unknown> {
+    await this.supervisor.withDeviceReconfiguration(async () => {
+      const previous = await this.configurations.deviceMemoryConfiguration();
+      await this.configurations.applyDeviceMemory(memory);
+      try {
+        await this.supervisor.reloadRunningInstances();
+      } catch (error) {
+        await this.configurations.restoreDeviceMemory(previous);
+        await this.supervisor.reloadRunningInstances().catch(() => undefined);
+        throw error;
+      }
+    });
+    return { memory: await this.configurations.deviceMemoryConfiguration() };
+  }
+
+  async localMemorySettlement(session: LocalSession, runId: string): Promise<unknown> {
+    const found = await this.memoryRuntimeForRun(session.ownerUserId, runId);
+    if (found === undefined) throw new LocalAgentApplicationError(404, "memory_settlement_run_not_found");
+    const memory = found.runtime.memory;
+    if (memory === undefined) throw new LocalAgentApplicationError(409, "memory_not_enabled");
+    const scope = { tenantId: memory.tenantId, ownerUserId: session.ownerUserId };
+    const [jobs, attempts] = await Promise.all([
+      memory.store.settlementJobs(scope, runId),
+      memory.store.settlementAttempts(scope, runId),
+    ]);
+    return {
+      runId,
+      runtimeId: found.runtime.id,
+      jobs: jobs.map((job) => ({
+        settlementJobId: job.settlementJobId, status: job.status, attempts: job.attempts,
+        terminalCommitRef: job.terminalCommitRef, enqueuedAt: job.enqueuedAt,
+        nextAttemptAt: job.nextAttemptAt,
+        ...(job.lastError === undefined ? {} : { lastError: safeMemoryDiagnostic(job.lastError) }),
+      })),
+      attempts: attempts.map((attempt) => ({ ...attempt, errors: attempt.errors.slice(0, 32) })),
+    };
+  }
+
+  async replayLocalMemorySettlement(session: LocalSession, runId: string): Promise<unknown> {
+    const found = await this.memoryRuntimeForRun(session.ownerUserId, runId);
+    if (found === undefined) throw new LocalAgentApplicationError(404, "memory_settlement_run_not_found");
+    const memory = found.runtime.memory;
+    if (memory === undefined) throw new LocalAgentApplicationError(409, "memory_not_enabled");
+    const scope = { tenantId: memory.tenantId, ownerUserId: session.ownerUserId };
+    await memory.store.replaySettlement(scope, runId, Date.now());
+    return await this.localMemorySettlement(session, runId);
+  }
+
+  private async memoryRuntimeForRun(ownerUserId: string, runId: string): Promise<{ readonly runtime: LocalRuntimeControl } | undefined> {
+    for (const runtime of this.supervisor.controls()) {
+      if (runtime.memory === undefined) continue;
+      try {
+        await runtime.runs.get(ownerUserId, runId);
+        return { runtime };
+      } catch {
+        // Run IDs are runtime-local; continue without revealing another user's run.
+      }
+    }
+    return undefined;
+  }
+
   async updateLocalRuntimeConfiguration(runtimeId: string, configuration: LocalRuntimeConfigurationInput, displayName?: string): Promise<unknown> {
     const updated = await this.supervisor.updateConfiguration(runtimeId, configuration, displayName);
     return { runtime: (await this.supervisor.list()).find((runtime) => runtime.id === runtimeId), configuration: updated };
@@ -477,6 +543,10 @@ export class LocalAgentService {
   private requireOrigin(origin: string | undefined): void {
     if (origin === undefined || this.input.webOrigin === undefined || !this.input.webOrigin.split(",").map((value) => value.trim()).includes(origin)) throw new LocalAgentApplicationError(403, "local_agent_origin_denied");
   }
+}
+
+function safeMemoryDiagnostic(value: string): string {
+  return memorySafeText(value.slice(0, 240), []);
 }
 
 function requiredString(value: unknown, name: string): string {

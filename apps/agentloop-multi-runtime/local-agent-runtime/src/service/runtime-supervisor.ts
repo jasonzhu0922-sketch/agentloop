@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AppDatabase, RunService } from "@zhujun/agentloop";
+import type { MemoryStore } from "@zhujun/agentloop-memory";
 import type { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.ts";
 import {
   LocalRuntimeConfigurationStore,
@@ -28,6 +29,9 @@ export interface LocalRuntimeControl extends LocalRuntimeDefinition {
   readonly scopes: LocalDirectoryScopeStore;
   readonly modelKeys: readonly string[];
   readonly activeRunIds: Set<string>;
+  /** Present only when device Memory is enabled; the tenant is device-local. */
+  readonly memory?: { readonly store: MemoryStore; readonly tenantId: string };
+  readonly close?: () => Promise<void>;
 }
 
 export interface LocalRuntimeSummary extends LocalRuntimeDefinition {
@@ -146,11 +150,18 @@ export class LocalRuntimeSupervisor {
         this.statusCache.set(row.runtime_id, "stopped");
       }
       if (configurationRequiresCredentials || row.status === "stopped") continue;
-      await this.startInstance(toDefinition(row), row.status);
-      if (row.pending_action !== null) {
-        if (!this.hasActiveWorkForRuntime(row.runtime_id)) await this.completePending(row.runtime_id);
-      } else if (row.status === "restarting") {
-        await this.updateState(row.runtime_id, "ready", null);
+      try {
+        await this.startInstance(toDefinition(row), row.status);
+        if (row.pending_action !== null) {
+          if (!this.hasActiveWorkForRuntime(row.runtime_id)) await this.completePending(row.runtime_id);
+        } else if (row.status === "restarting" || row.status === "failed") {
+          await this.updateState(row.runtime_id, "ready", null);
+        }
+      } catch {
+        // A Runtime whose MCP catalog cannot be built must remain visible for
+        // repair, but must never be advertised as ready.  Keep the Agent
+        // process alive so another local Runtime can continue operating.
+        await this.updateState(row.runtime_id, "failed", null);
       }
     }
   }
@@ -216,6 +227,11 @@ export class LocalRuntimeSupervisor {
     if (runtime === undefined) throw new LocalRuntimeSupervisorError(409, "runtime_not_running");
     if (requireReady && this.statusFromCache(runtimeId) !== "ready") throw new LocalRuntimeSupervisorError(409, "runtime_draining");
     return runtime;
+  }
+
+  /** Snapshot of currently running controls for device-local diagnostics. */
+  controls(): readonly LocalRuntimeControl[] {
+    return [...this.instances.values()];
   }
 
   async admitRun<T>(runtimeId: string, start: (runtime: LocalRuntimeControl) => Promise<{ readonly runId: string; readonly value: T }>): Promise<T> {
@@ -318,6 +334,7 @@ export class LocalRuntimeSupervisor {
     const runtime = this.instances.get(runtimeId);
     if (runtime !== undefined) {
       await this.updateState(runtimeId, "draining", null);
+      await runtime.close?.();
       await runtime.database.close();
       this.instances.delete(runtimeId);
       this.statusCache.set(runtimeId, "stopped");
@@ -356,13 +373,20 @@ export class LocalRuntimeSupervisor {
   async reloadRunningInstances(): Promise<void> {
     if (this.hasActiveWork()) throw new LocalRuntimeSupervisorError(409, "runtime_active_runs_prevent_reconfiguration");
     const rows = await this.rows();
-    for (const runtime of this.instances.values()) await runtime.database.close();
+    for (const runtime of this.instances.values()) { await runtime.close?.(); await runtime.database.close(); }
     this.instances.clear();
+    let firstError: unknown;
     for (const row of rows) {
       if (row.status === "stopped") continue;
-      await this.startInstance(toDefinition(row), row.status === "draining" ? "draining" : "ready");
+      try {
+        await this.startInstance(toDefinition(row), row.status === "draining" ? "draining" : "ready");
+      } catch (error) {
+        await this.updateState(row.runtime_id, "failed", null);
+        firstError ??= error;
+      }
     }
     this.emit();
+    if (firstError !== undefined) throw firstError;
   }
 
   async drain(runtimeId: string): Promise<LocalRuntimeSummary> {
@@ -441,7 +465,7 @@ export class LocalRuntimeSupervisor {
   }
 
   async close(): Promise<void> {
-    for (const runtime of this.instances.values()) await runtime.database.close();
+    for (const runtime of this.instances.values()) { await runtime.close?.(); await runtime.database.close(); }
     this.instances.clear();
     await this.database.close();
   }
@@ -464,6 +488,7 @@ export class LocalRuntimeSupervisor {
     const runtime = this.instances.get(runtimeId);
     if (this.hasActiveWorkForRuntime(runtimeId)) return;
     if (row.pending_action === "stop") {
+      await runtime?.close?.();
       await runtime?.database.close();
       this.instances.delete(runtimeId);
       this.statusCache.set(runtimeId, "stopped");
@@ -475,6 +500,7 @@ export class LocalRuntimeSupervisor {
     await this.updateState(runtimeId, "restarting", "restart");
     this.statusCache.set(runtimeId, "restarting");
     this.emit();
+    await runtime?.close?.();
     await runtime?.database.close();
     this.instances.delete(runtimeId);
     try {

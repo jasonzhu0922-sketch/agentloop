@@ -6,6 +6,7 @@ import type { RuntimeResultBinding, RuntimeResultCard, RuntimeResultRecord, Runt
 import type { ToolSourceDescriptor } from "../tools/tool-registry.ts";
 import type { AssessmentEvidenceBundles } from "./runtime-evidence-bundle.ts";
 import type { CanonicalRunState, CanonicalRunStateRef } from "../runtime/canonical-run-state.ts";
+import type { MemoryIntentCandidate, MemoryProjection } from "../runtime/memory-plugin.ts";
 
 export type PlanStatus = "pending" | "admitted" | "running" | "completed" | "failed";
 export type PlanStepStatus = "pending" | "running" | "completed" | "failed";
@@ -168,6 +169,8 @@ export interface TaskSpec {
    * These entries are not part of the first-round relevance recommendation.
    */
   readonly capabilityRecovery?: CapabilityRecoveryCatalog;
+  /** Planner-only projection compiled by an optional Local Agent Memory plugin. */
+  readonly memoryProjection?: MemoryProjection;
 }
 
 export interface CapabilityRecoveryCatalog {
@@ -259,6 +262,8 @@ export interface ConversationTurnResolution {
   /** Runtime-derived invariant of evidenceStrategy; the model never chooses it independently. */
   readonly evidenceDemand: SourceNeed;
   readonly userConstraints: readonly string[];
+  /** Model proposal only; the Local Memory plugin validates and commits it. */
+  readonly memoryIntents?: readonly MemoryIntentCandidate[];
   /** Explicit execution requirements, independent of catalog availability. */
   readonly requiredCapabilityReferences?: readonly RequiredCapabilityReference[];
   readonly source: "model" | "model_guarded";

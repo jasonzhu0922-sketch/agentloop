@@ -1,4 +1,5 @@
 import { createLocalModelSettings } from "./local-runtime/local-model-settings.js";
+import { createLocalMemorySettings } from "./local-runtime/local-memory-settings.js";
 import { clearToast, showToast } from "./ui/toast.js";
 import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "./projections/assistant-event-projection.js";
 import { conversationMessagesFromTurns } from "./projections/conversation-history.js";
@@ -1082,17 +1083,19 @@ function defaultUploadStoragePath(sharedStoragePath) {
 
 async function openLocalAgentSettings() {
   if (!sessionState.localSessionToken) return;
-  await Promise.all([loadLocalAgentConfig(), loadLocalRuntimes(), loadLocalModelConfiguration(), loadLocalSkillPackages(true)]);
+  await Promise.all([loadLocalAgentConfig(), loadLocalRuntimes(), loadLocalModelConfiguration(), loadLocalMemoryConfiguration(), loadLocalSkillPackages(true)]);
   renderLocalAgentConfig();
   syncLocalRuntimeManager();
   activateAgentSettingsView("models");
   $("agent-settings-modal").hidden = false;
 }
 
-const localModelSettings = createLocalModelSettings({ getElement: $, request: localAgentFetch, onSaved: loadModels, notify: showToast });
+const localMemorySettings = createLocalMemorySettings({ getElement: $, request: localAgentFetch, notify: showToast });
+const localModelSettings = createLocalModelSettings({ getElement: $, request: localAgentFetch, onSaved: async () => { await loadModels(); await localMemorySettings.refreshModels(); }, notify: showToast });
 let activeAgentSettingsView = "models";
 
 async function loadLocalModelConfiguration() { await localModelSettings.load(); }
+async function loadLocalMemoryConfiguration() { await localMemorySettings.load(); }
 
 function activateAgentSettingsView(view) {
   if (view !== "models" && view !== "skills" && view !== "general" && view !== "runtimes") view = "models";
@@ -1111,7 +1114,7 @@ function syncAgentSettingsView(paired) {
 }
 
 function closeLocalAgentSettings() {
-  if (!$("agent-settings-modal").hidden && localModelSettings.canClose()) {
+  if (!$("agent-settings-modal").hidden && localModelSettings.canClose() && localMemorySettings.canClose()) {
     $("agent-settings-modal").hidden = true;
     clearToast();
   }
@@ -2590,7 +2593,7 @@ function renderMessage(message) {
   const planPanel = hasPlan && message.planOpen === true ? `<ol class="inline-plan-steps" id="${planPanelId}">${plan.map((step, index) => `<li><span class="step-dot ${step.status === "completed" ? "done" : step.status === "running" ? "running" : step.status === "failed" ? "error" : "pending"}"></span><span><b>${String(index + 1).padStart(2, "0")} ${escapeHtml(step.objective || step.id || "未命名步骤")}</b><small>${planStepLabel(step.status)}</small></span></li>`).join("")}</ol>` : "";
   const executionTrace = renderExecutionTrace(message);
   const inlineArtifacts = renderInlineArtifacts(message);
-  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop · ${stateLabel}</span>${provenance}${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${executionTrace}${inlineArtifacts}${responseTiming}</div></div></article>`;
+  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><img class="msg-avatar logo-image" src="/assets/xuanwu-mascot-icon.png" alt="玄武" /><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop · ${stateLabel}</span>${provenance}${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${executionTrace}${inlineArtifacts}${responseTiming}</div></div></article>`;
 }
 
 function renderExecutionProvenance(message) {

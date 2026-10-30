@@ -23,6 +23,8 @@ description: 读取部署配置的 Eplat 人事法人汇总报表原始行。用
 4. 点名组织的查询必须原样携带 resolver 返回的 `codes` 和 `selectionToken`。无令牌、代码变化或令牌不匹配都会被拒绝。
 5. 保留工具返回的完整查询回执文件引用，交给 `hr-report-analysis/analyze-report`。通过 `computer_run_command` 执行时使用 `stdoutRef.path` 指向的完整原始文件；`stdout` 可能只是预览。不要猜测路径，也不要手工复制部分行作为分析输入。
 
+通过 `computer_run_command` 执行包脚本时，`command` 是可执行程序，`args` 仅包含其参数，二者必须分开。例如：`{"command":"python3","args":["scripts/hr_report_data.py","query-report","--request-json","<request-json>"],"cwd":"@skills/hr-report-data"}`。不要把 `python3` 放进 `args`，也不要省略 `command`；参数校验被拒绝表示脚本没有运行，须修正结构后再调用。
+
 `full_company` 表示四位公司代码，包含下属单位的汇总口径；`headquarters` 表示对应 `XXXX00` 总部口径；`both` 会同时返回两者，二者存在范围重叠，不能相加。
 
 ## 完成边界

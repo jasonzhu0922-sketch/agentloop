@@ -44,9 +44,15 @@ export function webToolsOptionsFromEnvironment(
   environment: Readonly<Record<string, string | undefined>>,
 ): WebToolsOptions {
   return {
+    ...(environment.WEB_SEARCH_PROVIDER === undefined ? {} : { searchProvider: parseWebSearchProvider(environment.WEB_SEARCH_PROVIDER) }),
     ...(environment.WEB_SEARCH_ENDPOINT === undefined ? {} : { searchEndpoint: environment.WEB_SEARCH_ENDPOINT }),
     ...(environment.WEB_SEARCH_API_KEY === undefined ? {} : { searchApiKey: environment.WEB_SEARCH_API_KEY }),
   };
+}
+
+function parseWebSearchProvider(value: string): "bocha" | "baidu" | "bing" {
+  if (value === "bocha" || value === "baidu" || value === "bing") return value;
+  throw new Error('WEB_SEARCH_PROVIDER must be "bocha", "baidu", or "bing"');
 }
 
 export async function loadMultiRuntimeConfig(path: string): Promise<MultiRuntimeConfig> {

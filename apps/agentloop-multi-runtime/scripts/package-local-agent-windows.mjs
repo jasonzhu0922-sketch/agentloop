@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { PACKAGED_LOCAL_AGENT_PORT } from "../src/shared/local-agent-endpoint.mjs";
 import { windowsMsiPayload } from "./windows-msi-payload.mjs";
-import { copyPackagedNodeModules, PACKAGED_NODE_MAJOR, preparePackagedPythonRuntime } from "./package-local-agent-runtime.mjs";
+import { copyPackagedAgentRuntimeSupportFiles, copyPackagedNodeModules, PACKAGED_NODE_MAJOR, preparePackagedPythonRuntime } from "./package-local-agent-runtime.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(appRoot, "../..");
@@ -24,6 +24,7 @@ const seaExecutable = join(resources, "agentloop-local-runtime-agent.exe");
 const launcher = join(resources, "agentloop-local-runtime-agent.cmd");
 const packagedPythonRoot = requiredPackagedPythonRoot();
 const msi = join(releaseRoot, `AgentLoop-Local-Runtime-${version}-windows-x64.msi`);
+const packagedRequirements = join(appRoot, "requirements.local-agent.txt");
 const releaseEnvironment = process.env.AGENTLOOP_RELEASE_ENV ?? "development";
 const routerUrl = process.env.AGENTLOOP_ROUTER_URL ?? ({
   development: process.env.AGENTLOOP_ROUTER_URL_DEVELOPMENT ?? "http://127.0.0.1:8788",
@@ -106,20 +107,20 @@ async function writeLauncher(seaInjected) {
 async function copyRuntimePayload() {
   await cp(join(appRoot, "distribution/rotating-log-launcher.mjs"), join(resources, "rotating-log-launcher.mjs"));
   await cp(join(repositoryRoot, "packages/agentloop-skills/skills"), join(resources, "skills"), { recursive: true });
-  await cp(join(appRoot, "local-agent-runtime"), join(resources, "agent-loop-runtime"), { recursive: true });
+  await copyPackagedAgentRuntimeSupportFiles({ appRoot, destinationRoot: resources });
   const runtimeNode = join(resources, "agentloop-local-runtime-node.exe");
   if (!existsSync(runtimeNode)) await cp(process.execPath, runtimeNode);
   await cp(runtimeNode, join(resources, "node.exe"));
   await preparePackagedPythonRuntime({
     sourceRoot: packagedPythonRoot,
     destinationRoot: join(resources, "runtime-python"),
-    requirementsPath: join(appRoot, "requirements.txt"),
+    requirementsPath: packagedRequirements,
   });
   await copyPackagedNodeModules({ repositoryRoot, destinationRoot: resources });
-  await cp(join(appRoot, "requirements.txt"), join(resources, "requirements.txt"));
+  await cp(packagedRequirements, join(resources, "requirements.txt"));
   await cp(join(repositoryRoot, "packages/agentloop/src/assets"), join(payloadRoot, "assets"), { recursive: true });
+  await cp(join(repositoryRoot, "xuanwu-mascot-icon.png"), join(payloadRoot, "assets", "xuanwu-mascot-icon.png"));
   await mkdir(join(resources, "config"), { recursive: true });
-  await cp(join(appRoot, "config/llm-providers.example.json"), join(resources, "config/llm-providers.json"));
   await writeFile(join(resources, "config/skill-directories.json"), JSON.stringify({ schema: "agentloop.skillDirectories/v1", customSkillDirectories: [] }, null, 2));
   await cp(join(appRoot, "config/step-execution-strategy.json"), join(resources, "config/step-execution-strategy.json"));
   await cp(join(appRoot, "config/practice-profiles.json"), join(resources, "config/practice-profiles.json"));

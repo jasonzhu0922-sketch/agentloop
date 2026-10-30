@@ -1240,6 +1240,12 @@ body.workspace-resizing * {
 .local-model-save-bar>.local-model-actions{flex-shrink:0}
 .local-cloud-model-row{padding:8px 0;border-bottom:1px solid var(--border);font-size:11px;overflow-wrap:anywhere}
 #local-cloud-model-table{font-size:11px;color:var(--text-2)}
+.local-memory-section{display:grid;gap:12px;padding:15px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2)}
+.local-memory-toggle{display:grid;grid-template-columns:18px minmax(0,1fr);align-items:start;gap:10px;padding:12px;border:1px solid var(--border);border-radius:7px;background:var(--bg)}
+.local-memory-toggle>input{width:16px;height:16px;margin:2px 0 0;accent-color:var(--brand)}
+.local-memory-toggle span{display:grid;gap:4px}.local-memory-toggle strong{font-size:12px}.local-memory-toggle small{color:var(--text-3);font-size:11px;line-height:1.5}
+.local-memory-model-field{display:grid;gap:5px;color:var(--text-2);font-size:10px;font-weight:650}.local-memory-model-field select{width:100%;height:35px;padding:7px 9px;border:1px solid var(--border-2);border-radius:5px;background:var(--bg);font-size:11px}.local-memory-warning{margin:0;padding:9px 10px;border:1px solid color-mix(in srgb,#d9a441 45%,var(--border));border-radius:6px;color:#996b13;font-size:11px;line-height:1.5}
+.local-memory-section .local-model-save-bar{bottom:-15px;margin-top:2px;padding-bottom:0;background:var(--bg-2)}
 @media(max-width:720px){.local-model-section>.settings-section-title{align-items:flex-start;flex-wrap:wrap}.local-model-save-bar{bottom:-16px;flex-wrap:wrap}.local-model-json{font-size:11px}.local-model-provider-choice{min-width:130px;flex:1}.local-model-save-bar>.local-model-actions{margin-left:auto}}
 @media(max-width:560px){.agent-settings-layout{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}.agent-settings-nav{flex-direction:row;padding:8px 0;border-right:0;border-bottom:1px solid var(--border)}.agent-settings-content{padding:14px 10px}.settings-local-badge{justify-self:start}.local-model-save-bar{bottom:-14px}}
 

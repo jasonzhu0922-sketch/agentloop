@@ -21,7 +21,7 @@ const routerUrl = process.env.ROUTER_URL ?? "http://127.0.0.1:8788";
 // paired Local Runtime Agent must receive the externally routable URL.
 const routerPublicUrl = process.env.ROUTER_PUBLIC_URL ?? routerUrl;
 const localAgentUrl = resolveLocalAgentUrl();
-const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
+const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png" };
 
 export function runtimeConfigScript(apiUrl, agentUrl = localAgentUrl, runtimeControl = {}) {
   // Browser traffic stays same-origin even when Web and Router are separate
@@ -32,13 +32,16 @@ export function runtimeConfigScript(apiUrl, agentUrl = localAgentUrl, runtimeCon
 
 export function staticFilePath(pathname) {
   const decodedPathname = decodeURIComponent(pathname);
-  const requested = decodedPathname === "/" || decodedPathname === "/index.html" || decodedPathname === "/app"
+  const requested = decodedPathname === "/favicon.ico"
+    ? "assets/xuanwu-mascot-icon.png"
+    : decodedPathname === "/" || decodedPathname === "/index.html" || decodedPathname === "/app"
     ? "pages/app.html"
     : (decodedPathname === "/login" || decodedPathname === "/register" || decodedPathname === "/login.html"
       ? "pages/login.html"
       : decodedPathname === "/downloads" || decodedPathname === "/downloads/" ? "pages/downloads.html"
         : decodedPathname === "/cloud-models" || decodedPathname === "/cloud-models/" ? "pages/cloud-models.html"
-          : decodedPathname === "/cloud-skills" || decodedPathname === "/cloud-skills/" ? "pages/cloud-skills.html" : decodedPathname.slice(1));
+        : decodedPathname === "/cloud-skills" || decodedPathname === "/cloud-skills/" ? "pages/cloud-skills.html"
+          : decodedPathname === "/cloud-mcp" || decodedPathname === "/cloud-mcp/" ? "pages/cloud-mcp.html" : decodedPathname.slice(1));
   const file = resolve(root, requested);
   return file === root || file.startsWith(`${root}${sep}`) ? file : undefined;
 }
@@ -49,9 +52,10 @@ export function createWebServer({ installerDirectory = process.env.LOCAL_AGENT_D
   runtimeControlDevRoot = process.env.RUNTIME_CONTROL_DEV_ROOT ?? "./data/local/cloud-skills",
   runtimeControlDevSkillsRoot = process.env.RUNTIME_CONTROL_DEV_SKILLS_ROOT ?? resolve(root, "..", "custom-skills"),
   runtimeControlDevToken = process.env.RUNTIME_CONTROL_DEV_TOKEN ?? "development-operator-token",
-  runtimeControlDevConfiguration = process.env.LLM_PROVIDER_CONFIG_PATH } = {}) {
+  runtimeControlDevConfiguration = process.env.LLM_PROVIDER_CONFIG_PATH,
+  runtimeControlDevMcpConfiguration = process.env.MCP_SERVERS_CONFIG_PATH } = {}) {
   const devRuntimeControl = runtimeControlDevMode && !runtimeControlSocket
-    ? createDevRuntimeControl({ root: runtimeControlDevRoot, skillsRoot: runtimeControlDevSkillsRoot, token: runtimeControlDevToken, configurationPath: runtimeControlDevConfiguration })
+    ? createDevRuntimeControl({ root: runtimeControlDevRoot, skillsRoot: runtimeControlDevSkillsRoot, token: runtimeControlDevToken, configurationPath: runtimeControlDevConfiguration, mcpConfigurationPath: runtimeControlDevMcpConfiguration })
     : undefined;
   return createServer(async (request, response) => {
     // This is the local control-plane UI.  Its browser state and Router
@@ -59,7 +63,7 @@ export function createWebServer({ installerDirectory = process.env.LOCAL_AGENT_D
     // SSE/recovery implementation alive after the Router has been restarted.
     response.setHeader("cache-control", "no-store");
     const pathname = new URL(request.url ?? "/", "http://web.local").pathname;
-    if (pathname === "/api/operations/runtime-reload" || pathname === "/api/operations/model-configuration" || pathname === "/api/operations/skill-configuration") {
+    if (pathname === "/api/operations/runtime-reload" || pathname === "/api/operations/model-configuration" || pathname === "/api/operations/mcp-configuration" || pathname === "/api/operations/skill-configuration") {
       const operationPath = pathname.slice("/api/operations".length);
       if (devRuntimeControl) await devRuntimeControl.handle(request, response, operationPath);
       else await proxyRuntimeControl(request, response, runtimeControlSocket, operationPath);

@@ -17,7 +17,16 @@ final class AgentLoopLocalRuntimeTray: NSObject, NSApplicationDelegate {
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    statusItem.button?.title = "AgentLoop"
+    let iconURL = Bundle.main.resourceURL!.appendingPathComponent("xuanwu-mascot-icon.png")
+    if let image = NSImage(contentsOf: iconURL) {
+      image.size = NSSize(width: 18, height: 18)
+      image.isTemplate = false
+      statusItem.button?.image = image
+      statusItem.button?.imageScaling = .scaleProportionallyDown
+      statusItem.button?.toolTip = "玄武 · AgentLoop Local Runtime"
+    } else {
+      statusItem.button?.title = "AgentLoop"
+    }
     let menu = NSMenu()
     menu.addItem(NSMenuItem(title: "Local Runtime Agent", action: nil, keyEquivalent: ""))
     menu.addItem(actionItem(title: "启动或重连", action: #selector(startAgent), keyEquivalent: "r"))

@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@zhujun/agentloop": "*",
+    "@zhujun/agentloop-memory": "*",
     "@zhujun/agentloop-artifact-preview": "*",
     "@zhujun/agentloop-plan-template": "*",
     "@zhujun/agentloop-skills": "*",
@@ -33,8 +34,8 @@
     "start:runtime-host": "node --env-file-if-exists=.env src/runtime-host/main.ts",
     "start:local-agent": "node --env-file-if-exists=.env local-agent-runtime/src/main.ts",
     "start:local": "node scripts/start-local.mjs",
-    "package:local-agent:mac": "npm run build --workspace @zhujun/agentloop && npm run build --workspace @zhujun/agentloop-skills && node scripts/package-local-agent-macos.mjs",
-    "package:local-agent:win": "node scripts/assert-windows-local-agent-build.mjs && npm run build --workspace @zhujun/agentloop && npm run build --workspace @zhujun/agentloop-skills && node scripts/package-local-agent-windows.mjs",
+    "package:local-agent:mac": "npm run build --workspace @zhujun/agentloop && npm run build --workspace @zhujun/agentloop-memory && npm run build --workspace @zhujun/agentloop-skills && node scripts/package-local-agent-macos.mjs",
+    "package:local-agent:win": "node scripts/assert-windows-local-agent-build.mjs && npm run build --workspace @zhujun/agentloop && npm run build --workspace @zhujun/agentloop-memory && npm run build --workspace @zhujun/agentloop-skills && node scripts/package-local-agent-windows.mjs",
     "start:web": "node web/server.mjs",
     "start:web:dev": "RUNTIME_CONTROL_DEV_MODE=1 node web/server.mjs",
     "publish:local-agent": "node scripts/publish-local-agent.mjs",

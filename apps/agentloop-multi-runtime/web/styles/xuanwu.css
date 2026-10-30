@@ -1,0 +1,22 @@
+.logo-image,
+.brand-icon-image,
+.empty-logo-image {
+  object-fit: contain;
+  border: 1px solid rgba(39, 78, 68, 0.18);
+  box-shadow: 0 5px 14px rgba(39, 78, 68, 0.16);
+}
+
+.logo-image,
+.brand-icon-image {
+  padding: 3px;
+  background: radial-gradient(circle at 50% 28%, #f5fff9 0%, #d7eee4 72%, #c7e3d8 100%) !important;
+}
+
+.empty-logo-image {
+  padding: 7px;
+  background: radial-gradient(circle at 50% 28%, #f5fff9 0%, #d7eee4 72%, #c7e3d8 100%) !important;
+}
+
+.msg-avatar.logo-image {
+  padding: 2px;
+}

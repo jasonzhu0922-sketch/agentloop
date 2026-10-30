@@ -213,7 +213,7 @@ function LiveCard({ events, steps }: { readonly events: readonly RunEvent[]; rea
   const reasoningContent = latestProviderReasoning(events);
   return (
     <article className="msg assistant live">
-      <div className="msg-avatar">A</div>
+      <img className="msg-avatar logo-image" src="/xuanwu-mascot-icon.png" alt="玄武" />
       <div className="msg-body">
         <div className="live-card">
           <div className="live-head">
@@ -288,7 +288,7 @@ function FinalAnswer({
 }): React.ReactNode {
   return (
     <article className="msg assistant">
-      <div className="msg-avatar">A</div>
+      <img className="msg-avatar logo-image" src="/xuanwu-mascot-icon.png" alt="玄武" />
       <div className="msg-body">
         <div className="msg-heading done">✓ 已完成</div>
         <div className="msg-text md">
@@ -322,7 +322,7 @@ function ErrorMessage({
   });
   return (
     <article className="msg assistant">
-      <div className="msg-avatar">A</div>
+      <img className="msg-avatar logo-image" src="/xuanwu-mascot-icon.png" alt="玄武" />
       <div className="msg-body">
         <div className="failure-card">
           <div className="msg-heading error">未完成</div>
@@ -340,7 +340,7 @@ function ErrorMessage({
 function RunningPlaceholder(): React.ReactNode {
   return (
     <article className="msg assistant">
-      <div className="msg-avatar">A</div>
+      <img className="msg-avatar logo-image" src="/xuanwu-mascot-icon.png" alt="玄武" />
       <div className="msg-body">
         <div className="msg-heading">
           <Thinking /> 运行中
@@ -357,7 +357,7 @@ function EmptyConversation(): React.ReactNode {
   if (!state.skills.length) {
     return (
       <div className="empty-state">
-        <div className="empty-logo">A</div>
+        <img className="empty-logo empty-logo-image" src="/xuanwu-mascot-icon.png" alt="玄武" />
         <h2>欢迎使用 AgentLoop</h2>
         <p className="empty-sub">服务器还没有可用的能力（Skill）。请联系管理员配置 Skill 目录后再开始。</p>
       </div>
@@ -366,7 +366,7 @@ function EmptyConversation(): React.ReactNode {
   const tips = ["帮我写一份清晰的项目周报", "把这段内容整理成要点", "检查并修复这段代码的问题"];
   return (
     <div className="empty-state">
-      <div className="empty-logo">A</div>
+      <img className="empty-logo empty-logo-image" src="/xuanwu-mascot-icon.png" alt="玄武" />
       <h2>我能帮你做什么？</h2>
       <p className="empty-sub">{skill?.description ?? ""}</p>
       <p className="empty-hint">在下方输入任务，我会先制定计划、执行，并在完成后给出可核验的结果。你可以在同一个对话里继续提出后续要求。</p>

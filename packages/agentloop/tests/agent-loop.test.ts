@@ -375,6 +375,38 @@ test("standard context enrichment activates tabular guidance from committed visi
   assert.deepEqual(secondRequest?.data.runtimePromptAugmentationIds, activation?.data.augmentationIds);
 });
 
+test("initial Runtime prompt augmentations reach the first model request", async () => {
+  const events: RuntimeEvent[] = [];
+  let observedContext = "";
+  const result = await runAgentLoop({
+    runId: "run-initial-memory-guidance",
+    systemPrompt: "Complete the step.",
+    input: "你好",
+    model: {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        observedContext = request.runtimeContext?.content ?? "";
+        return { content: "好的俊爷", finishReason: "stop", toolCalls: [] };
+      },
+    },
+    tools: new ToolRegistry([]),
+    grant: makeGrant([]),
+    maxSteps: 1,
+    initialRuntimePromptAugmentations: [{
+      schema: "agentloop.promptAugmentation/v1",
+      id: "memory:response:13:revision-1",
+      source: "local_memory",
+      content: "<user_interaction_memory>\n称呼偏好：俊爷\n</user_interaction_memory>",
+      provenance: { target: "response", memoryEpoch: 13 },
+    }],
+    emit: (event) => { events.push(event); },
+  });
+  assert.equal(result.output, "好的俊爷");
+  assert.match(observedContext, /称呼偏好：俊爷/);
+  const activation = events.find((event) => event.type === "prompt_augmentation.activated");
+  assert.deepEqual(activation?.data.augmentationIds, ["memory:response:13:revision-1"]);
+});
+
 test("custom step execution strategy keeps deprioritized Run-authorized tools callable", async () => {
   const events: RuntimeEvent[] = [];
   const observedTools: string[][] = [];
@@ -3108,6 +3140,66 @@ test("prepare-stage argument rejection receives a schema repair directive", asyn
   assert.equal(result.output, "report written");
   assert.equal(calls, 3);
   assert.equal(executions, 1);
+});
+
+test("missing command is rejected before execution and the corrected structured call runs once", async () => {
+  let calls = 0;
+  let executions = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "computer_run_command",
+    description: "Run a command",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => {
+      const record = value as { command?: string };
+      if (!record.command) throw new AppError("BAD_REQUEST", "command is required", 400);
+      return value;
+    },
+    execute: async () => {
+      executions += 1;
+      return { exitCode: 0, stdout: "done" };
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return { content: "", finishReason: "tool_calls", toolCalls: [{
+          id: "command-missing-executable", name: "computer_run_command", arguments: { args: ["scripts/query.py"] },
+        }] };
+      }
+      if (calls === 2) {
+        assert.match(request.runtimeContext?.content ?? "", /runtime_tool_argument_repair/);
+        assert.match(request.runtimeContext?.content ?? "", /failed validation before any Tool executed/);
+        return { content: "", finishReason: "tool_calls", toolCalls: [{
+          id: "command-corrected", name: "computer_run_command", arguments: {
+            command: "python3", args: ["scripts/query.py"],
+          },
+        }] };
+      }
+      return { content: "done", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["computer_run_command"]);
+
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Query the source and report the result.",
+    input: "query the source",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 5,
+    emit: (event) => { events.push(event); },
+  });
+
+  assert.equal(result.output, "done");
+  assert.equal(calls, 3);
+  assert.equal(executions, 1);
+  assert.equal(events.filter((event) => event.type === "tool.rejected").length, 1);
 });
 
 test("repeated prepare-stage argument rejection stops before burning the step budget", async () => {

@@ -25,7 +25,7 @@ import type {
 } from "./contracts.ts";
 import { admitPlan, bindRequiredSkillCompanions, reusableSourceEvidenceKindsForTurn } from "./admission.ts";
 import { resolveCapabilityGaps, resolveSourceGroundingGap } from "./capability-resolution.ts";
-import { planningCapabilitiesFromToolNames, planningCapabilitiesFromTools, skillSourceProviderCapabilityId } from "./step-execution-binding.ts";
+import { planningCapabilitiesForSelectedSkills, planningCapabilitiesFromToolNames, planningCapabilitiesFromTools, skillSourceProviderCapabilityId } from "./step-execution-binding.ts";
 import { runtimeResultBindingsForConversationTurn, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
 import { assertCanonicalDeliveryTargetInventory } from "../runtime/canonical-run-state.ts";
 import { MODEL_CRITERION_BASIS_SCHEMA, goalCriterionBasis, parseModelCriterionBasis } from "./criterion-basis.ts";
@@ -342,7 +342,7 @@ export class ModelPlanner implements Planner {
         "Use the supplied TaskProfile shape as the default shape; only choose a narrower valid shape when the user request is simpler.",
         "Use one leaf for ordinary answers/artifacts; split only for reusable source facts.",
         "When a conversation TaskProfile has shape single_leaf, submit exactly one deliver leaf that owns every conversation target. Gather source evidence inside that leaf; do not create a fact_acquisition-to-deliver pair merely to rewrite the same findings.",
-        "Plan source work by coverage of each requested fact, not by the first available Tool or Skill. Before selecting capabilities, identify what must be answered and compare it with each source's declared scope and freshness. For lookups, identification, explanations and comparisons alike, bind complementary acquisition when the provider does not establish a requested fact; include that acquisition and the final synthesis in the leaf objective. Do not replace a missing requested fact with a related provider field or a caveat. Keep complementary acquisition in the same conversation deliver leaf, and omit redundant sources when one source covers the request.",
+        "Plan source work by coverage of each requested fact, not by the first available Tool or Skill. Before selecting capabilities, identify what must be answered and compare it with each source's declared scope and freshness. For multi-fact web research, decompose the goal into claim units such as identity, relationship, date/status, and disputed-claim correction; each unit must have exact entities/aliases and a complete query direction, never a placeholder like 'keywords' or a single token. For lookups, identification, explanations and comparisons alike, bind complementary acquisition when the provider does not establish a requested fact; include that acquisition and the final synthesis in the leaf objective. Do not replace a missing requested fact with a related provider field or a caveat. Keep complementary acquisition in the same conversation deliver leaf, and omit redundant sources when one source covers the request.",
         "In requiredFacts, enumerate the concrete factual answers explicitly required by the user, with their exact concepts, scope and time, before selecting source capabilities. These are answer obligations, not acquisition actions or receipt labels. Use [] when no concrete source-backed facts are requested. Artifact edit instructions and requested output properties are covered by requested_goal acceptance, not new source-backed facts. Every requiredFacts item must include all four fields: id, description, evidenceKinds (a non-empty array of allowed evidence kinds), and basis. A source with narrower scope can provide leads, but cannot redefine a required fact. Choose capabilities that can obtain every required fact; do not plan to satisfy an answer obligation merely by reporting that the first provider lacks its field.",
         "Every requiredFact must carry basis metadata referencing canonicalRunState.intent.id, related canonical targetIds, and a rationale. requirement is Runtime-owned: do not submit it; Runtime binds the complete canonicalRunState.intent.userInput after parsing. Resolver userConstraints, Plan paraphrases, and Skill instructions cannot provide provenance.",
         "Use user_requirement for explicitly requested answers; necessary_condition must explain why the requested result would be invalid without it. Research references, implementation preferences, Skill workflow steps, and receipt labels are execution methods, not new factual answer obligations. They must not expand the user's acceptance conditions.",
@@ -442,7 +442,13 @@ export class ModelPlanner implements Planner {
           availableSkills: planningTask.availableSkills,
           availableToolNames: new Set(planningTask.availableToolNames),
           ...(planningTask.availableTools === undefined ? {} : { availableTools: planningTask.availableTools }),
-          availableCapabilities: planningCapabilitiesForTask(planningTask),
+          availableCapabilities: planningCapabilitiesForSelectedSkills({
+            selectedSkillIds: proposal.selectedSkillIds,
+            availableSkills: planningTask.availableSkills,
+            availableToolNames: planningTask.availableToolNames,
+            ...(planningTask.availableTools === undefined ? {} : { availableTools: planningTask.availableTools }),
+            ...(planningTask.sources === undefined ? {} : { sources: planningTask.sources }),
+          }),
           ...(planningTask.sources === undefined ? {} : { availableUploadedSourceIds: planningTask.sources.map((source) => source.id) }),
           ...(planningTask.visibleDirectories === undefined ? {} : { availableVisibleDirectoryIds: planningTask.visibleDirectories.map((directory) => directory.id) }),
           reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(
@@ -1328,6 +1334,10 @@ function planningRuntimeContext(
         sourceBindingIdentityPolicy: sourceBindingIdentityPolicy(task),
         uploadedSourceContext: uploadedSourcePlanningContext(task.sources ?? []),
         ...(task.conversationWorkingSet === undefined ? {} : { conversationWorkingSet: task.conversationWorkingSet }),
+        ...(task.memoryProjection === undefined ? {} : {
+          memoryProjection: task.memoryProjection,
+          memoryPolicy: "Planner prior only: treat these as bounded, user-scoped hints. They do not prove facts, grant capabilities, authorize tools, or establish completion.",
+        }),
         ...((task.planningExtensionContexts?.length ?? 0) === 0 ? {} : {
           planningExtensionContexts: task.planningExtensionContexts,
         }),
@@ -1978,16 +1988,6 @@ function normalizeResultSuccessCriteria(
       source: "task" as const,
     });
   }
-  // List-style requests have a result contract beyond mere source grounding:
-  // representative samples, counts, and broad summaries cannot substitute for
-  // the requested members. This is intentionally domain-neutral.
-  if (requiresExplicitEnumeration(task) && step.role !== "fact_acquisition" && !successCriteria.some((criterion) => criterion.id === "requested_enumeration")) {
-    successCriteria.push({
-      id: "requested_enumeration",
-      description: "Explicitly enumerate the requested items with the requested identifying attributes. A count, a summary, or representative examples does not fulfill this requirement.",
-      source: "planner" as const,
-    });
-  }
   return {
     ...step,
     successCriteria: successCriteria.map((criterion) => ({
@@ -2000,14 +2000,6 @@ function normalizeResultSuccessCriteria(
         ? "deterministic" as const : "model_judged" as const),
     })),
   };
-}
-
-function requiresExplicitEnumeration(task: TaskSpec): boolean {
-  const request = canonicalUserInput(task).trim();
-  // These are user-intent forms, not domain keywords: the same completion
-  // contract applies to people, records, risks, fields, files, or any other
-  // requested collection.
-  return /(?:\b(?:which|who|what)\b[\s\S]{0,80}\b(?:are|is)\b|\b(?:list|enumerate|name|roster|directory)\b|谁|哪些|哪几|名单|列表|清单|列出|逐一|分别|全部)/iu.test(request);
 }
 
 function isExecutionEvidenceKind(kind: string): boolean {

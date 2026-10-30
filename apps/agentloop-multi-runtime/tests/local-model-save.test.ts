@@ -53,6 +53,37 @@ async function fixture(t: test.TestContext) {
   return { service, supervisor, store, options, close };
 }
 
+test("device Memory reloads all local Runtimes and refuses changes during active work", async (t) => {
+  const { service, supervisor } = await fixture(t);
+  const child = await supervisor.create("Child");
+  const before = [supervisor.runtime("default-runtime"), supervisor.runtime(child.id)];
+  await service.updateLocalMemoryConfiguration({ enabled: true, settlementModelKey: "local:model" });
+  for (const [index, id] of ["default-runtime", child.id].entries()) {
+    assert.notEqual(supervisor.runtime(id), before[index]);
+    assert.deepEqual((await supervisor.configuration(id)).memory, { enabled: true, settlementModelKey: "local:model" });
+  }
+  const runtime = supervisor.runtime(child.id)!;
+  runtime.activeRunIds.add("active");
+  await assert.rejects(service.updateLocalMemoryConfiguration({ enabled: false }), /runtime_active_runs_prevent_reconfiguration/);
+  assert.deepEqual(await service.localMemoryConfiguration(), { memory: { enabled: true, settlementModelKey: "local:model" } });
+  runtime.activeRunIds.delete("active");
+  await service.updateLocalMemoryConfiguration({ enabled: false });
+  assert.deepEqual(await service.localMemoryConfiguration(), { memory: { enabled: false } });
+});
+
+test("device Memory restores its previous setting when Runtime reload fails", async (t) => {
+  const { service, supervisor } = await fixture(t);
+  const reload = supervisor.reloadRunningInstances.bind(supervisor);
+  let calls = 0;
+  t.mock.method(supervisor, "reloadRunningInstances", async () => {
+    if (++calls === 1) throw new Error("test_reload_failure");
+    await reload();
+  });
+  await assert.rejects(service.updateLocalMemoryConfiguration({ enabled: true, settlementModelKey: "local:model" }), /test_reload_failure/);
+  assert.equal(calls, 2);
+  assert.deepEqual(await service.localMemoryConfiguration(), { memory: { enabled: false } });
+});
+
 test("saving models preserves active Runtime resources and MCP sessions while new adapters use updated configuration", async (t) => {
   const factory = t.mock.method(LocalRuntimeFactory.prototype, "create");
   const skills = t.mock.method(SkillService.prototype, "syncSkillDirectories");

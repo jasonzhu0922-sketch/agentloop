@@ -1,0 +1,23 @@
+# Default Local Agent package baseline.
+#
+# This intentionally omits imageio-ffmpeg's 47 MiB platform binary. The
+# Local Agent can use a target machine's ffmpeg through PATH or
+# IMAGEIO_FFMPEG_EXE when an audio/video Skill needs it; the full Runtime Host
+# baseline remains in requirements.txt for Docker and media-capable hosts.
+anthropic>=0.39,<1
+defusedxml>=0.7,<1
+imageio>=2.31,<3
+imageio-ffmpeg>=0.4.9,<1
+lxml>=5,<7
+markitdown[pptx]==0.1.7
+mcp>=1.1,<2
+numpy>=1.24,<3
+openpyxl>=3.1,<4
+pandas>=2.2,<3
+pdf2image>=1.17,<2
+pdfplumber>=0.11,<1
+Pillow>=10,<12
+PyMySQL>=1.1,<2
+pypdf>=5,<7
+pytesseract>=0.3,<1
+reportlab>=4,<5

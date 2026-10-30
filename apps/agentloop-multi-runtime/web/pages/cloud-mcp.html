@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
+    <link rel="icon" type="image/png" href="/assets/xuanwu-mascot-icon.png" />
+    <title>云端 MCP 配置 · AgentLoop</title>
+    <link rel="stylesheet" href="/pages/cloud-mcp.css" />
+    <link rel="stylesheet" href="/styles/xuanwu.css" />
+  </head>
+  <body>
+    <header class="page-header"><a class="brand" href="/" aria-label="AgentLoop 工作区"><img class="brand-icon brand-icon-image" src="/assets/xuanwu-mascot-icon.png" alt="玄武" />AgentLoop</a><nav class="page-nav"><a class="back-link" href="/cloud-models">云端模型配置</a><a class="back-link" href="/cloud-skills">云端 Skill 配置</a><a class="back-link" href="/">返回工作区 <span aria-hidden="true">↗</span></a></nav></header>
+    <main>
+      <section class="intro"><p class="eyebrow">CLOUD RUNTIME</p><h1>云端 MCP 配置</h1><p class="intro-copy">直接编辑云端 Runtime 使用的 <code>mcp-servers.json</code>。当前开发态保存会写入本地云端配置沙盒，便于模拟云端管理流程。</p></section>
+      <section class="config-section credential-section"><label class="reload-credential">运维凭证<input id="operator-token" type="password" autocomplete="off" placeholder="读取和保存配置时使用" /></label></section>
+      <section class="config-section">
+        <div class="section-heading"><div><h2>服务器配置 JSON</h2><p>根对象包含 <code>defaultTrust</code> 和 <code>servers</code>；每个 Server 的 <code>key</code> 必须唯一。</p></div><div class="heading-actions"><button id="load-production-config" type="button">读取当前配置</button><button id="format-json" type="button">格式化</button></div></div>
+        <textarea id="config-json" spellcheck="false" autocomplete="off" autocapitalize="off" rows="26" aria-label="云端 MCP JSON 配置" placeholder="粘贴完整 mcp-servers.json 配置"></textarea>
+        <div class="help"><strong>配置边界</strong><span>仅支持 HTTP MCP。认证可使用 <code>query</code> / <code>headers_env</code> 引用 Runtime 环境变量，也可使用直接值认证；不要把真实密钥写入 Git 或日志。</span></div>
+        <div class="action-bar"><span id="status" role="status" aria-live="polite">尚未载入配置</span><div><button id="download-config" type="button" disabled>下载 mcp-servers.json</button><button id="apply-config" class="primary" type="button">保存并应用</button></div></div>
+      </section>
+    </main>
+    <script src="/runtime-config.js"></script><script type="module" src="/pages/cloud-mcp.js"></script>
+  </body>
+</html>

@@ -1,8 +1,8 @@
 # AgentLoop 用户级 Memory 设计方案
 
-版本：v0.3
+版本：v0.5
 日期：2026-10-28
-状态：Local Agent 专属设计改进稿；现有 episode/procedure、异步 settlement、SQLite 和可选本地模型是基础实现，Task Group 级语义沉淀、历史融合和 MEMORY.md 导出仍待实现
+状态：Local Agent 专属 v0.5 实施中；已实现 episode/procedure、异步 settlement、SQLite、专用本地模型、结构化语义校验、Task Group 候选检索/融合、revision 和 Markdown 投影。独立 Task Group 管理表、FTS 派生索引、用户管理 API 与完整 MEMORY.md 导出仍待实现。本版把“启用 Memory 必须配置专用沉淀 LLM”确定为实施前置契约。
 
 当前实现入口：`packages/agentloop-memory`（Local Agent 插件、本地 SQLite Store、episode/procedure settlement 与进程内测试实现）与
 `packages/agentloop/src/runtime/memory-plugin.ts`（Kernel-owned SPI）。
@@ -68,7 +68,7 @@ tenantId + ownerUserId
 1. Memory 一级类型收敛为偏好、事实、经验；具体应用由 subtype 和正交属性决定。
 2. 常驻交互偏好必须按用户主键确定性加载，不能依赖向量召回。
 3. 私人事实只在任务确实相关时召回；秘密永不进入 Memory。
-4. 历史 Run 先形成 `experience/episode`；任务结束后的本地 LLM 根据完整证据总结本次经验，再从本地索引检索相似 Task Group，判断是否融合。
+4. 历史 Run 先保留为可审计的 `experience/episode` 候选；任务结束后的专用本地沉淀 LLM 根据完整证据总结本次经验，再从本地索引检索相似 Task Group，判断是否融合。没有完成这次 LLM 沉淀和校验，就不能声称形成了长期经验。
 5. `Task Group` 是长期经验的第一类组织单元，必须包含 `scope`、`applies_to`、`reuse_rule`、`keywords`、经典路径、工具/Skill、可复用知识、失败与改进、验证状态和来源引用。
 6. Task Group 至少由两个独立、verified-success episode 支持后，才能生成 Planner 可用的 `experience/procedure` 投影；失败 episode 只能补充 warning/lesson。
 7. LLM 只能提出总结和融合 proposal，不能决定 Run 成功、授予权限、绕过 Admission 或直接写入未经校验的工具/事实。
@@ -78,7 +78,9 @@ tenantId + ownerUserId
 11. 每次实际使用 Memory 都必须生成带版本和原因的投影记录，保证 Run 可复现、可解释。
 12. 不同 AgentLoop Kernel 实例通过同一 `AgentLoopMemoryPlugin` SPI 消费同一用户级权威 Memory；实例之间只共享 revision 语义，不共享可变 Prompt 状态或数据库连接。
 13. Memory 通过专用 `AgentLoopMemoryPlugin` SPI 接入 Kernel；它不是 Skill、Tool 或 `PlanningExtension`。Kernel 固化调用时机与优先级，插件实现召回、沉淀和持久化，Runtime 只负责启动时注册插件。
-14. Loop 终局后 AgentLoop 只异步调用 `enqueueSettlement(runId, terminalCommitRef)`；Local Agent worker 再读取本机 canonical Run/Outcome/Assessment，调用本地配置模型完成总结、相似记忆检索、融合校验和写入。云端 Router/Runtime 不注册 Memory、不开 Memory 表，也不接收 Memory 内容。
+14. Loop 终局后 AgentLoop 只异步调用 `enqueueSettlement(runId, terminalCommitRef)`；Local Agent worker 再读取本机 canonical Run/Outcome/Assessment，调用专用本地配置模型完成总结、相似记忆检索、融合校验和写入。云端 Router/Runtime 不注册 Memory、不开 Memory 表，也不接收 Memory 内容。
+
+15. 经验沉淀必须能改变下一次任务的行动。验收通过只说明 Run 可信，不说明它值得形成长期经验；没有新增、可迁移、证据支持的行动指导时，必须保留 Episode 而不创建 Task Group 知识。
 
 一句话约束：
 
@@ -560,7 +562,15 @@ interface ExecutionEpisode {
   }[];
   readonly keyDecisions: readonly string[];
   readonly successfulRecoveries: readonly string[];
-  readonly failureLessons: readonly string[];
+  readonly failureLessons: readonly ActionableFailureLesson[];
+  /** 是否产生了能够改变下一次行动的、证据支持的经验。 */
+  readonly learningValue: {
+    readonly status: "actionable" | "insufficient" | "unknown";
+    readonly novelty: "new" | "reinforcement" | "none";
+    readonly transferability: "task_family" | "run_specific" | "unknown";
+    readonly actionChange?: string;
+    readonly sourceRefs: readonly MemorySourceRef[];
+  };
   readonly quality: {
     readonly terminalCommitted: boolean;
     readonly assessmentApproved: boolean;
@@ -595,15 +605,90 @@ Experience Episode 只保存可复用的执行结构和指标，完整 Action/Ev
 Outcome                 -> verified_success / failure / mixed
 Classic path            -> 去实体化的有序目标、角色、所需/产出证据类型与成功标准
 Tool usage              -> 每个步骤实际/推荐使用的 Skill、Tool、Capability（仅建议，不授予权限）
-Cautions                -> 前置事实、口径、缺失证据、交付验收等注意事项
-Reusable knowledge      -> 仅允许显式结构化规则、适用条件、排除条件；不从 plan_goal 派生
-Failures and correction -> 失败教训、下次应如何做
+Cautions                -> 会改变执行顺序或决策的前置条件、口径和检查点
+Reusable knowledge      -> 有证据、可迁移、能改变下一次行动的规则；不从 plan_goal 派生
+Failures and correction -> 触发条件、现象、根因、证据、有效改法和下次动作
 Preference signals      -> 明确偏好、纠正、约束及其来源
 Verification            -> Terminal / Assessment / Artifact / correction / dispute
 References              -> Run、Outcome、Plan、Assessment 等 canonical sourceRef
 ```
 
 `episode` 是一次 Run 的可审计事实记录，不是可直接复用的 Planner 经验。它必须经过后续 Task Group 聚合才有资格形成 `procedure`；因此单个 episode 不会生成 `PlanningPrior`。
+
+### 7.5.1 经验价值契约：从“验收提醒”到“可执行改进”
+
+经验沉淀有两个互相独立的判断，不能混为一个 `success` 字段：
+
+```text
+Outcome / quality gate
+  -> 这次 Run 是否真实完成、证据是否可信？
+
+Learning-value gate
+  -> 这次 Run 是否产生了能迁移到同类任务的行动改进？
+```
+
+只有前者通过，才能把 Episode 标记为 `verified_success`；只有后者达到 `actionable`，Episode 中的内容才有资格进入 Task Group 的长期知识。一个任务可以完成得很好，但没有新经验；此时应记录 Episode 的支持证据，不应为了填充 Memory 而生成泛化规则。
+
+经验价值至少检查以下维度：
+
+| 维度 | 合格问题 | 不合格示例 |
+| --- | --- | --- |
+| 触发条件 | 下次遇到什么任务、输入或环境时适用？ | “做报告时要注意质量” |
+| 具体现象 | 发生了什么可观察的问题或关键选择？ | “过程有缺口” |
+| 因果依据 | 根因是已由 Evidence/Action/Outcome 证明，还是仅为推测？ | 没有来源的“可能是数据问题” |
+| 行动变化 | 下次具体先做什么、改哪一步、避免什么？ | “加强验证” |
+| 迁移边界 | 哪类任务可复用，哪些相似任务不适用？ | 对所有任务一概而论 |
+| 验证方式 | 如何确认改法真的有效？ | 没有可观察的检查结果 |
+
+“来源未验证”“交付物未验收”属于系统准入或证据完整性规则，默认不能作为长期经验。只有当 Episode 证据进一步说明了具体失败机制和有效改法时，才可形成经验，例如：
+
+```text
+现象：员工查询接口只读取第一页，部门人数少于总人数。
+根因：分页游标没有继续读取，统计使用了不完整数据集。
+改法：先遍历所有分页，再按同一统计口径汇总。
+验证：部门汇总人数与完整数据集总人数一致后才生成报告。
+```
+
+如果历史事实只能证明“没有做来源验证”，却不能证明为什么失败、如何修复，则应保存为 Episode 的 `evidenceGap`，不进入 Task Group 的 `failureLessons`。
+
+失败经验采用以下结构，而不是一条自由文本：
+
+```ts
+interface ActionableFailureLesson {
+  readonly trigger: string;
+  readonly symptom: string;
+  readonly rootCause?: string;
+  readonly causeStatus: "confirmed" | "inferred" | "unknown";
+  readonly evidenceRefs: readonly MemorySourceRef[];
+  readonly ineffectiveAttempts?: readonly string[];
+  readonly effectiveChange?: string;
+  readonly nextAction: string;
+  readonly verification?: string;
+  readonly applicability: readonly string[];
+  readonly exclusions: readonly string[];
+}
+```
+
+其中 `causeStatus=unknown` 的记录可以留在 Episode，但不得作为 Planner warning；`inferred` 只能作为待验证候选，`confirmed` 且包含 `nextAction` 和 `evidenceRefs` 后，才可进入 Task Group。成功路径也必须表达“关键决策 + 选择理由 + 适用条件 + 预期证据”，不能退化为“获取数据、生成文件、验收”。
+
+成功经验采用对下一次计划有直接影响的规则结构：
+
+```ts
+interface ActionableKnowledgeRule {
+  readonly trigger: string;
+  readonly decision: string;
+  readonly rationale: string;
+  readonly action: string;
+  readonly expectedEvidence: readonly string[];
+  readonly applicability: readonly string[];
+  readonly exclusions: readonly string[];
+  readonly sourceRefs: readonly MemorySourceRef[];
+}
+```
+
+例如“先固定统计口径”只有在补充了触发条件、选择该顺序的原因、要执行的动作和预期核对证据后，才是 `ActionableKnowledgeRule`；否则只是 `caution` 或 `insufficient`，不能进入长期 `reusableKnowledge`。
+
+现有 `experienceSettlement/v1` 中的 `lesson` / `doDifferently` 只能作为兼容输入，不能直接导出为长期经验：缺少 `trigger`、`causeStatus`、`evidenceRefs`、`nextAction` 或 `verification` 时，必须降级为 Episode 审计字段。Task Group 写入前要完成一次结构化迁移和 source-bound 校验，不能用字段名映射掩盖语义缺失。
 
 ### 7.6 Task Group Memory
 
@@ -630,9 +715,9 @@ interface TaskGroupMemory {
   readonly userPreferences: readonly Readonly<Record<string, unknown>>[];
   readonly classicPath: readonly Readonly<Record<string, unknown>>[];
   readonly toolUsage: readonly Readonly<Record<string, unknown>>[];
-  readonly reusableKnowledge: readonly Readonly<Record<string, unknown>>[];
+  readonly reusableKnowledge: readonly ActionableKnowledgeRule[];
   readonly cautions: readonly string[];
-  readonly failureLessons: readonly Readonly<Record<string, unknown>>[];
+  readonly failureLessons: readonly ActionableFailureLesson[];
   readonly verification: {
     readonly status: "candidate" | "partial" | "verified" | "stale" | "conflicted";
     readonly successfulEpisodeCount: number;
@@ -680,18 +765,20 @@ reuse_rule: 只有来源事实、统计口径和 HTML 验收证据均可验证�
 
 ## Classic path
 
-1. 获取并验证来源事实和统计口径。
-2. 生成 HTML 报告，并验证文件存在、可打开、格式正确且通过验收。
+1. 先确认来源数据是否分页完整，并固定部门、总人数等统计口径；如果来源返回分页游标，必须读取至结束。
+2. 按固定口径计算指标，使用部门汇总与全量总数交叉核对；不一致时先修复数据获取，不进入报告生成。
+3. 生成 HTML 报告，并验证文件内容、可打开性和最终交付身份。
 
 ## Reusable knowledge
 
-- 先固定统计口径，再生成报告。
+- 分页接口不能只取第一页；先证明数据集完整，再计算画像指标。
+- 部门汇总与同口径总人数是低成本的完整性检查，失败时应回到数据获取步骤。
 - 交付前必须验证 HTML 产物，而不能只确认模型生成过文件。
 
 ## Failures and how to do differently
 
-- 计划未覆盖数据源 capability 时，先修正 Skill/capability closure，再重新提交计划。
-- 有过程缺口的 completed Run 不作为成功路径，只作为验收警告。
+- 触发：来源接口带分页但计划只安排一次查询。现象：部门汇总与总人数不一致。根因：分页游标未消费完。下次：先遍历分页并做总数交叉核对，再生成报告；验证：完整数据集的汇总与总数一致。
+- 触发：计划缺少数据源 capability。现象：只能生成空壳报告或使用不完整数据。下次：先补齐 Skill/capability closure，再重新提交计划；不能把空壳产物记为成功路径。
 ```
 
 这段 Markdown 是 Task Group 的可读投影；每条规则仍必须能回溯到 episode、Outcome、Assessment 或用户反馈。
@@ -896,7 +983,7 @@ TerminalCommitter 已提交 completed/caveated Outcome
 
 用户点赞、耗时、模型调用数、Tool 调用数和 retry 数是评估信号，不是单独的准入条件。
 
-失败 Run 也可形成 `experience/episode.failure`，但只产生 `failureLessons` 或 Planning warning，不得作为推荐执行过程。
+失败 Run 也可形成 `experience/episode.failure`，但只有同时具备具体触发条件、可观察现象、证据支持的根因或明确标注的待验证假设，以及下一次行动，才可进入 Task Group 的 `failureLessons`。否则只保留为 Episode 的 `evidenceGap`，不产生 Planner warning。失败本身不是经验，失败中被证实的因果改进才是经验。
 
 提炼器只能读取中性、持久化的 Run 事实：
 
@@ -923,7 +1010,20 @@ classicPath
 toolUsage
 cautions
 reusableKnowledge
-failureLessons { lesson, doDifferently }
+learningValue { status, novelty, transferability, actionChange }
+failureLessons {
+  trigger,
+  symptom,
+  rootCause,
+  causeStatus,
+  evidenceRefs,
+  ineffectiveAttempts,
+  effectiveChange,
+  nextAction,
+  verification,
+  applicability,
+  exclusions
+}
 preferenceSignals
 sameGoalFamily（仅用于融合阶段）
 conflicts
@@ -935,8 +1035,9 @@ recheckRules
 1. 每个工具、Skill、Capability 和 Evidence kind 都必须存在于输入证据中。
 2. 不能把一次任务中的具体实体写入长期复用规则。
 3. 不能把失败 Run 归纳为 verified success。
-4. 每条知识、教训和路径都必须带可追溯 sourceRef。
-5. 目标族不确定或存在冲突时只能保留 episode，不得强制融合。
+4. 每条知识、教训和路径都必须带可追溯 sourceRef；失败根因必须标明 confirmed/inferred/unknown。
+5. `actionable` 经验必须包含可执行的 `actionChange`/`nextAction`、适用边界和验证方式；只有通用提醒时返回 `insufficient`。
+6. 目标族不确定或存在冲突时只能保留 episode，不得强制融合。
 
 ### 8.4 历史 Task Group 检索与语义融合
 
@@ -978,6 +1079,17 @@ mark_conflicted
   -> Planner 只消费 PlanningPrior
 ```
 
+融合不是“把两次 Run 的句子合并”，而是比较它们是否带来了同一类可执行决策：
+
+| 合并对象 | 合并条件 | 结果 |
+| --- | --- | --- |
+| 成功路径 | 相同 Goal Family，且关键步骤、决策理由和验证证据相互支持 | 强化或精炼 `classicPath` / `reusableKnowledge` |
+| 失败教训 | 触发条件和失败机制一致，且有效改法能解释结果改善 | 合并为一条更具体的 `failureLesson`，增加支持次数和适用边界 |
+| 相似提醒 | 只有“注意验证”“检查质量”等抽象表述，没有新增行动 | 丢弃，不写入 Task Group |
+| 相互冲突 | 同一场景下改法、适用条件或结果互相矛盾 | 保留冲突 revision，暂停相关 procedure 投影 |
+
+Task Group 的每次修订都应回答“本次增加了什么行动价值”。如果新 Episode 没有新增步骤、决策、边界、失败因果或验证方法，只增加了重复成功计数，则可以更新支持统计，但不新增 prose 知识；如果连独立成功证据也没有，则不创建 Task Group revision。
+
 禁止自我强化：
 
 ```text
@@ -996,16 +1108,19 @@ Memory 被召回
 - 失败 episode 只形成 warning/lesson，不参与 procedure 晋升；
 - 同类失败 episode 的 lesson 可以附着到已由成功 episode 晋升的 procedure，作为 Planner warning；失败次数不计入成功可靠性；
 - procedure 只作为 Planner context，仍必须经过当前 PlanAdmission、Assessment 和 TerminalCommitter。
+- `learningValue.status=insufficient` 的 episode 不得产生长期 `reusableKnowledge`、`failureLessons` 或 Planner warning。
+- “验收未完成”“来源未验证”“过程有缺口”等策略性标签，只有绑定到具体机制、行动变化和验证结果后，才可进入 Task Group。
 
 ### 8.5 Task Group revision 与冲突
 
-Candidate 与现有 Memory 比较后只能产生四种结果：
+Candidate 与现有 Memory 比较后只能产生以下结果：
 
 ```text
 new         -> 创建 Task Group MemoryItem + revision 1
 reinforce   -> 创建新 Task Group revision，追加独立 sourceRef 和评估信息
 refine      -> 创建新 Task Group revision，补充适用条件或例外
 contradict  -> 创建新 Task Group revision，并 supersede 旧 revision 或标记冲突
+no_learning -> 只保留 episode；不创建 Task Group 知识 revision
 ```
 
 不允许原地覆盖历史 revision。
@@ -1309,14 +1424,25 @@ reuse_rule: <复用和重新验证规则>
 - 与该任务组相关的显式偏好和纠正
 
 ## Reusable knowledge
-- 可跨 Run 复用的规则、工具边界和判断方法
+- 可跨 Run 复用、能改变下一次行动的规则、工具边界和判断方法
 
 ## Failures and how to do differently
-- 失败根因
-- 下次的具体做法
+- **触发条件**：什么任务或输入会触发
+- **失败现象**：可观察到的错误或偏差
+- **根因与证据**：已证实的机制及 source refs；推测必须标注
+- **下次行动**：先做什么、避免什么
+- **验证方式**：如何确认改法生效
 ```
 
 导出时只写入已通过 Policy 的去实体化内容，并保留 revision/source 引用。任务组 Markdown 只用于阅读、调试、导出和模型上下文构造；权限、版本、删除、冲突和召回仍以本地 SQLite 为准。
+
+导出过滤规则：
+
+```text
+没有 actionChange / nextAction / evidenceRefs 的条目 -> 不导出
+causeStatus=unknown 的失败 -> 只显示在 episode 审计，不进入长期失败章节
+只有“注意验收”“加强验证”等泛化提醒 -> 丢弃
+```
 
 不采用：
 
@@ -1521,7 +1647,7 @@ interface AgentLoopMemoryPlugin {
 
 - `recall` 返回最终、不可变、带 revision/hash 的 target-specific Projection，不返回 Memory row、任意搜索结果或原始历史文本。
 - `commitExplicit` 由插件完成显式意图识别、敏感性判断、冲突处理和同步持久化。Kernel 只有收到 `kind=committed` 及其 `MemoryCommitReceipt` 才能向用户确认“已记住”；`confirmation_required` 必须进入正常 HIL 语义。
-- `enqueueSettlement` 是 canonical Outcome 之后的异步投递接口。它只能校验触发、执行幂等判断并把 job 持久化入队；不得在接口调用内读取完整执行轨迹、调用提炼模型、归并 experience 或写入最终 Memory。返回 `enqueued` 只表示插件已经可靠接管任务，不表示已经生成 Memory；相同 `runId + terminalCommitRef` 重复调用必须返回 `duplicate` 或等价结果。
+- `enqueueSettlement` 是 canonical Outcome 之后的异步投递接口。它只能校验触发、执行幂等判断并把 job 持久化入队；不得在接口调用内读取完整执行轨迹、调用提炼模型、归并 experience 或写入最终 Memory。返回 `enqueued` 只表示插件已经可靠接管任务，不表示已经生成 Memory；相同 `runId + terminalCommitRef` 重复调用必须返回 `duplicate` 或等价结果。偏好、事实和显式用户记忆继续走即时提交路径；experience job 先进入本地 outbox，按 tenant+ownerUserId 分组累计，达到默认 10 个待处理案例后才触发一次批量语义沉淀。
 
 `terminalCommitRef` 必须由 TerminalCommitter 成功提交后产生，并可供插件验证对应的 canonical Outcome；推荐使用 opaque outcome ID，或由 outcome ID + commit version/hash 构成。它不能使用 `reasonCode`、状态字符串或 Assistant 输出代替。调用方也不能用任意 `runId` 伪造一次成功沉淀。
 
@@ -1619,7 +1745,7 @@ Local Agent config
 ```
 
 ```ts
-const memoryPlugin = runtimeConfig.memory.enabled
+const memoryPlugin = localAgentConfig.memory.enabled
   ? await createLocalMemoryPlugin({ database, resolveRunScope })
   : undefined;
 
@@ -1631,7 +1757,7 @@ const runs = new RunService({
 
 必须区分：
 
-- `memory.enabled/settlementModelKey` 是 Local Agent 装配配置，不是 Kernel Memory 语义。
+- `memory.enabled/settlementModelKey` 是 Local Agent 的设备级装配配置，不是 Kernel Memory 语义；同一设备上的所有 Local Runtime 读取同一个配置。
 - 数据库连接只指向用户本机 SQLite，不存在 control-plane endpoint、Memory service credential 或远程 Memory adapter。
 - `tenantId/ownerUserId` 不是配置项，也不由 Kernel recall 参数提供；插件从可信本地 Run scope 解析。
 - 插件实例可以是进程级对象，但所有 Projection、缓存和审计必须以 Run 及其解析出的 subject 隔离。
@@ -1675,9 +1801,9 @@ Router/Runtime 不参与 settlement，也不接收本地 Memory 内容。
 - 沉淀失败只影响 Memory 学习并产生可观测事件，不反向修改、撤销或伪造已经提交的 Outcome。
 - 后续 correction、dispute 或反馈变化可以让插件重新评价已有 episode，并通过新 revision 修订，不能原地覆盖。
 
-### 12.6.1 默认关闭与本地语义模型
+### 12.6.1 默认关闭与必选 Memory 沉淀模型
 
-Memory 的启用配置属于 Local Agent Runtime：
+Memory 的启用配置属于 Local Agent 设备，而不是某一个 Runtime：
 
 ```json
 {
@@ -1689,19 +1815,50 @@ Memory 的启用配置属于 Local Agent Runtime：
 ```
 
 默认 `enabled=false`。关闭时 Local Agent 不创建 `memory.db`、Memory Plugin、settlement worker 或定时器；
+开启或关闭通过设备级 Local Agent 配置完成，并对该设备的所有 Runtime 统一生效。Runtime 自己的
+Skill/MCP 配置仍保持独立；切换 Memory 时 Local Agent 必须在没有活动 Run 的情况下重载所有运行中的 Runtime，
+避免某些 Runtime 继续使用旧开关。历史 Runtime 配置中的 Memory 字段只用于一次性迁移，不能形成第二个开关。
 Cloud Router/Runtime 没有这组配置，也不能启用 Memory。`settlementModelKey` 只能引用 Local Agent 本地模型目录中的
 `local:<key>`，`cloud:<key>` 在配置层拒绝。
+
+`settlementModelKey` 不是“可选优化项”，而是 Memory 的启用前置条件：
+
+- `enabled=false` 时不得保存或使用沉淀模型；新安装默认关闭，升级时迁移旧配置，新 Runtime 继承设备级设置。
+- `enabled=true` 时必须同时存在 `settlementModelKey`，且该 key 必须在当前 Local Agent 模型目录中可解析。缺失、删除或配置无效时拒绝启用 Memory，返回明确错误；不能默认选择目录中的第一个模型。Provider 的暂时故障按下面的 job 重试语义处理，不阻断普通任务。
+- Memory 有独立的模型绑定，不跟随用户执行任务时选择的 `modelKey` 自动变化。用户可以显式选择与任务相同的模型，也可以另选模型；不要求额外部署一个模型实例。调用用途、超时、预算、prompt schema 和数据最小化策略属于独立的 Memory 调用策略。
+- 模型目录只引用模型标识和能力配置；API Key、endpoint secret 等凭据仍由 Local Agent secret store 保存，绝不写入 Memory revision、Task Group Markdown 或云端请求。
+- 模型请求只允许发送去实体化的 canonical evidence、episode 结构和候选历史摘要；原始文件、秘密、完整会话文本和未验证的 Assistant 总结不得进入请求。
+- `local:` 表示模型配置和调用由 Local Agent 管理，不代表推理一定发生在设备内。若 Provider 是远程服务，所选结构化摘要会发送到其 endpoint，配置界面必须如实说明；这仍不允许经 AgentLoop 云端 Router/Runtime 代理 Memory 请求。
+
+配置应用的状态机固定为：
+
+```text
+disabled
+  -> configured (enabled + local model key + catalog/provider validation)
+  -> unavailable (model/provider temporarily unavailable; job remains pending/retryable)
+  -> disabled (explicit user action; worker stops after durable state is flushed)
+```
+
+`unavailable` 是 Memory 学习的运行状态，不改变用户已经保存的绑定。它不能触发规则版长期经验、自动换用任务模型或切换到 `cloud:` 模型。模型恢复后，worker 按
+`runId + terminalCommitRef` 幂等重试；超过上限进入 dead-letter，保留 Episode 和失败原因，等待人工重放或重新配置模型。
 
 语义模型只负责四类不具权威的工作：判断相似目标族、抽象经典路径、归纳可复用知识与失败教训。它接收
 确定性代码筛选出的 fingerprint、当前 episode 和相似历史 episode 的结构化子集，不接收完整会话、原始文件、
 秘密或未验证成功描述。模型输出必须通过 JSON/schema、来源集合和 Tool/Skill/Capability 白名单校验；canonical
-Outcome、Assessment、用户 scope、至少两个独立成功 Run 的晋升门槛以及最终 Memory 写入仍由确定性代码控制。
+Outcome、Assessment、用户 scope、至少两个独立成功 Run 的晋升门槛以及最终 Memory 写入仍由确定性代码控制。v2 worker 另记录提炼/融合阶段、模型 key、输入/输出 hash、候选 revision 和字段级拒绝原因；不保存模型原始输出。
 
-模型不可用或输出不合规时，worker 记录 fallback/validation 状态并使用确定性 settlement，不影响当前 Run 的
-Outcome 或交付。Procedure revision 记录模型 key、prompt schema、输入 episode revision IDs、输出 hash 和校验结果，
+模型不可用或输出不合规时，worker 记录 `model_unavailable` / `invalid_output` / `source_not_admitted` / `goal_family_rejected` 状态及字段路径，保留 Episode 或提炼检查点，拒绝本次 Task Group 融合；结构性错误最多携带诊断纠正一次，隐私或来源越界不可自动修复。不得使用确定性 settlement 伪造长期经验，也不得影响当前 Run 的 Outcome 或交付。Procedure revision 记录模型 key、prompt schema、输入 episode revision IDs、输出 hash 和校验结果，
 便于本地审计与重放。
 
-这里的“异步”不等于进程内 fire-and-forget。仅执行 `void plugin.enqueueSettlement(...)` 而没有 durable job，会在进程退出时丢失沉淀请求。插件可以使用数据库 outbox/job table、消息队列或等价的可靠任务设施，但必须具备持久化状态、attempt、backoff、dead-letter/人工重放和幂等键。
+这里的“异步”不等于进程内 fire-and-forget。仅执行 `void plugin.enqueueSettlement(...)` 而没有 durable job，会在进程退出时丢失沉淀请求。插件可以使用数据库 outbox/job table、消息队列或等价的可靠任务设施，但必须具备持久化状态、attempt、backoff、dead-letter/人工重放和幂等键。批量阈值未达到时 worker 返回 `waiting_for_experience_batch`，不调用模型；达到阈值后一次领取同一用户的有界案例集合，模型只执行一次，批量失败时整批按同一 job 边界重试，不能跨用户拼批。
+
+目标输出契约应包含：目标族判断、经典路径、工具/Skill 用法、可复用知识、失败教训、下次动作、适用与复查条件，以及受来源白名单约束的引用。下次动作必须能够改变下一次规划行为；只有“提高质量”“注意验收”“加强验证”等泛化句子时，结果为 `no_learning`，只保留 Episode，不创建或更新 Task Group 长期知识。当前实现协议为 `agentloop.semanticSettlement/v2`：提炼与融合共用严格结构定义，输入保留脱敏后的目标、实际 Action、验收和修复证据，输出携带 source ID；历史 v1 Episode 只保留审计，必须授权重放后才能升级。
+
+启用前先校验模型引用、Provider 配置和调用预算；界面提供使用合成输入的连接与结构化输出测试。worker 每次处理 job 时重新解析模型绑定，并以实际调用和 JSON/schema 校验结果判定成功，不要求 Provider 原生支持 JSON Schema 参数。配置测试通过不代表真实历史 Run 的沉淀验收通过。
+
+首期配置只引入 `enabled` 和 `settlementModelKey` 两个用户必需字段，复用本机模型目录管理 Provider、协议和凭据。摘要提炼与历史融合先共用这一个明确绑定的模型；独立的输入/输出 token 上限、调用超时和重试上限由 Memory 调用策略管理，并在 job 审计中记录。模型选型以证据归纳、中文任务理解、结构化输出和相似经验辨别能力验收，不硬编码模型品牌，也不预设必须使用最大推理档位。
+
+配置的管理入口位于 Local Agent 的设备级 Memory 设置，支持读取、选择、关闭和持久化；修改其他 Skills/MCP 配置不得意外清空 Memory 绑定。关闭只停止后续召回和沉淀，不等于删除已有 Memory；删除、遗忘和账号切换遵守独立的用户隔离与删除协议。配置切换在 job 边界生效，正在处理的 job 固定模型与策略快照，重放时显式记录所用新配置；模型 key 改变本身不生成新的经验 revision。
 
 ### 12.7 同一设备内多 Local Runtime 一致性与降级
 
@@ -1924,6 +2081,8 @@ memory.plan_template_promotion.proposed
 - Task Group 候选召回命中率、目标族判断接受/拒绝率和误合并率。
 - settlement model 不可用、超时、无效输出和 source-bound validation 拒绝率。
 - Task Group revision 的新增知识、失败教训、冲突和 recheck rule 数量。
+- Task Group revision 的 `actionable`、`insufficient`、`no_learning` 比例，以及被过滤的泛化提醒数量。
+- 失败教训的 `causeStatus` 分布、有效改法覆盖率和后续 Run 验证率。
 - settlement enqueue latency、队列深度、处理延迟、重试率和 dead-letter 数量。
 - experience/procedure 使用后的成功、repair、dispute 和用户反馈变化。
 - stale/private Memory 被过滤数量。
@@ -1982,6 +2141,14 @@ memory.plan_template_promotion.proposed
 - 进程在 enqueue receipt 后、worker 执行前退出，重启后仍能继续处理 durable job。
 - 超过重试上限的 job 进入 dead-letter 并可审计、重放，不能静默丢弃。
 - Settlement model 输出无效、越权或引用未出现的 Tool/Skill/Evidence 时，保留 episode、拒绝本次 Task Group 融合，并记录可诊断原因。
+- Memory 默认关闭；启用但缺少模型、引用 `cloud:` 或不存在的 `local:` key 时配置校验失败，且不修改原配置。
+- 模型不可用或输出不合规时不生成规则版 Task Group；Episode 和 durable job 保留，已完成 Run 与其他用户记忆不受影响。
+- 修改任务模型不改变 Memory 绑定；修改 Skills/MCP 不丢失 Memory 配置；关闭 Memory 不删除历史数据。
+- 只有“来源未验证”“交付物未验收”“加强质量”等泛化提醒时，保留 Episode 但不写入 Task Group。
+- 失败经验缺少触发条件、具体现象、可执行下次动作或 source refs 时，不得生成 Planner warning。
+- 失败根因标为 `unknown` 时不得在长期 Memory 中写成确定性结论；`inferred` 必须以待验证候选呈现。
+- 同一失败机制重复出现时，应聚合为一条更具体的经验并增加支持证据，而不是生成重复措辞。
+- 同一目标的成功 Run 只重复已有路径时可以增加可靠性计数，但不得伪造新的知识条目。
 - 两个相同 domain 但不同 taskKind 的成功 Run 不得自动合并为同一 Task Group。
 - 新 Run 能通过 title、goalSummary、keywords 和 TaskFingerprint 找到正确历史 Task Group，不依赖完全相同的自然语言 goal。
 - 新 episode 与历史 Task Group 目标族不一致时必须创建新组或保持未归并，不能为了达到 procedure 门槛强行合并。
@@ -2008,12 +2175,15 @@ memory.plan_template_promotion.proposed
 8. 同一 domain 但不同目标族的 Run 不会被合并；相同目标但不同表达可正确找到历史 Task Group。
 9. 使用 experience/procedure 的新 Plan 仍经过 PlanAdmission、Assessment 和 TerminalCommitter。
 10. Task Group 可以导出为类似 Codex Memory 的 Markdown，包含 scope、applies_to、reuse_rule、keywords、User preferences、Reusable knowledge 和 Failures and how to do differently。
+11. 一个只有“缺少来源验证/缺少交付验收”的 Run 不会生成长期失败经验；一个包含分页根因、修复动作和交叉核对结果的 Run 会生成可执行教训。
+12. 三次同类任务会形成一个 Task Group 的多次 revision：重复路径提高可靠性，新失败机制增加具体 lesson，无新增行动价值的 Run 不制造冗余 prose。
 
 ## 18. 分阶段实施
 
 ### Phase 0：契约与观测
 
 - 固化本文数据类型和应用矩阵。
+- 先完成 Memory 独立模型配置契约与用户入口设计，再实施 Task Group 提炼/融合；启用必选模型和失败不降级是前置条件。
 - 定义 `AgentLoopMemoryPlugin`、target-specific `MemoryProjection`、`PlanningPrior` 和 settlement enqueue receipt。
 - 在 canonical `RunRecord` 增加 `tenantId` 或可信 opaque subject ref。
 - 让 TerminalCommitter 在成功写入任意终态 Outcome 后返回稳定、可验证的 `terminalCommitRef`，不能复用 `reasonCode`。
@@ -2051,21 +2221,23 @@ memory.plan_template_promotion.proposed
 - 从 canonical Run/Assessment/Outcome 生成 kind=experience、maturity=episode 的 candidate。
 - 接入用户反馈、correction/dispute 和效率指标。
 - 只提供历史参考和 warning，不影响 Plan。
+- 增加 learning-value gate：把“结果可信”和“是否值得长期记住”分开；对无行动价值的 Run 只保存 Episode 证据。
 
 退出标准：正负 experience/episode 分类有持久证据，失败/点赞/完成边界不混淆。
 
 ### Phase 4：Experience Procedure 与 Planner Context
 
 - 扩展 canonical settlement evidence，保留去实体化的 `plan_goal`、intent、Tool/Action 摘要、恢复过程、用户纠正和结果证据。
-- 增加本地 settlement model 适配器和严格的 `agentloop.semanticSettlement/v1` 输出校验。
+- 增加本地 settlement model 适配器和严格的 `agentloop.semanticSettlement/v2` 输出校验；v1 仅作为历史审计格式，不直接晋升。
 - 为 Task Group 增加 `title`、`goalSummary`、`keywords`、`scope`、`appliesTo`、`reuseRule`、`userPreferences`、`reusableKnowledge` 和 `failureLessons`。
 - 实现基于 tenant/user、结构化 fingerprint、关键词/FTS 的候选 Task Group 检索。
-- 由本地模型判断同一 Goal Family，并输出 new/merge/refine/reject/conflict proposal；确定性策略负责落库和 revision。
+- 由本地模型判断同一 Goal Family，并输出 new/reinforce/refine/contradict/no_learning proposal；确定性策略负责来源校验、落库和 revision。
+- 要求模型输出结构化的失败因果、有效改法、下次行动和验证方式；没有这些字段时返回 `no_learning`，不把通用验收规则写成经验。
 - 只有两个独立 verified-success episode 支持的 Task Group 才生成 `experience/procedure` Planner projection。
 - 输出 `PlanningPrior`，只采用 planner_context 模式，并记录 Prior 的选择、采用和执行结果。
 - 增加 Task Group Markdown 导出，使用 Codex Memory 风格的任务组章节。
 
-退出标准：相同目标的不同表达可以融合为同一 Task Group；不同目标不会因共享 domain/tool/artifact 而误合并；Planner 获得有界规划建议，低匹配、模型不可用或融合冲突时正常走原 Planner，Runtime 权威链不变。
+退出标准：相同目标的不同表达可以融合为同一 Task Group；不同目标不会因共享 domain/tool/artifact 而误合并；Task Group 中的每条长期知识都能改变下一次行动并回溯到证据；Planner 获得有界规划建议，低匹配、模型不可用或融合冲突时正常走原 Planner，Runtime 权威链不变。
 
 ### Phase 5：与 PlanTemplate 晋升闭环
 
@@ -2099,6 +2271,8 @@ memory.plan_template_promotion.proposed
 8. 同一目标的不同表达可融合，不同目标不会因粗粒度 fingerprint 误合并。
 9. maturity=procedure 的 experience 只提供 PlanningPrior，PlanAdmission 和 Runtime 权威链保持不变。
 10. 删除、跨用户隔离、Task Group 导出一致性和 Prompt Injection 防护经过真实 E2E 验证。
+11. Task Group 不包含只有“加强验证”或“过程有缺口”的无行动价值条目。
+12. 每条 failureLesson 都能回答触发条件、现象、根因证据、下次行动和验证方式；无法回答时停留在 Episode。
 
 ## 20. 待实施前确认的决策
 
@@ -2110,7 +2284,7 @@ memory.plan_template_promotion.proposed
 4. 用户反馈的等待窗口：点赞后多久、出现何种 correction/dispute 时重新评价 experience/episode。
 5. PlanTemplate Store 的 user scope 改造时机；在此之前 experience/procedure 只允许 planner_context。
 6. Memory 导出格式是否直接采用 Markdown + JSON manifest 的组合。
-7. Local Agent 可用哪些 settlement model；默认仍关闭 Memory 和 settlement model，启用后只能选择 `local:` 模型，云端模型不得接收本地 Memory 内容。
+7. Local Agent 的 Memory 专用 settlement model 配置；默认仍关闭 Memory，启用后必须选择目录中可用的 `local:` 模型，云端模型不得接收本地 Memory 内容。
 8. Task Group 的模型融合是否在每个 episode 结束后立即执行，还是先积累本地队列再批量执行；两种模式都必须保留 durable job、幂等和 revision 审计。
 9. Task Group 的 `reuseRule` 和 `recheckRules` 是否由模型提出后需要用户确认；在未确认前可以保存为 candidate，但不得作为 Planner procedure。
 

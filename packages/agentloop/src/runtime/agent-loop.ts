@@ -74,6 +74,8 @@ export interface AgentLoopOptions {
   /** Complete, persisted exchanges from a prior interrupted execution. */
   readonly initialMessages?: readonly ModelMessage[];
   readonly initialToolEvidence?: readonly AgentLoopToolEvidence[];
+  /** Server-authored guidance already applicable before the first model turn. */
+  readonly initialRuntimePromptAugmentations?: readonly RuntimePromptAugmentation[];
   /** Standard Runtime boundary after Tool facts commit and before the next model request. */
   readonly enrichRuntimeContext?: (context: RuntimeContextEnrichmentInput) => Promise<RuntimeContextEnrichment | undefined>;
   readonly model: ModelAdapter;
@@ -586,11 +588,31 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     policy: options.contextPolicy,
     emit,
   });
+  const initialPromptAugmentations = contextAssembler.applyRuntimePromptAugmentations(
+    options.initialRuntimePromptAugmentations ?? [],
+  );
 
   await emit({
     type: "loop.started",
     data: { runId: options.runId, depth: options.grant.depth },
   });
+  if (initialPromptAugmentations.length > 0) {
+    await emit({
+      type: "prompt_augmentation.activated",
+      data: {
+        schema: "agentloop.promptAugmentationActivation/v1",
+        augmentationIds: initialPromptAugmentations,
+        contextRevision: contextAssembler.runtimeContextRevision,
+        augmentations: (options.initialRuntimePromptAugmentations ?? [])
+          .filter((item) => initialPromptAugmentations.includes(item.id))
+          .map((item) => ({
+            id: item.id,
+            source: item.source,
+            ...(item.provenance === undefined ? {} : { provenance: item.provenance }),
+          })),
+      },
+    });
+  }
   if (availableSkillList.length > 0) {
     await emit({
       type: "skill.activation.available",

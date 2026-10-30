@@ -88,3 +88,25 @@ test("development cloud model control persists the applied catalog for the next 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("development cloud MCP control validates, persists, and reloads JSON configuration", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-dev-mcp-control-"));
+  const configurationPath = join(root, "config", "mcp-servers.json");
+  const original = { defaultTrust: "untrusted", servers: [] };
+  await mkdir(dirname(configurationPath), { recursive: true });
+  await writeFile(configurationPath, `${JSON.stringify(original)}\n`);
+  try {
+    const control = createDevRuntimeControl({ root: join(root, "control"), mcpConfigurationPath: configurationPath, token: "development-token" });
+    const next = { defaultTrust: "trusted", servers: [{ key: "knowledge", transport: "http", url: "https://mcp.example.test/mcp", auth: { kind: "none" }, aliases: ["知识库"] }] };
+    const started = await call(control, "POST", "/mcp-configuration", "development-token", { configuration: next });
+    assert.equal(started.status, 202);
+    assert.deepEqual(JSON.parse(await readFile(configurationPath, "utf8")), next);
+    assert.equal(started.body.mcpServers[0].key, "knowledge");
+
+    const restartedControl = createDevRuntimeControl({ root: join(root, "control"), mcpConfigurationPath: configurationPath, token: "development-token" });
+    const loaded = await call(restartedControl, "GET", "/mcp-configuration", "development-token");
+    assert.deepEqual(loaded.body.configuration, next);
+    const rejected = await call(restartedControl, "POST", "/mcp-configuration", "development-token", { configuration: { servers: [{ key: "duplicate", transport: "http", url: "https://one.test" }, { key: "duplicate", transport: "http", url: "https://two.test" }] } });
+    assert.equal(rejected.status, 400);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

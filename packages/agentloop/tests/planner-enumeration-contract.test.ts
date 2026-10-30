@@ -69,6 +69,7 @@ test("a forbidden requirement followed by missing fact fields gets bounded repai
   assert.deepEqual(proposal.steps[0]!.requiredFacts, [{ ...fixture.fact,
     basis: { ...fixture.fact.basis, requirement: fixture.task.canonicalState.intent.userInput } }]);
   assert.equal(proposal.steps[0]!.successCriteria.find((criterion) => criterion.id === "required_fact:current-chairman")?.blocking, true);
+  assert.equal(proposal.steps[0]!.successCriteria.some((criterion) => criterion.id === "requested_enumeration"), false);
 });
 
 test("invalid fact arguments stay rejected and argument repair cannot loop or bypass the turn limit", async (t) => {
@@ -131,7 +132,7 @@ test("an artifact edit with no factual lookup keeps its exact output requirement
   assert.deepEqual(goal.basis?.targetIds, ["updated-workbook"]);
 });
 
-test("Planner makes an enumerated user request reject summaries and representative samples", async () => {
+test("Planner does not turn an enumeration method into a blocking result criterion", async () => {
   const runId = "run-enumeration-contract";
   const objective = "宝武共享的公司领导有哪些人？请列出姓名和职务。";
   const tools = [
@@ -185,9 +186,8 @@ test("Planner makes an enumerated user request reject summaries and representati
     availableTools: tools,
   });
 
-  const criterion = proposal.steps[0]?.successCriteria.find((entry) => entry.id === "requested_enumeration");
-  assert.ok(criterion);
-  assert.match(criterion.description, /representative examples/i);
+  assert.equal(proposal.steps[0]?.successCriteria.some((entry) => entry.id === "requested_enumeration"), false);
+  assert.equal(proposal.steps[0]?.successCriteria.some((entry) => entry.id === "leadership-answer-core-result"), true);
 });
 
 test("a narrowed Plan objective cannot replace the original requested facts in conversation acceptance", async () => {

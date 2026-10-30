@@ -46,7 +46,7 @@ internal sealed class TrayContext : ApplicationContext
         icon = new NotifyIcon
         {
             Text = "AgentLoop Local Runtime",
-            Icon = SystemIcons.Application,
+            Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? SystemIcons.Application,
             Visible = true,
             ContextMenuStrip = BuildMenu(),
         };

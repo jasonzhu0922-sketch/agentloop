@@ -1,4 +1,4 @@
-import { chmod, cp, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -38,7 +38,9 @@ export async function preparePackagedPythonRuntime({ sourceRoot, destinationRoot
   pipArgs.push("-r", resolve(requirementsPath));
   run(python, pipArgs, { action: "install packaged Runtime Python requirements" });
   const probe = "import importlib, sys; [importlib.import_module(name) for name in sys.argv[1:]]";
-  run(python, ["-c", probe, "anthropic", "defusedxml", "imageio", "lxml", "mcp", "numpy", "openpyxl", "pandas", "pdf2image", "pdfplumber", "PIL", "pymysql", "pypdf", "pytesseract", "reportlab"], { action: "verify packaged Runtime Python modules" });
+  await removeBundledFfmpeg(destination);
+  await prunePackagedPythonRuntime(destination);
+  run(python, ["-c", probe, "anthropic", "defusedxml", "imageio", "lxml", "mcp", "numpy", "openpyxl", "pandas", "pdf2image", "pdfplumber", "PIL", "pymysql", "pypdf", "pytesseract", "reportlab"], { action: "verify packaged Runtime Python modules after pruning" });
   await ensurePythonCommandAliases(destination, python);
   if (process.platform !== "win32") {
     const markitdown = join(destination, "bin", "markitdown");
@@ -61,6 +63,8 @@ export async function preparePackagedPythonRuntime({ sourceRoot, destinationRoot
   }
   const markitdown = join(destination, process.platform === "win32" ? "Scripts/markitdown.exe" : "bin/markitdown");
   run(markitdown, ["--version"], { action: "verify packaged markitdown" });
+  // Import and CLI probes can recreate bytecode after the first pruning pass.
+  await prunePackagedPythonRuntime(destination);
   const marker = {
     schema: "agentloop.packagedRuntimePython/v1",
     pythonVersion: PACKAGED_PYTHON_MAJOR_MINOR,
@@ -69,6 +73,45 @@ export async function preparePackagedPythonRuntime({ sourceRoot, destinationRoot
   };
   await writeFile(join(destination, "agentloop-runtime-python.json"), `${JSON.stringify(marker, null, 2)}\n`, "utf8");
   return marker;
+}
+
+/** Keep the default Local Agent package free of a second platform FFmpeg binary. */
+async function removeBundledFfmpeg(destination) {
+  const sitePackages = process.platform === "win32"
+    ? join(destination, "Lib", "site-packages")
+    : join(destination, "lib", "python3.12", "site-packages");
+  const binaries = join(sitePackages, "imageio_ffmpeg", "binaries");
+  for (const name of await readdir(binaries).catch(() => [])) {
+    if (name.startsWith("ffmpeg-")) await rm(join(binaries, name), { force: true });
+  }
+}
+
+/** Remove build-time Python artifacts that are never imported by the installed Runtime. */
+export async function prunePackagedPythonRuntime(destination) {
+  const sitePackages = process.platform === "win32"
+    ? join(destination, "Lib", "site-packages")
+    : join(destination, "lib", "python3.12", "site-packages");
+  const pending = [resolve(destination)];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    if (directory === undefined) continue;
+    for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [])) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === "__pycache__" || entry.name === "test" || entry.name === "tests") {
+          await rm(path, { recursive: true, force: true });
+        } else if (directory === sitePackages && (entry.name === "pip" || (entry.name.startsWith("pip-") && entry.name.endsWith(".dist-info")))) {
+          await rm(path, { recursive: true, force: true });
+        } else {
+          pending.push(path);
+        }
+      } else if (entry.name.endsWith(".pyc")) {
+        await rm(path, { force: true });
+      } else if (directory === sitePackages && entry.name.startsWith("pip-") && entry.name.endsWith(".dist-info")) {
+        await rm(path, { recursive: true, force: true });
+      }
+    }
+  }
 }
 
 async function ensurePythonCommandAliases(destination, python) {
@@ -107,6 +150,21 @@ export async function copyPackagedNodeModules({ repositoryRoot, destinationRoot 
     }
   }
   return [...copied].map((source) => relative(sourceRoot, source)).sort();
+}
+
+/** Copy only credential-free templates needed to initialize device-owned configuration. */
+export async function copyPackagedAgentRuntimeSupportFiles({ appRoot, destinationRoot } = {}) {
+  if (appRoot === undefined || destinationRoot === undefined) throw new Error("appRoot and destinationRoot are required");
+  const sourceRoot = resolve(appRoot, "local-agent-runtime");
+  const targetRoot = resolve(destinationRoot, "agent-loop-runtime");
+  await mkdir(join(targetRoot, "config"), { recursive: true });
+  for (const relativePath of [
+    ".env.example",
+    "config/llm-providers.example.json",
+    "config/mcp-servers.json",
+  ]) {
+    await cp(join(sourceRoot, relativePath), join(targetRoot, relativePath));
+  }
 }
 
 function resolvePackageDirectory(name, sourceRoot) {

@@ -154,6 +154,38 @@ test("search API responses share charset decoding and reject corrupt text instea
   } finally { await close(server); }
 });
 
+test("Bocha search uses its request contract and preserves backend provenance", async () => {
+  let body: Record<string, unknown> | undefined;
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({
+      code: 200,
+      data: { webPages: { value: [{ name: "冯国璋人物资料", url: "https://wenwen.sogou.com/z/q1", snippet: "代理大总统与直系首领" }] } },
+    }));
+  });
+  await listen(server);
+  try {
+    const port = (server.address() as AddressInfo).port;
+    const allowed = new ToolRegistry(createWebTools({ searchEndpoint: `http://127.0.0.1:${port}/v1/web-search`, searchProvider: "bocha", searchApiKey: "bocha-test-key" })).materialize(grant(["websearch"]));
+    const prepared = allowed.prepare({ id: "bocha-search", name: "websearch", arguments: { query: "冯国璋 代理大总统 直系", numResults: 8 } });
+    const result = await prepared.tool.execute(grantContext(["websearch"]), prepared.input) as {
+      backend: string;
+      returned: number;
+      results: Array<{ discoveryOnly?: boolean; qualitySignals?: string[] }>;
+      evidenceReceipt: { backend?: string };
+    };
+    assert.deepEqual(body, { query: "冯国璋 代理大总统 直系", count: 8, freshness: "noLimit", summary: true });
+    assert.equal(result.backend, "bocha");
+    assert.equal(result.returned, 1);
+    assert.equal(result.results[0]?.discoveryOnly, true);
+    assert.deepEqual(result.results[0]?.qualitySignals, ["qa_or_aggregator"]);
+    assert.equal(result.evidenceReceipt.backend, "bocha");
+  } finally { await close(server); }
+});
+
 test("extractRedirectTarget detects JavaScript and meta-refresh redirects", () => {
   assert.equal(
     extractRedirectTarget(`<script>window.location.replace("https://www.cehome.com/news/1.shtml")</script>`),

@@ -94,6 +94,16 @@ Runtime 选择、目录授权操作、执行状态和产物展示全部属于 `w
 `local-agent-client.js` 或 Router 的受控设备接口访问 Agent。这样不会形成第二套页面、
 第二套身份状态或第二套业务路由。
 
+### Local Agent Memory
+
+Memory 只属于 Local Agent，新安装默认关闭；云端 Router/Runtime 不初始化 Memory。通过设备级接口
+`PUT /v1/local-memory/configuration` 提交 `{"enabled":true,"settlementModelKey":"local:<model-key>"}` 开启，开关对该 Local Agent 的所有 Runtime 统一生效。切换时不能有活动 Run。Memory 数据保存在设备
+本地 `memory.db`，scope 固定为设备 tenant 与 Run 的可信 `ownerUserId`，不使用云端 Memory 服务。沉淀模型只能选择
+Local Agent 模型目录中的 `local:` key；模型不可用时不能进行语义沉淀，不改变当前 Run 的结果。
+偏好和事实类记忆即时写入；经验类案例先可靠入队，默认累计同一用户的 10 个案例后再批量调用一次 Memory 模型归纳。
+
+当前沉淀协议为 `agentloop.semanticSettlement/v2`；历史 v1 Episode 只有在本地授权重放并通过 v2 校验后，才会形成 Task Group 或 Planner procedure。
+
 `src/shared/contracts.ts` 是 Router 与 Cloud Runtime Host 唯一允许共享的版本化运行协议；HTTP 层只做协议解码、响应和错误映射，任务身份绑定、数据面校验和调度规则属于 application，`main.ts` 只负责依赖装配。测试会递归检查依赖闭包：Router 不得引入 `runtime-host/`，Host 不得引入 `router/`，Local Agent 不得依赖任一云端角色。新增跨角色能力必须先进入 `shared/` 的中立协议，不能以进程内 import 绕过边界。
 
 ```bash
@@ -173,7 +183,34 @@ Local Runtime Agent 的模型、联网搜索和 Skill 集成配置属于设备�
 
 Local Agent 的源码也作为独立部署单元位于 `local-agent-runtime/src/`；它只依赖共享内核包及 Multi Runtime 的中立配置/契约，Router 和云端 Runtime Host 入口仍保留在 `src/`。`start:local-agent`、本地启动器和 macOS/Windows 打包器都以此目录的 `main.ts` 为唯一入口。
 
+Memory 沉淀模型复用 Local Agent 的模型配置和 Provider Registry，不维护第二套 Memory provider 文件。启用 Memory 时，`settlementModelKey` 必须使用已经配置的 `local:<modelKey>`；模型凭据沿用本地模型配置的 device-local secret store，不进入云端 Runtime。
+
 Runtime 配置窗口的“上传 Skill”直接请求浏览器所在设备的 Local Agent，ZIP 或目录内容保存在该设备数据目录的 `skill-packages/uploaded/`，不经 Router 或云端转存。Local Agent 启动时不会自动加载云端/开发态的 `custom-skills/` 目录；本机扩展 Skill 必须由用户上传后才会进入某个 Runtime。可以上传 ZIP，也可以选择 Skill 目录；目录上传会保留每个文件相对所选目录的路径。本地上传允许携带 Skill 自己的 `.env`、凭据和证书文件，仍校验路径、普通文件类型和解包/目录大小。一个 ZIP 或目录可以包含一个或多个 Skill：单 Skill 可将 `SKILL.md` 放在根目录或唯一 Skill 文件夹中，多 Skill 则应为每个 Skill 文件夹放置一个 `SKILL.md`。包内已有 `agentloop.skill.json` 时直接保留并使用；旧 `SKILL.md` 中的 `agentloop:` 块只读取、不改写；没有声明的包会先得到确定性识别结果，再尝试使用 Local Agent 当前第一个可用的本地/云端模型补充 metadata。metadata 存在 Local Agent 的包外 revision 中，用户可以不维护；后续页面编辑只生成 metadata revision，不改变原始包或 `packageHash`。上传完成后无需点击“保存”才能完成导入，是否应用到某个 Runtime 仍由 Runtime 配置明确选择。
+
+#### Skill execution manifest
+
+AgentLoop Skill 与普通“只包含 instructions 的 Skill”不同：Skill 可以选择性地提供一个由 Runtime 校验和调用的结构化执行接口。该接口由包内 `agentloop.executors.json` 声明，并在 `agentloop.skill.json` 中通过以下字段引用：
+
+```json
+"execution": {
+  "manifest": "agentloop.executors.json"
+}
+```
+
+这个字段不是每个 Skill 的必填项，也不是权限授予。没有稳定脚本接口的 Skill 应省略 `execution`；仅仅存在 `scripts/` 目录，也不能自动推断出执行能力。
+
+需要确定性取数、校验、计算、转换或 evidence 产物的 Skill，才应编制 manifest。manifest 必须使用当前 `agentloop.skillExecutors/v1` 格式，明确声明：
+
+- Runtime 可调用的 executor、裸 command 和包内相对 script 路径；
+- 每个 action 的唯一 ID、输入、参数模板和输出语义；
+- action 实际产生的 evidence 类型；
+- 必要时，哪些输入来自 Runtime 已确认的人机决策。
+
+manifest 带来的不是“让模型多一个脚本可以运行”，而是把 Skill 变成可验证的执行组件：Runtime 可以限制 action 和参数、绑定当前 Run workspace、保持 Skill 包只读、记录退出码和产物、生成 evidence receipt，并在恢复或重放时识别同一个确定性动作。`SKILL.md` 仍然负责说明业务规则，manifest 只负责声明可调用接口；它不会自动授予网络、数据库、文件系统或 Secret 权限。
+
+以 `shutu-ods-analysis-validate` 为例，Skill 要求全部校验逻辑由 `check_md_completeness.py` 完成，Agent 不得自行判断报告是否合格。若要纳入正式 Runtime 工作流，应将单文件校验、批量校验分别声明为 action；这样 Runtime 能验证输入输出并记录校验报告。若只需要模型参考命令、暂不纳入受控执行，也可以不配置 manifest。
+
+manifest 的详细字段约束、编制流程和测试清单见[Skill Execution Manifest 编制说明](../../docs/SKILL-EXECUTION-MANIFEST-AUTHORING-GUIDE.md)。
 
 内核 bundled Skill 与 `custom-skills/` 使用同一个包内声明格式，但元数据文件随各自包根独立维护：内核声明来自 `@zhujun/agentloop-skills` 发布包，Custom 声明来自 `custom-skills.zip` 或部署挂载目录。两者都不再把 AgentLoop 规划/执行元数据写入 `SKILL.md`；启动同步会分别校验每个包的 sidecar 与 `SKILL.md` identity，缺少或冲突时 fail-closed。
 
@@ -369,7 +406,7 @@ Router 提供可断线续读的事件查询以及 `GET /v1/assignments/:assignme
 
 ### 打包 Local Runtime Agent（macOS Apple Silicon）
 
-Local Runtime Agent 优先使用 Node SEA 打包为后台可执行程序，配合一个很小的 Swift 托盘壳，不包含 Electron/Chromium。若构建机的 Node 二进制没有 SEA fuse（例如当前 Homebrew Node 26），打包器会自动改为随包携带 Node runtime 及其 macOS 动态库依赖；两种产物使用同一个 Agent bundle 和协议。生产包还必须显式提供可重定位的 Python 3.12 runtime 目录；打包器会把 requirements.txt 安装进随包 Python 前缀并验证 Runtime 模块，避免安装后回退到用户的 `python3` 或联网建 venv。包内还带有同版本 Node runtime、Skill 脚本需要的 Node 模块，启动时通过 `PATH` 和 `NODE_PATH` 交给 Local Runtime，并设置 `PYTHONNOUSERSITE=1` 隔离用户级 Python 包。`pandoc`、`qpdf`、`tesseract` 等系统工具仍由目标设备提供，安装包不会伪装成已包含它们。打包命令会先构建 kernel 和 bundled Skills：
+Local Runtime Agent 优先使用 Node SEA 打包为后台可执行程序，配合一个很小的 Swift 托盘壳，不包含 Electron/Chromium。若构建机的 Node 二进制没有 SEA fuse（例如当前 Homebrew Node 26），打包器会自动改为随包携带 Node runtime 及其 macOS 动态库依赖；两种产物使用同一个 Agent bundle 和协议。生产包还必须显式提供可重定位的 Python 3.12 runtime 目录；打包器会把 `requirements.local-agent.txt` 安装进随包 Python 前缀并验证 Runtime 模块，避免安装后回退到用户的 `python3` 或联网建 venv。默认包不携带 `imageio-ffmpeg` 的平台 FFmpeg 二进制；音视频扩展应使用系统 `ffmpeg` 或 `IMAGEIO_FFMPEG_EXE` 指定的可执行文件。包内还带有同版本 Node runtime、Skill 脚本需要的 Node 模块，启动时通过 `PATH` 和 `NODE_PATH` 交给 Local Runtime，并设置 `PYTHONNOUSERSITE=1` 隔离用户级 Python 包。`pandoc`、`qpdf`、`tesseract` 等系统工具仍由目标设备提供，安装包不会伪装成已包含它们。打包命令会先构建 kernel 和 bundled Skills：
 
 ```bash
 AGENTLOOP_PACKAGED_PYTHON_ROOT=/path/to/python-3.12-standalone \

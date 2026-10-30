@@ -25,11 +25,14 @@ interface SearchResult {
   readonly title: string;
   readonly url: string;
   readonly snippet: string;
+  readonly qualitySignals?: readonly string[];
+  readonly discoveryOnly?: boolean;
 }
 
 interface WebSearchResult {
   readonly schema: "agentloop.webSearch/v1";
   readonly query: string;
+  readonly backend: WebSearchBackend;
   readonly returned: number;
   readonly results: readonly SearchResult[];
   readonly evidenceReceipt: WebToolEvidenceReceipt;
@@ -61,6 +64,7 @@ interface WebTextDecoding {
 interface WebToolEvidenceReceipt {
   readonly schema: "agentloop.toolEvidenceReceipt/v1";
   readonly sourceType: "web_search" | "web_page";
+  readonly backend?: WebSearchBackend;
   readonly receiptId: string;
   readonly sourceRefs: readonly Record<string, unknown>[];
   readonly facts: readonly Record<string, unknown>[];
@@ -71,6 +75,8 @@ interface WebToolEvidenceReceipt {
     readonly failed: readonly string[];
   };
 }
+
+type WebSearchBackend = "bocha" | "custom_endpoint" | "baidu" | "bing";
 
 /**
  * Bounded per-run cache keyed by trimmed query + numResults. Identical repeated
@@ -89,15 +95,18 @@ export interface WebToolsOptions {
   /** Allow loopback/private/link-local targets (used by local tooling and tests). */
   readonly allowPrivateTargets?: boolean;
   /**
-   * Search backend for websearch. "baidu" (default) queries Baidu directly and
-   * is the right choice for deployments inside mainland China; "bing" uses the
-   * Bing RSS feed. Ignored when searchEndpoint is set.
+   * Search backend for websearch. "baidu" (default) queries Baidu directly,
+   * "bing" uses the Bing RSS feed, and "bocha" uses the Bocha API contract.
+   * When searchEndpoint is set, the endpoint remains authoritative; provider
+   * selects its request/response contract and is otherwise inferred from the
+   * api.bochaai.com hostname.
    */
-  readonly searchProvider?: "baidu" | "bing";
+  readonly searchProvider?: "bocha" | "baidu" | "bing";
   /**
    * Optional search API endpoint. When set, websearch POSTs
    * { query, count, numResults } as JSON (Authorization: Bearer searchApiKey
-   * when provided) and normalizes the response. Accepts Tavily-style
+   * when provided) and normalizes the response. Bocha endpoints instead use
+   * { query, count, freshness, summary }. Accepts Tavily-style
    * { results: [{ title, url, content }] }, Brave-style { web: [...] },
    * Google-style { organic_results: [...] }, and Bocha-style
    * { data: { webPages: { value: [{ name, url, snippet, summary }] } } }.
@@ -163,8 +172,10 @@ function createSearchTool(
     description: [
       "Search the web and return structured results plus a canonical evidenceReceipt.",
       "Returns { schema, query, returned, results: [{ title, url, snippet }], evidenceReceipt }.",
+      "Decompose multi-fact research into claim-specific queries containing the exact entities, relationship terms, dates, or source roles needed for that claim; for relationship claims add provenance cues such as interview, autobiography, profile, or independent report. Never search a placeholder such as 'keywords' or a single token extracted from a result title.",
       "Search once with a complete query phrase reflecting the user's intent; do not re-search by splitting single words or characters out of result titles.",
       "The snippet is enough to judge relevance; for broader coverage raise numResults (up to 10) in one search instead of repeating it.",
+      "Results marked discoveryOnly or carrying qualitySignals such as qa_or_aggregator are leads only; prefer readable primary, institutional, or reputable media pages for factual claims and do not treat a search snippet as source_summary.",
       "Prefer webfetch on the returned URLs to read full article text, and avoid repeated searches on the same topic.",
       "Prefer this over computer_run_command + curl for research.",
     ].join(" "),
@@ -267,40 +278,76 @@ async function executeSearch(
     runCache = new Map();
     searchCacheByRun.set(runId, runCache);
   }
+  const backend = searchBackend(options);
   const cached = runCache.get(key);
-  if (cached !== undefined) return webSearchResult(trimmed, cached);
-  const results = await searchWeb(trimmed, numResults, options, timeoutMs);
+  if (cached !== undefined) return webSearchResult(trimmed, cached, backend);
+  const results = annotateSearchResults(await searchWeb(trimmed, numResults, options, timeoutMs));
   if (runCache.size >= SEARCH_CACHE_MAX_PER_RUN) {
     const oldestQuery = runCache.keys().next().value as string;
     runCache.delete(oldestQuery);
   }
   runCache.set(key, results);
-  return webSearchResult(trimmed, results);
+  return webSearchResult(trimmed, results, backend);
 }
 
-function webSearchResult(query: string, results: readonly SearchResult[]): WebSearchResult {
+function annotateSearchResults(results: readonly SearchResult[]): SearchResult[] {
+  return results.map((result) => {
+    const haystack = `${result.url} ${result.title} ${result.snippet}`.toLocaleLowerCase();
+    const qualitySignals = [
+      /(?:wenwen|iask|zhidao|know|question|ask\.|qa[./])/u.test(haystack) ? "qa_or_aggregator" : undefined,
+      /(?:baike|encyclopedia|词典|百科)/u.test(haystack) ? "reference_or_dictionary" : undefined,
+      /(?:copy|转载|聚合|摘编|小编)/u.test(haystack) ? "copied_or_aggregated" : undefined,
+    ].filter((value): value is string => value !== undefined);
+    if (qualitySignals.length === 0) return result;
+    return { ...result, qualitySignals, discoveryOnly: true };
+  });
+}
+
+function searchBackend(options: WebToolsOptions): WebSearchBackend {
+  if (options.searchEndpoint !== undefined) {
+    return options.searchProvider === "bocha" || isBochaEndpoint(options.searchEndpoint)
+      ? "bocha"
+      : "custom_endpoint";
+  }
+  return options.searchProvider === "bing" ? "bing" : "baidu";
+}
+
+function isBochaEndpoint(endpoint: string): boolean {
+  try {
+    return new URL(endpoint).hostname.toLowerCase() === "api.bochaai.com";
+  } catch {
+    return false;
+  }
+}
+
+function webSearchResult(query: string, results: readonly SearchResult[], backend: WebSearchBackend): WebSearchResult {
   return {
     schema: "agentloop.webSearch/v1",
     query,
+    backend,
     returned: results.length,
     results,
-    evidenceReceipt: webSearchReceipt(query, results),
+    evidenceReceipt: webSearchReceipt(query, results, backend),
   };
 }
 
-function webSearchReceipt(query: string, results: readonly SearchResult[]): WebToolEvidenceReceipt {
+function webSearchReceipt(query: string, results: readonly SearchResult[], backend: WebSearchBackend): WebToolEvidenceReceipt {
   const sourceRefs = results.map((result) => webSourceRef(result.url, {
     title: result.title,
     snippetCharacters: result.snippet.length,
+    ...(result.qualitySignals === undefined ? {} : { qualitySignals: result.qualitySignals }),
+    ...(result.discoveryOnly === undefined ? {} : { discoveryOnly: result.discoveryOnly }),
   }));
   const failed = results.length === 0 ? ["source_urls"] : [];
   return buildWebToolEvidenceReceipt({
     sourceType: "web_search",
+    backend,
     sourceRefs,
     facts: [{
       kind: "source_urls",
       query,
       returned: results.length,
+      discoveryOnlyCount: results.filter((result) => result.discoveryOnly === true).length,
       urls: results.map((result) => ({ title: result.title, url: result.url })),
     }],
     caveats: [
@@ -361,6 +408,7 @@ function webSourceRef(url: string, extra: Record<string, unknown>): Record<strin
 
 function buildWebToolEvidenceReceipt(input: {
   readonly sourceType: "web_search" | "web_page";
+  readonly backend?: WebSearchBackend;
   readonly sourceRefs: readonly Record<string, unknown>[];
   readonly facts: readonly Record<string, unknown>[];
   readonly caveats: readonly string[];
@@ -369,6 +417,7 @@ function buildWebToolEvidenceReceipt(input: {
 }): WebToolEvidenceReceipt {
   const material = JSON.stringify({
     sourceType: input.sourceType,
+    backend: input.backend,
     sourceRefs: input.sourceRefs,
     facts: input.facts,
     caveats: input.caveats,
@@ -377,6 +426,7 @@ function buildWebToolEvidenceReceipt(input: {
   return {
     schema: "agentloop.toolEvidenceReceipt/v1",
     sourceType: input.sourceType,
+    ...(input.backend === undefined ? {} : { backend: input.backend }),
     receiptId: createHash("sha256").update(material).digest("hex"),
     sourceRefs: input.sourceRefs,
     facts: input.facts,
@@ -438,13 +488,16 @@ async function searchViaEndpoint(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const bocha = options.searchProvider === "bocha" || isBochaEndpoint(options.searchEndpoint as string);
     const response = await fetch(options.searchEndpoint as string, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         ...(options.searchApiKey === undefined ? {} : { Authorization: `Bearer ${options.searchApiKey}` }),
       },
-      body: JSON.stringify({ query, count: numResults, numResults, num_results: numResults, max_results: numResults }),
+      body: JSON.stringify(bocha
+        ? { query, count: numResults, freshness: "noLimit", summary: true }
+        : { query, count: numResults, numResults, num_results: numResults, max_results: numResults }),
       signal: controller.signal,
     });
     if (!response.ok) {

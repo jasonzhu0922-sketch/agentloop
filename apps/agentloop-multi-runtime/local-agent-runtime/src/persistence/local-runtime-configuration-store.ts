@@ -134,6 +134,12 @@ export interface LocalRuntimeConfigurationInput {
   readonly mcpServers?: readonly LocalRuntimeMcpServerInput[];
 }
 
+export interface LocalRuntimeMemoryConfigurationInput {
+  readonly enabled?: boolean;
+  /** The semantic settlement model must be selected from the local catalog. */
+  readonly settlementModelKey?: string;
+}
+
 interface LocalRuntimeConfigurationStorageInput {
   readonly skillPackageIds?: readonly string[];
   readonly mcpServers?: readonly LocalRuntimeMcpServerWrite[];
@@ -143,6 +149,7 @@ export interface LocalRuntimeConfiguration {
   readonly runtimeId: string;
   readonly skills: readonly LocalSkillPackageSummary[];
   readonly mcpServers: readonly LocalRuntimeMcpServerConfiguration[];
+  readonly memory?: ResolvedLocalMemoryConfiguration;
   readonly updatedAt: number;
 }
 
@@ -158,6 +165,12 @@ export interface ResolvedLocalRuntimeConfiguration {
   readonly customSkillDirectories: readonly string[];
   readonly mcpServers: readonly McpServerRegistration[];
   readonly integrationEnvironment: Readonly<Record<string, string | undefined>>;
+  readonly memory?: ResolvedLocalMemoryConfiguration;
+}
+
+export interface ResolvedLocalMemoryConfiguration {
+  readonly enabled: boolean;
+  readonly settlementModelKey?: string;
 }
 
 export interface LegacyLocalRuntimeConfigurationMigration {
@@ -262,7 +275,15 @@ export class LocalRuntimeConfigurationStore {
         WHERE status = 'active';
       CREATE TABLE IF NOT EXISTS local_runtime_configurations (
         runtime_id TEXT PRIMARY KEY REFERENCES local_runtime_instances(runtime_id) ON DELETE CASCADE,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        memory_enabled INTEGER NOT NULL DEFAULT 0,
+        settlement_model_key TEXT
+      );
+      CREATE TABLE IF NOT EXISTS local_memory_configuration (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        updated_at INTEGER NOT NULL,
+        memory_enabled INTEGER NOT NULL DEFAULT 0,
+        settlement_model_key TEXT
       );
       CREATE TABLE IF NOT EXISTS local_runtime_skill_bindings (
         runtime_id TEXT NOT NULL REFERENCES local_runtime_instances(runtime_id) ON DELETE CASCADE,
@@ -288,10 +309,30 @@ export class LocalRuntimeConfigurationStore {
         UNIQUE(runtime_id, source_key)
       );
     `);
+    await this.migrateMemoryConfigurationColumns();
     await this.migrateMcpServerTableForQueryAuthentication();
     await this.removeOrphanedSecrets();
     await this.synchronizeCustomDirectories(this.customSkillDirectories);
     await this.restoreUploadedPackages();
+  }
+
+  private async migrateMemoryConfigurationColumns(): Promise<void> {
+    const columns = await this.database.prepare("PRAGMA table_info(local_runtime_configurations)").all() as Array<{ name: string }>;
+    const names = new Set(columns.map((column) => column.name));
+    if (!names.has("memory_enabled")) await this.database.exec("ALTER TABLE local_runtime_configurations ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 0");
+    if (!names.has("settlement_model_key")) await this.database.exec("ALTER TABLE local_runtime_configurations ADD COLUMN settlement_model_key TEXT");
+    const device = await this.database.prepare("SELECT singleton FROM local_memory_configuration WHERE singleton = 1").get() as { singleton: number } | undefined;
+    if (device === undefined) {
+      const legacy = await this.database.prepare(`
+        SELECT memory_enabled, settlement_model_key FROM local_runtime_configurations
+        WHERE memory_enabled = 1 OR settlement_model_key IS NOT NULL
+        ORDER BY updated_at DESC LIMIT 1
+      `).get() as { memory_enabled: number; settlement_model_key: string | null } | undefined;
+      await this.database.prepare(`
+        INSERT INTO local_memory_configuration(singleton, updated_at, memory_enabled, settlement_model_key)
+        VALUES (1, ?, ?, ?)
+      `).run(Date.now(), legacy?.memory_enabled === 1 ? 1 : 0, legacy?.settlement_model_key ?? null);
+    }
   }
 
   private async removeOrphanedSecrets(): Promise<void> {
@@ -713,8 +754,9 @@ export class LocalRuntimeConfigurationStore {
     const now = Date.now();
     await this.database.transaction(async () => {
       await this.database.prepare(`
-        INSERT INTO local_runtime_configurations(runtime_id, updated_at) VALUES (?, ?)
-        ON CONFLICT(runtime_id) DO UPDATE SET updated_at = excluded.updated_at
+        INSERT INTO local_runtime_configurations(runtime_id, updated_at, memory_enabled, settlement_model_key) VALUES (?, ?, 0, NULL)
+        ON CONFLICT(runtime_id) DO UPDATE SET updated_at = excluded.updated_at,
+          memory_enabled = 0, settlement_model_key = NULL
       `).run(runtimeId, now);
       await this.database.prepare("DELETE FROM local_runtime_skill_bindings WHERE runtime_id = ?").run(runtimeId);
       for (const packageId of skillPackageIds) {
@@ -869,10 +911,15 @@ export class LocalRuntimeConfigurationStore {
       WHERE b.runtime_id = ? ORDER BY p.display_name, p.package_id
     `).all(runtimeId) as SkillPackageRow[];
     const mcpRows = await this.mcpRows(runtimeId);
+    const memory = await this.deviceMemory();
     return {
       runtimeId,
       skills: skillRows.map(toSkillSummary),
       mcpServers: mcpRows.map(toPublicMcpServer),
+      // Keep the legacy public shape for the default-off state. Resolved
+      // Runtime configuration always carries the explicit boolean used by the
+      // factory; enabled Memory is exposed to management clients.
+      ...(memory.enabled ? { memory } : {}),
       updatedAt: configuration.updated_at,
     };
   }
@@ -923,8 +970,50 @@ export class LocalRuntimeConfigurationStore {
     for (const row of await this.mcpRows(runtimeId)) {
       mcpServers.push(await this.resolveMcpServer(row, environment));
     }
-    return { customSkillDirectories, mcpServers, integrationEnvironment: environment,
+    const configuration = await this.database.prepare(`SELECT runtime_id FROM local_runtime_configurations WHERE runtime_id = ?`).get(runtimeId) as { runtime_id: string } | undefined;
+    if (configuration === undefined) throw new LocalRuntimeConfigurationStoreError(404, "runtime_configuration_not_found");
+    const memory = await this.deviceMemory();
+    await this.assertValidMemoryConfiguration(memory);
+    return { customSkillDirectories, mcpServers, integrationEnvironment: environment, memory,
       ...(this.modelConfigurations === undefined ? {} : { modelConfiguration: await this.modelConfigurations.resolve() }) };
+  }
+
+  async deviceMemoryConfiguration(): Promise<ResolvedLocalMemoryConfiguration> {
+    return await this.deviceMemory();
+  }
+
+  async applyDeviceMemory(input: LocalRuntimeMemoryConfigurationInput): Promise<void> {
+    const memory = normalizeMemoryConfiguration(input);
+    await this.assertValidMemoryConfiguration(memory);
+    await this.restoreDeviceMemory(memory);
+  }
+
+  async restoreDeviceMemory(memory: ResolvedLocalMemoryConfiguration): Promise<void> {
+    await this.database.prepare(`
+      INSERT INTO local_memory_configuration(singleton, updated_at, memory_enabled, settlement_model_key)
+      VALUES (1, ?, ?, ?)
+      ON CONFLICT(singleton) DO UPDATE SET updated_at = excluded.updated_at,
+        memory_enabled = excluded.memory_enabled, settlement_model_key = excluded.settlement_model_key
+    `).run(Date.now(), memory.enabled ? 1 : 0, memory.settlementModelKey ?? null);
+  }
+
+  private async deviceMemory(): Promise<ResolvedLocalMemoryConfiguration> {
+    const row = await this.database.prepare(`
+      SELECT memory_enabled, settlement_model_key FROM local_memory_configuration WHERE singleton = 1
+    `).get() as { memory_enabled: number; settlement_model_key: string | null } | undefined;
+    return resolvedMemory(row?.memory_enabled === 1, row?.settlement_model_key ?? null);
+  }
+
+  private async assertValidMemoryConfiguration(memory: ResolvedLocalMemoryConfiguration): Promise<void> {
+    if (memory.settlementModelKey !== undefined && !memory.settlementModelKey.startsWith("local:")) {
+      throw new LocalRuntimeConfigurationStoreError(400, "memory_settlement_model_must_be_local");
+    }
+    if (memory.enabled && memory.settlementModelKey === undefined) {
+      throw new LocalRuntimeConfigurationStoreError(400, "memory_settlement_model_required");
+    }
+    if (!memory.enabled || this.modelConfigurations === undefined) return;
+    const available = await this.modelConfigurations.orderedModelKeys();
+    if (!available.includes(memory.settlementModelKey!)) throw new LocalRuntimeConfigurationStoreError(409, "memory_settlement_model_unavailable");
   }
 
   private async assertValidPackages(packageIds: readonly string[]): Promise<void> {
@@ -1259,6 +1348,25 @@ function unique(values: readonly string[]): readonly string[] {
   if (result.some((value) => typeof value !== "string" || value.trim().length === 0)) throw new LocalRuntimeConfigurationStoreError(400, "runtime_configuration_invalid");
   if (result.length !== values.length) throw new LocalRuntimeConfigurationStoreError(409, "runtime_configuration_duplicate_value");
   return result;
+}
+
+function normalizeMemoryConfiguration(input: LocalRuntimeMemoryConfigurationInput | undefined): ResolvedLocalMemoryConfiguration {
+  const enabled = input?.enabled === true;
+  const settlementModelKey = input?.settlementModelKey?.trim();
+  if (input !== undefined && input.enabled !== undefined && typeof input.enabled !== "boolean") {
+    throw new LocalRuntimeConfigurationStoreError(400, "memory_configuration_invalid");
+  }
+  if (settlementModelKey !== undefined && (settlementModelKey.length === 0 || settlementModelKey.length > 200)) {
+    throw new LocalRuntimeConfigurationStoreError(400, "memory_configuration_invalid");
+  }
+  if (!enabled && settlementModelKey !== undefined) {
+    throw new LocalRuntimeConfigurationStoreError(400, "memory_model_requires_memory_enabled");
+  }
+  return { enabled, ...(settlementModelKey === undefined ? {} : { settlementModelKey }) };
+}
+
+function resolvedMemory(enabled: boolean, settlementModelKey: string | null): ResolvedLocalMemoryConfiguration {
+  return { enabled, ...(settlementModelKey === null ? {} : { settlementModelKey }) };
 }
 
 function legacyEnvironmentValue(environment: Readonly<Record<string, string | undefined>>, name: string): string | undefined {

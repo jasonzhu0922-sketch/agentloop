@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import "@zhujun/agentloop-artifact-preview/markdown.css";
 import "./styles.css";
+import "./xuanwu.css";
 
 const root = document.getElementById("root");
 if (root === null) throw new Error("Missing #root element");

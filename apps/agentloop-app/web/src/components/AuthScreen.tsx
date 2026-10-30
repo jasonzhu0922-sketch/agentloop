@@ -27,7 +27,7 @@ export function AuthScreen(): React.ReactNode {
     <main className="auth-shell">
       <section className="auth-card">
         <div className="auth-brand">
-          <div className="logo lg">A</div>
+          <img className="logo lg logo-image" src="/xuanwu-mascot-icon.png" alt="玄武" />
           <div>
             <strong>AgentLoop</strong>
             <small>可追踪的智能体工作台</small>

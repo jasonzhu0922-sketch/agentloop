@@ -66,6 +66,23 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
         await session(request, service);
         return json(response, 200, await service.localModels(url.searchParams.has("includeCloud") ? url.searchParams.get("includeCloud") === "true" : undefined));
       }
+      if (request.method === "GET" && url.pathname === "/v1/local-memory/configuration") {
+        await session(request, service);
+        return json(response, 200, await service.localMemoryConfiguration());
+      }
+      if (request.method === "PUT" && url.pathname === "/v1/local-memory/configuration") {
+        await session(request, service);
+        const value = await body(request);
+        return json(response, 200, await service.updateLocalMemoryConfiguration(parseMemoryConfigurationInput(value)));
+      }
+      const memorySettlement = url.pathname.match(/^\/v1\/local-memory\/settlements\/([^/]+)$/);
+      if (memorySettlement !== null && request.method === "GET") {
+        return json(response, 200, await service.localMemorySettlement(await session(request, service), decodeURIComponent(memorySettlement[1])));
+      }
+      const memoryReplay = url.pathname.match(/^\/v1\/local-memory\/settlements\/([^/]+)\/replay$/);
+      if (memoryReplay !== null && request.method === "POST") {
+        return json(response, 200, await service.replayLocalMemorySettlement(await session(request, service), decodeURIComponent(memoryReplay[1])));
+      }
       if (request.method === "PUT" && url.pathname === "/v1/local-models/configuration") {
         await session(request, service);
         const value = await body(request);
@@ -209,7 +226,18 @@ function runtimeConfigurationInput(value: Record<string, unknown>): LocalRuntime
   const mcpServers = value.mcpServers === undefined
     ? []
     : objectArray(value.mcpServers, "mcpServers").map(parseMcpServerInput);
+  if (value.memory !== undefined) throw new Error("memory_configuration_is_device_scoped");
   return { skillPackageIds, mcpServers };
+}
+
+function parseMemoryConfigurationInput(value: Record<string, unknown>): { enabled?: boolean; settlementModelKey?: string } {
+  const input = recordValue(value.memory ?? value, "memory");
+  if (input.enabled !== undefined && typeof input.enabled !== "boolean") throw new Error("memory.enabled_invalid");
+  if (input.settlementModelKey !== undefined && typeof input.settlementModelKey !== "string") throw new Error("memory.settlementModelKey_invalid");
+  return {
+    ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+    ...(input.settlementModelKey === undefined ? {} : { settlementModelKey: input.settlementModelKey }),
+  };
 }
 
 function parseMcpServerInput(value: Record<string, unknown>, index: number): LocalRuntimeMcpServerInput {

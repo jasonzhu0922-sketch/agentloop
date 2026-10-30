@@ -67,7 +67,9 @@ m=json.loads((r/'agentloop-local-runtime.manifest.json').read_text())
 assert m['routerUrl']==sys.argv[2] and m['webOrigin']==sys.argv[3], 'Wrong embedded production endpoints'
 assert m['localAgentPort']==18790, 'Wrong installed Local Agent port'
 for p in r.rglob('*'):
-    assert p.name not in {'.env','agentloop.db','supervisor.db','device-identity.json','config.zip','custom-skills.zip'}, 'Unexpected private state in installer'
+    assert p.name not in {'.env','llm-providers.json','runtimes.json','agentloop.db','supervisor.db','device-identity.json','config.zip','custom-skills.zip'}, 'Unexpected device configuration or private state in installer'
+    relative = p.relative_to(r).as_posix()
+    assert not relative.startswith('agent-loop-runtime/src/'), 'Runtime source must not be shipped in installer'
 PY
 python3 - "$destination" "$sha" "$router" "$web" "$pkg" <<'PY'
 import hashlib,json,sys

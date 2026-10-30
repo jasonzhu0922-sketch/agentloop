@@ -4,6 +4,8 @@ Runtime Host 只能在声明的工具、Python 模块、Node 模块均已可用�
 
 `requirements.txt` 是所有 bundled Skills 共用的 Python 基线，集中固定兼容区间，避免某个 Skill 的临时安装污染另一个 Skill：
 
+macOS/Windows Local Agent 安装包使用 `requirements.local-agent.txt`。它保留图像处理的 `imageio`，但不携带 `imageio-ffmpeg` 的平台二进制。需要视频或音频转码的扩展 Skill 必须使用目标设备的 `ffmpeg`，或通过 `IMAGEIO_FFMPEG_EXE` 指定一个受管控的可执行文件；Docker 和显式声明媒体能力的 Runtime Host 继续使用完整的 `requirements.txt` 基线。
+
 | 能力 | 基线内容 |
 | --- | --- |
 | PDF | `pypdf`、`pdfplumber`、`reportlab`、`qpdf`、Poppler、Ghostscript |

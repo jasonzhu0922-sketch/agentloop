@@ -595,6 +595,7 @@ export function createComputerTools(
       name: "computer_run_command",
       description: [
         "Spawn an executable with an argument array and no shell; requires dangerous-tool consent.",
+        "command is the executable name and args is a separate array containing only its arguments; never put command inside args. Example: {command:'python3',args:['scripts/task.py','query','--request-json','{...}'],cwd:'@skills/hr-report-data'}.",
         "command must be a bare executable name (no path separators or shell syntax).",
         "cwd must be relative to the workspace root; absolute paths are rejected. For an authorized package Skill, cwd may also be the Runtime-provided @skills/<skill-name> execution root shown by load_skill; for an authorized visible directory, cwd may be the Runtime-provided @visible/<root-id> command root.",
         "@skills/<skill-name> and @visible/<root-id> are virtual cwd aliases only; do not pass @skills/... or @visible/... as command arguments or write them into generated scripts as file paths.",

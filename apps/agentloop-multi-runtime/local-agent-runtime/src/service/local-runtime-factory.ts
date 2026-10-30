@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { AppDatabase, AppError, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools, loadMcpToolsFromConfig, type ModelAdapter, type ModelInvocation, type ModelResponse, type ModelRetryReporter, type ModelStreamSink } from "@zhujun/agentloop";
+import { createLocalMemoryPlugin, MemorySettlementWorker, type MemorySettlementModel } from "@zhujun/agentloop-memory";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { loadPracticeProfileConfig, loadStepExecutionStrategyProfileConfig, webToolsOptionsFromEnvironment } from "../../../src/shared/config.ts";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
@@ -11,6 +12,8 @@ import { LocalModelStreamCaptureStore } from "../persistence/model-stream-captur
 import { LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
 import { LocalAgentStateStore } from "../persistence/local-agent-state-store.ts";
 import { consumeModelResponse } from "../../../src/shared/model-proxy.ts";
+import { LocalMemorySettlementReader } from "../persistence/local-memory-settlement-reader.ts";
+import { localRuntimeDatabases, registerLocalRuntimeDatabase, unregisterLocalRuntimeDatabase } from "../persistence/local-memory-runtime-database-registry.ts";
 
 export class CloudProxyModel implements ModelAdapter {
   readonly limits = { contextWindowTokens: 1_000_000, maxOutputTokens: 1_000_000 };
@@ -80,6 +83,32 @@ export function redactMcpDiagnostic(message: string, secretValues: readonly stri
     .reduce((result, value) => result.replaceAll(value, "[redacted]"), message);
 }
 
+function localSettlementModel(
+  modelKey: string,
+  resolveProvider: () => LlmProviderRegistry | undefined,
+): MemorySettlementModel {
+  if (!modelKey.startsWith("local:") || modelKey.length <= "local:".length) {
+    throw new LocalRuntimeSupervisorError(400, "memory_settlement_model_must_be_local");
+  }
+  return {
+    modelKey,
+    complete: async ({ runId, systemPrompt, input, signal }) => {
+      const provider = resolveProvider();
+      if (provider === undefined) throw new LocalRuntimeSupervisorError(409, "memory_settlement_model_unavailable");
+      const model = provider.create(modelKey.slice("local:".length));
+      const response = await model.complete({
+        runId,
+        phase: "compaction",
+        systemPrompt,
+        messages: [{ role: "user", content: JSON.stringify(input) }],
+        tools: [],
+        maxOutputTokens: 6_000,
+      }, signal);
+      return { content: response.content, usage: response.usage };
+    },
+  };
+}
+
 /** Creates the isolated kernel, storage and skill catalog for one device Runtime. */
 export class LocalRuntimeFactory {
   private readonly input: LocalAgentOptions;
@@ -108,6 +137,39 @@ export class LocalRuntimeFactory {
     await mkdir(sharedStorageRoot, { recursive: true });
     await mkdir(this.input.skillPackageStoreRoot, { recursive: true });
     const database = new AppDatabase(databasePath);
+    registerLocalRuntimeDatabase(definition.id, database);
+    // Memory is an explicitly opted-in Local Agent feature. When disabled we
+    // do not even create the SQLite file, plugin, settlement worker, or timer.
+    const memoryEnabled = configuration.memory?.enabled === true;
+    let memoryDatabase: AppDatabase | undefined;
+    let memory: Awaited<ReturnType<typeof createLocalMemoryPlugin>> | undefined;
+    let memoryTenantId: string | undefined;
+    let settlementWorker: MemorySettlementWorker | undefined;
+    if (memoryEnabled) {
+      // Memory is device-local and shared by all Local Runtime instances. Run
+      // evidence remains in each Runtime database; only the Memory SQLite file
+      // is shared, so Runtime lifecycle cannot fork user preferences.
+      memoryDatabase = new AppDatabase(join(dirname(this.input.databasePath), "memory.db"));
+      const localState = await new LocalAgentStateStore(this.input.statePath).read();
+      // A device is the local tenant boundary. Cloud tenant/user identity never
+      // enters the Memory store or crosses the model proxy.
+      memoryTenantId = `local-device:${localState.defaultRuntimeId}`;
+      memory = await createLocalMemoryPlugin({
+        database: memoryDatabase,
+        resolveRunScope: async (runId) => {
+          const row = await database.prepare("SELECT owner_user_id, conversation_id, parent_run_id FROM runs WHERE id = ?").get(runId) as { owner_user_id: string; conversation_id: string | null; parent_run_id: string | null } | undefined;
+          if (row === undefined) return undefined;
+          return {
+            tenantId: memoryTenantId!,
+            ownerUserId: row.owner_user_id,
+            runId,
+            ...(row.conversation_id === null ? {} : { conversationId: row.conversation_id }),
+            ...(row.parent_run_id === null ? {} : { parentRunId: row.parent_run_id }),
+          };
+        },
+      });
+    }
+    let settlementTimer: NodeJS.Timeout | undefined;
     await database.exec(`
       CREATE TABLE IF NOT EXISTS local_runtime_dispatches (
         dispatch_key TEXT PRIMARY KEY, assignment_id TEXT NOT NULL, owner_user_id TEXT NOT NULL,
@@ -138,6 +200,22 @@ export class LocalRuntimeFactory {
       }
       return { provider, configuration: localModelConfiguration };
     };
+    if (memory !== undefined && memoryTenantId !== undefined) {
+      const settlementModel = configuration.memory?.settlementModelKey === undefined
+        ? undefined
+        : localSettlementModel(
+          configuration.memory.settlementModelKey,
+          () => currentModels().provider,
+        );
+      settlementWorker = new MemorySettlementWorker({
+        store: memory.store,
+        reader: new LocalMemorySettlementReader(localRuntimeDatabases, memoryTenantId),
+        consolidate: true,
+        requireSettlementModel: true,
+        experienceBatchSize: 10,
+        ...(settlementModel === undefined ? {} : { settlementModel }),
+      });
+    }
     const packaged = environment.AGENTLOOP_BUNDLED_SKILL_DIRECTORIES?.split(",").map((path) => path.trim()).filter(Boolean);
     const skills = new SkillService(database, {
       packageStoreRoot: this.input.skillPackageStoreRoot,
@@ -153,7 +231,7 @@ export class LocalRuntimeFactory {
     );
     const runs = new RunService({
       requireExplicitModel: true,
-      database, skills, modelFactory: (onRetry, modelKey) => {
+      database, skills, ...(memory === undefined ? {} : { memory }), modelFactory: (onRetry, modelKey) => {
         const { provider, configuration: modelConfiguration } = currentModels();
         if (modelKey === undefined || modelKey.length === 0) throw new AppError("MODEL_ERROR", "model_required", 400);
         if (typeof modelKey === "string" && modelKey.startsWith("cloud:")) {
@@ -191,6 +269,26 @@ export class LocalRuntimeFactory {
     for (const line of localRuntimeMcpStartupLogLines(sanitizedMcpIntegration)) {
       (line.stream === "stdout" ? process.stdout : process.stderr).write(`${line.text}\n`);
     }
+    // A configured MCP source is part of this Runtime's execution contract.
+    // Do not construct a superficially-ready Runtime with a partial tool
+    // catalog: Router admission would succeed and the first Run would only
+    // fail later with CAPABILITY_UNAVAILABLE.  Keep the diagnostic limited to
+    // source keys; the loader's messages may contain endpoint or credential
+    // details even after redaction.
+    if (mcpIntegration.failedServers.length > 0) {
+      await memory?.close?.();
+      await memoryDatabase?.close();
+      unregisterLocalRuntimeDatabase(definition.id, database);
+      await database.close();
+      throw new LocalRuntimeSupervisorError(
+        503,
+        `mcp_startup_failed:${mcpIntegration.failedServers.map((server) => server.key).join(",")}`,
+      );
+    }
+    if (settlementWorker !== undefined) {
+      settlementTimer = setInterval(() => { void settlementWorker!.runOnce(); }, 5_000);
+      settlementTimer.unref();
+    }
     const activeRunIds = new Set<string>();
     const dispatched = await database.prepare("SELECT owner_user_id, remote_run_id FROM local_runtime_dispatches").all() as Array<{ owner_user_id: string; remote_run_id: string }>;
     const restoredAt = Date.now();
@@ -199,6 +297,8 @@ export class LocalRuntimeFactory {
       catch { /* Orphaned ledger rows are not active admissions. */ }
     }
     return { ...definition, database, scopes, runs,
+      ...(memory === undefined || memoryTenantId === undefined ? {} : { memory: { store: memory.store, tenantId: memoryTenantId } }),
+      close: async () => { if (settlementTimer !== undefined) clearInterval(settlementTimer); await memory?.close?.(); await memoryDatabase?.close(); unregisterLocalRuntimeDatabase(definition.id, database); },
       get modelKeys() { return currentModels().provider?.modelKeys().map((key) => `local:${key}`) ?? []; }, activeRunIds };
   }
 

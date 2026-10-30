@@ -203,6 +203,36 @@ test("a failed Runtime can be stopped and returned to the configurable lifecycle
   }
 });
 
+test("startup failures leave a persisted Runtime failed and out of Router advertisements", async () => {
+  const supervisor = new LocalRuntimeSupervisor(new AppDatabase(":memory:"), async () => {
+    throw new Error("mcp_startup_failed:amap-maps");
+  });
+  try {
+    await supervisor.ready("local-default");
+    assert.equal((await supervisor.list())[0]?.status, "failed");
+    assert.deepEqual(supervisor.advertisements(), []);
+  } finally {
+    await supervisor.close();
+  }
+});
+
+test("reload failures persist failed state instead of leaving a ready ghost", async () => {
+  let fail = false;
+  const supervisor = new LocalRuntimeSupervisor(new AppDatabase(":memory:"), async definition => {
+    if (fail) throw new Error("mcp_startup_failed:amap-maps");
+    return fakeRuntime(definition);
+  });
+  try {
+    await supervisor.ready("local-default");
+    fail = true;
+    await assert.rejects(supervisor.reloadRunningInstances(), /mcp_startup_failed:amap-maps/);
+    assert.equal((await supervisor.list())[0]?.status, "failed");
+    assert.deepEqual(supervisor.advertisements(), []);
+  } finally {
+    await supervisor.close();
+  }
+});
+
 test("Runtime extensions are optional, isolated, and mutable only while stopped", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-runtime-configuration-"));
   const customRoot = join(root, "custom-skills");
@@ -785,7 +815,7 @@ test("web keeps strict_local recovery support while normal placement uses the Lo
   assert.match(index, /id="local-runtime-picker"[\s\S]*?id="use-local-runtime"[\s\S]*?id="runtime"/, "the local-execution checkbox must sit before the Runtime selector");
   assert.match(app, /const executionTarget = binding === undefined[\s\S]*?\? isLocalExecution\(\) \? "local" : "cloud"/);
   assert.match(app, /dataPolicy: \{ mode: executionTarget \}/);
-  assert.match(app, /localAgentRouterPath/);
+  assert.doesNotMatch(app, /localAgentRouterPath/, "browser Agent controls must not use Router reverse-control paths");
   assert.match(app, /async function localAgentFetch\(path, init = \{\}\)/);
   assert.match(localAgentClient, /body\.error !== "local_session_invalid" && body\.error !== "local_session_required"/);
   assert.match(app, /await refreshLocalSessionOnce\(\)/);

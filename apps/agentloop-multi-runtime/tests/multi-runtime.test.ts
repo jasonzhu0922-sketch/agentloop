@@ -71,7 +71,7 @@ import {
   localRuntimeToolsRoot,
   requiredLocalRuntimePythonModules,
 } from "../scripts/local-runtime-tools.mjs";
-import { copyPackagedNodeModules, packagedRuntimePythonManifestPath } from "../scripts/package-local-agent-runtime.mjs";
+import { copyPackagedAgentRuntimeSupportFiles, copyPackagedNodeModules, packagedRuntimePythonManifestPath, prunePackagedPythonRuntime } from "../scripts/package-local-agent-runtime.mjs";
 import { runtimeConfigScript, staticFilePath } from "../web/server.mjs";
 
 function runtime(id: string, overrides: Partial<RuntimeInstance> = {}): RuntimeInstance {
@@ -98,6 +98,36 @@ async function localModuleClosure(entry: string, files = new Set<string>()): Pro
   }
   return files;
 }
+
+test("Local Agent packaging copies templates without device configuration or source state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-local-agent-package-support-"));
+  const appRoot = join(root, "app");
+  const destinationRoot = join(root, "resources");
+  try {
+    await mkdir(join(appRoot, "local-agent-runtime/config"), { recursive: true });
+    await writeFile(join(appRoot, "local-agent-runtime/.env.example"), "OPENAI_API_KEY=\n");
+    await writeFile(join(appRoot, "local-agent-runtime/config/llm-providers.example.json"), "{\"providers\":{}}\n");
+    await writeFile(join(appRoot, "local-agent-runtime/config/mcp-servers.json"), "{\"servers\":[]}\n");
+    await writeFile(join(appRoot, "local-agent-runtime/config/llm-providers.json"), "device configuration\n");
+    await writeFile(join(appRoot, "local-agent-runtime/config/runtimes.json"), "persisted runtime state\n");
+    await mkdir(join(appRoot, "local-agent-runtime/src"), { recursive: true });
+    await writeFile(join(appRoot, "local-agent-runtime/src/main.ts"), "source\n");
+
+    await copyPackagedAgentRuntimeSupportFiles({ appRoot, destinationRoot });
+    assert.equal(await readFile(join(destinationRoot, "agent-loop-runtime/.env.example"), "utf8"), "OPENAI_API_KEY=\n");
+    assert.equal(await readFile(join(destinationRoot, "agent-loop-runtime/config/llm-providers.example.json"), "utf8"), "{\"providers\":{}}\n");
+    assert.equal(await readFile(join(destinationRoot, "agent-loop-runtime/config/mcp-servers.json"), "utf8"), "{\"servers\":[]}\n");
+    for (const relativePath of [
+      "agent-loop-runtime/config/llm-providers.json",
+      "agent-loop-runtime/config/runtimes.json",
+      "agent-loop-runtime/src/main.ts",
+    ]) {
+      await assert.rejects(() => readFile(join(destinationRoot, relativePath)));
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("shared state configuration switches between SQLite, PostgreSQL, and role-specific TiDB without changing Host code", () => {
   assert.deepEqual(stateDatabaseConfigFromEnvironment({
@@ -406,6 +436,39 @@ test("local launcher provisions a fixed MarkItDown contract and exposes it to Ru
     "pdf2image", "pdfplumber", "PIL", "pymysql", "pypdf", "pytesseract", "reportlab",
   ]);
   assert.deepEqual(requiredLocalRuntimePythonModules({ RUNTIME_REQUIRED_PYTHON_MODULES: "anthropic, anthropic ,pymysql" }), ["anthropic", "pymysql"]);
+});
+
+test("Local Agent packaging uses a media-light Python baseline", async () => {
+  const appRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+  const requirements = await readFile(join(appRoot, "requirements.local-agent.txt"), "utf8");
+  assert.match(requirements, /^imageio>=/m);
+  assert.match(requirements, /^imageio-ffmpeg>=/m);
+  const macosScript = await readFile(join(appRoot, "scripts/package-local-agent-macos.mjs"), "utf8");
+  const windowsScript = await readFile(join(appRoot, "scripts/package-local-agent-windows.mjs"), "utf8");
+  assert.match(macosScript, /requirements\.local-agent\.txt/);
+  assert.match(windowsScript, /requirements\.local-agent\.txt/);
+});
+
+test("packaged Python pruning removes build artifacts without removing runtime modules", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-packaged-python-prune-"));
+  try {
+    const sitePackages = join(root, "lib/python3.12/site-packages");
+    await mkdir(join(sitePackages, "runtime_module/__pycache__"), { recursive: true });
+    await mkdir(join(sitePackages, "runtime_module/tests"), { recursive: true });
+    await mkdir(join(sitePackages, "pip-24.0.dist-info"), { recursive: true });
+    await mkdir(join(sitePackages, "pip"), { recursive: true });
+    await writeFile(join(sitePackages, "runtime_module/__init__.py"), "value = 1\n");
+    await writeFile(join(sitePackages, "runtime_module/__pycache__/__init__.cpython-312.pyc"), "bytecode\n");
+    await writeFile(join(sitePackages, "runtime_module/tests/test_runtime.py"), "assert True\n");
+    await prunePackagedPythonRuntime(root);
+    assert.equal((await readFile(join(sitePackages, "runtime_module/__init__.py"), "utf8")).trim(), "value = 1");
+    await assert.rejects(() => readFile(join(sitePackages, "runtime_module/__pycache__/__init__.cpython-312.pyc")));
+    await assert.rejects(() => readFile(join(sitePackages, "runtime_module/tests/test_runtime.py")));
+    await assert.rejects(() => readFile(join(sitePackages, "pip/__init__.py")));
+    await assert.rejects(() => readFile(join(sitePackages, "pip-24.0.dist-info/RECORD")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("packaged Local Runtime can invoke Skill-owned Node scripts without host node_modules", async () => {
@@ -765,9 +828,11 @@ test("Multi Runtime Web requests and appends conversation pages of 30", async ()
 
 test("Runtime Host forwards deployment search endpoint and credentials to generic web tools", () => {
   assert.deepEqual(webToolsOptionsFromEnvironment({
+    WEB_SEARCH_PROVIDER: "bocha",
     WEB_SEARCH_ENDPOINT: "https://api.bochaai.com/v1/web-search",
     WEB_SEARCH_API_KEY: "bocha-test-key",
   }), {
+    searchProvider: "bocha",
     searchEndpoint: "https://api.bochaai.com/v1/web-search",
     searchApiKey: "bocha-test-key",
   });
@@ -921,6 +986,10 @@ test("Windows Local Runtime MSI owns protocol activation, tray startup, and fixe
   assert.match(tray, /StartAgent\(\)/);
   assert.match(tray, /StopAgent\(\)/);
   assert.match(tray, /--stop-for-install/);
+  assert.match(tray, /ExtractAssociatedIcon/);
+  assert.match(await readFile(new URL("../distribution/windows/AgentLoopLocalRuntimeTray.csproj", import.meta.url), "utf8"), /ApplicationIcon.*xuanwu-mascot-icon\.ico/);
+  assert.match(macPackager, /xuanwu-mascot-icon\.icns/);
+  assert.match(macPackager, /xuanwu-mascot-icon\.png/);
   assert.match(wix, /agentloop-local-runtime/);
   assert.match(wix, /ProgramFiles6432Folder/);
   assert.match(wix, /MajorUpgrade/);
@@ -935,6 +1004,23 @@ test("Windows Local Runtime MSI owns protocol activation, tray startup, and fixe
   assert.match(packager, /windowsMsiPayload/);
   assert.match(JSON.parse(rootPackage).scripts["package:local-agent:win"], /--workspace agentloop-multi-runtime/);
   assert.match(JSON.parse(workspacePackage).scripts["package:local-agent:win"], /assert-windows-local-agent-build\.mjs.*package-local-agent-windows\.mjs/);
+});
+
+test("Web and packaged Agent expose the Xuanwu brand asset at their serving boundaries", async () => {
+  const [html, login, server, styles, asset] = await Promise.all([
+    readFile(new URL("../web/pages/app.html", import.meta.url), "utf8"),
+    readFile(new URL("../web/pages/login.html", import.meta.url), "utf8"),
+    readFile(new URL("../web/server.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../web/styles/xuanwu.css", import.meta.url), "utf8"),
+    readFile(new URL("../web/assets/xuanwu-mascot-icon.png", import.meta.url)),
+  ]);
+  assert.ok(asset.length > 10_000, "the Web asset must be the real mascot image, not a placeholder");
+  assert.match(html, /xuanwu-mascot-icon\.png/);
+  assert.match(login, /xuanwu-mascot-icon\.png/);
+  assert.match(server, /favicon\.ico/);
+  assert.match(styles, /#d7eee4/);
+  assert.doesNotMatch(styles, /#0f172a/);
+  assert.equal(staticFilePath("/favicon.ico")?.endsWith("/web/assets/xuanwu-mascot-icon.png"), true);
 });
 
 test("Web serves authentication as a dedicated page rather than sidebar controls", async () => {
