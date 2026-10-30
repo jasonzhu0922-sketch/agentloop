@@ -14,6 +14,7 @@ x-runtime-environment: &runtime_environment
   RUNTIME_DISPATCH_TOKEN: ${RUNTIME_DISPATCH_TOKEN:?set in deployment .env}
   RUNTIME_ATTACHMENT_TOKEN: ${RUNTIME_ATTACHMENT_TOKEN:?set in deployment .env}
   LLM_PROVIDER_CONFIG_PATH: /run/config/llm-providers.json
+  MCP_SERVERS_CONFIG_PATH: /run/config/mcp-servers.json
   STEP_EXECUTION_STRATEGY_CONFIG_PATH: ./config/step-execution-strategy.json
   WORKSPACE_ROOT: /app/apps/agentloop-multi-runtime/workspace
   MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-20}

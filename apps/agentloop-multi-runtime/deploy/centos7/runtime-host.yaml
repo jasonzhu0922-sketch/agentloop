@@ -24,3 +24,4 @@
       - ${RUNTIME_WORKSPACE_HOST_PATH:?set in deployment .env}:/app/apps/agentloop-multi-runtime/workspace
       - ${CUSTOM_SKILLS_HOST_PATH:?set in deployment .env}:/app/apps/agentloop-multi-runtime/custom-skills:ro
       - ${LLM_PROVIDER_CONFIG_FILE:?set in deployment .env}:/run/config/llm-providers.json:ro
+      - ${MCP_SERVERS_CONFIG_FILE:-${DEPLOY_ROOT:-/opt/agentloop}/config/mcp-servers.json}:/run/config/mcp-servers.json:ro

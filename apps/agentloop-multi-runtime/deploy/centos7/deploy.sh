@@ -118,6 +118,11 @@ init() {
     cp "$APP_ROOT/config/llm-providers.example.json" "$DEPLOY_ROOT/config/llm-providers.json"
     note "created editable provider configuration: $DEPLOY_ROOT/config/llm-providers.json"
   fi
+  if [ ! -f "$DEPLOY_ROOT/config/mcp-servers.json" ]; then
+    cp "$APP_ROOT/config/mcp-servers.example.json" "$DEPLOY_ROOT/config/mcp-servers.json"
+    chmod 600 "$DEPLOY_ROOT/config/mcp-servers.json"
+    note "created editable MCP configuration: $DEPLOY_ROOT/config/mcp-servers.json"
+  fi
   if [ ! -f "$DEPLOY_ROOT/secrets/runtime.env" ]; then
     cp "$SCRIPT_DIR/runtime.env.example" "$DEPLOY_ROOT/secrets/runtime.env"
     chmod 600 "$DEPLOY_ROOT/secrets/runtime.env"
@@ -134,6 +139,7 @@ init() {
       printf 'DEPLOY_ROOT=%s\n' "$DEPLOY_ROOT"
       printf 'RUNTIME_ENV_FILE=%s/secrets/runtime.env\n' "$DEPLOY_ROOT"
       printf 'LLM_PROVIDER_CONFIG_FILE=%s/config/llm-providers.json\n' "$DEPLOY_ROOT"
+      printf 'MCP_SERVERS_CONFIG_FILE=%s/config/mcp-servers.json\n' "$DEPLOY_ROOT"
       printf 'CUSTOM_SKILLS_HOST_PATH=%s/config/custom-skills\n' "$DEPLOY_ROOT"
       printf 'RUNTIME_WORKSPACE_HOST_PATH=%s/data/workspace\n' "$DEPLOY_ROOT"
       printf 'AGENTLOOP_STATE_DRIVER=sqlite\nAGENTLOOP_STATE_SQLITE_PATH=./data/state/agentloop.db\n'

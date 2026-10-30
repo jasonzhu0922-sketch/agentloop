@@ -62,6 +62,18 @@ class RuntimeControl:
             except ValueError:
                 return 500, {"error": "skill_configuration_read_failed"}
 
+    def mcp_configuration(self):
+        with tempfile.TemporaryDirectory(prefix="agentloop-mcp-read-") as job:
+            result = subprocess.run(["bash", self.helper, "mcp-configuration", job],
+                                    env=dict(os.environ, AGENTLOOP_DEPLOY_ROOT=str(self.root)),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            if result.returncode:
+                return 409, {"error": "mcp_configuration_read_failed"}
+            try:
+                return 200, {"configuration": json.loads(result.stdout)}
+            except ValueError:
+                return 500, {"error": "mcp_configuration_read_failed"}
+
     def start(self, payload=None):
         with self.lock:
             if self.state["status"] == "running":
@@ -72,6 +84,46 @@ class RuntimeControl:
             self.update()
             threading.Thread(target=self.reload, args=(payload,), daemon=True).start()
             return 202, dict(self.state)
+
+    def start_mcp(self, payload):
+        with self.lock:
+            if self.state["status"] == "running":
+                return 409, dict(self.state)
+            self.state = {"id": str(uuid.uuid4()), "operation": "mcp-apply",
+                          "status": "running", "phase": "validating", "startedAt": time.time()}
+            self.update()
+            threading.Thread(target=self.reload_mcp, args=(payload,), daemon=True).start()
+            return 202, dict(self.state)
+
+    def reload_mcp(self, payload):
+        phase = "reload_failed"
+        try:
+            with tempfile.TemporaryDirectory(prefix="agentloop-mcp-apply-") as job:
+                Path(job, "mcp-servers.json").write_text(json.dumps(payload["configuration"]))
+                process = subprocess.Popen(["bash", self.helper, "mcp", job],
+                                           env=dict(os.environ, AGENTLOOP_DEPLOY_ROOT=str(self.root)),
+                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                           universal_newlines=True)
+                for line in process.stdout:
+                    if "Active/nonterminal Runs:" in line:
+                        phase = "active_runs"
+                    elif "Invalid MCP configuration" in line:
+                        phase = "invalid_configuration"
+                    elif "Another production operation holds the lock" in line:
+                        phase = "operation_locked"
+                    elif "Container readiness timed out" in line:
+                        phase = "readiness_failed"
+                    elif line.startswith("Ready:"):
+                        with self.lock:
+                            self.update(phase="checking_readiness")
+                code = process.wait()
+                mcp_servers = json.loads(Path(job, "applied-mcp.json").read_text()) if code == 0 and Path(job, "applied-mcp.json").exists() else []
+                with self.lock:
+                    self.update(status="succeeded" if code == 0 else "failed",
+                                phase="complete" if code == 0 else phase, mcpServers=mcp_servers, finishedAt=time.time())
+        except Exception:
+            with self.lock:
+                self.update(status="failed", phase="reload_failed", finishedAt=time.time())
 
     def reload(self, payload=None):
         phase = "reload_failed"
@@ -127,7 +179,7 @@ def serve(control, socket_path):
         def handle_operation(self):
             if not hmac.compare_digest(self.headers.get("Authorization", "").encode(), ("Bearer " + control.token).encode()):
                 return self.reply(401, {"error": "operator_unauthorized"})
-            if self.path not in ("/runtime-reload", "/model-configuration", "/skill-configuration"):
+            if self.path not in ("/runtime-reload", "/model-configuration", "/mcp-configuration", "/skill-configuration"):
                 return self.reply(404, {"error": "not_found"})
             if self.path == "/model-configuration":
                 if self.command == "GET":
@@ -143,6 +195,22 @@ def serve(control, socket_path):
                     except (ValueError, TypeError, AttributeError):
                         return self.reply(400, {"error": "invalid_configuration_request"})
                     code, state = control.start(payload)
+                    return self.reply(code, state)
+                return self.reply(405, {"error": "method_not_allowed"})
+            if self.path == "/mcp-configuration":
+                if self.command == "GET":
+                    code, body = control.mcp_configuration()
+                    return self.reply(code, body)
+                if self.command == "POST":
+                    try:
+                        size = int(self.headers.get("Content-Length", "0"))
+                        if self.headers.get("Transfer-Encoding") or not 0 < size <= 2 * 1024 * 1024:
+                            raise ValueError()
+                        payload = json.loads(self.rfile.read(size).decode("utf8"))
+                        validate_mcp_payload(payload)
+                    except (ValueError, TypeError, AttributeError):
+                        return self.reply(400, {"error": "invalid_mcp_configuration_request"})
+                    code, state = control.start_mcp(payload)
                     return self.reply(code, state)
                 return self.reply(405, {"error": "method_not_allowed"})
             if self.path == "/skill-configuration":
@@ -238,6 +306,14 @@ def validate_skill_remove_payload(payload):
         raise ValueError()
     name = payload.get("skillName")
     if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name):
+        raise ValueError()
+
+
+def validate_mcp_payload(payload):
+    if not isinstance(payload, dict) or set(payload) != {"configuration"}:
+        raise ValueError()
+    configuration = payload["configuration"]
+    if not isinstance(configuration, dict) or not isinstance(configuration.get("servers"), list):
         raise ValueError()
 
 

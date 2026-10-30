@@ -27,6 +27,7 @@
 | `/opt/agentloop/.env` | Compose 插值：镜像、端口、URL、身份令牌、数据库、容量、配置文件路径 | Docker Compose；只有显式映射的值进入服务 |
 | `/opt/agentloop/secrets/runtime.env` | 模型、MCP 等 Runtime 环境变量；权限 `600` | 所有已部署 Runtime 的 `env_file`；不注入 Router / Web |
 | `/opt/agentloop/config/llm-providers.json` | Provider / 模型定义；`apiKeyEnv` 引用变量名 | 只读挂载到 Runtime 的 `/run/config/llm-providers.json` |
+| `/opt/agentloop/config/mcp-servers.json` | MCP Server 注册、策略与认证引用 | 只读挂载到 Runtime 的 `/run/config/mcp-servers.json` |
 | `/opt/agentloop/config/custom-skills/` | 当前代码发布提交审核后的自定义 Skills；Skill 自有 `.env` 由服务器保留维护 | 只读挂载到各 Runtime |
 | `/opt/agentloop/data/workspace/` | 云端任务共享文件；实际路径由 `RUNTIME_WORKSPACE_HOST_PATH` 指定 | 各 Runtime |
 | `/opt/agentloop/releases/<SHA>/` | 不可变发布源码（含 `custom-skills.zip`）、镜像 manifest、构建记录 | 发布脚本 |

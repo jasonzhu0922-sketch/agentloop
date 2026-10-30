@@ -83,6 +83,42 @@ print(values[0])
 PY
 )
 test -f "$environment_path"
+# MCP configuration is deployment-owned state. New topologies bind this file
+# into every Runtime; the fallback container path lets the first upgrade
+# migrate an older image-owned configuration without losing its contents.
+mcp_config_path=${MCP_SERVERS_CONFIG_FILE:-}
+if [ -z "$mcp_config_path" ] && [ -f "$root/.env" ]; then
+  mcp_config_path=$(python3 - "$root/.env" <<'PY'
+from pathlib import Path
+import sys
+for line in Path(sys.argv[1]).read_text().splitlines():
+    if line.startswith('MCP_SERVERS_CONFIG_FILE='):
+        print(line.split('=', 1)[1].strip().strip('"\x27'))
+        break
+PY
+)
+fi
+mcp_config_path=${mcp_config_path:-$root/config/mcp-servers.json}
+mcp_container_config_path=/app/apps/agentloop-multi-runtime/config/mcp-servers.json
+read_mcp_configuration() {
+  if [ -f "$mcp_config_path" ]; then
+    cat "$mcp_config_path"
+  else
+    docker exec "${runtime_names[0]}" cat "$mcp_container_config_path"
+  fi
+}
+ensure_mcp_configuration_file() {
+  if [ -f "$mcp_config_path" ]; then return; fi
+  install -d -m 700 "$(dirname "$mcp_config_path")"
+  local staging
+  staging=$(mktemp "${mcp_config_path}.XXXXXX")
+  if ! read_mcp_configuration > "$staging"; then
+    rm -f "$staging"
+    return 1
+  fi
+  chmod 600 "$staging"
+  mv "$staging" "$mcp_config_path"
+}
 skills_path=$(docker inspect "${runtime_names[0]}" --format '{{range .Mounts}}{{if eq .Destination "/app/apps/agentloop-multi-runtime/custom-skills"}}{{.Source}}{{end}}{{end}}')
 test -n "$skills_path" && test -d "$skills_path"
 verify_models() {
@@ -127,6 +163,9 @@ TOPOLOGY_PY
   fi
   cp -p "$config_path" "$backup/llm-providers.json"
   cp -p "$environment_path" "$backup/runtime.env"
+  if [ "$operation" = mcp ]; then
+    cp -p "$mcp_config_path" "$backup/mcp-servers.json"
+  fi
   if [ "$operation" = cloud ] || [ "$operation" = skills ] || [ "$operation" = skills-remove ]; then
     cp -a "$skills_path" "$backup/custom-skills"
   fi
@@ -134,7 +173,9 @@ TOPOLOGY_PY
     echo '#!/usr/bin/env bash'
     echo 'set -euo pipefail'
     printf 'exec 9>%q\nflock -n 9\n' "$root/.production-release.lock"
-    if [ "$operation" != llm ]; then
+    if [ "$operation" = mcp ]; then
+      printf 'cp -p %q %q\n' "$backup/mcp-servers.json" "$mcp_config_path"
+    elif [ "$operation" != llm ]; then
       printf 'cp -p %q %q\n' "$backup/deployment.env" "$root/.env"
     else
       printf 'cp -p %q %q\n' "$backup/llm-providers.json" "$config_path"
@@ -249,6 +290,7 @@ if old.is_dir():
         if destination.parent.is_dir() and not destination.exists(): shutil.copy2(env,destination)
 PY
   template_dir=$source_dir/apps/agentloop-multi-runtime/deploy/centos7
+  ensure_mcp_configuration_file
   compose_file=$(render_topology "$template_dir" "$root/.env")
   idle
   umask 077
@@ -296,6 +338,7 @@ for name,value,maximum in [('RUNTIME_COUNT',sys.argv[2],256),('MAX_CONCURRENT_RU
 p.write_text('\n'.join(lines)+'\n')
 TOPOLOGY_PY
   template_dir=${5:-$template_dir}
+  ensure_mcp_configuration_file
   compose_file=$(render_topology "$template_dir" "$candidate")
   # Validate desired config without changing the live deployment env.
   docker compose --project-directory "$root" --env-file "$candidate" -f "$compose_file" config -q
@@ -342,6 +385,38 @@ PY
   verify_models
   echo "Reloaded ${#runtime_services[@]} Runtime(s); readiness and effective model configuration checks passed."
   echo 'A fresh model-backed Run is a separate acceptance check.'
+  exit 0
+elif [ "$operation" = mcp-configuration ]; then
+  read_mcp_configuration
+  exit 0
+elif [ "$operation" = mcp ]; then
+  candidate=$job/mcp-servers.json
+  test -f "$candidate"
+  # Validate the neutral configuration contract in the serving image before
+  # touching the persisted file. This checks schema and credential references,
+  # but does not connect to an MCP server or expose its values in output.
+  docker exec -i "${runtime_names[0]}" node --input-type=module -e "
+    import fs from 'node:fs';
+    import {parseMcpServersConfig} from '@zhujun/agentloop';
+    try { parseMcpServersConfig(JSON.parse(fs.readFileSync(0, \"utf8\"))); }
+    catch { console.error(\"Invalid MCP configuration; production unchanged.\"); process.exit(1); }
+  " < "$candidate"
+  ensure_mcp_configuration_file
+  idle
+  umask 077
+  make_backup
+  trap rollback ERR
+  install -m 600 "$candidate" "$mcp_config_path"
+  dc config -q
+  dc up -d --no-deps --no-build --force-recreate "${runtime_services[@]}"
+  ready "${runtime_names[@]}"
+  python3 - "$mcp_config_path" "$job/applied-mcp.json" <<'PY'
+import json,sys
+config=json.load(open(sys.argv[1]))
+json.dump([dict(key=s['key'],displayName=s.get('displayName',s['key'])) for s in config.get('servers',[])],open(sys.argv[2],'w'),ensure_ascii=False)
+PY
+  echo "Reloaded ${#runtime_services[@]} Runtime(s); MCP configuration and readiness checks passed."
+  echo 'MCP server reachability and a fresh model-backed Run are separate acceptance checks.'
   exit 0
 elif [ "$operation" = skills-configuration ]; then
   python3 - "$skills_path" <<'PY'

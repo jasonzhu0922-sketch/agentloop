@@ -91,5 +91,5 @@ async function applyConfiguration() {
   finally { busy = false; $("apply-config").disabled = false; $("load-production-config").disabled = false; }
 }
 
-const messages = { operator_unauthorized: "运维凭证不正确。", runtime_control_not_configured: "尚未启用服务器 Runtime 控制服务。", runtime_control_unavailable: "无法连接服务器 Runtime 控制服务。", invalid_mcp_configuration: "MCP 配置无效，请检查 JSON 和 Server 字段。", invalid_mcp_configuration_request: "提交的 MCP 配置请求无效。", configuration_too_large: "配置超过 2 MB。" };
+const messages = { operator_unauthorized: "运维凭证不正确。", runtime_control_not_configured: "尚未启用服务器 Runtime 控制服务。", runtime_control_unavailable: "无法连接服务器 Runtime 控制服务。", mcp_configuration_read_failed: "无法读取生产 MCP 配置，请稍后重试。", invalid_mcp_configuration: "MCP 配置无效，请检查 JSON 和 Server 字段。", invalid_mcp_configuration_request: "提交的 MCP 配置请求无效。", configuration_too_large: "配置超过 2 MB。" };
 function setStatus(text, error) { status.textContent = text; status.dataset.state = error ? "error" : ""; }

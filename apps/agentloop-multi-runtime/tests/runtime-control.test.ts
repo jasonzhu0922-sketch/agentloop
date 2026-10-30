@@ -26,6 +26,7 @@ test("Web -> Unix host control authenticates, tracks reload, rejects overlap and
   await writeFile(helper, `#!/bin/bash
 set -eu
 if [ "$1" = configuration ]; then echo '{"models":{"fixture":{}},"providers":{}}'; exit 0; fi
+if [ "$1" = mcp-configuration ]; then echo '{"defaultTrust":"untrusted","servers":[]}'; exit 0; fi
 if [ "$1" = skills-configuration ]; then echo '[{"name":"fixture-skill","description":"Fixture skill","packageHash":"hash","fileCount":1,"totalBytes":10,"hasEnvironment":false}]'; exit 0; fi
 if [ "$1" = llm ]; then
   cp "$2/llm-providers.json" '${root}/captured.json'
@@ -36,6 +37,9 @@ elif [ "$1" = skills ]; then
 elif [ "$1" = skills-remove ]; then
   cp "$2/skill-name" '${root}/removed-skill'
   printf '%s' '[]' > "$2/applied-skills.json"
+elif [ "$1" = mcp ]; then
+  cp "$2/mcp-servers.json" '${root}/captured-mcp.json'
+  printf '%s' '[{"key":"fixture-mcp","displayName":"Fixture MCP"}]' > "$2/applied-mcp.json"
 elif [ "$1" != reload ]; then exit 1; fi
 echo started >> '${root}/starts'
 while [ ! -f '${root}/finish' ]; do sleep 0.02; done
@@ -97,6 +101,17 @@ printf '%s' '[{"key":"fixture","displayName":"Fixture"}]' > "$2/applied-models.j
   assert.deepEqual(applyState.models, [{ key: "fixture", displayName: "Fixture" }]);
   assert.deepEqual(JSON.parse(await readFile(join(root, "captured.json"), "utf8")), payload.configuration);
   assert.doesNotMatch(JSON.stringify(applyState), /provider-secret/);
+  const mcpUrl = url.replace("runtime-reload", "mcp-configuration");
+  const mcpRead = await fetch(mcpUrl, { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(mcpRead.status, 200);
+  assert.deepEqual((await mcpRead.json()).configuration, { defaultTrust: "untrusted", servers: [] });
+  const mcpPayload = { configuration: { defaultTrust: "untrusted", servers: [] } };
+  const mcpApply = await fetch(mcpUrl, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(mcpPayload) });
+  assert.equal(mcpApply.status, 202);
+  const mcpState = await until(async () => (await call()).json(), s => s.operation === "mcp-apply" && s.status !== "running");
+  assert.equal(mcpState.status, "succeeded");
+  assert.deepEqual(JSON.parse(await readFile(join(root, "captured-mcp.json"), "utf8")), mcpPayload.configuration);
+  assert.deepEqual(mcpState.mcpServers, [{ key: "fixture-mcp", displayName: "Fixture MCP" }]);
   const skillUrl = url.replace("runtime-reload", "skill-configuration");
   const skillRead = await fetch(skillUrl, { headers: { authorization: `Bearer ${token}` } });
   assert.equal(skillRead.status, 200);
