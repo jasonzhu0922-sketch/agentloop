@@ -11,6 +11,7 @@ export interface LocalModelProviderInput {
 }
 
 export interface LocalModelInput {
+  readonly [parameter: string]: unknown;
   readonly key: string;
   readonly displayName: string;
   readonly providerModel: string;
@@ -25,6 +26,7 @@ export interface LocalModelInput {
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   readonly reasoningSummary?: "auto" | "detailed";
   readonly thinkingMode?: "enabled" | "disabled";
+  readonly enableThinking?: boolean;
   readonly thinkingEffort?: "low" | "medium" | "high";
   readonly toolChoiceMode?: "native" | "constrained-as-auto" | "named-as-required";
   readonly runtimeContextPlacement?: "system" | "user-envelope";
@@ -213,10 +215,12 @@ function normalizeInput(value: LocalModelConfigurationInput): LocalModelConfigur
     const models = (provider.models as LocalModelProviderInput["models"]).map((model) => {
       if (!model || typeof model !== "object" || typeof model.key !== "string" || model.key.length > 100 || !/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(model.key) || modelKeys.has(model.key)) throw new TypeError("local_model_configuration_invalid");
       modelKeys.add(model.key);
-      const allowed = new Set(["key", "displayName", "providerModel", "protocol", "contextWindowTokens", "maxOutputTokens",
-        "temperature", "topP", "timeoutMs", "maxAttempts", "retryDelayMs", "reasoningEffort", "reasoningSummary", "thinkingMode", "thinkingEffort", "toolChoiceMode", "runtimeContextPlacement", "reasoningEncryptedContent",
-        "reasoningVisibility", "planningThinkingMode", "chatTemplateKwargs"]);
-      if (Object.keys(model).some((key) => !allowed.has(key))) throw new TypeError("local_model_parameter_unknown");
+      // Model-specific provider parameters are intentionally open-ended. The
+      // shared registry validates the managed fields, bounds JSON extensions,
+      // and forwards the rest to the selected provider. Connection-bearing
+      // fields remain reserved and cannot be smuggled into a request body.
+      const forbiddenExtensions = new Set(["apiKey", "apiKeyEnv", "baseUrl", "kind", "providerKey"]);
+      if (Object.keys(model).some((key) => forbiddenExtensions.has(key))) throw new TypeError("local_model_parameter_unknown");
       // Keep every admitted parameter. The canonical registry below validates
       // protocol constraints and numeric ranges before anything is persisted.
       return { ...model, key: model.key, displayName: text(model.displayName, 100), providerModel: text(model.providerModel, 160) };

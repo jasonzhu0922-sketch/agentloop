@@ -17,6 +17,20 @@ const MAX_CONTEXT_WINDOW_TOKENS = 10_000_000;
 const MAX_OUTPUT_TOKENS = 1_000_000;
 const MAX_TIMEOUT_MS = 30 * 60 * 1_000;
 
+const MODEL_PARAMETER_NAMES = [
+  "providerKey", "providerModel", "displayName", "contextWindowTokens", "maxOutputTokens", "timeoutMs",
+  "maxAttempts", "retryDelayMs", "toolChoiceMode", "runtimeContextPlacement", "reasoningSummary",
+  "reasoningEncryptedContent", "reasoningEffort", "temperature", "topP", "thinkingMode", "enableThinking",
+  "thinkingEffort", "reasoningVisibility", "planningThinkingMode", "chatTemplateKwargs", "protocol",
+] as const;
+
+const PROVIDER_PARAMETER_NAMES = [
+  "kind", "baseUrl", "apiKey", "apiKeyEnv", "defaultModel", "contextWindowTokens", "maxOutputTokens",
+  "timeoutMs", "maxAttempts", "retryDelayMs", "toolChoiceMode", "runtimeContextPlacement", "reasoningSummary",
+  "reasoningEncryptedContent", "reasoningEffort", "temperature", "topP", "thinkingMode", "enableThinking",
+  "thinkingEffort", "reasoningVisibility", "planningThinkingMode", "chatTemplateKwargs", "protocol",
+] as const;
+
 export interface LlmProviderSummary {
   readonly key: string;
   readonly kind: "openai-compatible";
@@ -48,10 +62,12 @@ interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
   readonly topP?: number;
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   readonly thinkingMode?: "enabled" | "disabled";
+  readonly enableThinking?: boolean;
   readonly thinkingEffort?: "low" | "medium" | "high";
   readonly reasoningVisibility: "visible" | "hidden";
   readonly planningThinkingMode?: "enabled" | "disabled";
   readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
+  readonly providerParameters: Readonly<Record<string, unknown>>;
   readonly protocol: "chat-completions" | "responses";
 }
 
@@ -72,10 +88,12 @@ interface OpenAICompatibleModelConfig extends LlmModelSummary {
   readonly topP?: number;
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   readonly thinkingMode?: "enabled" | "disabled";
+  readonly enableThinking?: boolean;
   readonly thinkingEffort?: "low" | "medium" | "high";
   readonly reasoningVisibility: "visible" | "hidden";
   readonly planningThinkingMode?: "enabled" | "disabled";
   readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
+  readonly providerParameters: Readonly<Record<string, unknown>>;
   readonly protocol: "chat-completions" | "responses";
 }
 
@@ -230,10 +248,12 @@ export class LlmProviderRegistry {
       ...(model.topP === undefined ? {} : { topP: model.topP }),
       ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
       ...(model.thinkingMode === undefined ? {} : { thinkingMode: model.thinkingMode }),
+      ...(model.enableThinking === undefined ? {} : { enableThinking: model.enableThinking }),
       ...(model.thinkingEffort === undefined ? {} : { thinkingEffort: model.thinkingEffort }),
       reasoningVisibility: model.reasoningVisibility,
       ...(model.planningThinkingMode === undefined ? {} : { planningThinkingMode: model.planningThinkingMode }),
       ...(model.chatTemplateKwargs === undefined ? {} : { chatTemplateKwargs: model.chatTemplateKwargs }),
+      providerParameters: model.providerParameters,
       ...(onRetry === undefined ? {} : { onRetry }),
       ...(this.streamRawCaptureWriter === undefined ? {} : { streamRawCaptureWriter: this.streamRawCaptureWriter }),
     };
@@ -293,35 +313,7 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
   const providerKey = requireProviderKey(key, `${documentLabel}.providers key`);
   const label = `LLM provider "${providerKey}"`;
   const config = requireObject(value, label);
-  assertExactKeys(
-    config,
-    [
-      "kind",
-      "baseUrl",
-      "apiKey",
-      "apiKeyEnv",
-      "defaultModel",
-      "contextWindowTokens",
-      "maxOutputTokens",
-      "timeoutMs",
-      "maxAttempts",
-      "retryDelayMs",
-      "toolChoiceMode",
-      "runtimeContextPlacement",
-      "reasoningSummary",
-      "reasoningEncryptedContent",
-      "reasoningEffort",
-      "temperature",
-      "topP",
-      "thinkingMode",
-      "thinkingEffort",
-      "reasoningVisibility",
-      "planningThinkingMode",
-      "chatTemplateKwargs",
-      "protocol",
-    ],
-    label,
-  );
+  const providerParameters = collectProviderParameters(config, PROVIDER_PARAMETER_NAMES, `${label}.providerParameters`);
   if (config.kind !== "openai-compatible") {
     throw new Error(`${label} has unsupported kind`);
   }
@@ -378,6 +370,7 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
   const topP = optionalSamplingNumber(config.topP, 1, `${label}.topP`);
   const reasoningEffort = optionalReasoningEffort(config.reasoningEffort, `${label}.reasoningEffort`);
   const thinkingMode = optionalThinkingMode(config.thinkingMode, `${label}.thinkingMode`);
+  const enableThinking = optionalBoolean(config.enableThinking, false, `${label}.enableThinking`);
   const thinkingEffort = optionalThinkingEffort(config.thinkingEffort, `${label}.thinkingEffort`);
   const reasoningVisibility = optionalReasoningVisibility(config.reasoningVisibility, `${label}.reasoningVisibility`);
   const planningThinkingMode = optionalThinkingMode(config.planningThinkingMode, `${label}.planningThinkingMode`);
@@ -418,10 +411,12 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     ...(topP === undefined ? {} : { topP }),
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     ...(thinkingMode === undefined ? {} : { thinkingMode }),
+    ...(config.enableThinking === undefined ? {} : { enableThinking }),
     ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
     reasoningVisibility,
     ...(planningThinkingMode === undefined ? {} : { planningThinkingMode }),
     ...(chatTemplateKwargs === undefined ? {} : { chatTemplateKwargs }),
+    providerParameters,
     protocol,
   };
 }
@@ -447,33 +442,7 @@ function parseModel(
   const modelKey = requireModelKey(key, `${documentLabel}.models key`);
   const label = `LLM model "${modelKey}"`;
   const config = requireObject(value, label);
-  assertExactKeys(
-    config,
-    [
-      "providerKey",
-      "providerModel",
-      "displayName",
-      "contextWindowTokens",
-      "maxOutputTokens",
-      "timeoutMs",
-      "maxAttempts",
-      "retryDelayMs",
-      "toolChoiceMode",
-      "runtimeContextPlacement",
-      "reasoningSummary",
-      "reasoningEncryptedContent",
-      "reasoningEffort",
-      "temperature",
-      "topP",
-      "thinkingMode",
-      "thinkingEffort",
-      "reasoningVisibility",
-      "planningThinkingMode",
-      "chatTemplateKwargs",
-      "protocol",
-    ],
-    label,
-  );
+  const modelParameters = collectProviderParameters(config, MODEL_PARAMETER_NAMES, `${label}.providerParameters`);
   const providerKey = requireProviderKey(config.providerKey, `${label}.providerKey`);
   const provider = providersByKey.get(providerKey);
   if (provider === undefined) throw new Error(`${label}.providerKey must name a configured provider`);
@@ -487,6 +456,7 @@ function parseModel(
   );
   const protocol = optionalProtocol(config.protocol, `${label}.protocol`, provider.protocol);
   const thinkingMode = optionalThinkingMode(config.thinkingMode, `${label}.thinkingMode`, provider.thinkingMode);
+  const enableThinking = optionalBoolean(config.enableThinking, provider.enableThinking ?? false, `${label}.enableThinking`);
   const planningThinkingMode = optionalThinkingMode(
     config.planningThinkingMode,
     `${label}.planningThinkingMode`,
@@ -518,6 +488,12 @@ function parseModel(
     config.chatTemplateKwargs,
     `${label}.chatTemplateKwargs`,
     provider.chatTemplateKwargs,
+  );
+  const providerParameters = collectProviderParameters(
+    modelParameters,
+    [],
+    `${label}.providerParameters`,
+    provider.providerParameters,
   );
   if (thinkingMode !== undefined && protocol !== "chat-completions") {
     throw new Error(`${label}.thinkingMode is supported only with chat-completions`);
@@ -570,10 +546,12 @@ function parseModel(
     ...(topP === undefined ? {} : { topP }),
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     ...(thinkingMode === undefined ? {} : { thinkingMode }),
+    ...(config.enableThinking === undefined && provider.enableThinking === undefined ? {} : { enableThinking }),
     ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
     reasoningVisibility,
     ...(planningThinkingMode === undefined ? {} : { planningThinkingMode }),
     ...(chatTemplateKwargs === undefined ? {} : { chatTemplateKwargs }),
+    providerParameters,
     protocol,
   };
 }
@@ -602,10 +580,12 @@ function legacyModelsFromProviders(
     ...(provider.topP === undefined ? {} : { topP: provider.topP }),
     ...(provider.reasoningEffort === undefined ? {} : { reasoningEffort: provider.reasoningEffort }),
     ...(provider.thinkingMode === undefined ? {} : { thinkingMode: provider.thinkingMode }),
+    ...(provider.enableThinking === undefined ? {} : { enableThinking: provider.enableThinking }),
     ...(provider.thinkingEffort === undefined ? {} : { thinkingEffort: provider.thinkingEffort }),
     reasoningVisibility: provider.reasoningVisibility,
     ...(provider.planningThinkingMode === undefined ? {} : { planningThinkingMode: provider.planningThinkingMode }),
     ...(provider.chatTemplateKwargs === undefined ? {} : { chatTemplateKwargs: provider.chatTemplateKwargs }),
+    providerParameters: provider.providerParameters,
     protocol: provider.protocol,
   }));
 }
@@ -625,6 +605,37 @@ function requireObject(value: unknown, label: string): Record<string, unknown> {
 function assertExactKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
   const invalid = Object.keys(value).filter((key) => !allowed.includes(key));
   if (invalid.length > 0) throw new Error(`${label} contains unsupported fields: ${invalid.join(", ")}`);
+}
+
+/**
+ * Preserve provider-owned request parameters without making the registry know
+ * every vendor extension. Core connection and runtime fields are excluded by
+ * the caller's known-name list; extensions are still bounded to JSON data so
+ * they can be durably persisted and safely serialized onto the wire.
+ */
+function collectProviderParameters(
+  value: Record<string, unknown>,
+  known: readonly string[],
+  label: string,
+  inherited: Readonly<Record<string, unknown>> = {},
+): Readonly<Record<string, unknown>> {
+  const parameters: Record<string, unknown> = { ...inherited };
+  for (const [key, parameter] of Object.entries(value)) {
+    if (known.includes(key)) continue;
+    if (key === "__proto__" || key === "prototype" || key === "constructor") {
+      throw new Error(`${label} contains a forbidden extension key: ${key}`);
+    }
+    parameters[key] = parameter;
+  }
+  try {
+    const serialized = JSON.stringify(parameters);
+    if (serialized === undefined || serialized.length > 65_536) throw new Error();
+    const parsed = JSON.parse(serialized) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+    return parsed as Readonly<Record<string, unknown>>;
+  } catch {
+    throw new Error(`${label} must contain JSON values of at most 65536 characters`);
+  }
 }
 
 function requireProviderKey(value: unknown, label: string): string {

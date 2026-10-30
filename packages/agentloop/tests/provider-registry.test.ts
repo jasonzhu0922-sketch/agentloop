@@ -269,6 +269,41 @@ test("the provider registry forwards model chat template kwargs over provider de
   }
 });
 
+test("the provider registry forwards Bailian thinking controls and unknown model extensions", async (t) => {
+  const registry = LlmProviderRegistry.fromEnvironment({
+    LLM_PROVIDERS_JSON: JSON.stringify({
+      defaultProvider: "bailian",
+      defaultModelKey: "deepseek-flash",
+      providers: {
+        bailian: {
+          kind: "openai-compatible",
+          baseUrl: "https://models.example.test/v1",
+          apiKeyEnv: "BAILIAN_API_KEY",
+          defaultModel: "deepseek-v4.1-flash",
+        },
+      },
+      models: {
+        "deepseek-flash": {
+          providerKey: "bailian",
+          providerModel: "deepseek-v4.1-flash",
+          protocol: "chat-completions",
+          enableThinking: false,
+          providerSpecificFlag: true,
+        },
+      },
+    }),
+    BAILIAN_API_KEY: "bailian-secret",
+  });
+  let body: Record<string, unknown> | undefined;
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    return Response.json({ choices: [{ finish_reason: "stop", message: { content: "ok" } }] });
+  });
+  await registry.create("deepseek-flash").complete({ runId: "bailian-extension", phase: "execution", systemPrompt: "Test", messages: [], tools: [] });
+  assert.equal(body?.enable_thinking, false);
+  assert.equal(body?.providerSpecificFlag, true);
+});
+
 test("the provider registry passes a Responses reasoning effort only to the selected Responses model", async () => {
   const registry = LlmProviderRegistry.fromEnvironment({
     LLM_PROVIDERS_JSON: JSON.stringify({
