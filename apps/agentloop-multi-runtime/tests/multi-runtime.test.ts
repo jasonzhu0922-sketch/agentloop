@@ -930,6 +930,8 @@ test("local launcher gives Router and Runtime Hosts the same shared workspace mo
   );
   assert.match(routerEnvironment, /RUNTIME_WORKSPACE_ROOT:\s*sharedWorkspaceRoot/);
   assert.match(source, /WORKSPACE_ROOT:\s*sharedWorkspaceRoot/);
+  assert.match(source, /RUNTIME_CONTROL_DEV_ENVIRONMENT:\s*providerEnvFile/,
+    "the development cloud model control must write credentials to the same env file used by Runtime Hosts");
   const localAgentEnvironment = source.slice(
     source.indexOf('children.push(start("local-agent"'),
     source.indexOf('for (let index = 0;', source.indexOf('children.push(start("local-agent"')),

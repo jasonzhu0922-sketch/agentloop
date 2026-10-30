@@ -53,9 +53,10 @@ export function createWebServer({ installerDirectory = process.env.LOCAL_AGENT_D
   runtimeControlDevSkillsRoot = process.env.RUNTIME_CONTROL_DEV_SKILLS_ROOT ?? resolve(root, "..", "custom-skills"),
   runtimeControlDevToken = process.env.RUNTIME_CONTROL_DEV_TOKEN ?? "development-operator-token",
   runtimeControlDevConfiguration = process.env.LLM_PROVIDER_CONFIG_PATH,
+  runtimeControlDevEnvironment = resolve(root, "..", process.env.RUNTIME_CONTROL_DEV_ENVIRONMENT ?? process.env.LLM_PROVIDER_ENV_FILE ?? ".env"),
   runtimeControlDevMcpConfiguration = process.env.MCP_SERVERS_CONFIG_PATH } = {}) {
   const devRuntimeControl = runtimeControlDevMode && !runtimeControlSocket
-    ? createDevRuntimeControl({ root: runtimeControlDevRoot, skillsRoot: runtimeControlDevSkillsRoot, token: runtimeControlDevToken, configurationPath: runtimeControlDevConfiguration, mcpConfigurationPath: runtimeControlDevMcpConfiguration })
+    ? createDevRuntimeControl({ root: runtimeControlDevRoot, skillsRoot: runtimeControlDevSkillsRoot, token: runtimeControlDevToken, configurationPath: runtimeControlDevConfiguration, environmentPath: runtimeControlDevEnvironment, mcpConfigurationPath: runtimeControlDevMcpConfiguration })
     : undefined;
   return createServer(async (request, response) => {
     // This is the local control-plane UI.  Its browser state and Router

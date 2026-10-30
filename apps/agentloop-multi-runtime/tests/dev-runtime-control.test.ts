@@ -71,17 +71,20 @@ test("development cloud Skill control validates and persists a ZIP without invok
 test("development cloud model control persists the applied catalog for the next Runtime restart", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-dev-model-control-"));
   const configurationPath = join(root, "config", "llm-providers.json");
+  const environmentPath = join(root, ".env");
   const original = { defaultModelKey: "old-model", providers: { provider: { defaultModel: "old-model" } }, models: { "old-model": { providerKey: "provider", providerModel: "old-model" } } };
   await mkdir(dirname(configurationPath), { recursive: true });
   await writeFile(configurationPath, `${JSON.stringify(original)}\n`);
+  await writeFile(environmentPath, "MODEL_KEY=old-secret\nWEB_SEARCH_DISABLED=1\n", { mode: 0o600 });
   try {
-    const control = createDevRuntimeControl({ root: join(root, "control"), configurationPath, token: "development-token" });
+    const control = createDevRuntimeControl({ root: join(root, "control"), configurationPath, environmentPath, token: "development-token" });
     const next = { defaultModelKey: "new-model", providers: { provider: { defaultModel: "new-model" } }, models: { "new-model": { providerKey: "provider", providerModel: "new-model", displayName: "New model" } } };
-    const started = await call(control, "POST", "/model-configuration", "development-token", { configuration: next, credentialUpdates: {} });
+    const started = await call(control, "POST", "/model-configuration", "development-token", { configuration: next, credentialUpdates: { MODEL_KEY: "new-secret" } });
     assert.equal(started.status, 202);
     assert.deepEqual(JSON.parse(await readFile(configurationPath, "utf8")), next);
+    assert.equal(await readFile(environmentPath, "utf8"), "MODEL_KEY='new-secret'\nWEB_SEARCH_DISABLED=1\n");
 
-    const restartedControl = createDevRuntimeControl({ root: join(root, "control"), configurationPath, token: "development-token" });
+    const restartedControl = createDevRuntimeControl({ root: join(root, "control"), configurationPath, environmentPath, token: "development-token" });
     const loaded = await call(restartedControl, "GET", "/model-configuration", "development-token");
     assert.deepEqual(loaded.body.configuration.models, next.models);
   } finally {

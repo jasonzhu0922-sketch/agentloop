@@ -3,6 +3,7 @@ import { copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFil
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { validateSkillArchive } from "./skill-archive-validator.mjs";
+import { mergeEnvLines } from "./pages/cloud-model-config.js";
 
 const SKILL_ARCHIVE_LIMITS = Object.freeze({
   maxArchiveBytes: 90 * 1024 * 1024,
@@ -14,12 +15,13 @@ const SKILL_ARCHIVE_LIMITS = Object.freeze({
 
 // Development-only substitute for the host-owned production control daemon.
 // It intentionally writes below data/local and never invokes Docker or shell.
-export function createDevRuntimeControl({ root, skillsRoot, token = "development-operator-token", configurationPath, mcpConfigurationPath } = {}) {
+export function createDevRuntimeControl({ root, skillsRoot, token = "development-operator-token", configurationPath, mcpConfigurationPath, environmentPath } = {}) {
   const storeRoot = resolve(root ?? "./data/local/cloud-skills");
   const customSkillsRoot = resolve(skillsRoot ?? join(storeRoot, "active"));
   const statePath = join(storeRoot, "runtime-reload.json");
   const modelPath = configurationPath ? resolve(configurationPath) : undefined;
   const mcpPath = mcpConfigurationPath ? resolve(mcpConfigurationPath) : undefined;
+  const envPath = environmentPath ? resolve(environmentPath) : undefined;
   let state = { status: "idle" };
   let configuration = { providers: {}, models: {} };
   let mcpConfiguration = { defaultTrust: "untrusted", servers: [] };
@@ -124,6 +126,25 @@ export function createDevRuntimeControl({ root, skillsRoot, token = "development
       await mkdir(dirname(modelPath), { recursive: true, mode: 0o700 });
       await writeFile(temporaryPath, `${JSON.stringify(value.configuration, null, 2)}\n`, { mode: 0o600 });
       await rename(temporaryPath, modelPath);
+    }
+    if (envPath && (typeof value.environment === "string" || (value.credentialUpdates && typeof value.credentialUpdates === "object" && Object.keys(value.credentialUpdates).length > 0))) {
+      // Keep the same boundary as production control: an imported environment
+      // is the base, otherwise merge explicitly entered credentials into the
+      // existing Runtime environment. Never replace unrelated variables.
+      const existing = typeof value.environment === "string"
+        ? value.environment
+        : await readFile(envPath, "utf8").catch(() => "");
+      const updates = value.credentialUpdates && typeof value.credentialUpdates === "object"
+        ? Object.entries(value.credentialUpdates)
+        : [];
+      const merged = updates.length > 0
+        ? mergeEnvLines(existing.split(/\r?\n/), updates).join("\n")
+        : existing;
+      const temporaryPath = `${envPath}.${process.pid}.tmp`;
+      await mkdir(dirname(envPath), { recursive: true, mode: 0o700 });
+      const output = updates.length > 0 && !merged.endsWith("\n") ? `${merged}\n` : merged;
+      await writeFile(temporaryPath, output, { mode: 0o600 });
+      await rename(temporaryPath, envPath);
     }
     configuration = value.configuration;
     state = { id: cryptoRandomId(), operation: "apply", status: "succeeded", phase: "complete", models: Object.entries(configuration.models ?? {}).map(([key, model]) => ({ key, displayName: model?.displayName ?? key })), finishedAt: Date.now() / 1000 };

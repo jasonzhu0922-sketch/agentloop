@@ -7,5 +7,6 @@ export function createDevRuntimeControl(options?: {
   readonly skillsRoot?: string;
   readonly token?: string;
   readonly configurationPath?: string;
+  readonly environmentPath?: string;
   readonly mcpConfigurationPath?: string;
 }): DevRuntimeControl;

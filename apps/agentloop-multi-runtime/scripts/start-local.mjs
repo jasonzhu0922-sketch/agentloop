@@ -188,6 +188,7 @@ children.push(start("web", "web/server.mjs", {
   RUNTIME_CONTROL_DEV_TOKEN: process.env.RUNTIME_CONTROL_DEV_TOKEN ?? "development-operator-token",
   RUNTIME_CONTROL_DEV_ROOT: process.env.RUNTIME_CONTROL_DEV_ROOT ?? join(runtimeDataRoot, "cloud-skills"),
   RUNTIME_CONTROL_DEV_SKILLS_ROOT: process.env.RUNTIME_CONTROL_DEV_SKILLS_ROOT ?? join(appRoot, "custom-skills"),
+  RUNTIME_CONTROL_DEV_ENVIRONMENT: providerEnvFile,
 }));
 
 process.stdout.write(`Starting multi-runtime locally with ${runtimeCount} Runtime Host(s).\n`);

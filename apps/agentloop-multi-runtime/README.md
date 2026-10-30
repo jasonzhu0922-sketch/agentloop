@@ -125,7 +125,7 @@ npm run start:multi-runtime -- --runtimes 4
 
 `--runtime-count 4`、`-n 4` 和 `RUNTIME_COUNT=4` 等价。Host 使用 `general-01` 起始的独立端口，默认共用 `data/local/agentloop.db` 与 `data/local/workspace`；可通过 `AGENTLOOP_STATE_*` 和 `RUNTIME_WORKSPACE_ROOT` 分别指向共享状态库与同一个已挂载的物理工作区。启动器先等待 Router 健康后才启动 Host，避免本地共享 SQLite/WAL 的初始化竞争。可用 `RUNTIME_BASE_PORT`、`PORT`、`WEB_PORT`、`PUBLIC_HOST`、`ROUTER_URL`、`LLM_PROVIDER_CONFIG_PATH` 和 `STEP_EXECUTION_STRATEGY_CONFIG_PATH` 覆盖默认值。`PUBLIC_HOST`/`ROUTER_URL` 用于浏览器访问 Router；当 `HOST=0.0.0.0` 时启动器默认向浏览器公布 `127.0.0.1`。按 `Ctrl-C` 会同时停止所有子进程。
 
-开发态的 `/cloud-skills` 和 `/cloud-models` 会自动启用本地控制适配器，默认凭证为 `development-operator-token`（页面会自动填入）。Skill 发布会管理实际的 `custom-skills/` 目录，操作状态写入 `data/local/cloud-skills`，不会调用 Docker、生产数据库或服务器 Unix socket；可用 `RUNTIME_CONTROL_DEV_SKILLS_ROOT`、`RUNTIME_CONTROL_DEV_ROOT` 和 `RUNTIME_CONTROL_DEV_TOKEN` 覆盖目录与凭证。生产 Web 不设置 `RUNTIME_CONTROL_DEV_MODE`，仍只通过服务器 Runtime Control 服务执行。
+开发态的 `/cloud-skills` 和 `/cloud-models` 会自动启用本地控制适配器，默认凭证为 `development-operator-token`（页面会自动填入）。Skill 发布会管理实际的 `custom-skills/` 目录；模型配置会将填写的 Provider 环境变量合并写入 Local Runtime 使用的 `.env`，并保留其他变量。操作状态写入 `data/local/cloud-skills`，不会调用 Docker、生产数据库或服务器 Unix socket；可用 `RUNTIME_CONTROL_DEV_SKILLS_ROOT`、`RUNTIME_CONTROL_DEV_ROOT`、`RUNTIME_CONTROL_DEV_ENVIRONMENT` 和 `RUNTIME_CONTROL_DEV_TOKEN` 覆盖目录、环境文件与凭证。生产 Web 不设置 `RUNTIME_CONTROL_DEV_MODE`，仍只通过服务器 Runtime Control 服务执行。
 
 ### MCP 配置
 
