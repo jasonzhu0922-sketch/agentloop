@@ -403,6 +403,22 @@ export class SqliteMemoryStore implements MemoryStore {
     if (!columnNames.has("last_error")) await this.connection.exec("ALTER TABLE local_memory_settlement_jobs ADD COLUMN last_error TEXT");
     if (!columnNames.has("next_attempt_at")) await this.connection.exec("ALTER TABLE local_memory_settlement_jobs ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0");
     await this.connection.exec("UPDATE local_memory_settlement_jobs SET next_attempt_at = enqueued_at WHERE next_attempt_at = 0");
+    // v0.5 accepted arbitrary private intent keys as preferences. The first
+    // affected profile fact was contact.email, which then vanished from the
+    // typed response projection. Reclassify that persisted shape once so
+    // existing local users do not need to re-teach the Agent their email.
+    await this.connection.exec(`
+      UPDATE local_memory_items
+         SET kind = 'fact'
+       WHERE kind = 'preference' AND subtype = 'contact.email' AND canonical_key = 'contact.email';
+      UPDATE local_memory_revisions
+         SET preference_effect = NULL,
+             content_markdown = '用户提供了联系邮箱。'
+       WHERE memory_id IN (
+         SELECT id FROM local_memory_items
+          WHERE kind = 'fact' AND subtype = 'contact.email' AND canonical_key = 'contact.email'
+       );
+    `);
   }
 }
 

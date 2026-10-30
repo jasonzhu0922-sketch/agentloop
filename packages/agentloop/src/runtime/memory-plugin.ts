@@ -28,7 +28,9 @@ export type MemorySensitivity = "normal" | "private" | "restricted" | "secret";
  */
 export interface MemoryIntentCandidate {
   readonly schema: "agentloop.memoryIntentCandidate/v1";
-  readonly kind: "preference";
+  /** Model-authored durable user memory proposal. Facts and preferences have
+   * different projection semantics and must not be collapsed into one kind. */
+  readonly kind: "preference" | "fact";
   readonly subtype: string;
   readonly canonicalKey: string;
   readonly value: Readonly<Record<string, unknown>>;
@@ -68,6 +70,13 @@ export interface InteractionMemoryProjection extends MemoryProjectionBase {
     readonly verbosity?: string;
     readonly formatting?: Readonly<Record<string, unknown>>;
   };
+  /** Explicit user facts authorized for response/human-loop use. */
+  readonly facts?: readonly {
+    readonly memoryRevisionId: string;
+    readonly subtype: string;
+    readonly value: Readonly<Record<string, unknown>>;
+    readonly stale: boolean;
+  }[];
   readonly promptMarkdown: string;
 }
 

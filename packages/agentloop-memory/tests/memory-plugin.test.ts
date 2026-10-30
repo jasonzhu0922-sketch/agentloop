@@ -64,6 +64,41 @@ test("structured resolver intent commits the natural-language address preference
   assert.equal(projection && "guidance" in projection ? projection.guidance.preferredAddress : undefined, "俊爷");
 });
 
+test("structured contact email is stored as a fact and recalled for responses", async () => {
+  const memory = plugin();
+  const result = await memory.commitExplicit({
+    runId: "runA",
+    messageId: "m-email",
+    userText: "记住我的邮箱是 12875549@qq.com",
+    memoryIntents: [{
+      schema: "agentloop.memoryIntentCandidate/v1",
+      kind: "fact",
+      subtype: "contact.email",
+      canonicalKey: "contact.email",
+      value: { email: "12875549@qq.com" },
+      persistenceIntent: "explicit",
+      sensitivity: "private",
+      applicationTargets: ["response", "human_loop"],
+      confidence: 1,
+    }],
+  });
+  assert.equal(result.kind, "committed");
+  const active = await memory.store.active(scopes.runA);
+  assert.equal(active[0]?.item.kind, "fact");
+  const projection = await memory.recall({ runId: "runA", target: "response", budget: { maxItems: 10, maxTokens: 200 } });
+  assert.equal(projection && "facts" in projection ? projection.facts?.[0]?.value.email : undefined, "12875549@qq.com");
+  assert.match(projection && "promptMarkdown" in projection ? projection.promptMarkdown : "", /12875549@qq\.com/u);
+});
+
+test("explicit email fact survives when the resolver supplies no intent", async () => {
+  const memory = plugin();
+  const result = await memory.commitExplicit({ runId: "runA", messageId: "m-email-fallback", userText: "记住我的邮箱是 fallback@example.com" });
+  assert.equal(result.kind, "committed");
+  const active = await memory.store.active(scopes.runA);
+  assert.equal(active[0]?.item.kind, "fact");
+  assert.equal(active[0]?.revision.value.email, "fallback@example.com");
+});
+
 test("memory ownership is resolved from the trusted run scope", async () => {
   const memory = plugin();
   await memory.commitExplicit({ runId: "runA", messageId: "m1", userText: "以后叫我甲。" });
@@ -181,4 +216,39 @@ test("separate local Runtime SQLite connections share the device Memory file", a
   await firstDatabase.close();
   await secondDatabase.close();
   await rm(root, { recursive: true, force: true });
+});
+
+test("SQLite migration repairs legacy contact email preferences", async () => {
+  const database = new AppDatabase(":memory:");
+  const legacy = await createLocalMemoryPlugin({
+    database,
+    resolveRunScope: async (runId) => scopes[runId],
+    resolveExplicitCandidate: ({ scope, candidateId, messageId }) => ({
+      schema: "agentloop.userMemoryCandidate/v1",
+      id: candidateId,
+      tenantId: scope.tenantId,
+      ownerUserId: scope.ownerUserId,
+      proposedKind: "preference",
+      proposedSubtype: "contact.email",
+      proposedCanonicalKey: "contact.email",
+      proposedValue: { email: "12875549@qq.com" },
+      proposedContentMarkdown: "用户希望在适合称呼时使用其指定称呼。",
+      persistenceIntent: "explicit",
+      authority: "explicit_user",
+      sensitivity: "private",
+      proposedPreferenceEffect: "default",
+      activation: { mode: "always" },
+      applicationTargets: ["response"],
+      sourceRefs: [{ type: "user_message", runId: scope.runId, messageId }],
+      confidence: 1,
+      reason: "legacy_fixture",
+      decision: "pending",
+    }),
+  });
+  await legacy.commitExplicit({ runId: "runA", messageId: "legacy", userText: "记住我的邮箱" });
+  const repaired = await createLocalMemoryPlugin({ database, resolveRunScope: async (runId) => scopes[runId] });
+  const active = await repaired.store.active(scopes.runA);
+  assert.equal(active[0]?.item.kind, "fact");
+  assert.equal(active[0]?.revision.preferenceEffect, undefined);
+  await database.close();
 });

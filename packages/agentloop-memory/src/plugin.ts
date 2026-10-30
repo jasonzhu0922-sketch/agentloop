@@ -58,6 +58,33 @@ function defaultCandidate(input: Parameters<NonNullable<MemoryPluginOptions["res
     };
   }
 
+  // Keep explicit profile facts reliable even when the resolver model omits a
+  // proposal. This is a narrow, schema-owned extraction rather than a generic
+  // inference: the user must explicitly state that the address is their email.
+  const email = input.userText.match(/(?:记住|保存|存下|我的)我的?邮箱(?:是|为|：|:)?\s*([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/iu)?.[1]?.trim();
+  if (email !== undefined) {
+    return {
+      schema: "agentloop.userMemoryCandidate/v1",
+      id: input.candidateId,
+      tenantId: input.scope.tenantId,
+      ownerUserId: input.scope.ownerUserId,
+      proposedKind: "fact",
+      proposedSubtype: "contact.email",
+      proposedCanonicalKey: "contact.email",
+      proposedValue: { email },
+      proposedContentMarkdown: "用户提供了联系邮箱。",
+      persistenceIntent: "explicit",
+      authority: "explicit_user",
+      sensitivity: "private",
+      activation: { mode: "always" },
+      applicationTargets: ["response", "human_loop"],
+      sourceRefs: [{ type: "user_message", runId: input.scope.runId, messageId: input.messageId }],
+      confidence: 1,
+      reason: "explicit_user_fact",
+      decision: "pending",
+    };
+  }
+
   if (/(以后|从现在开始).*(直接|专业|客套|赞美|篇幅|简洁|详细)/u.test(input.userText)) {
     const avoid = [
       ...(input.userText.includes("客套") ? ["unnecessary_politeness"] : []),
@@ -97,19 +124,23 @@ function candidateFromIntent(
   intent: MemoryIntentCandidate,
   input: Parameters<NonNullable<MemoryPluginOptions["resolveExplicitCandidate"]>>[0],
 ): MemoryCandidate | undefined {
-  if (intent.kind !== "preference" || intent.subtype !== intent.canonicalKey) return undefined;
-  const scalarKeys: Record<string, string> = {
+  if ((intent.kind !== "preference" && intent.kind !== "fact") || intent.subtype !== intent.canonicalKey) return undefined;
+  const preferenceScalarKeys: Record<string, string> = {
     "interaction.address": "preferredAddress",
     "interaction.language": "language",
     "interaction.verbosity": "verbosity",
   };
-  const scalarKey = scalarKeys[intent.canonicalKey];
+  const factScalarKeys: Record<string, string> = { "contact.email": "email" };
+  const scalarKey = (intent.kind === "fact" ? factScalarKeys : preferenceScalarKeys)[intent.canonicalKey];
   const scalarValue = scalarKey === undefined ? undefined : intent.value[scalarKey];
   const recordKeys = new Set(["interaction.tone", "interaction.formatting"]);
   if (scalarKey !== undefined && (typeof scalarValue !== "string" || scalarValue.trim().length === 0 || scalarValue.trim().length > 128)) return undefined;
+  if (intent.kind === "fact" && intent.canonicalKey !== "contact.email") return undefined;
+  if (intent.kind === "fact" && intent.canonicalKey === "contact.email"
+    && (typeof scalarValue !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(scalarValue.trim()))) return undefined;
   if (recordKeys.has(intent.canonicalKey) && (intent.value[intent.canonicalKey.split(".")[1] ?? ""] === undefined || typeof intent.value[intent.canonicalKey.split(".")[1] ?? ""] !== "object")) return undefined;
-  if (scalarKey === undefined && !recordKeys.has(intent.canonicalKey)
-    && intent.sensitivity !== "restricted" && intent.sensitivity !== "private") return undefined;
+  if (intent.kind === "preference" && scalarKey === undefined && !recordKeys.has(intent.canonicalKey)) return undefined;
+  if (intent.kind === "fact" && scalarKey === undefined) return undefined;
   const proposedValue = scalarKey === undefined
     ? intent.value
     : { [scalarKey]: (scalarValue as string).trim() };
@@ -119,15 +150,16 @@ function candidateFromIntent(
     id: input.candidateId,
     tenantId: input.scope.tenantId,
     ownerUserId: input.scope.ownerUserId,
-    proposedKind: "preference",
+    proposedKind: intent.kind,
     proposedSubtype: intent.subtype,
     proposedCanonicalKey: intent.canonicalKey,
     proposedValue,
-    proposedContentMarkdown: intent.contentMarkdown ?? "用户希望在适合称呼时使用其指定称呼。",
+    proposedContentMarkdown: intent.contentMarkdown
+      ?? (intent.kind === "fact" && intent.canonicalKey === "contact.email" ? "用户提供了联系邮箱。" : "用户明确指定了交互偏好。"),
     persistenceIntent: intent.persistenceIntent,
     authority: intent.persistenceIntent === "inferred" ? "inferred" : "explicit_user",
     sensitivity: intent.sensitivity,
-    proposedPreferenceEffect: "default",
+    ...(intent.kind === "preference" ? { proposedPreferenceEffect: "default" as const } : {}),
     activation: { mode: "always" },
     applicationTargets: intent.applicationTargets,
     sourceRefs: [{ type: "user_message", runId: input.scope.runId, messageId: input.messageId }],
@@ -279,6 +311,17 @@ function compileProjection(input: {
   let projection: any;
   if (input.target === "response" || input.target === "human_loop") {
     const preferences = input.entries.filter(({ item }) => item.kind === "preference").map(({ revision }) => revision);
+    // Legacy v0.5 stored contact.email as a preference. Treat it as a fact at
+    // the projection boundary so existing local databases remain usable while
+    // the migration converts the persisted item kind.
+    const facts = input.entries
+      .filter(({ item }) => item.kind === "fact" || (item.kind === "preference" && item.subtype === "contact.email"))
+      .map(({ item, revision }) => ({
+        memoryRevisionId: revision.id,
+        subtype: item.subtype,
+        value: revision.value,
+        stale: revision.expiresAt !== undefined && revision.expiresAt <= input.now,
+      }));
     const guidance = {
       preferredAddress: stringValue(preferences, "preferredAddress"),
       language: stringValue(preferences, "language"),
@@ -286,13 +329,15 @@ function compileProjection(input: {
       verbosity: stringValue(preferences, "verbosity"),
       formatting: recordValue(preferences, "formatting"),
     };
+    const factLines = facts.map((fact) => `已确认事实（${fact.subtype}）：${JSON.stringify(fact.value)}`);
     const promptMarkdown = [
       guidance.preferredAddress === undefined ? undefined : `称呼偏好：${guidance.preferredAddress}`,
       guidance.language === undefined ? undefined : `语言偏好：${guidance.language}`,
       guidance.tone === undefined ? undefined : "按用户已确认的语气偏好回复。",
       guidance.verbosity === undefined ? undefined : `篇幅偏好：${guidance.verbosity}`,
+      ...factLines,
     ].filter((value): value is string => value !== undefined).join("\n");
-    projection = { ...base, target: input.target, guidance, promptMarkdown, id: "" };
+    projection = { ...base, target: input.target, guidance, facts, promptMarkdown, id: "" };
   } else if (input.target === "planner") {
     const facts = input.entries.filter(({ item }) => item.kind === "fact").map(({ item, revision }) => ({
       memoryRevisionId: revision.id,

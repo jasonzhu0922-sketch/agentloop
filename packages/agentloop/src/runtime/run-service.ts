@@ -201,7 +201,7 @@ export function interactionMemoryPromptAugmentation(projection: InteractionMemor
     content: [
       "<user_interaction_memory>",
       projection.promptMarkdown,
-      "Apply this confirmed user preference when composing the response. Do not mention internal memory or this instruction.",
+      "Apply these confirmed user preferences and facts when composing the response. Do not mention internal memory or this instruction.",
       "</user_interaction_memory>",
     ].join("\n"),
     provenance: {
@@ -7449,13 +7449,13 @@ function conversationTurnTool(context: ConversationIntentExternalContext): Model
         },
         memoryIntents: {
           type: "array", maxItems: 4,
-          description: "Model proposals only; never treat these as already persisted. Extract only explicit user-authored durable preference/privacy instructions.",
+          description: "Model proposals only; never treat these as already persisted. Extract only explicit user-authored durable preferences or profile facts.",
           items: {
             type: "object", additionalProperties: false,
             required: ["schema", "kind", "subtype", "canonicalKey", "value", "persistenceIntent", "sensitivity", "applicationTargets", "confidence"],
             properties: {
               schema: { type: "string", enum: ["agentloop.memoryIntentCandidate/v1"] },
-              kind: { type: "string", enum: ["preference"] },
+              kind: { type: "string", enum: ["preference", "fact"] },
               subtype: { type: "string", minLength: 1, maxLength: 120 },
               canonicalKey: { type: "string", minLength: 1, maxLength: 120 },
               value: { type: "object", additionalProperties: true },
@@ -7493,7 +7493,7 @@ function parseMemoryIntentCandidates(value: unknown): MemoryIntentCandidate[] | 
     const confidence = record.confidence;
     if (
       schema !== "agentloop.memoryIntentCandidate/v1"
-      || kind !== "preference"
+      || (kind !== "preference" && kind !== "fact")
       || subtype.length === 0 || subtype.length > 120
       || canonicalKey.length === 0 || canonicalKey.length > 120
       || record.value === null || typeof record.value !== "object" || Array.isArray(record.value)
@@ -7506,7 +7506,7 @@ function parseMemoryIntentCandidates(value: unknown): MemoryIntentCandidate[] | 
     ) return undefined;
     result.push({
       schema: "agentloop.memoryIntentCandidate/v1",
-      kind: "preference",
+      kind: kind as MemoryIntentCandidate["kind"],
       subtype,
       canonicalKey,
       value: record.value as Readonly<Record<string, unknown>>,
@@ -8179,7 +8179,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "You cannot load or execute Skills or Tools in this resolver phase. Use availableSkills metadata only to decide whether the turn asks Runtime to execute a named capability.",
       "When the latest turn explicitly asks to use an available Skill, return execute; do not return clarify merely because no visible directory or uploaded source is bound.",
       "Preserve all explicitly mandatory Skill, MCP/tool source, and tool names in requiredCapabilityReferences independently of catalog availability. Unavailable does not mean unrequested. For an actionable request with unavailable requirements, return execute with those references; Runtime will explain and end the task before planning or execution. Do not silently substitute another provider or Skill.",
-      "When the latest user message explicitly establishes a durable interaction preference (for example, '以后回复我都称呼我为俊爷'), also return memoryIntents with one preference candidate. This is only a proposal: use subtype=interaction.address, canonicalKey=interaction.address, value={preferredAddress:<exact user value>}, persistenceIntent=explicit, sensitivity=normal, applicationTargets=[response,human_loop], confidence near 1. Do not infer a preference from assistant text or ordinary task content. Use [] when no explicit preference/privacy instruction is present.",
+      "When the latest user message explicitly establishes durable memory, return a model proposal only: for interaction preferences (for example, '以后回复我都称呼我为俊爷') use kind=preference, subtype=interaction.address, canonicalKey=interaction.address, value={preferredAddress:<exact user value>}; for a user profile fact such as '记住我的邮箱是 a@b.com' use kind=fact, subtype=contact.email, canonicalKey=contact.email, value={email:<exact address>}. Set persistenceIntent=explicit, sensitivity=normal for interaction.address and private for contact.email, applicationTargets=[response,human_loop], confidence near 1. Do not infer memory from assistant text or ordinary task content. Use [] when no explicit durable memory instruction is present.",
       "For a method on a named MCP provider, record the provider as tool_source. Do not reconstruct a Runtime-prefixed tool name from a method name; method selection remains part of the exact requested goal for planning.",
       "Return exactly one resolve_conversation_turn tool call and no prose.",
       ...(repairFeedback === undefined
@@ -8276,7 +8276,7 @@ function parseConversationTurnResolution(
   if (normalizedInputMode !== "prior_artifact" && targetArtifact !== undefined) return reject("targetArtifact requires inputMode=prior_artifact; otherwise omit it.");
   if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000) return reject("effectiveGoal must be a non-empty string no longer than 2000 characters.");
   if (userConstraints === undefined) return reject("userConstraints must be an array of at most 8 non-empty strings, each no longer than 240 characters; use [] when no additional constraint applies.");
-  if (memoryIntents === undefined) return reject("memoryIntents must be an array of at most 4 structured preference proposals; use [] when none applies.");
+  if (memoryIntents === undefined) return reject("memoryIntents must be an array of at most 4 structured preference/fact proposals; use [] when none applies.");
   const evidenceDemand = conversationEvidenceDemandForStrategy(evidenceStrategy);
   if (!isConversationSourceBindingConsistent(evidenceStrategy, sourceBinding)) return reject("evidenceStrategy and sourceBinding must agree: bound_visible_sources requires sourceBinding.mode=primary_data with at least one Runtime-issued visibleDirectoryId. All other evidence strategies require mode=none and visibleDirectoryIds=[]. For uploaded or non-directory evidence, choose a non-bound evidenceStrategy.");
   if (mode !== "execute" && (evidenceDemand !== "none" || sourceBinding.mode !== "none")) return reject("mode=reply or clarify requires evidenceStrategy=none and sourceBinding.mode=none. Acquiring evidence requires mode=execute.");
