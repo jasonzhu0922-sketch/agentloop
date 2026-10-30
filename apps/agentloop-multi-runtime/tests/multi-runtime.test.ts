@@ -1002,7 +1002,9 @@ test("Windows Local Runtime MSI owns protocol activation, tray startup, and fixe
   assert.doesNotMatch(wix, /LocalAppData|Application Support|agentloop\.db|device-identity|runtime-secrets/);
   assert.match(packager, /InstallerLifecycleTests/);
   assert.match(packager, /windowsMsiPayload/);
-  assert.match(JSON.parse(rootPackage).scripts["package:local-agent:win"], /--workspace agentloop-multi-runtime/);
+  const rootScripts = JSON.parse(rootPackage).scripts;
+  assert.equal(rootScripts["package:local-agent:mac"], "npm run package:local-agent:mac --workspace agentloop-multi-runtime");
+  assert.equal(rootScripts["package:local-agent:win"], "npm run package:local-agent:win --workspace agentloop-multi-runtime");
   assert.match(JSON.parse(workspacePackage).scripts["package:local-agent:win"], /assert-windows-local-agent-build\.mjs.*package-local-agent-windows\.mjs/);
 });
 
