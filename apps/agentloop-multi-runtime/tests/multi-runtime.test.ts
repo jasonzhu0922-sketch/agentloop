@@ -1016,7 +1016,9 @@ test("Web and packaged Agent expose the Xuanwu brand asset at their serving boun
     readFile(new URL("../web/styles/xuanwu.css", import.meta.url), "utf8"),
     readFile(new URL("../web/assets/xuanwu-mascot-icon.png", import.meta.url)),
   ]);
+  const packagedAsset = await readFile(new URL("../../../xuanwu-mascot-icon.png", import.meta.url));
   assert.ok(asset.length > 10_000, "the Web asset must be the real mascot image, not a placeholder");
+  assert.deepEqual(packagedAsset, asset, "the Local Agent packaging asset must be tracked and match the Web asset");
   assert.match(html, /xuanwu-mascot-icon\.png/);
   assert.match(login, /xuanwu-mascot-icon\.png/);
   assert.match(server, /favicon\.ico/);
