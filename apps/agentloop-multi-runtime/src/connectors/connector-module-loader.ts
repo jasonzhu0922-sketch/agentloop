@@ -1,10 +1,11 @@
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { ConnectorModule } from "@zhujun/agentloop-connector-sdk";
+import type { ConnectorModule, ConnectorModuleFactoryContext } from "@zhujun/agentloop-connector-sdk";
 
 export interface ConnectorModuleRegistration {
   readonly modulePath: string;
   readonly exportName?: string;
+  readonly config?: Readonly<Record<string, unknown>>;
 }
 
 export interface ConnectorModuleLoaderOptions {
@@ -26,8 +27,13 @@ export async function loadConnectorModules(
     const exported = registration.exportName === undefined
       ? loaded.default ?? loaded.connectorModule
       : loaded[registration.exportName];
+    const factoryContext: ConnectorModuleFactoryContext = {
+      modulePath: registration.modulePath,
+      config: registration.config ?? {},
+      fetch: globalThis.fetch,
+    };
     const module = typeof exported === "function"
-      ? await (exported as () => Promise<ConnectorModule> | ConnectorModule)()
+      ? await (exported as (context: ConnectorModuleFactoryContext) => Promise<ConnectorModule> | ConnectorModule)(factoryContext)
       : exported;
     if (!isConnectorModule(module)) {
       throw new Error(`Configured Connector module is invalid: ${registration.modulePath}`);
@@ -59,9 +65,13 @@ export function registrationsFromEnvironment(
     if (record.exportName !== undefined && typeof record.exportName !== "string") {
       throw new Error(`CONNECTOR_MODULES_JSON[${index}].exportName must be a string`);
     }
+    if (record.config !== undefined && (typeof record.config !== "object" || record.config === null || Array.isArray(record.config))) {
+      throw new Error(`CONNECTOR_MODULES_JSON[${index}].config must be an object`);
+    }
     return {
       modulePath: record.modulePath,
       ...(record.exportName === undefined ? {} : { exportName: record.exportName }),
+      ...(record.config === undefined ? {} : { config: record.config as Readonly<Record<string, unknown>> }),
     };
   });
 }
