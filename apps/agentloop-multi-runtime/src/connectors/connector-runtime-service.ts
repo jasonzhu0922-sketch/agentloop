@@ -81,6 +81,7 @@ export class ConnectorRuntimeService {
     readonly runId: string;
     readonly actorUserId: string;
     readonly conversationId?: string;
+    readonly workspaceId?: string;
     readonly connectionIds: readonly string[];
   }): Promise<readonly import("@zhujun/agentloop").RuntimeTool<unknown>[]> {
     const materialized = await this.materializeMany(
