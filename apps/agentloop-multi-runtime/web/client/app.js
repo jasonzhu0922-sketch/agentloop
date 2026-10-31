@@ -1083,7 +1083,9 @@ function defaultUploadStoragePath(sharedStoragePath) {
 
 async function openLocalAgentSettings() {
   if (!sessionState.localSessionToken) return;
-  await Promise.all([loadLocalAgentConfig(), loadLocalRuntimes(), loadLocalModelConfiguration(), loadLocalConnectorConfiguration(), loadLocalSkillPackages(true)]);
+  await loadLocalAgentConfig();
+  await loadLocalRuntimes();
+  await Promise.all([loadLocalModelConfiguration(), loadLocalConnectorConfiguration(), loadLocalSkillPackages(true)]);
   renderLocalAgentConfig();
   syncLocalRuntimeManager();
   activateAgentSettingsView("models");
