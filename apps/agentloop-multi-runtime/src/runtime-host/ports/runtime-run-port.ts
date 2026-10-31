@@ -21,6 +21,8 @@ export interface RuntimeHostRunPort {
   startConversation(actorUserId: string, input: unknown, options?: {
     readonly conversationId?: string;
     readonly sourceIds?: readonly string[];
+    /** Application-authorized Connector connection IDs resolved by the Host. */
+    readonly connectorConnectionIds?: readonly string[];
     readonly allowDangerousTools?: boolean;
     readonly modelKey?: string;
   }): Promise<RuntimeHostRun>;
