@@ -80,8 +80,10 @@ test("Run resolves a structured preference before committing Local Memory", asyn
             taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "answer", requiresExecution: false,
               deliverables: [{ targetId: "answer", purpose: input, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
             evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [],
+            memoryAction: "commit",
             memoryIntents: [{ schema: "agentloop.memoryIntentCandidate/v1", kind: "preference", subtype: "interaction.address", canonicalKey: "interaction.address",
-              value: { preferredAddress: "俊爷" }, persistenceIntent: "explicit", sensitivity: "normal", applicationTargets: ["response", "human_loop"], confidence: 0.99 }],
+              value: { preferredAddress: "俊爷" }, sourceQuote: input, persistenceIntent: "explicit", sensitivity: "normal", applicationTargets: ["response", "human_loop"], confidence: 0.99 }],
+            requiredCapabilityReferences: [],
           } }],
         };
       } }),
@@ -94,6 +96,81 @@ test("Run resolves a structured preference before committing Local Memory", asyn
     await assert.rejects(runs.executeConversation("owner", input), /Run failed/);
     assert.equal(commitRequest?.memoryIntents?.[0]?.value.preferredAddress, "俊爷");
     assert.equal(responseProjectionApplied, true);
+  } finally {
+    await database.close();
+  }
+});
+
+test("a response cannot pass assessment with a false Memory receipt when the commit was not saved", async () => {
+  const database = new AppDatabase(":memory:");
+  const input = "以后我会称呼你为玄武，玄武是你的名字，知道吗？";
+  let executionAttempts = 0;
+  let assessedNotSaved = false;
+  const memory: AgentLoopMemoryPlugin = {
+    name: "rejecting-memory",
+    commitExplicit: async () => ({ kind: "not_applicable" }),
+    recall: async () => undefined,
+    enqueueSettlement: async () => ({ kind: "enqueued", settlementJobId: "settlement", enqueuedAt: 1 }),
+  };
+  try {
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      memory,
+      plannerFactory: singleStepTestPlanner,
+      assessorFactory: () => ({ assess: async (assessmentInput) => {
+        assert.equal(assessmentInput.currentTurnMemoryCommit?.status, "not_saved");
+        assessedNotSaved = true;
+        const falseReceipt = assessmentInput.evidence.candidateOutput.includes("已经记住");
+        return {
+          id: `assessment-${assessmentInput.attempt}`,
+          planId: assessmentInput.planId,
+          stepId: assessmentInput.step.id,
+          attempt: assessmentInput.attempt,
+          approved: !falseReceipt,
+          criteria: assessmentInput.step.successCriteria.map((criterion) => ({
+            criterionId: criterion.id,
+            blocking: criterion.blocking ?? true,
+            satisfied: !falseReceipt,
+            rationale: falseReceipt ? "The Runtime did not persist the requested Memory." : "The response accurately reports that persistence did not succeed.",
+            evidenceRefs: ["candidateOutput"],
+          })),
+          skills: [],
+          evidenceDigest: `memory-outcome-${assessmentInput.attempt}`,
+          feedback: falseReceipt ? "Do not claim that the Memory was saved; report the Runtime persistence outcome accurately." : "",
+          createdAt: Date.now(),
+        };
+      } }),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        if (request.runId.startsWith("conversation-turn:")) {
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "resolve", name: "resolve_conversation_turn", arguments: {
+            mode: "reply", relation: "new_goal", inputMode: "none", effectiveGoal: input,
+            taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "answer", requiresExecution: false,
+              deliverables: [{ targetId: "answer", purpose: input, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
+            evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [],
+            memoryAction: "commit", memoryIntents: [{
+              schema: "agentloop.memoryIntentCandidate/v1", kind: "preference", subtype: "interaction.assistant_name", canonicalKey: "interaction.assistant_name",
+              value: { subject: "assistant", name: "玄武" }, sourceQuote: input, persistenceIntent: "future_oriented",
+              sensitivity: "normal", applicationTargets: ["response", "human_loop"], confidence: 1,
+            }], requiredCapabilityReferences: [],
+          } }] };
+        }
+        assert.match(request.runtimeContext?.content ?? "", /status: not_saved/u);
+        executionAttempts += 1;
+        return {
+          content: executionAttempts === 1 ? "好的，我已经记住了，我叫玄武。" : "我理解你希望称呼我为玄武，但这次没有保存成功。",
+          finishReason: "stop",
+          toolCalls: [],
+        };
+      } }),
+    });
+    const run = await runs.executeConversation("owner", input);
+    assert.equal(run.status, "completed");
+    assert.equal(run.output, "我理解你希望称呼我为玄武，但这次没有保存成功。");
+    assert.equal(executionAttempts, 2);
+    assert.equal(assessedNotSaved, true);
+    assert.ok((await runs.events("owner", run.id)).some((event) => event.type === "memory.explicit_commit_outcome"
+      && event.data.status === "not_saved"));
   } finally {
     await database.close();
   }
@@ -149,7 +226,8 @@ test("response assessment receives confirmed local Memory facts used by the repl
                     schema: "agentloop.conversationTaskIntent/v1", operation: "answer", requiresExecution: false,
                     deliverables: [{ targetId: "email", purpose: input, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }],
                   },
-                  evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [], memoryIntents: [],
+                  evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [],
+                  memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
                 },
               }],
             };
@@ -231,6 +309,7 @@ for (const explicitlyNamed of [false, true]) {
             taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "lookup", requiresExecution: true,
               deliverables: [{ targetId: "answer", purpose: goal, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
             evidenceStrategy: "source_grounded", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [],
+            memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
           } }] };
         } }),
         plannerFactory: () => ({ plan: async (task) => {

@@ -106,7 +106,7 @@ test("MCP discovery preserves native tool identity through RunService availabili
         mode: "execute", relation: "new_goal", inputMode: "none", effectiveGoal: goal,
         taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "lookup", requiresExecution: true,
           deliverables: [{ targetId: "answer", purpose: goal, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
-        evidenceStrategy: "source_grounded", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [],
+        evidenceStrategy: "source_grounded", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [], memoryAction: "none", memoryIntents: [],
         requiredCapabilityReferences: [{ kind: "tool_source", reference: "asset-service" }, { kind: "tool", reference: "query_records" }],
       } }] };
     } };
@@ -153,7 +153,7 @@ test("missing mandatory capabilities persist a readable terminal outcome before 
         taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "lookup", requiresExecution: true,
           deliverables: [{ targetId: "answer", purpose: goal, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
         evidenceStrategy: "source_grounded", sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-        userConstraints: [], requiredCapabilityReferences: continuation ? [] : requirements,
+        userConstraints: [], memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: continuation ? [] : requirements,
       } }] };
     } };
     const runs = new RunService({ database, skills: new SkillService(database), workspaceRoot: workspace,
@@ -213,7 +213,7 @@ test("available providers and reuse of a bound Result reach planning; refreshing
         taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "answer", requiresExecution: true,
           deliverables: [{ targetId: "answer", purpose: goal, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
         evidenceStrategy: reuse ? "none" : "source_grounded", sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-        userConstraints: [], requiredCapabilityReferences: [{ kind: "tool_source", reference: source }],
+        userConstraints: [], memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [{ kind: "tool_source", reference: source }],
       } }] };
     } };
     const runs = new RunService({ database, skills: new SkillService(database), workspaceRoot: workspace,

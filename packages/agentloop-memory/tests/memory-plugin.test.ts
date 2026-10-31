@@ -7,9 +7,11 @@ import { AppDatabase } from "@zhujun/agentloop";
 import { createLocalMemoryPlugin, createMemoryPlugin } from "../src/plugin.ts";
 import { InMemoryMemoryStore } from "../src/store.ts";
 import type { MemoryCandidate, MemoryRunScope } from "../src/types.ts";
+import type { MemoryIntentCandidate } from "@zhujun/agentloop";
 
 const scopes: Record<string, MemoryRunScope> = {
   runA: { runId: "runA", tenantId: "tenant-1", ownerUserId: "user-a" },
+  runA2: { runId: "runA2", tenantId: "tenant-1", ownerUserId: "user-a", conversationId: "another-conversation" },
   runB: { runId: "runB", tenantId: "tenant-1", ownerUserId: "user-b" },
 };
 
@@ -21,6 +23,163 @@ function plugin(options: Partial<Parameters<typeof createMemoryPlugin>[0]> = {})
     ...options,
   });
 }
+
+function preference(key: string, value: Readonly<Record<string, unknown>>, extra: Partial<MemoryIntentCandidate> = {}): MemoryIntentCandidate {
+  return {
+    schema: "agentloop.memoryIntentCandidate/v1", kind: "preference", subtype: key, canonicalKey: key,
+    value, persistenceIntent: "explicit", sensitivity: "normal", applicationTargets: ["response", "human_loop"], confidence: 1,
+    ...extra,
+  };
+}
+
+test("assistant nickname and unseen preference concepts survive storage and both interaction projections", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const create = () => createLocalMemoryPlugin({ database, resolveRunScope: async (runId) => scopes[runId] });
+    const memory = await create();
+    const userText = "还有，以后我会称呼你为玄武，你就是玄武，知道吗？以后解释复杂问题先画图。";
+    const result = await memory.commitExplicit({
+      runId: "runA", messageId: "assistant-name", userText,
+      memoryIntents: [
+        preference("interaction.assistant_name", { subject: "assistant", name: "玄武" }, {
+          contentMarkdown: "用户以后称呼助手为玄武。", sourceQuote: "以后我会称呼你为玄武，你就是玄武",
+        }),
+        preference("interaction.explanation_order", { when: "复杂问题", first: "画图" }, {
+          contentMarkdown: "解释复杂问题时优先使用图示。", sourceQuote: "以后解释复杂问题先画图",
+        }),
+      ],
+    });
+    assert.equal(result.kind, "committed");
+    if (result.kind !== "committed") return;
+    assert.equal(result.receipt.committedCount, 2);
+    const active = await memory.store.active(scopes.runA);
+    assert.equal(active.length, 2);
+    assert.equal(new Set(active.map(({ item }) => item.id)).size, 2);
+    assert.equal(active.find(({ item }) => item.subtype === "interaction.assistant_name")?.revision.sourceRefs[0]?.quotedText,
+      "以后我会称呼你为玄武，你就是玄武");
+    // A new plugin and a different Run for the same owner must apply the
+    // durable preferences; the original conversation is not required.
+    const reloaded = await create();
+    for (const target of ["response", "human_loop"] as const) {
+      const projection = await reloaded.recall({ runId: "runA2", target, budget: { maxItems: 10, maxTokens: 800 } });
+      assert.ok(projection && "preferences" in projection);
+      assert.deepEqual(projection.preferences?.find((entry) => entry.subtype === "interaction.assistant_name")?.value,
+        { subject: "assistant", name: "玄武" });
+      assert.equal("guidance" in projection ? projection.guidance.preferredAddress : undefined, undefined);
+      assert.match(projection.promptMarkdown, /玄武/u);
+      assert.match(projection.promptMarkdown, /复杂问题/u);
+      assert.match(projection.promptMarkdown, /画图/u);
+    }
+    assert.equal(await reloaded.recall({ runId: "runB", target: "response", budget: { maxItems: 10, maxTokens: 800 } }), undefined);
+  } finally {
+    await database.close();
+  }
+});
+
+test("revising an open-ended preference preserves other preferences and supersedes its prior value", async () => {
+  const memory = plugin();
+  await memory.commitExplicit({ runId: "runA", messageId: "first", userText: "以后叫你玄武；少用表格",
+    memoryIntents: [preference("interaction.assistant_name", { name: "玄武" }), preference("interaction.tables", { use: "sparingly" })] });
+  await memory.commitExplicit({ runId: "runA", messageId: "second", userText: "以后改叫你小武",
+    memoryIntents: [preference("interaction.assistant_name", { name: "小武" })] });
+  const active = await memory.store.active(scopes.runA);
+  assert.equal(active.length, 2);
+  const name = active.find(({ item }) => item.subtype === "interaction.assistant_name");
+  assert.equal(name?.revision.revision, 2);
+  const projection = await memory.recall({ runId: "runA", target: "response", budget: { maxItems: 10, maxTokens: 800 } });
+  assert.ok(projection && "promptMarkdown" in projection);
+  assert.match(projection.promptMarkdown, /小武/u);
+  assert.doesNotMatch(projection.promptMarkdown, /玄武/u);
+  assert.match(projection.promptMarkdown, /sparingly/u);
+});
+
+test("empty semantic intake does not re-interpret quoted or temporary text through legacy regexes", async () => {
+  const memory = plugin();
+  const result = await memory.commitExplicit({ runId: "runA", messageId: "quoted", userText: "分析这句测试素材：以后叫我大王。", memoryIntents: [] });
+  assert.equal(result.kind, "not_applicable");
+  assert.equal((await memory.store.active(scopes.runA)).length, 0);
+});
+
+test("general preference intake preserves policy decisions and does not drop accepted siblings", async () => {
+  const memory = plugin();
+  const result = await memory.commitExplicit({ runId: "runA", messageId: "mixed", userText: "以后叫你玄武",
+    memoryIntents: [
+      preference("interaction.secret", { secret: "do not store" }, { sensitivity: "secret" }),
+      preference("interaction.restricted", { value: "private" }, { sensitivity: "restricted" }),
+      preference("interaction.inferred", { value: "guess" }, { persistenceIntent: "inferred" }),
+      preference("interaction.assistant_name", { name: "玄武" }),
+    ] });
+  assert.equal(result.kind, "committed");
+  if (result.kind !== "committed") return;
+  assert.equal(result.receipt.committedCount, 1);
+  assert.equal(result.pendingConfirmations?.length, 2);
+  assert.equal((await memory.store.active(scopes.runA)).length, 1);
+});
+
+test("generic preference validation rejects missing evidence, unsafe shapes and unbounded values", async () => {
+  const memory = plugin();
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  const invalid = [
+    preference("invalid", { name: "玄武" }),
+    preference("interaction.assistant_name", {}),
+    preference("interaction.assistant_name", { name: "玄武" }, { sourceQuote: "用户没有说过的话" }),
+    preference("interaction.assistant_name", { name: "x".repeat(2_001) }),
+    preference("interaction.assistant_name", { x: Number.NaN }),
+    preference("interaction.assistant_name", JSON.parse('{"__proto__":{"x":1}}')),
+    preference("interaction.assistant_name", circular),
+  ];
+  for (const [index, intent] of invalid.entries()) {
+    assert.equal((await memory.commitExplicit({ runId: "runA", messageId: `invalid-${index}`, userText: "以后叫你玄武", memoryIntents: [intent] })).kind,
+      "not_applicable");
+  }
+  assert.equal((await memory.store.active(scopes.runA)).length, 0);
+});
+
+test("source evidence cannot persist secrets alongside an otherwise normal preference", async () => {
+  const memory = plugin();
+  const userText = "以后叫你玄武，旁边这项是密码：example-sensitive-value";
+  const result = await memory.commitExplicit({ runId: "runA", messageId: "secret-quote", userText,
+    memoryIntents: [preference("interaction.assistant_name", { name: "玄武" }, { sourceQuote: userText })] });
+  assert.equal(result.kind, "not_applicable");
+  assert.equal((await memory.store.active(scopes.runA)).length, 0);
+});
+
+test("tone and formatting values are projected in full without schema-specific rendering", async () => {
+  const memory = plugin();
+  await memory.commitExplicit({ runId: "runA", messageId: "style", userText: "以后少客套，比较时用表格",
+    memoryIntents: [preference("interaction.tone", { tone: { avoid: ["unnecessary_politeness"] } }),
+      preference("interaction.formatting", { formatting: { comparisons: "table" } })] });
+  const projection = await memory.recall({ runId: "runA", target: "response", budget: { maxItems: 10, maxTokens: 800 } });
+  assert.ok(projection && "promptMarkdown" in projection);
+  assert.match(projection.promptMarkdown, /unnecessary_politeness/u);
+  assert.match(projection.promptMarkdown, /comparisons/u);
+  assert.match(projection.promptMarkdown, /table/u);
+});
+
+test("projection budgeting counts structured values and does not let a large item starve a small preference", async () => {
+  const memory = plugin();
+  await memory.commitExplicit({ runId: "runA", messageId: "budget", userText: "偏好测试",
+    memoryIntents: [preference("interaction.long", { text: "x".repeat(900) }), preference("interaction.assistant_name", { name: "玄武" })] });
+  const projection = await memory.recall({ runId: "runA", target: "response", budget: { maxItems: 10, maxTokens: 50 } });
+  assert.ok(projection && "preferences" in projection);
+  assert.equal(projection.preferences?.length, 1);
+  assert.equal(projection.preferences[0].value.name, "玄武");
+});
+
+test("new preference values survive every declared application target without a per-type adapter", async () => {
+  const memory = plugin();
+  await memory.commitExplicit({ runId: "runA", messageId: "targets", userText: "以后输出表格时金额保留两位小数",
+    memoryIntents: [preference("artifact.amount_precision", { decimalPlaces: 2, when: "表格金额" }, {
+      applicationTargets: ["planner", "execution", "artifact"],
+    })] });
+  for (const target of ["planner", "execution", "artifact"] as const) {
+    const projection = await memory.recall({ runId: "runA", target, budget: { maxItems: 10, maxTokens: 800 } });
+    assert.deepEqual(projection?.preferences?.[0].value, { decimalPlaces: 2, when: "表格金额" });
+    if (projection && "augmentations" in projection) assert.match(projection.augmentations[0].contentMarkdown, /decimalPlaces/u);
+  }
+  assert.equal(await memory.recall({ runId: "runA", target: "response", budget: { maxItems: 10, maxTokens: 800 } }), undefined);
+});
 
 test("explicit address preference is committed and recalled as a typed projection", async () => {
   const memory = plugin();

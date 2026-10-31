@@ -468,7 +468,7 @@ test("an artifact edit can continue a failed goal while retaining the earlier ar
               requiresExecution: true, deliverables: [{ targetId: "updated-workbook", purpose: objective,
                 expectedArtifactCount: 1, action: "modify", kind: "spreadsheet", format: "xlsx", surface: "workspace_artifact" }] },
             evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-            userConstraints: [], requiredCapabilityReferences: [],
+            userConstraints: [], memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
           },
         }] };
       },
@@ -675,7 +675,7 @@ for (const fixture of [
               mode: "execute", relation: "new_goal", inputMode: "none",
               effectiveGoal: "基于上传的游戏设计稿，生成游戏众筹推荐 PPTX。",
               evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-              userConstraints: [], requiredCapabilityReferences: [],
+              userConstraints: [], memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
               taskIntent: {
                 schema: "agentloop.conversationTaskIntent/v1", operation: "create_artifact",
                 requiresExecution: repaired || !fixture.noExecution,
@@ -983,7 +983,7 @@ test("Conversation resolver atomically binds only the visible directory selected
                   },
                   evidenceStrategy: "bound_visible_sources",
                   sourceBinding: { mode: "primary_data", visibleDirectoryIds: ["visible_dir_2"] },
-                  userConstraints: [],
+                  userConstraints: [], memoryAction: "none", memoryIntents: [],
                 },
               }],
             };
@@ -1065,7 +1065,7 @@ test("clarification turns do not misrepresent their intentionally tool-free step
                   },
                   evidenceStrategy: "none",
                   sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-                  userConstraints: ["Ask for the concrete database schema and table name before analysis."],
+                  userConstraints: ["Ask for the concrete database schema and table name before analysis."], memoryAction: "none", memoryIntents: [],
                 },
               }],
             };
@@ -1122,7 +1122,7 @@ test("non-executable artifact deliverables are repaired before Planner admission
                 effectiveGoal: "在制作 PPT 前澄清主题、页数和风格要求。",
                 evidenceStrategy: "none",
                 sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-                userConstraints: ["用户希望制作一份 PPT，但具体要求尚未明确。"],
+                userConstraints: ["用户希望制作一份 PPT，但具体要求尚未明确。"], memoryAction: "none", memoryIntents: [],
                 requiredCapabilityReferences: [],
                 taskIntent: {
                   schema: "agentloop.conversationTaskIntent/v1",
@@ -1184,7 +1184,7 @@ test("persistent non-executable artifact deliverables fall back to a safe clarif
                 effectiveGoal: "制作一份 PPT 文件。",
                 evidenceStrategy: "none",
                 sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-                userConstraints: [],
+                userConstraints: [], memoryAction: "none", memoryIntents: [],
                 requiredCapabilityReferences: [],
                 taskIntent: {
                   schema: "agentloop.conversationTaskIntent/v1",
@@ -1545,7 +1545,7 @@ function priorResultContinuationResolver(inputMode: "prior_result" | "refresh_so
             },
             evidenceStrategy: refreshSources ? "source_grounded" : "none",
             sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-            userConstraints: refreshSources ? ["Refresh the source data before delivery."] : ["Do not refresh source data."],
+            userConstraints: refreshSources ? ["Refresh the source data before delivery."] : ["Do not refresh source data."], memoryAction: "none", memoryIntents: [],
           },
         }],
       };
@@ -1817,7 +1817,7 @@ class ContextAwareConversationIntentModel implements ModelAdapter {
             sourceBinding: usesVisibleData
               ? { mode: "primary_data", visibleDirectoryIds: ["visible_dir_1"] }
               : { mode: "none", visibleDirectoryIds: [] },
-            userConstraints: [],
+            userConstraints: [], memoryAction: "none", memoryIntents: [],
           },
         }],
       };
@@ -1857,7 +1857,7 @@ class GreetingTargetConversationModel implements ModelAdapter {
             },
             evidenceStrategy: "none",
             sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-            userConstraints: [],
+            userConstraints: [], memoryAction: "none", memoryIntents: [],
           },
         }],
       };
@@ -1919,7 +1919,7 @@ class OverEagerPriorArtifactResolverModel implements ModelAdapter {
             },
             evidenceStrategy: "none",
             sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-            userConstraints: ["基于上一轮产物解释"],
+            userConstraints: ["基于上一轮产物解释"], memoryAction: "none", memoryIntents: [],
           },
         }],
       };
@@ -1966,7 +1966,7 @@ class ErroneousSourceStrategyArtifactTransformModel extends ConversationWriteMod
           },
           evidenceStrategy: "source_grounded",
           sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-          userConstraints: ["不引用外部资源"],
+          userConstraints: ["不引用外部资源"], memoryAction: "none", memoryIntents: [],
         },
       }],
     };
@@ -2034,7 +2034,7 @@ class ProcessArtifactPollutingResolverModel extends ConversationWriteModel {
             },
           evidenceStrategy: "none",
           sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-          userConstraints: ["现在把合并文件拆分为平均的 4 份"],
+          userConstraints: ["现在把合并文件拆分为平均的 4 份"], memoryAction: "none", memoryIntents: [],
         },
       }],
     };
@@ -2079,7 +2079,7 @@ class MissingExpectedArtifactCountResolverModel implements ModelAdapter {
           },
           evidenceStrategy: "none",
           sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-          userConstraints: [],
+          userConstraints: [], memoryAction: "none", memoryIntents: [],
         },
       }],
     };
@@ -2124,7 +2124,7 @@ class InvalidEvidenceStrategyResolverModel implements ModelAdapter {
           },
           evidenceStrategy: this.resolverAttempts === 1 ? "unsupported" : "none",
           sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-          userConstraints: [],
+          userConstraints: [], memoryAction: "none", memoryIntents: [],
         },
       }],
     };
@@ -2192,7 +2192,7 @@ class InventedNewGoalCandidateResolverModel implements ModelAdapter {
           },
           evidenceStrategy: "none",
           sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-          userConstraints: ["用于游戏众筹介绍"],
+          userConstraints: ["用于游戏众筹介绍"], memoryAction: "none", memoryIntents: [],
         },
       }],
     };
@@ -2241,7 +2241,7 @@ class PriorArtifactLineageDriftModel extends ConversationWriteModel {
           },
           evidenceStrategy: "none",
           sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-          userConstraints: [],
+          userConstraints: [], memoryAction: "none", memoryIntents: [],
         },
       }],
     };
@@ -2282,7 +2282,7 @@ class AlwaysMalformedPriorArtifactResolverModel extends ConversationWriteModel {
           },
           evidenceStrategy: "none",
           sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-          userConstraints: [],
+          userConstraints: [], memoryAction: "none", memoryIntents: [],
         },
       }],
     };

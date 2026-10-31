@@ -200,6 +200,7 @@ export class ModelStepAssessor implements StepAssessor {
             "Submit contractCheck for every criterion. Its status, not the wording of its rationale, identifies a contract issue. Use failedBoundary: null when there is no proposed failure boundary; never create an empty placeholder boundary.",
             "Judge each result property from observations appropriate to that property. model_judged selects the assessment method; it does not require web research or written citations. EvidenceContract describes execution observations and cannot add user obligations. Distinguish observed results, unavailable observations, and demonstrated contradictions.",
             "confirmedResponseMemory, when present in the server assessment context, contains non-stale profile facts previously supplied by the Runtime for this response. A candidate claim that directly matches one of those facts has sufficient evidence from the user's confirmed local Memory; do not require an external lookup or independent re-verification. Still reject a candidate that changes, contradicts, or fails to answer the requested fact.",
+            "currentTurnMemoryCommit, when present, is the authoritative persistence result for the user's durable-memory request in this turn. Approve a claim that the request was remembered or saved only when status=committed. For partial, require the response to distinguish the saved and unsaved or confirmation-pending portions. For confirmation_required, not_saved, failed, or unavailable, reject any claim that persistence succeeded and require an accurate user-facing status.",
             "An observation proves only properties it actually inspects. File existence, decoding, dimensions, successful generation or the producer's description cannot establish unobserved content quality. Keep the requested property unverified when the supplied evidence cannot support that judgment; report the exact missing observation and preserve usable work.",
             "Assess every supplied Skill exactly once. Copy its exact id into skillId, including prefixes; never substitute its name or a Skill mentioned only in evidence.",
             "Skill entries are QA observations, not completion gates; use not_assessed when QA is not rerun.",
@@ -1235,6 +1236,9 @@ function assessmentView(input: StepAssessmentInput): Record<string, unknown> {
         retrievalReasons: input.confirmedResponseMemory.retrievalReasons,
         facts: input.confirmedResponseMemory.facts.filter((fact) => !fact.stale),
       },
+    }),
+    ...(input.currentTurnMemoryCommit === undefined ? {} : {
+      currentTurnMemoryCommit: input.currentTurnMemoryCommit,
     }),
     ...(input.runtimeEvidenceBundles === undefined ? {} : {
       runtimeEvidenceBundles: {

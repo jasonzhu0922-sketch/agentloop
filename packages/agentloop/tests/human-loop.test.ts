@@ -596,7 +596,7 @@ class HilArtifactDeliveryModel {
             },
             evidenceStrategy: "none",
             sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-            userConstraints: [],
+            userConstraints: [], memoryAction: "none", memoryIntents: [],
           },
         }],
       };

@@ -25,14 +25,9 @@ function candidateId(scope: MemoryRunScope, messageId: string, userText: string)
   return `memcand_${hash({ tenantId: scope.tenantId, ownerUserId: scope.ownerUserId, messageId, userText }).slice(0, 24)}`;
 }
 
-function defaultCandidate(input: Parameters<NonNullable<MemoryPluginOptions["resolveExplicitCandidate"]>>[0]): MemoryCandidate | undefined {
-  if (input.memoryIntents !== undefined && input.memoryIntents.length > 0) {
-    for (const intent of input.memoryIntents) {
-      const candidate = candidateFromIntent(intent, input);
-      if (candidate !== undefined) return candidate;
-    }
-    return undefined;
-  }
+// Compatibility intake for direct, non-conversational callers. Conversational
+// turns use the resolver's complete candidate list, including an explicit [].
+function legacyCandidate(input: Parameters<NonNullable<MemoryPluginOptions["resolveExplicitCandidate"]>>[0]): MemoryCandidate | undefined {
   const address = input.userText.match(/以后(?:都)?叫我[“"「]?([^”"」,，。！？!?\n]{1,32})[”"」]?/u)?.[1]?.trim();
   if (address !== undefined && address.length > 0) {
     return {
@@ -125,29 +120,19 @@ function candidateFromIntent(
   input: Parameters<NonNullable<MemoryPluginOptions["resolveExplicitCandidate"]>>[0],
 ): MemoryCandidate | undefined {
   if ((intent.kind !== "preference" && intent.kind !== "fact") || intent.subtype !== intent.canonicalKey) return undefined;
-  const preferenceScalarKeys: Record<string, string> = {
-    "interaction.address": "preferredAddress",
-    "interaction.language": "language",
-    "interaction.verbosity": "verbosity",
-  };
-  const factScalarKeys: Record<string, string> = { "contact.email": "email" };
-  const scalarKey = (intent.kind === "fact" ? factScalarKeys : preferenceScalarKeys)[intent.canonicalKey];
-  const scalarValue = scalarKey === undefined ? undefined : intent.value[scalarKey];
-  const recordKeys = new Set(["interaction.tone", "interaction.formatting"]);
-  if (scalarKey !== undefined && (typeof scalarValue !== "string" || scalarValue.trim().length === 0 || scalarValue.trim().length > 128)) return undefined;
-  if (intent.kind === "fact" && intent.canonicalKey !== "contact.email") return undefined;
-  if (intent.kind === "fact" && intent.canonicalKey === "contact.email"
-    && (typeof scalarValue !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(scalarValue.trim()))) return undefined;
-  if (recordKeys.has(intent.canonicalKey) && (intent.value[intent.canonicalKey.split(".")[1] ?? ""] === undefined || typeof intent.value[intent.canonicalKey.split(".")[1] ?? ""] !== "object")) return undefined;
-  if (intent.kind === "preference" && scalarKey === undefined && !recordKeys.has(intent.canonicalKey)) return undefined;
-  if (intent.kind === "fact" && scalarKey === undefined) return undefined;
-  const proposedValue = scalarKey === undefined
-    ? intent.value
-    : { [scalarKey]: (scalarValue as string).trim() };
-  if (JSON.stringify(proposedValue).length > 2_000) return undefined;
+  // Keys organize revisions, not the set of concepts the user may remember.
+  // Validate syntax, size and evidence instead of enumerating preference types.
+  if (intent.canonicalKey.length > 120 || !/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/u.test(intent.canonicalKey)) return undefined;
+  if (!boundedMemoryValue(intent.value)) return undefined;
+  if (intent.sourceQuote !== undefined && (intent.sourceQuote.trim().length === 0 || intent.sourceQuote.length > 1_000 || !input.userText.includes(intent.sourceQuote))) return undefined;
+  // Facts retain their existing privacy/schema contract; the open-ended
+  // contract in this change belongs to explicit preferences.
+  if (intent.kind === "fact" && (intent.canonicalKey !== "contact.email"
+    || typeof intent.value.email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(intent.value.email.trim()))) return undefined;
+  const proposedValue = intent.value;
   return {
     schema: "agentloop.userMemoryCandidate/v1",
-    id: input.candidateId,
+    id: `${input.candidateId}_${hash({ key: intent.canonicalKey, value: proposedValue }).slice(0, 12)}`,
     tenantId: input.scope.tenantId,
     ownerUserId: input.scope.ownerUserId,
     proposedKind: intent.kind,
@@ -162,18 +147,36 @@ function candidateFromIntent(
     ...(intent.kind === "preference" ? { proposedPreferenceEffect: "default" as const } : {}),
     activation: { mode: "always" },
     applicationTargets: intent.applicationTargets,
-    sourceRefs: [{ type: "user_message", runId: input.scope.runId, messageId: input.messageId }],
+    sourceRefs: [{ type: "user_message", runId: input.scope.runId, messageId: input.messageId,
+      ...(intent.sourceQuote === undefined ? {} : { quotedText: intent.sourceQuote }) }],
     confidence: intent.confidence,
     reason: "structured_user_memory_intent",
     decision: "pending",
   };
 }
 
+/** Bounded JSON values are the shape contract, independent of user semantics. */
+function boundedMemoryValue(value: unknown): value is Readonly<Record<string, unknown>> {
+  if (!isRecord(value) || Object.keys(value).length === 0) return false;
+  let nodes = 0;
+  const valid = (item: unknown, depth: number): boolean => {
+    if (++nodes > 128 || depth > 4) return false;
+    if (item === null || typeof item === "boolean") return true;
+    if (typeof item === "string") return item.length <= 1_000;
+    if (typeof item === "number") return Number.isFinite(item);
+    if (Array.isArray(item)) return item.length <= 24 && item.every((entry) => valid(entry, depth + 1));
+    if (!isRecord(item)) return false;
+    const entries = Object.entries(item);
+    return entries.length <= 24 && entries.every(([key, entry]) =>
+      key.length > 0 && key.length <= 80 && !["__proto__", "constructor", "prototype"].includes(key) && valid(entry, depth + 1));
+  };
+  return valid(value, 0) && JSON.stringify(value).length <= 2_000;
+}
+
 export function createMemoryPlugin(options: MemoryPluginOptions): AgentLoopMemoryPlugin & { readonly store: MemoryStore } {
   const store = options.store;
   const now = options.now ?? (() => Date.now());
   const projectionTtlMs = options.projectionTtlMs ?? 5 * 60_000;
-  const resolveCandidate = options.resolveExplicitCandidate ?? defaultCandidate;
 
   const plugin: AgentLoopMemoryPlugin = {
     name: "agentloop-memory",
@@ -192,6 +195,7 @@ export function createMemoryPlugin(options: MemoryPluginOptions): AgentLoopMemor
         .slice(0, Math.max(0, input.budget.maxItems));
       if (matching.length === 0) return undefined;
       const bounded = boundEntries(matching, input.budget.maxTokens);
+      if (bounded.length === 0) return undefined;
       const projection = compileProjection({
         runId: input.runId,
         target: input.target,
@@ -209,31 +213,46 @@ export function createMemoryPlugin(options: MemoryPluginOptions): AgentLoopMemor
     commitExplicit: async (input): Promise<ExplicitMemoryCommitResult> => {
       const scope = await options.resolveRunScope(input.runId);
       if (scope === undefined) return { kind: "not_applicable" };
-      const candidate = resolveCandidate({
+      const candidateInput = {
         scope,
         messageId: input.messageId,
         userText: input.userText,
         candidateId: candidateId(scope, input.messageId, input.userText),
         ...(input.memoryIntents === undefined ? {} : { memoryIntents: input.memoryIntents }),
-      });
-      if (candidate === undefined) return { kind: "not_applicable" };
-      const decision = evaluateCandidate(candidate);
-      if (decision.kind === "reject") return { kind: "not_applicable" };
-      if (decision.kind === "confirmation_required") {
-        return {
-          kind: "confirmation_required",
-          candidateId: candidate.id,
-          prompt: "这条信息涉及需要确认的长期记忆，确认后我才会保存。",
-        };
+      };
+      const candidates = options.resolveExplicitCandidate !== undefined
+        ? [options.resolveExplicitCandidate(candidateInput)]
+        : input.memoryIntents === undefined
+          ? [legacyCandidate(candidateInput)]
+          : input.memoryIntents.map((intent) => candidateFromIntent(intent, candidateInput));
+      const commits: Awaited<ReturnType<MemoryStore["commit"]>>[] = [];
+      const pendingConfirmations: { readonly candidateId: string; readonly prompt: string }[] = [];
+      // One message may establish several independent preferences. Apply the
+      // policy to every candidate; a rejected or restricted sibling must not
+      // erase the accepted candidates or be silently persisted with them.
+      for (const candidate of candidates) {
+        if (candidate === undefined) continue;
+        const decision = evaluateCandidate(candidate);
+        if (decision.kind === "reject") continue;
+        if (decision.kind === "confirmation_required") {
+          pendingConfirmations.push({ candidateId: candidate.id, prompt: "这条信息涉及需要确认的长期记忆，确认后我才会保存。" });
+          continue;
+        }
+        commits.push(await store.commit(scope, { ...candidate, decision: "accepted" }, now()));
       }
-      const committed = await store.commit(scope, { ...candidate, decision: "accepted" }, now());
+      const committed = commits.at(-1);
+      if (committed === undefined) return pendingConfirmations[0] === undefined
+        ? { kind: "not_applicable" }
+        : { kind: "confirmation_required", ...pendingConfirmations[0] };
       return {
         kind: "committed",
         receipt: {
-          id: `memreceipt_${hash(committed.revision.id).slice(0, 24)}`,
+          id: `memreceipt_${hash(commits.map(({ revision }) => revision.id)).slice(0, 24)}`,
           memoryEpoch: committed.memoryEpoch,
-          affectedTargets: committed.revision.applicationTargets,
+          affectedTargets: [...new Set(commits.flatMap(({ revision }) => revision.applicationTargets))],
+          committedCount: commits.length,
         },
+        ...(pendingConfirmations.length === 0 ? {} : { pendingConfirmations }),
       };
     },
 
@@ -278,8 +297,10 @@ function boundEntries<T extends { readonly revision: MemoryRevision }>(entries: 
   const result: T[] = [];
   let used = 0;
   for (const entry of entries) {
-    const estimate = Math.max(1, Math.ceil(entry.revision.contentMarkdown.length / 4));
-    if (used + estimate > maxTokens) break;
+    // Values are projected too. Counting only a generic content label could
+    // admit many large preference values under a deceptively small budget.
+    const estimate = Math.max(1, Math.ceil((entry.revision.contentMarkdown.length + JSON.stringify(entry.revision.value).length) / 4));
+    if (used + estimate > maxTokens) continue;
     result.push(entry);
     used += estimate;
   }
@@ -307,10 +328,14 @@ function compileProjection(input: {
     projectionContextHash: hash({ taskFingerprint: input.taskFingerprint, stepContext: input.stepContext }),
     createdAt: input.now,
     expiresAt: input.expiresAt,
+    preferences: input.entries
+      .filter(({ item }) => item.kind === "preference" && item.subtype !== "contact.email")
+      .map(({ item, revision }) => ({ memoryRevisionId: revision.id, subtype: item.subtype, value: revision.value, contentMarkdown: revision.contentMarkdown })),
   };
   let projection: any;
   if (input.target === "response" || input.target === "human_loop") {
-    const preferences = input.entries.filter(({ item }) => item.kind === "preference").map(({ revision }) => revision);
+    const preferenceEntries = input.entries.filter(({ item }) => item.kind === "preference" && item.subtype !== "contact.email");
+    const projectedPreferences = base.preferences;
     // Legacy v0.5 stored contact.email as a preference. Treat it as a fact at
     // the projection boundary so existing local databases remain usable while
     // the migration converts the persisted item kind.
@@ -322,22 +347,24 @@ function compileProjection(input: {
         value: revision.value,
         stale: revision.expiresAt !== undefined && revision.expiresAt <= input.now,
       }));
+    const revisionsFor = (subtype: string) => preferenceEntries.filter(({ item }) => item.subtype === subtype).map(({ revision }) => revision);
     const guidance = {
-      preferredAddress: stringValue(preferences, "preferredAddress"),
-      language: stringValue(preferences, "language"),
-      tone: recordValue(preferences, "tone"),
-      verbosity: stringValue(preferences, "verbosity"),
-      formatting: recordValue(preferences, "formatting"),
+      preferredAddress: stringValue(revisionsFor("interaction.address"), "preferredAddress"),
+      language: stringValue(revisionsFor("interaction.language"), "language"),
+      tone: recordValue(revisionsFor("interaction.tone"), "tone"),
+      verbosity: stringValue(revisionsFor("interaction.verbosity"), "verbosity"),
+      formatting: recordValue(revisionsFor("interaction.formatting"), "formatting"),
     };
     const factLines = facts.map((fact) => `已确认事实（${fact.subtype}）：${JSON.stringify(fact.value)}`);
+    // Project all accepted preferences, including future concepts and all
+    // values inside tone/formatting. The compatibility guidance is not a gate.
+    const preferenceLines = projectedPreferences.map((preference) =>
+      `已确认偏好：${JSON.stringify({ subtype: preference.subtype, value: preference.value, description: preference.contentMarkdown })}`);
     const promptMarkdown = [
-      guidance.preferredAddress === undefined ? undefined : `称呼偏好：${guidance.preferredAddress}`,
-      guidance.language === undefined ? undefined : `语言偏好：${guidance.language}`,
-      guidance.tone === undefined ? undefined : "按用户已确认的语气偏好回复。",
-      guidance.verbosity === undefined ? undefined : `篇幅偏好：${guidance.verbosity}`,
+      ...preferenceLines,
       ...factLines,
     ].filter((value): value is string => value !== undefined).join("\n");
-    projection = { ...base, target: input.target, guidance, facts, promptMarkdown, id: "" };
+    projection = { ...base, target: input.target, guidance, preferences: projectedPreferences, facts, promptMarkdown, id: "" };
   } else if (input.target === "planner") {
     const facts = input.entries.filter(({ item }) => item.kind === "fact").map(({ item, revision }) => ({
       memoryRevisionId: revision.id,
@@ -411,7 +438,11 @@ function compileProjection(input: {
     projection = {
       ...base,
       target: input.target,
-      augmentations: input.entries.map(({ item, revision }) => ({ id: revision.id, contentMarkdown: revision.contentMarkdown, reason: `${item.kind}:${item.subtype}` })),
+      augmentations: input.entries.map(({ item, revision }) => ({
+        id: revision.id,
+        contentMarkdown: item.kind === "preference" ? `${revision.contentMarkdown}\n${JSON.stringify(revision.value)}` : revision.contentMarkdown,
+        reason: `${item.kind}:${item.subtype}`,
+      })),
       id: "",
     };
   }

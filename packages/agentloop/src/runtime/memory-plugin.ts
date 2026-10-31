@@ -35,6 +35,8 @@ export interface MemoryIntentCandidate {
   readonly canonicalKey: string;
   readonly value: Readonly<Record<string, unknown>>;
   readonly contentMarkdown?: string;
+  /** Verbatim evidence from the current user message, never assistant prose. */
+  readonly sourceQuote?: string;
   readonly persistenceIntent: "explicit" | "future_oriented" | "inferred";
   readonly sensitivity: MemorySensitivity;
   readonly applicationTargets: readonly MemoryApplicationTarget[];
@@ -59,6 +61,13 @@ export interface MemoryProjectionBase {
   readonly contentHash: string;
   readonly createdAt: number;
   readonly expiresAt: number;
+  /** Open-ended confirmed preferences, bounded for this application target. */
+  readonly preferences?: readonly {
+    readonly memoryRevisionId: string;
+    readonly subtype: string;
+    readonly value: Readonly<Record<string, unknown>>;
+    readonly contentMarkdown: string;
+  }[];
 }
 
 export interface InteractionMemoryProjection extends MemoryProjectionBase {
@@ -133,6 +142,7 @@ export interface MemoryCommitReceipt {
   readonly id: string;
   readonly memoryEpoch: number;
   readonly affectedTargets: readonly MemoryApplicationTarget[];
+  readonly committedCount?: number;
 }
 
 export type ExplicitMemoryCommitResult =
@@ -142,7 +152,29 @@ export type ExplicitMemoryCommitResult =
       readonly candidateId: string;
       readonly prompt: string;
     }
-  | { readonly kind: "committed"; readonly receipt: MemoryCommitReceipt };
+  | {
+      readonly kind: "committed";
+      readonly receipt: MemoryCommitReceipt;
+      readonly pendingConfirmations?: readonly { readonly candidateId: string; readonly prompt: string }[];
+    };
+
+/**
+ * Runtime-owned outcome for a durable-memory request in the current turn.
+ * This is supplied to response generation and assessment so model prose
+ * cannot turn an uncommitted proposal into a false persistence receipt.
+ */
+export interface CurrentTurnMemoryCommitState {
+  readonly status:
+    | "committed"
+    | "partial"
+    | "confirmation_required"
+    | "not_saved"
+    | "failed"
+    | "unavailable";
+  readonly candidateCount: number;
+  readonly committedCount?: number;
+  readonly confirmationPrompts?: readonly string[];
+}
 
 export interface MemorySettlementEnqueueReceipt {
   readonly kind: "enqueued" | "duplicate";

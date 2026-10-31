@@ -412,7 +412,7 @@ test("an accepted file receipt cannot route a requested content property through
             taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "create_artifact", requiresExecution: true,
               deliverables: [{ targetId: "report", purpose: "The report must state the difference", expectedArtifactCount: 1,
                 action: "create", kind: "html", format: "html", surface: "workspace_artifact" }] },
-            evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [], requiredCapabilityReferences: [],
+            evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [], memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
           },
         }] };
         if (request.phase === "assessment") {

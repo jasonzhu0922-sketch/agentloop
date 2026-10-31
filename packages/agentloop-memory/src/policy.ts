@@ -3,7 +3,9 @@ import type { MemoryCandidate, MemoryKind, MemoryPolicyDecision, MemoryRevision 
 const SECRET_MARKERS = /(?:password|passwd|token|cookie|private\s*key|secret|密码|口令|令牌|私钥|支付密码)/iu;
 
 export function evaluateCandidate(candidate: MemoryCandidate): MemoryPolicyDecision {
-  if (candidate.sensitivity === "secret" || SECRET_MARKERS.test(candidate.proposedContentMarkdown) || SECRET_MARKERS.test(JSON.stringify(candidate.proposedValue))) {
+  if (candidate.sensitivity === "secret" || SECRET_MARKERS.test(candidate.proposedContentMarkdown)
+    || SECRET_MARKERS.test(JSON.stringify(candidate.proposedValue))
+    || candidate.sourceRefs.some((ref) => ref.quotedText !== undefined && SECRET_MARKERS.test(ref.quotedText))) {
     return { kind: "reject", reason: "secret_data_is_never_persisted" };
   }
   if (candidate.sensitivity === "restricted") {

@@ -201,6 +201,8 @@ test("continued Runs reuse only ToolSources backed by published completed Step R
     sourceBinding: { mode: "none", visibleDirectoryIds: [] },
     evidenceDemand: "source_grounded",
     userConstraints: [],
+    memoryAction: "none",
+    memoryIntents: [],
     source: "model_guarded",
   } as const satisfies ConversationTurnResolution;
   const sourceBinding = {

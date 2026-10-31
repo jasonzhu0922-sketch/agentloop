@@ -865,7 +865,7 @@ class ClarifyThenLoadDirectorySkillModel implements ModelAdapter {
             },
             evidenceStrategy: "none",
             sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-            userConstraints: ["Use directory-demo."],
+            userConstraints: ["Use directory-demo."], memoryAction: "none", memoryIntents: [],
           },
         }],
       };

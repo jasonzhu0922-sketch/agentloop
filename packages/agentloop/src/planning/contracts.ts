@@ -6,7 +6,7 @@ import type { RuntimeResultBinding, RuntimeResultCard, RuntimeResultRecord, Runt
 import type { ToolSourceDescriptor } from "../tools/tool-registry.ts";
 import type { AssessmentEvidenceBundles } from "./runtime-evidence-bundle.ts";
 import type { CanonicalRunState, CanonicalRunStateRef } from "../runtime/canonical-run-state.ts";
-import type { InteractionMemoryProjection, MemoryIntentCandidate, MemoryProjection } from "../runtime/memory-plugin.ts";
+import type { CurrentTurnMemoryCommitState, InteractionMemoryProjection, MemoryIntentCandidate, MemoryProjection } from "../runtime/memory-plugin.ts";
 
 export type PlanStatus = "pending" | "admitted" | "running" | "completed" | "failed";
 export type PlanStepStatus = "pending" | "running" | "completed" | "failed";
@@ -262,8 +262,10 @@ export interface ConversationTurnResolution {
   /** Runtime-derived invariant of evidenceStrategy; the model never chooses it independently. */
   readonly evidenceDemand: SourceNeed;
   readonly userConstraints: readonly string[];
-  /** Model proposal only; the Local Memory plugin validates and commits it. */
-  readonly memoryIntents?: readonly MemoryIntentCandidate[];
+  /** Deliberate resolver decision; omission is invalid for a new model response. */
+  readonly memoryAction: "none" | "commit";
+  /** Model proposals only; the Local Memory plugin validates and commits them. */
+  readonly memoryIntents: readonly MemoryIntentCandidate[];
   /** Explicit execution requirements, independent of catalog availability. */
   readonly requiredCapabilityReferences?: readonly RequiredCapabilityReference[];
   readonly source: "model" | "model_guarded";
@@ -681,6 +683,8 @@ export interface StepAssessmentInput {
    * execution turn. Assessment may use them as evidence for the same reply.
    */
   readonly confirmedResponseMemory?: Pick<InteractionMemoryProjection, "memoryRevisionIds" | "retrievalReasons" | "facts">;
+  /** Authoritative persistence outcome for a durable-memory request in this turn. */
+  readonly currentTurnMemoryCommit?: CurrentTurnMemoryCommitState;
   readonly contextSummary?: string;
   readonly assessmentProfile?: AssessmentProfileId;
   /** Server-verified Runtime Result evidence bundles. Tool labels remain advisory. */

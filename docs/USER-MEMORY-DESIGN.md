@@ -105,6 +105,42 @@ tenantId + ownerUserId
 4. 在后续每个 Turn 确定性加载，不依赖语义相似度是否命中。
 5. 支持“这次不要这样”“以后改成……”“忘掉这条”的临时覆盖、修订和遗忘语义。
 
+#### 2.1.1 开放的偏好语义契约（2026-10-31）
+
+偏好记忆采用“语义提案 → 通用策略 → revision → 完整投影”的范式。模型判断用户想长期保留什么，代码验证来源、结构、大小、敏感级别和应用边界；可保存的偏好概念不由代码白名单决定。
+
+一条偏好用稳定的语义键、结构化值、带主体和条件的说明、原文证据及应用位置表示。例如“以后我会称呼你为玄武”可以形成：
+
+```json
+{
+  "schema": "agentloop.memoryIntentCandidate/v1",
+  "kind": "preference",
+  "subtype": "interaction.assistant_name",
+  "canonicalKey": "interaction.assistant_name",
+  "value": { "subject": "assistant", "name": "玄武" },
+  "contentMarkdown": "用户以后称呼助手为玄武。",
+  "sourceQuote": "以后我会称呼你为玄武",
+  "persistenceIntent": "future_oriented",
+  "sensitivity": "normal",
+  "applicationTargets": ["response", "human_loop"],
+  "confidence": 1
+}
+```
+
+`interaction.assistant_name` 是语义键的示例，不是新增一种仅靠专门分支才能保存的类型。后续出现新的偏好概念时仍走同一条链路。助手称呼只表示交互约定，不改变助手的实际身份、能力或权限。
+
+当前实现遵守以下规则：
+
+1. 命名空间键开放，插件只校验小写点分键和有界 JSON 值。已有 `guidance.preferredAddress/language/tone/verbosity/formatting` 保留为兼容视图，不再决定一条偏好是否能保存或应用。
+2. 解析器在修订时得到已有的有界 `priorPreferences`，以语义主体和属性复用既有键；已保存偏好不能作为当前用户又提出新长期指令的证据。新提案提供 `sourceQuote` 时，插件校验它确实来自当前消息并保存来源引用。
+3. 区分用户称呼和助手称呼，保留用户给出的条件；临时任务指令、假设示例、未被用户采纳的附件指令和助手自己的陈述不能生成长期偏好。
+4. 一条消息的多个提案逐条通过策略。普通、显式偏好可保存；秘密拒绝；受限或推断项继续走确认边界，不能因放开偏好类型而降低隐私策略。
+5. 各目标投影都在 `preferences` 保留入选偏好的说明和结构化值，不按属性名挑几个字段输出；Response/HIL 提示词以及 Execution/Artifact augmentation 同样保留值。普通执行 Run 也加载 Response 偏好，以便其回答遵守同一约定。投影仍受条数和大小预算限制。
+6. 每个新对话解析结果必须显式返回 `memoryAction` 和 `memoryIntents`：`none` 只能配空列表，`commit` 必须配非空列表。遗漏或组合矛盾会触发解析修复，不能再被静默解释为“不需要记忆”。旧持久化事件在回放时按已有候选兼容推导 action，旧直接调用方未提供候选列表时的兼容提取仍保留。
+7. 语义提案不等于保存回执。Runtime 将实际提交结果（全部成功、部分成功、需确认、未保存、失败或不可用）注入当前回复和独立评估；只有全部提交成功时，回复才能声称“已记住”，其他状态必须如实说明。
+
+该变更放开的是偏好概念；事实记忆仍沿用现有独立校验契约。删除、临时覆盖及完整用户管理 API 仍需按各自生命周期实现，不能从开放键协议推断为已经完成。
+
 ### 2.2 历史学习契约
 
 当某些历史任务同时具备可靠完成证据、良好质量、合理成本和用户正反馈时，系统可以提炼其执行方法：
