@@ -82,7 +82,7 @@
       <div class="runtime-modal-card agent-settings-card">
         <div class="agent-settings-header"><div><strong id="agent-settings-title">本机能力设置</strong><p>模型配置保存在这台设备上。API Key 仅在本机加密存储。</p></div><button id="agent-settings-close-icon" class="runtime-modal-close" type="button" title="关闭" aria-label="关闭 Local Runtime Agent 设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg></button></div>
         <div class="agent-settings-layout">
-          <nav class="agent-settings-nav" aria-label="本机能力设置"><button type="button" data-agent-settings-view="general">常规</button><button type="button" class="active" data-agent-settings-view="models">模型配置</button><button type="button" data-agent-settings-view="skills">Skill 管理</button><button type="button" data-agent-settings-view="runtimes">Runtime 管理</button></nav>
+          <nav class="agent-settings-nav" aria-label="本机能力设置"><button type="button" data-agent-settings-view="general">常规</button><button type="button" class="active" data-agent-settings-view="models">模型配置</button><button type="button" data-agent-settings-view="skills">Skill 管理</button><button type="button" data-agent-settings-view="connectors">Connector 配置</button><button type="button" data-agent-settings-view="runtimes">Runtime 管理</button></nav>
           <div class="agent-settings-content">
             <section id="agent-model-settings" class="agent-settings-view">
               <div class="settings-page-heading"><div><h2>模型配置</h2><p>使用 JSON 管理本机 Provider、模型和调用参数。保存后用于后续新任务。</p></div><span class="settings-local-badge">仅本机保存</span></div>
@@ -126,6 +126,22 @@
                 <small id="local-skill-upload-status" class="runtime-skill-upload-status" role="status" aria-live="polite"></small>
                 <div id="local-skill-package-list" class="local-skill-package-list" aria-live="polite"></div>
               </section>
+            </section>
+            <section id="agent-connector-settings" class="agent-settings-view" hidden>
+              <div class="settings-page-heading"><div><h2>Connector 配置</h2><p>个人 Connector 只保存在 Local Agent；配置凭据不会上传到云端。</p></div><span class="settings-local-badge">仅本机保存</span></div>
+              <div id="local-connector-editable" class="local-connector-layout">
+                <section class="local-model-section">
+                  <div class="settings-section-title"><strong>本机 Connectors</strong><button id="local-connector-add" type="button">＋ 添加 Connector</button></div>
+                  <div id="local-connector-list" class="local-connector-list"></div>
+                </section>
+                <div id="local-connector-json-empty" class="local-connector-empty">添加 Connector 后，填写模块路径、连接配置和凭据。</div>
+                <section id="local-connector-json-editor" class="local-model-section" hidden>
+                  <div class="settings-section-title"><strong>Connector 配置</strong><div class="local-model-actions"><button id="local-connector-format" type="button">格式化</button><button id="local-connector-delete" type="button" class="danger">删除 Connector</button></div></div>
+                  <p class="local-model-field-note">modulePath 指向本机独立 Connector 模块；credentials 只会写入本机加密 Secret Store。</p>
+                  <textarea id="local-connector-json" class="local-model-json" spellcheck="false" autocomplete="off" autocapitalize="off" rows="18"></textarea>
+                </section>
+              </div>
+              <div class="local-model-save-bar"><p id="local-connector-save-status" class="settings-save-status" role="status" aria-live="polite"></p><div class="local-model-actions"><button id="local-connector-discard" type="button" disabled>放弃更改</button><button id="local-connector-save" type="button" class="primary" disabled>保存配置</button></div></div>
             </section>
             <section id="agent-general-settings" class="agent-settings-view" hidden>
               <dl class="settings-detail"><dt>Agent</dt><dd id="agent-settings-version">-</dd><dt>服务端</dt><dd id="agent-router-url">-</dd><dt>共享工作目录</dt><dd class="settings-detail-value"><span id="agent-settings-storage">-</span><button id="agent-storage-pick" class="icon-button" type="button" title="编辑共享工作目录" aria-label="编辑共享工作目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg></button></dd><dt>上传源文件目录</dt><dd class="settings-detail-value"><span id="agent-settings-upload-storage">-</span><button id="agent-upload-storage-pick" class="icon-button" type="button" title="编辑上传源文件目录" aria-label="编辑上传源文件目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg></button></dd><dt>Skill 模式</dt><dd>Runtime 启动时统一加载</dd></dl><p class="install-security-note">切换任一目录前必须没有活动任务；原位置数据不会被自动删除。上传源文件在公共根目录内按 Runtime 分区。</p></section>
