@@ -1491,8 +1491,19 @@ export class RunService {
     readonly conversationId?: string;
     readonly connectionIds: readonly string[];
   }): Promise<readonly RuntimeTool<unknown>[]> {
-    if (this.runToolProvider === undefined || input.connectionIds.length === 0) return [];
-    return await this.runToolProvider.resolve(input);
+    if (this.runToolProvider === undefined) return [];
+    const connectionIds = input.connectionIds.length > 0
+      ? input.connectionIds
+      : await this.connectorConnectionIdsFromEvents(input.runId);
+    if (connectionIds.length === 0) return [];
+    return await this.runToolProvider.resolve({ ...input, connectionIds });
+  }
+
+  private async connectorConnectionIdsFromEvents(runId: string): Promise<readonly string[]> {
+    const started = (await this.runtimeEvents(runId)).find((event) => event.type === "run.started");
+    const raw = started?.data.connectorConnectionIds;
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((value): value is string => typeof value === "string");
   }
 
   private resolveRunModelKey(requestedModelKey: string | undefined): string | undefined {
@@ -1594,6 +1605,9 @@ export class RunService {
         workspaceRoot: runWorkspaceRoot,
         visibleDirectories,
         sources: availableSources.map((source) => sourceEventSummary(source)),
+        ...(executeOptions.connectorConnectionIds.length === 0
+          ? {}
+          : { connectorConnectionIds: executeOptions.connectorConnectionIds }),
       },
     });
     onRunStarted?.(await this.get(actorUserId, runId));
