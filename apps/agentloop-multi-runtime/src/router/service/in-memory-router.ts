@@ -129,6 +129,7 @@ export class MultiRuntimeRouter {
         ...(task.requestedModelKey === undefined ? {} : { requestedModelKey: task.requestedModelKey }),
         allowDangerousTools: task.allowDangerousTools !== false,
         resourceRefs: task.resourceRefs ?? [],
+        ...(task.connectorConnectionIds === undefined ? {} : { connectorConnectionIds: task.connectorConnectionIds }),
       };
       try {
         const accepted = await selected.endpoint.dispatch(envelope);
