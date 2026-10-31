@@ -13,6 +13,7 @@ test("local runtime state keeps device, Runtime, scope, and Agent lifecycle toge
   state.scopes = [{ id: "scope-1", status: "active" }];
   state.agentStatus = "online";
   state.agentHealth = { registered: true };
+  state.agentReconnect = Promise.resolve();
   state.hydratedPreferenceKey = "user-1:device-1";
   state.clear();
   assert.equal(state.device, undefined);
@@ -22,6 +23,7 @@ test("local runtime state keeps device, Runtime, scope, and Agent lifecycle toge
   assert.deepEqual(state.scopes, []);
   assert.equal(state.agentStatus, "checking");
   assert.equal(state.agentHealth, undefined);
+  assert.equal(state.agentReconnect, undefined);
   assert.equal(state.hydratedPreferenceKey, "");
 });
 
@@ -35,9 +37,79 @@ test("browser does not report a failed Local Agent health probe as uninstalled",
 test("browser keeps Agent reconnect and Runtime lifecycle on the loopback service", async () => {
   const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
   assert.match(app, /localAgentFetch\("\/v1\/agent\/reconnect", \{ method: "POST" \}\)/);
+  assert.match(app, /agentStatus === "online" \|\| localRuntimeState\.agentStatus === "router_disconnected"/);
+  assert.match(app, /agentStatus !== "online_unpaired" && localRuntimeState\.agentStatus !== "online" && localRuntimeState\.agentStatus !== "router_disconnected"/);
   assert.match(app, /localAgentFetch\("\/v1\/local-runtimes"\)/);
   assert.match(app, /localAgentFetch\(`\/v1\/local-runtimes\/\$\{encodeURIComponent\(runtimeId\)\}\/\$\{action\}`/);
   assert.doesNotMatch(app, /routerClient\.request\(localAgentRouterPath\("\/runtimes"\)\)/);
+});
+
+test("refresh recovery shares one Local Agent reconnect while Router health is disconnected", async () => {
+  const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  const start = app.indexOf("async function connectRegisteredLocalAgent()");
+  const end = app.indexOf("async function probeLocalAgent()", start);
+  assert.ok(start >= 0 && end > start, "reconnect workflow must remain a distinct browser boundary");
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let reconnectRequests = 0;
+  const loaded: string[] = [];
+  // Re-evaluate with the asynchronous gate in scope so two recovery sources
+  // overlap exactly as bootstrap and the status button can in a browser.
+  const connect = runInNewContext(`${app.slice(start, end)}; connectRegisteredLocalAgent`, {
+    localRuntimeState: { device: { id: "device-1" }, agentReconnect: undefined },
+    localAgentFetch: async () => { reconnectRequests += 1; await gate; },
+    loadLocalRuntimes: async () => { loaded.push("runtimes"); },
+    loadLocalScopes: async () => { loaded.push("scopes"); },
+    reconcileStrictLocalRuns: async () => { loaded.push("runs"); },
+    loadLocalAgentConfig: async () => { loaded.push("config"); },
+    updateLocalControls: () => { loaded.push("controls"); },
+  });
+  const first = connect();
+  const second = connect();
+  assert.equal(reconnectRequests, 1);
+  release();
+  await Promise.all([first, second]);
+  assert.deepEqual(loaded, ["runtimes", "scopes", "runs", "config", "controls"]);
+});
+
+test("page bootstrap and the Local Runtime button both reconnect a registered disconnected Agent", async () => {
+  const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  const state = { agentStatus: "router_disconnected", agentHealth: { deviceId: "device-1", registered: true }, device: undefined as { id: string } | undefined };
+  let reconnects = 0;
+  let scheduled = 0;
+  const loadStart = app.indexOf("async function loadDevices()");
+  const loadEnd = app.indexOf("function scheduleLocalAgentReprobe()", loadStart);
+  const loadDevices = runInNewContext(`${app.slice(loadStart, loadEnd)}; loadDevices`, {
+    localRuntimeState: state,
+    probeLocalAgent: async () => undefined,
+    routerClient: { request: async () => ({ ok: true, json: async () => ({ devices: [{ id: "device-1", status: "active" }] }) }) },
+    connectRegisteredLocalAgent: async () => { reconnects += 1; },
+    scheduleLocalAgentReprobe: () => { scheduled += 1; },
+    updateLocalControls() {},
+    localSkillPackages: [],
+    localSkillPackagesLoaded: true,
+  });
+  await loadDevices();
+  assert.equal(state.device?.id, "device-1");
+  assert.equal(reconnects, 1, "refresh recovery must call the protected loopback reconnect");
+  assert.equal(scheduled, 1, "health observation remains active until the Router confirms recovery");
+
+  const enableStart = app.indexOf("async function enableLocalRuntime()");
+  const enableEnd = app.indexOf("async function loadDevices()", enableStart);
+  const button = { disabled: false };
+  const enableLocalRuntime = runInNewContext(`${app.slice(enableStart, enableEnd)}; enableLocalRuntime`, {
+    $: () => button,
+    sessionState: { user: { id: "user-1" } },
+    localRuntimeState: state,
+    probeLocalAgent: async () => undefined,
+    connectRegisteredLocalAgent: async () => { reconnects += 1; },
+    redirectToLogin() {}, offerLocalAgentInstall() {}, startInstalledLocalAgent() {},
+    call: async () => assert.fail("registered Agent must not be paired again"),
+    setStatus() {},
+  });
+  await enableLocalRuntime();
+  assert.equal(reconnects, 2, "the visible Local Runtime control must also request reconnect");
+  assert.equal(button.disabled, false);
 });
 
 test("browser keeps Agent settings and Runtime deletion on the loopback service", async () => {
@@ -86,7 +158,9 @@ test("settings preserve the active tab across Agent refreshes and reopen on mode
     modelCatalog: { load() {} }, modelCatalogContext: () => ({}),
     syncModelSelection() {},
     syncLocalRuntimeManager() {}, renderLocalScopes() {}, renderLocalAgentConfig() {},
-    loadLocalAgentConfig() {}, loadLocalRuntimes() {}, loadLocalModelConfiguration() {}, loadLocalSkillPackages() {},
+    loadLocalAgentConfig() {}, loadLocalRuntimes() {}, loadLocalModelConfiguration() {}, loadLocalMemoryConfiguration() {}, loadLocalSkillPackages() {},
+    createLocalMemorySettings: () => ({ load() {}, canClose: () => true, refreshModels() {} }),
+    localAgentFetch() {}, showToast() {},
   });
 
   for (const view of ["models", "skills", "general", "runtimes"]) {

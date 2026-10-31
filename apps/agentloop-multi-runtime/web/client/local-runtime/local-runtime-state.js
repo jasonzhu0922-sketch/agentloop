@@ -19,6 +19,11 @@ export function createLocalRuntimeState() {
     agentStatus: "checking",
     agentInstallPoll: undefined,
     agentReprobe: undefined,
+    // Browser bootstrap, the Local Runtime button, and a scheduled health
+    // observation can all notice the same disconnected Agent. Keep their
+    // protected reconnect request single-flight so they do not churn the
+    // Router connection or invalidate each other's local session.
+    agentReconnect: undefined,
     hydratedPreferenceKey: "",
     clear() {
       this.device = undefined;
@@ -33,6 +38,7 @@ export function createLocalRuntimeState() {
       this.agentStatus = "checking";
       this.agentInstallPoll = undefined;
       this.agentReprobe = undefined;
+      this.agentReconnect = undefined;
       this.hydratedPreferenceKey = "";
     },
   };

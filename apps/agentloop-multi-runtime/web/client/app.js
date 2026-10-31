@@ -358,7 +358,7 @@ async function enableLocalRuntime() {
       return;
     }
     if (localRuntimeState.agentStatus === "incompatible") { await offerLocalAgentInstall(); return; }
-    if (localRuntimeState.agentStatus !== "online_unpaired" && localRuntimeState.agentStatus !== "online") throw new Error("Local Runtime Agent 尚未就绪");
+    if (localRuntimeState.agentStatus !== "online_unpaired" && localRuntimeState.agentStatus !== "online" && localRuntimeState.agentStatus !== "router_disconnected") throw new Error("Local Runtime Agent 尚未就绪");
     if (localRuntimeState.agentHealth?.registered === true) {
       await connectRegisteredLocalAgent();
       return;
@@ -393,7 +393,10 @@ async function loadDevices() {
       localSkillPackagesLoaded = false;
     }
     localRuntimeState.device = device;
-    if (localRuntimeState.device && localRuntimeState.agentStatus === "online") await connectRegisteredLocalAgent();
+    // A browser refresh is also the recovery entry point for an already
+    // paired Agent. Health alone cannot restore its outbound Router socket;
+    // ask the loopback Agent to reconnect using the browser's local session.
+    if (localRuntimeState.device && (localRuntimeState.agentStatus === "online" || localRuntimeState.agentStatus === "router_disconnected")) await connectRegisteredLocalAgent();
   } catch {}
   if (localRuntimeState.agentStatus === "router_disconnected") scheduleLocalAgentReprobe();
   updateLocalControls();
@@ -411,13 +414,25 @@ function scheduleLocalAgentReprobe() {
 
 async function connectRegisteredLocalAgent() {
   if (!localRuntimeState.device?.id) return;
-  await refreshLocalSession();
-  await localAgentFetch("/v1/agent/reconnect", { method: "POST" });
-  await loadLocalRuntimes();
-  await loadLocalScopes();
-  await reconcileStrictLocalRuns();
-  await loadLocalAgentConfig();
-  updateLocalControls();
+  if (!localRuntimeState.agentReconnect) {
+    const reconnect = (async () => {
+      // localAgentFetch ensures an initial browser session and retries once
+      // after an invalidated session. Do not mint a new session for every
+      // health observation: the Router deliberately keeps one browser
+      // binding per device.
+      await localAgentFetch("/v1/agent/reconnect", { method: "POST" });
+      await loadLocalRuntimes();
+      await loadLocalScopes();
+      await reconcileStrictLocalRuns();
+      await loadLocalAgentConfig();
+      updateLocalControls();
+    })();
+    const shared = reconnect.finally(() => {
+      if (localRuntimeState.agentReconnect === shared) localRuntimeState.agentReconnect = undefined;
+    });
+    localRuntimeState.agentReconnect = shared;
+  }
+  await localRuntimeState.agentReconnect;
 }
 
 async function probeLocalAgent() {

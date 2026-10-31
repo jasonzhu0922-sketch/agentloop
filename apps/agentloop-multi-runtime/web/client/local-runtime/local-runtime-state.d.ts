@@ -11,6 +11,7 @@ export interface LocalRuntimeState {
   agentStatus: string;
   agentInstallPoll: ReturnType<typeof setInterval> | undefined;
   agentReprobe: ReturnType<typeof setTimeout> | undefined;
+  agentReconnect: Promise<void> | undefined;
   hydratedPreferenceKey: string;
   clear(): void;
 }
