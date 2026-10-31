@@ -4,7 +4,10 @@ import type {
 } from "@zhujun/agentloop-connector-sdk";
 
 export interface ConnectionResolver {
-  resolve(connectionId: string): Promise<ConnectorConnection>;
+  resolve(
+    connectionId: string,
+    scope?: { readonly actorUserId: string; readonly workspaceId?: string },
+  ): Promise<ConnectorConnection>;
 }
 
 export interface ConnectorConnectionRuntime {
@@ -15,8 +18,9 @@ export interface ConnectorConnectionRuntime {
 export async function requireActiveConnection(
   runtime: ConnectorConnectionRuntime,
   connectionId: string,
+  scope?: { readonly actorUserId: string; readonly workspaceId?: string },
 ): Promise<ConnectorConnection> {
-  const connection = await runtime.resolver.resolve(connectionId);
+  const connection = await runtime.resolver.resolve(connectionId, scope);
   if (connection.status !== "active") {
     throw new Error(`Connector connection is not active: ${connectionId}`);
   }
