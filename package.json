@@ -22,7 +22,7 @@
     "pack:skills": "npm run build:skills && npm pack ./packages/agentloop-skills",
     "pack:plan-template": "npm run build:kernel && npm run build:plan-template && npm pack ./packages/agentloop-plan-template",
     "build:web": "npm run build --prefix apps/agentloop-app/web",
-    "build": "npm run build:kernel && npm run build:artifact-preview && npm run build:skills && npm run build:plan-template && npm run build:web && npm run build:connector-sdk && npm run build:connector-feishu",
+    "build": "npm run build:kernel && npm run build:artifact-preview && npm run build:skills && npm run build:plan-template && npm run build:web && npm run build:connector-sdk && npm run build:connector-feishu && npm run build:connector-126-mail",
     "start:multi-runtime": "MAX_CONCURRENT_RUNS=20 npm run start:local --workspace agentloop-multi-runtime --",
     "start:multi-runtime:build": "npm run build:kernel && npm run build:artifact-preview && npm run build:skills && npm run build:plan-template && npm run start:local --workspace agentloop-multi-runtime --",
     "package:local-agent:mac": "npm run package:local-agent:mac --workspace agentloop-multi-runtime",
@@ -47,7 +47,8 @@
     "test:coverage": "npm run test:coverage --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "build:connector-sdk": "npm run build --workspace @zhujun/agentloop-connector-sdk",
-    "build:connector-feishu": "npm run build --workspace @zhujun/connector-feishu"
+    "build:connector-feishu": "npm run build --workspace @zhujun/connector-feishu",
+    "build:connector-126-mail": "npm run build --workspace @zhujun/connector-126-mail"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",
