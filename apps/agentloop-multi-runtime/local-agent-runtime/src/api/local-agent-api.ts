@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { LocalAgentService } from "../service/local-agent-service.ts";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
 import type { LocalRuntimeConfigurationInput, LocalRuntimeMcpServerInput } from "../persistence/local-runtime-configuration-store.ts";
+import type { LocalConnectorConfigurationInput } from "../persistence/local-connector-configuration-store.ts";
 import type { ToolSourceCapability } from "@zhujun/agentloop";
 import type { LocalSkillUploadFile } from "../service/local-skill-package-installer.ts";
 
@@ -96,6 +97,29 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
           runtimeConfigurationInput(value),
         ));
       }
+      const runtimeConnector = url.pathname.match(/^\\/v1\\/local-runtimes\\/([^/]+)\\/connectors$/);
+      if (request.method === "GET" && runtimeConnector !== null) {
+        await session(request, service);
+        return json(response, 200, await service.localConnectorConfigurations(decodeURIComponent(runtimeConnector[1])));
+      }
+      if (request.method === "POST" && runtimeConnector !== null) {
+        await session(request, service);
+        const value = await body(request);
+        return json(response, 200, await service.updateLocalConnectorConfiguration(
+          decodeURIComponent(runtimeConnector[1]),
+          connectorConfigurationInput(recordValue(value.connector ?? value, "connector")),
+        ));
+      }
+      const runtimeConnectorDelete = url.pathname.match(/^\\/v1\\/local-runtimes\\/([^/]+)\\/connectors\\/([^/]+)$/);
+      if (request.method === "DELETE" && runtimeConnectorDelete !== null) {
+        await session(request, service);
+        await service.removeLocalConnectorConfiguration(
+          decodeURIComponent(runtimeConnectorDelete[1]),
+          decodeURIComponent(runtimeConnectorDelete[2]),
+        );
+        return json(response, 200, { removed: true });
+      }
+
       const runtimeConfiguration = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)\/configuration$/);
       if (request.method === "GET" && runtimeConfiguration !== null) {
         await session(request, service);
@@ -210,6 +234,23 @@ function runtimeConfigurationInput(value: Record<string, unknown>): LocalRuntime
     ? []
     : objectArray(value.mcpServers, "mcpServers").map(parseMcpServerInput);
   return { skillPackageIds, mcpServers };
+}
+
+function connectorConfigurationInput(value: Record<string, unknown>): LocalConnectorConfigurationInput {
+  const credentials = value.credentials === undefined ? undefined : stringRecord(value.credentials, "connector.credentials");
+  const config = value.config === undefined ? {} : recordValue(value.config, "connector.config");
+  return {
+    ...(value.id === undefined ? {} : { id: stringValue(value.id, "connector.id") }),
+    connectorKey: stringValue(value.connectorKey, "connector.connectorKey"),
+    displayName: stringValue(value.displayName, "connector.displayName"),
+    modulePath: stringValue(value.modulePath, "connector.modulePath"),
+    ...(value.exportName === undefined ? {} : { exportName: stringValue(value.exportName, "connector.exportName") }),
+    ...(value.enabled === undefined ? {} : { enabled: value.enabled === true }),
+    config,
+    ...(value.externalAccountId === undefined ? {} : { externalAccountId: stringValue(value.externalAccountId, "connector.externalAccountId") }),
+    ...(value.scopes === undefined ? {} : { scopes: stringArray(value.scopes, "connector.scopes") }),
+    ...(credentials === undefined ? {} : { credentials }),
+  };
 }
 
 function parseMcpServerInput(value: Record<string, unknown>, index: number): LocalRuntimeMcpServerInput {
