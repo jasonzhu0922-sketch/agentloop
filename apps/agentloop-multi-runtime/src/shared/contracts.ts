@@ -62,6 +62,8 @@ export interface RuntimeDispatchEnvelope {
   readonly requestedModelKey?: string;
   readonly allowDangerousTools: boolean;
   readonly resourceRefs: readonly PortableResourceRef[];
+  /** Application-authorized Connector connection IDs. Host resolves them locally. */
+  readonly connectorConnectionIds?: readonly string[];
   /** Opaque Local Agent capabilities. Absolute paths never cross this boundary. */
   readonly localDirectoryScopeIds?: readonly string[];
   /** Opaque IDs of uploaded sources owned by this exact Local Runtime. File bytes never cross the Router. */
