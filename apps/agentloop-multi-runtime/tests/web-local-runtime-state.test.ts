@@ -14,6 +14,7 @@ test("local runtime state keeps device, Runtime, scope, and Agent lifecycle toge
   state.agentStatus = "online";
   state.agentHealth = { registered: true };
   state.agentReconnect = Promise.resolve();
+  state.agentReprobe = setTimeout(() => assert.fail("state cleanup must cancel pending reprobes"), 50);
   state.hydratedPreferenceKey = "user-1:device-1";
   state.clear();
   assert.equal(state.device, undefined);
@@ -24,14 +25,51 @@ test("local runtime state keeps device, Runtime, scope, and Agent lifecycle toge
   assert.equal(state.agentStatus, "checking");
   assert.equal(state.agentHealth, undefined);
   assert.equal(state.agentReconnect, undefined);
+  assert.equal(state.agentReprobe, undefined);
   assert.equal(state.hydratedPreferenceKey, "");
 });
 
 test("browser does not report a failed Local Agent health probe as uninstalled", async () => {
   const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
   assert.match(app, /catch \{\s+localRuntimeState\.agentHealth = undefined;\s+localRuntimeState\.agentStatus = "unreachable";/);
-  assert.match(app, /unreachable: \["无法访问 · 重试"/);
+  assert.match(app, /unreachable: \["等待 Agent"/);
   assert.doesNotMatch(app, /agentStatus = localStorage\.getItem\("agentloop\.local-agent-seen\.v1"\)/);
+});
+
+test("Local Agent status explains automatic startup recovery without asking the user to refresh", async () => {
+  const [app, page] = await Promise.all([
+    readFile(new URL("../web/client/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../web/pages/app.html", import.meta.url), "utf8"),
+  ]);
+  assert.match(app, /starting: \["正在启动"/);
+  assert.match(app, /unreachable: \["等待 Agent"[\s\S]*?无需刷新页面/);
+  assert.match(app, /router_disconnected: \["正在重连"[\s\S]*?无需刷新页面/);
+  assert.match(app, /LOCAL_AGENT_HEALTH_INTERVAL_MS/);
+  assert.match(app, /scheduleLocalAgentReprobe\(\);/);
+  assert.match(page, /id="local-agent-hint"[^>]*role="status"[^>]*aria-live="polite"/);
+});
+
+test("Local Agent observation retries startup quickly and monitors a healthy connection without reconnect churn", async () => {
+  const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  const start = app.indexOf("function scheduleLocalAgentReprobe()");
+  const end = app.indexOf("async function connectRegisteredLocalAgent()", start);
+  assert.ok(start >= 0 && end > start, "the Local Agent observer must remain independent from reconnect work");
+  const state = { agentStatus: "unreachable", agentReprobe: undefined as unknown };
+  let delay = 0;
+  const schedule = runInNewContext(`${app.slice(start, end)}; scheduleLocalAgentReprobe`, {
+    localRuntimeState: state,
+    LOCAL_AGENT_RETRY_DELAY_MS: 1_500,
+    LOCAL_AGENT_HEALTH_INTERVAL_MS: 10_000,
+    setTimeout(_callback: () => void, value: number) { delay = value; return { value }; },
+    probeLocalAgent: async () => undefined,
+    loadDevices: async () => undefined,
+  });
+  schedule();
+  assert.equal(delay, 1_500);
+  state.agentReprobe = undefined;
+  state.agentStatus = "online";
+  schedule();
+  assert.equal(delay, 10_000, "a steady connection receives passive health observation instead of forced reconnects");
 });
 
 test("browser keeps Agent reconnect and Runtime lifecycle on the loopback service", async () => {
@@ -77,12 +115,14 @@ test("page bootstrap and the Local Runtime button both reconnect a registered di
   const state = { agentStatus: "router_disconnected", agentHealth: { deviceId: "device-1", registered: true }, device: undefined as { id: string } | undefined };
   let reconnects = 0;
   let scheduled = 0;
-  const loadStart = app.indexOf("async function loadDevices()");
+  let routerAvailable = true;
+  const router = { request: async () => routerAvailable ? { ok: true, json: async () => ({ devices: [{ id: "device-1", status: "active" }] }) } : { ok: false } };
+  const loadStart = app.indexOf("async function loadDevices(");
   const loadEnd = app.indexOf("function scheduleLocalAgentReprobe()", loadStart);
   const loadDevices = runInNewContext(`${app.slice(loadStart, loadEnd)}; loadDevices`, {
     localRuntimeState: state,
     probeLocalAgent: async () => undefined,
-    routerClient: { request: async () => ({ ok: true, json: async () => ({ devices: [{ id: "device-1", status: "active" }] }) }) },
+    routerClient: router,
     connectRegisteredLocalAgent: async () => { reconnects += 1; },
     scheduleLocalAgentReprobe: () => { scheduled += 1; },
     updateLocalControls() {},
@@ -94,8 +134,21 @@ test("page bootstrap and the Local Runtime button both reconnect a registered di
   assert.equal(reconnects, 1, "refresh recovery must call the protected loopback reconnect");
   assert.equal(scheduled, 1, "health observation remains active until the Router confirms recovery");
 
+  state.agentStatus = "unreachable";
+  scheduled = 0;
+  await loadDevices();
+  assert.equal(scheduled, 1, "a startup-window miss remains under automatic observation");
+
+  state.agentStatus = "router_disconnected";
+  scheduled = 0;
+  routerAvailable = false;
+  await loadDevices();
+  assert.equal(scheduled, 1, "a Router device-list failure does not stop local connection observation");
+  routerAvailable = true;
+  state.agentStatus = "router_disconnected";
+
   const enableStart = app.indexOf("async function enableLocalRuntime()");
-  const enableEnd = app.indexOf("async function loadDevices()", enableStart);
+  const enableEnd = app.indexOf("async function loadDevices(", enableStart);
   const button = { disabled: false };
   const enableLocalRuntime = runInNewContext(`${app.slice(enableStart, enableEnd)}; enableLocalRuntime`, {
     $: () => button,

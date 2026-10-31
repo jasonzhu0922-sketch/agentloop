@@ -26,6 +26,8 @@ export function createLocalRuntimeState() {
     agentReconnect: undefined,
     hydratedPreferenceKey: "",
     clear() {
+      if (this.agentInstallPoll) clearInterval(this.agentInstallPoll);
+      if (this.agentReprobe) clearTimeout(this.agentReprobe);
       this.device = undefined;
       this.runtimeId = "";
       this.sessionRefresh = undefined;

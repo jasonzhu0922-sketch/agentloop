@@ -22,6 +22,7 @@
           <input id="user-id" type="hidden" /><input id="tenant-id" type="hidden" />
           <section class="local-capability" aria-label="本机能力">
             <div class="local-capability-head"><div class="local-capability-title"><strong>本机能力</strong><small id="local-agent-version"></small><button id="enable-local-runtime" class="local-agent-state" type="button"><i id="local-agent-state-dot" class="offline"></i><span id="local-agent-state-label">正在检查</span></button></div><button id="local-agent-settings" type="button" title="Local Runtime Agent 设置" disabled>设置</button></div>
+            <p id="local-agent-hint" class="local-agent-hint" role="status" aria-live="polite">正在检查本机 Agent 状态。</p>
             <div id="local-runtime-picker" class="local-runtime-picker" hidden>
               <label class="local-execution-toggle" title="启用后，下一次任务由所选本机 Runtime 执行"><input id="use-local-runtime" type="checkbox" disabled /><span>本机运行</span></label>
               <label class="local-runtime-select"><span class="sr-only">选择本机 Runtime</span><select id="runtime" disabled></select></label>

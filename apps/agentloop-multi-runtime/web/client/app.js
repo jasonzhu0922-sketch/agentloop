@@ -45,6 +45,8 @@ const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const CONVERSATION_PAGE_SIZE = 30;
 const LOCAL_AGENT_PROTOCOL_VERSION = "1";
 const LOCAL_SESSION_REFRESH_AHEAD_MS = 5 * 60 * 1000;
+const LOCAL_AGENT_RETRY_DELAY_MS = 1_500;
+const LOCAL_AGENT_HEALTH_INTERVAL_MS = 10_000;
 const ROUTER_STARTUP_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000, 4_000, 8_000];
 const ARTIFACT_PRODUCING_TOOLS = new Set([
   "computer_write_file",
@@ -381,35 +383,47 @@ async function enableLocalRuntime() {
   } finally { button.disabled = false; }
 }
 
-async function loadDevices() {
-  await probeLocalAgent();
+async function loadDevices({ skipAgentProbe = false } = {}) {
+  if (!skipAgentProbe) await probeLocalAgent();
   try {
     const response = await routerClient.request("/v1/devices");
-    if (!response.ok) return;
-    const body = await response.json();
-    const device = (body.devices || []).find((item) => item.id === localRuntimeState.agentHealth?.deviceId && item.status === "active");
-    if (device?.id !== localRuntimeState.device?.id) {
-      localSkillPackages = [];
-      localSkillPackagesLoaded = false;
+    if (response.ok) {
+      const body = await response.json();
+      const device = (body.devices || []).find((item) => item.id === localRuntimeState.agentHealth?.deviceId && item.status === "active");
+      if (device?.id !== localRuntimeState.device?.id) {
+        localSkillPackages = [];
+        localSkillPackagesLoaded = false;
+      }
+      localRuntimeState.device = device;
+      // A browser refresh is also the recovery entry point for an already
+      // paired Agent. Health alone cannot restore its outbound Router socket;
+      // ask the loopback Agent to reconnect using the browser's local session.
+      if (localRuntimeState.device && (localRuntimeState.agentStatus === "online" || localRuntimeState.agentStatus === "router_disconnected")) await connectRegisteredLocalAgent();
     }
-    localRuntimeState.device = device;
-    // A browser refresh is also the recovery entry point for an already
-    // paired Agent. Health alone cannot restore its outbound Router socket;
-    // ask the loopback Agent to reconnect using the browser's local session.
-    if (localRuntimeState.device && (localRuntimeState.agentStatus === "online" || localRuntimeState.agentStatus === "router_disconnected")) await connectRegisteredLocalAgent();
   } catch {}
-  if (localRuntimeState.agentStatus === "router_disconnected") scheduleLocalAgentReprobe();
+  scheduleLocalAgentReprobe();
   updateLocalControls();
 }
 
 function scheduleLocalAgentReprobe() {
   if (localRuntimeState.agentReprobe) return;
+  if (!["checking", "starting", "unreachable", "online_unpaired", "online", "router_disconnected"].includes(localRuntimeState.agentStatus)) return;
+  const delay = localRuntimeState.agentStatus === "online" || localRuntimeState.agentStatus === "online_unpaired"
+    ? LOCAL_AGENT_HEALTH_INTERVAL_MS
+    : LOCAL_AGENT_RETRY_DELAY_MS;
   localRuntimeState.agentReprobe = setTimeout(() => void (async () => {
     localRuntimeState.agentReprobe = undefined;
+    const wasReachable = localRuntimeState.agentHealth !== undefined;
     await probeLocalAgent();
-    if (localRuntimeState.agentStatus === "online") await loadDevices();
-    else if (localRuntimeState.agentStatus === "router_disconnected") scheduleLocalAgentReprobe();
-  })(), 1_500);
+    // A process can appear after the first probe during system startup. Once
+    // it does, hydrate the already-paired device without requiring a page
+    // refresh; keep steady-state checks passive so we do not churn its socket.
+    if (localRuntimeState.agentStatus === "router_disconnected" ||
+      (!wasReachable && (localRuntimeState.agentStatus === "online" || localRuntimeState.agentStatus === "online_unpaired"))) {
+      await loadDevices({ skipAgentProbe: true });
+    }
+    scheduleLocalAgentReprobe();
+  })(), delay);
 }
 
 async function connectRegisteredLocalAgent() {
@@ -462,19 +476,21 @@ async function probeLocalAgent() {
 
 function renderLocalAgentState() {
   const copy = {
-    checking: ["检查中", "正在检查 Local Runtime Agent。"],
-    not_installed: ["未安装 · 安装", "安装后可在本机安全地访问已授权目录。"],
-    router_not_configured: ["需重新安装", "此安装包未配置当前服务端。"],
-    installed_stopped: ["未启动 · 启动", "已安装的 Agent 将通过系统启动协议恢复。"],
-    unreachable: ["无法访问 · 重试", "无法从当前浏览器访问本机 Agent；请确认 Agent 正在运行并重试。"],
-    online_unpaired: ["未配对 · 配对", "配对后 Router 才可调度本机 Runtime。"],
-    online: ["已就绪", "本机 Agent 已连接；本机目录和产物默认不上传云端。"],
-    router_disconnected: ["连接中断 · 重试", "Agent 正在自动重连 Router；恢复后才可调度本机 Runtime。"],
-    incompatible: ["需更新", "当前 Agent 与 Web 控制协议不兼容。"],
-  }[localRuntimeState.agentStatus] || ["未就绪 · 重试", "请检查本机 Agent。"];
+    checking: ["检查中", "正在检查 Local Runtime Agent。", "正在检查本机 Agent 状态。"],
+    starting: ["正在启动", "已请求系统启动 Local Runtime Agent，Web 会自动等待连接。", "已发送启动请求，正在等待 Agent 上线；无需刷新页面。"],
+    not_installed: ["未安装 · 安装", "安装后可在本机安全地访问已授权目录。", "安装完成后此处会自动继续连接。"],
+    router_not_configured: ["需重新安装", "此安装包未配置当前服务端。", "请更新或重新安装与当前服务端匹配的 Agent。"],
+    installed_stopped: ["未启动 · 启动", "已安装的 Agent 将通过系统启动协议恢复。", "点击后将启动 Agent，并自动等待连接。"],
+    unreachable: ["等待 Agent", "暂时无法访问本机 Agent；Web 正在自动重试。", "暂时无法访问本机 Agent，正在自动重试；无需刷新页面。"],
+    online_unpaired: ["未配对 · 配对", "配对后 Router 才可调度本机 Runtime。", "Agent 已启动，下一步请完成设备配对。"],
+    online: ["已连接", "本机 Agent 已连接；本机目录和产物默认不上传云端。", "本机 Agent 和 Router 已连接，可使用本机 Runtime。"],
+    router_disconnected: ["正在重连", "Agent 正在自动重连 Router；恢复后才可调度本机 Runtime。", "Agent 已启动，正在自动重连 Router；无需刷新页面。"],
+    incompatible: ["需更新", "当前 Agent 与 Web 控制协议不兼容。", "请更新 Local Runtime Agent 后重试。"],
+  }[localRuntimeState.agentStatus] || ["未就绪 · 重试", "请检查本机 Agent。", "正在等待本机 Agent 就绪。"];
   $("local-agent-state-label").textContent = copy[0];
   $("enable-local-runtime").title = copy[1];
   $("enable-local-runtime").setAttribute("aria-label", `本机能力：${copy[0]}。${copy[1]}`);
+  $("local-agent-hint").textContent = copy[2];
   $("local-agent-state-dot").className = localRuntimeState.agentStatus;
   $("local-agent-version").textContent = localRuntimeState.agentHealth?.agentVersion ? `v${localRuntimeState.agentHealth.agentVersion}` : "";
   $("enable-local-runtime").classList.toggle("ready", localRuntimeState.agentStatus === "online");
@@ -507,8 +523,11 @@ function beginLocalAgentInstallPolling() {
 }
 
 async function startInstalledLocalAgent() {
+  localRuntimeState.agentStatus = "starting";
+  renderLocalAgentState();
   openLocalAgentProtocol("start");
   beginLocalAgentInstallPolling();
+  scheduleLocalAgentReprobe();
   setStatus("已请求系统启动 Local Runtime Agent，正在等待它上线…", "ok");
 }
 
@@ -524,6 +543,7 @@ async function configureLocalAgentRouter(value = publicRouterUrl) {
   }
   openLocalAgentProtocol("configure", routerUrl.toString());
   beginLocalAgentInstallPolling();
+  scheduleLocalAgentReprobe();
   setStatus("已请求 Local Runtime Agent 保存服务端地址并重连…", "ok");
 }
 
