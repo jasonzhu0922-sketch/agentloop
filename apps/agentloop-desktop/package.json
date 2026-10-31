@@ -1,0 +1,15 @@
+{
+  "name": "agentloop-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "description": "AgentLoop local desktop shell with a browser UI and multi-runtime Local Agent",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/main.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}
