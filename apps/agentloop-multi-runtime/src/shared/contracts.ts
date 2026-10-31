@@ -289,6 +289,8 @@ export interface SubmitConversationTask {
   readonly requestedRuntimeId?: string;
   readonly requestedProfile?: RuntimeProfile;
   readonly requiredCapabilities?: readonly string[];
+  /** Application-authorized Connector connection IDs for this Run. */
+  readonly connectorConnectionIds?: readonly string[];
   readonly requestedModelKey?: string;
   readonly allowDangerousTools?: boolean;
   readonly resourceRefs?: readonly PortableResourceRef[];
