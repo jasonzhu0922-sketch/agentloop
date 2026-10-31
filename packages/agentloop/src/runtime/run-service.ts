@@ -177,6 +177,15 @@ import {
 import { CanonicalRunStateRepository } from "./canonical-run-state-repository.ts";
 
 export type ModelFactory = (onRetry?: ModelRetryReporter, modelKey?: string) => ModelAdapter;
+
+export interface RunToolProvider {
+  resolve(input: {
+    readonly runId: string;
+    readonly actorUserId: string;
+    readonly conversationId?: string;
+    readonly connectionIds: readonly string[];
+  }): Promise<readonly RuntimeTool<unknown>[]>;
+}
 export type PlannerFactory = (model: ModelAdapter) => Planner;
 export type AssessorFactory = (model: ModelAdapter) => StepAssessor;
 export type RecoveryPlannerFactory = (model: ModelAdapter) => RecoveryPlanner;
@@ -256,6 +265,7 @@ interface ExecuteOptions {
   readonly modelKey?: string;
   readonly visibleDirectories: readonly string[];
   readonly sourceIds: readonly string[];
+  readonly connectorConnectionIds: readonly string[];
 }
 
 interface ContinuationOptions {
@@ -292,6 +302,9 @@ export class RunService {
   private readonly ownerScopedWorkspace: boolean;
   private readonly workspace: RuntimeWorkspaceService;
   private readonly coreTools: readonly RuntimeTool<unknown>[];
+  /** Resolves Run-scoped Connector tools without exposing Connector persistence to the kernel. */
+  private readonly runToolProvider?: RunToolProvider;
+  private readonly connectorConnectionIdsByRunId = new Map<string, readonly string[]>();
   private readonly plans: PlanRepository;
   private readonly canonicalStates: CanonicalRunStateRepository;
   private readonly sources: SourceRepository;
@@ -342,6 +355,8 @@ export class RunService {
     computerExecutableAliases?: Readonly<Record<string, string>>;
     computerCommandEnvironment?: Readonly<Record<string, string>>;
     tools?: readonly RuntimeTool<unknown>[];
+    /** Optional Run-scoped Connector tool resolver supplied by the host application. */
+    runToolProvider?: RunToolProvider;
     systemPrompt?: string;
     /** Bounded model-turn budget per executable Plan step. */
     maxSteps?: number;
@@ -359,6 +374,7 @@ export class RunService {
     this.database = options.database;
     this.skills = options.skills;
     this.modelFactory = options.modelFactory;
+    this.runToolProvider = options.runToolProvider;
     this.plannerFactory = options.plannerFactory ?? ((model) => new ModelPlanner(model, {
       ...(options.maxPlanningTurns === undefined ? {} : { maxPlanningTurns: options.maxPlanningTurns }),
     }));
@@ -1129,6 +1145,12 @@ export class RunService {
       privateSkills,
       visibleDirectories,
       uploadedSources: sources,
+      additionalTools: await this.connectorToolsForRun({
+        runId,
+        actorUserId,
+        conversationId: run.conversationId,
+        connectionIds: this.connectorConnectionIdsByRunId.get(runId) ?? [],
+      }),
     });
     assertNoDuplicateTools(allTools);
     const allowedToolNames = new Set(allTools
@@ -1463,6 +1485,16 @@ export class RunService {
     return reconciled;
   }
 
+  private async connectorToolsForRun(input: {
+    readonly runId: string;
+    readonly actorUserId: string;
+    readonly conversationId?: string;
+    readonly connectionIds: readonly string[];
+  }): Promise<readonly RuntimeTool<unknown>[]> {
+    if (this.runToolProvider === undefined || input.connectionIds.length === 0) return [];
+    return await this.runToolProvider.resolve(input);
+  }
+
   private resolveRunModelKey(requestedModelKey: string | undefined): string | undefined {
     if (this.requireExplicitModel && (requestedModelKey === undefined || requestedModelKey.trim().length === 0)) {
       throw new AppError("BAD_REQUEST", "model_required", 400);
@@ -1540,6 +1572,7 @@ export class RunService {
       ),
     );
     this.activeRunControllers.set(runId, runController);
+    this.connectorConnectionIdsByRunId.set(runId, executeOptions.connectorConnectionIds);
 
     const emit = async (event: RuntimeEvent): Promise<void> => {
       await this.appendRunEvent(runId, event);
@@ -1677,6 +1710,12 @@ export class RunService {
         privateSkills,
         visibleDirectories,
         uploadedSources: availableSources,
+        additionalTools: await this.connectorToolsForRun({
+          runId,
+          actorUserId,
+          conversationId,
+          connectionIds: executeOptions.connectorConnectionIds,
+        }),
       });
       assertNoDuplicateTools(allTools);
       const catalogToolNames = [...allTools.map((tool) => tool.name)].filter((name) =>
@@ -2933,6 +2972,12 @@ export class RunService {
       privateSkills,
       visibleDirectories,
       uploadedSources: sources,
+      additionalTools: await this.connectorToolsForRun({
+        runId: input.run.id,
+        actorUserId: input.actorUserId,
+        conversationId: input.run.conversationId,
+        connectionIds: this.connectorConnectionIdsByRunId.get(input.run.id) ?? [],
+      }),
     });
     assertNoDuplicateTools(allTools);
     const availableToolNames = new Set(allTools
@@ -3225,7 +3270,14 @@ export class RunService {
       const visibleDirectories = await this.runs.visibleDirectoriesForRun(input.run.id);
       const sources = (await this.sources.listByRun(input.run.id)).map(sourceSummary);
       const allTools = composeRunTools({ coreTools: this.coreTools, sourceRepository: this.sources,
-        privateSkills, visibleDirectories, uploadedSources: sources });
+        privateSkills, visibleDirectories, uploadedSources: sources,
+        additionalTools: await this.connectorToolsForRun({
+          runId: input.run.id,
+          actorUserId: input.actorUserId,
+          conversationId: input.run.conversationId,
+          connectionIds: this.connectorConnectionIdsByRunId.get(input.run.id) ?? [],
+        }),
+      });
       const toolNames = new Set(allTools.map((tool) => tool.name)
         .filter((name) => input.run.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)));
       const unresolvedActionEffects = await this.unresolvedUnsafeEffects(input.run.id, input.currentPlan.id, input.stepId);
@@ -7106,6 +7158,7 @@ function parseExecuteOptions(value: unknown): ExecuteOptions {
   }
   const visibleDirectories = parseVisibleDirectoryPaths(record.visibleDirectories);
   const sourceIds = parseSourceIds(record.sourceIds);
+  const connectorConnectionIds = parseConnectorConnectionIds(record.connectorConnectionIds);
   const conversationId = record.conversationId === undefined || record.conversationId === null
     ? undefined
     : requireString(record.conversationId, "conversationId", { max: 128 });
@@ -7119,9 +7172,24 @@ function parseExecuteOptions(value: unknown): ExecuteOptions {
     allowDangerousTools: record.allowDangerousTools !== false,
     visibleDirectories,
     sourceIds,
+    connectorConnectionIds,
     ...(conversationId === undefined ? {} : { conversationId }),
     ...(modelKey === undefined ? {} : { modelKey }),
   };
+}
+
+function parseConnectorConnectionIds(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > 20) {
+    throw new AppError("BAD_REQUEST", "connectorConnectionIds must be an array with at most 20 entries", 400);
+  }
+  const result = value.map((item, index) =>
+    requireString(item, `connectorConnectionIds[${index}]`, { max: 160, pattern: /^[A-Za-z0-9_.:@/-]+$/ })
+  );
+  if (new Set(result).size !== result.length) {
+    throw new AppError("BAD_REQUEST", "connectorConnectionIds must not contain duplicates", 400);
+  }
+  return result;
 }
 
 function parseSourceIds(value: unknown): string[] {
