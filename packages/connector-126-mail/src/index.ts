@@ -7,6 +7,7 @@ import type {
   ConnectorInstance,
   ConnectorModule,
   ConnectorOperation,
+  ConnectorModuleFactoryContext,
 } from "@zhujun/agentloop-connector-sdk";
 
 export interface MailMessageSummary {
@@ -196,4 +197,52 @@ export function create126MailConnector(
       };
     },
   };
+}
+
+
+export function createConfigured126MailConnector(
+  context: ConnectorModuleFactoryContext,
+): ConnectorModule {
+  const endpoint = requiredConfigString(context.config, "endpoint");
+  const searchPath = optionalConfigString(context.config, "searchPath", "/search");
+  const readPath = optionalConfigString(context.config, "readPath", "/read");
+  return create126MailConnector(async ({ credentials }) => ({
+    async search(input) {
+      return await requestMail<readonly MailMessageSummary[]>(context.fetch, endpoint + searchPath, credentials, input);
+    },
+    async read(input) {
+      return await requestMail<MailMessage>(context.fetch, endpoint + readPath, credentials, input);
+    },
+  }));
+}
+
+async function requestMail<T>(
+  fetcher: typeof globalThis.fetch,
+  url: string,
+  credentials: Readonly<Record<string, string>>,
+  body: unknown,
+): Promise<T> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (credentials.accessToken !== undefined) headers.Authorization = `Bearer ${credentials.accessToken}`;
+  const response = await fetcher(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`126 Mail transport request failed (${response.status}): ${text.slice(0, 500)}`);
+  return JSON.parse(text) as T;
+}
+
+function requiredConfigString(config: Readonly<Record<string, unknown>>, key: string): string {
+  const value = config[key];
+  if (typeof value !== "string" || value.trim().length === 0) throw new Error(`126 Mail Connector config requires ${key}`);
+  return value;
+}
+
+function optionalConfigString(config: Readonly<Record<string, unknown>>, key: string, fallback: string): string {
+  const value = config[key];
+  if (value === undefined) return fallback;
+  if (typeof value !== "string") throw new Error(`126 Mail Connector config ${key} must be a string`);
+  return value;
 }
