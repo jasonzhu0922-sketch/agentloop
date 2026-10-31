@@ -97,7 +97,7 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
           runtimeConfigurationInput(value),
         ));
       }
-      const runtimeConnector = url.pathname.match(/^\\/v1\\/local-runtimes\\/([^/]+)\\/connectors$/);
+      const runtimeConnector = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)\/connectors$/);
       if (request.method === "GET" && runtimeConnector !== null) {
         await session(request, service);
         return json(response, 200, await service.localConnectorConfigurations(decodeURIComponent(runtimeConnector[1])));
@@ -110,7 +110,7 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
           connectorConfigurationInput(recordValue(value.connector ?? value, "connector")),
         ));
       }
-      const runtimeConnectorDelete = url.pathname.match(/^\\/v1\\/local-runtimes\\/([^/]+)\\/connectors\\/([^/]+)$/);
+      const runtimeConnectorDelete = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)\/connectors\/([^/]+)$/);
       if (request.method === "DELETE" && runtimeConnectorDelete !== null) {
         await session(request, service);
         await service.removeLocalConnectorConfiguration(
