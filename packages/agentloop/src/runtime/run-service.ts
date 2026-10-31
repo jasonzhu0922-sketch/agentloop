@@ -7151,7 +7151,7 @@ function sourceEventSummary(source: UploadedSourceSummary): Record<string, unkno
 }
 
 function parseExecuteOptions(value: unknown): ExecuteOptions {
-  if (value === undefined) return { allowDangerousTools: true, visibleDirectories: [], sourceIds: [] };
+  if (value === undefined) return { allowDangerousTools: true, visibleDirectories: [], sourceIds: [], connectorConnectionIds: [] };
   const record = requireRecord(value, "run options");
   if (record.allowDangerousTools !== undefined && typeof record.allowDangerousTools !== "boolean") {
     throw new AppError("BAD_REQUEST", "allowDangerousTools must be boolean", 400);
