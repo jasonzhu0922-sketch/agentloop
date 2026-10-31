@@ -18,6 +18,7 @@ export class RuntimeConnectionClient {
   private connected = false;
   private credential?: DeviceCredential;
   private readonly dispatches = new Map<string, Promise<{ readonly remoteRunId: string }>>();
+  private readonly connectionWaiters = new Set<{ readonly resolve: (connected: boolean) => void; readonly timer: NodeJS.Timeout }>();
   private routerUrl?: string;
   private readonly supervisor: LocalRuntimeSupervisor;
   private readonly unsubscribe: () => void;
@@ -41,17 +42,38 @@ export class RuntimeConnectionClient {
 
   stop(): void {
     this.stopped = true;
+    this.connected = false;
     if (this.reconnect !== undefined) clearTimeout(this.reconnect);
     if (this.heartbeat !== undefined) clearInterval(this.heartbeat);
     this.unsubscribe();
     this.socket?.close();
+    this.resolveConnectionWaiters(false);
   }
 
   isConnected(): boolean { return this.connected; }
 
-  reconnectNow(): void {
+  async reconnectNow(timeoutMs = 5_000): Promise<boolean> {
+    this.connected = false;
+    if (this.heartbeat !== undefined) clearInterval(this.heartbeat);
     this.socket?.close();
+    this.socket = undefined;
     this.connect();
+    return await this.waitUntilConnected(timeoutMs);
+  }
+
+  /** Wait for the authenticated hello/ack handshake, not merely socket creation. */
+  async waitUntilConnected(timeoutMs = 5_000): Promise<boolean> {
+    if (this.connected) return true;
+    if (this.stopped || this.credential === undefined || this.routerUrl === undefined) return false;
+    let waiter: { readonly resolve: (connected: boolean) => void; readonly timer: NodeJS.Timeout };
+    return await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        this.connectionWaiters.delete(waiter);
+        resolve(false);
+      }, timeoutMs);
+      waiter = { resolve, timer };
+      this.connectionWaiters.add(waiter);
+    });
   }
 
   setRouterUrl(routerUrl: string): void {
@@ -80,6 +102,7 @@ export class RuntimeConnectionClient {
   }
 
   private async message(socket: WebSocket, raw: string): Promise<void> {
+    if (this.socket !== socket) return;
     let message: Record<string, unknown>;
     try { message = JSON.parse(raw) as Record<string, unknown>; } catch { return; }
     if (message.type === "connection.ready") {
@@ -88,6 +111,7 @@ export class RuntimeConnectionClient {
     }
     if (message.type === "agent.hello.ack") {
       this.connected = true;
+      this.resolveConnectionWaiters(true);
       this.sendHeartbeat(socket);
       if (this.heartbeat !== undefined) clearInterval(this.heartbeat);
       this.heartbeat = setInterval(() => this.sendHeartbeat(socket), 5_000);
@@ -121,6 +145,14 @@ export class RuntimeConnectionClient {
     const socket = this.socket;
     if (socket?.readyState !== WebSocket.OPEN || this.credential === undefined) return;
     socket.send(JSON.stringify({ type: "agent.hello", deviceId: this.credential.id, runtimes: this.supervisor.advertisements() }));
+  }
+
+  private resolveConnectionWaiters(connected: boolean): void {
+    for (const waiter of this.connectionWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(connected);
+    }
+    this.connectionWaiters.clear();
   }
 
   private async invoke(runtimeId: string | undefined, method: string, payload: Record<string, unknown>): Promise<unknown> {

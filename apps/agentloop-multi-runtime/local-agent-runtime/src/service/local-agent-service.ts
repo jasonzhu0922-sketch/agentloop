@@ -112,8 +112,8 @@ export class LocalAgentService {
   /** Keep Router connectivity under Agent ownership; the browser only asks
    * the loopback service to reconnect and then observes health. */
   async reconnect(): Promise<unknown> {
-    this.connection?.reconnectNow();
-    return { accepted: true, routerConnected: this.connection?.isConnected() ?? false };
+    const routerConnected = await this.connection?.reconnectNow() ?? false;
+    return { accepted: true, routerConnected };
   }
 
   async localRuntimes(): Promise<unknown> {
@@ -502,7 +502,10 @@ export class LocalAgentService {
     if (method === "agent.config.get") return await this.agentConfiguration();
     if (method === "agent.config.sharedStorage.pick") return await this.pickSharedStorage();
     if (method === "agent.config.uploadStorage.pick") return await this.pickUploadStorage();
-    if (method === "agent.reconnect") { this.connection?.reconnectNow(); return { accepted: true }; }
+    if (method === "agent.reconnect") {
+      const routerConnected = await this.connection?.reconnectNow() ?? false;
+      return { accepted: true, routerConnected };
+    }
     throw new LocalAgentApplicationError(404, "agent_control_method_not_found");
   }
 

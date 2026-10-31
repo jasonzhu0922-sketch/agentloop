@@ -75,11 +75,19 @@ test("Local Agent observation retries startup quickly and monitors a healthy con
 test("browser keeps Agent reconnect and Runtime lifecycle on the loopback service", async () => {
   const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
   assert.match(app, /localAgentFetch\("\/v1\/agent\/reconnect", \{ method: "POST" \}\)/);
+  assert.match(app, /reconnectBody\.routerConnected !== true/);
   assert.match(app, /agentStatus === "online" \|\| localRuntimeState\.agentStatus === "router_disconnected"/);
   assert.match(app, /agentStatus !== "online_unpaired" && localRuntimeState\.agentStatus !== "online" && localRuntimeState\.agentStatus !== "router_disconnected"/);
   assert.match(app, /localAgentFetch\("\/v1\/local-runtimes"\)/);
   assert.match(app, /localAgentFetch\(`\/v1\/local-runtimes\/\$\{encodeURIComponent\(runtimeId\)\}\/\$\{action\}`/);
   assert.doesNotMatch(app, /routerClient\.request\(localAgentRouterPath\("\/runtimes"\)\)/);
+});
+
+test("browser recovers the paired device before requesting a local model catalog", async () => {
+  const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  assert.match(app, /localDeviceRecovery = loadDevices\(\)/);
+  assert.match(app, /if \(isLocalExecution\(\) && localDeviceRecovery !== undefined\) await localDeviceRecovery/);
+  assert.match(app, /if \(!modelContext\.local \|\| \(localRuntimeState\.device\?\.id && sessionState\.localSessionToken\)\)/);
 });
 
 test("refresh recovery shares one Local Agent reconnect while Router health is disconnected", async () => {
@@ -95,7 +103,7 @@ test("refresh recovery shares one Local Agent reconnect while Router health is d
   // overlap exactly as bootstrap and the status button can in a browser.
   const connect = runInNewContext(`${app.slice(start, end)}; connectRegisteredLocalAgent`, {
     localRuntimeState: { device: { id: "device-1" }, agentReconnect: undefined },
-    localAgentFetch: async () => { reconnectRequests += 1; await gate; },
+    localAgentFetch: async () => { reconnectRequests += 1; await gate; return { ok: true, json: async () => ({ routerConnected: true }) }; },
     loadLocalRuntimes: async () => { loaded.push("runtimes"); },
     loadLocalScopes: async () => { loaded.push("scopes"); },
     reconcileStrictLocalRuns: async () => { loaded.push("runs"); },
