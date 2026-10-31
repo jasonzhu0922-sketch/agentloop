@@ -18,6 +18,8 @@ Workspace scope.
 
 ## Development configuration
 
+The current Host foundation registers the Feishu read-only Connector. The 126 Mail and WPS packages expose transport-factory-based modules; their IMAP or platform API transports will be registered when the application supplies those adapters.
+
 The current Host foundation includes an environment-backed resolver for local
 development. Configure connection metadata with `CONNECTOR_CONNECTIONS_JSON`:
 
