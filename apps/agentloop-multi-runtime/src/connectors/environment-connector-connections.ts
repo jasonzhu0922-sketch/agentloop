@@ -61,9 +61,18 @@ export function environmentConnectorRuntime(
 ): ConnectorConnectionRuntime {
   const byId = new Map(connections.map((connection) => [connection.id, connection]));
   const resolver: ConnectionResolver = {
-    async resolve(connectionId: string): Promise<ConnectorConnection> {
+    async resolve(
+      connectionId: string,
+      scope?: { readonly actorUserId: string; readonly workspaceId?: string },
+    ): Promise<ConnectorConnection> {
       const connection = byId.get(connectionId);
       if (connection === undefined) throw new Error(`Connector connection not found: ${connectionId}`);
+      if (scope !== undefined) {
+        const allowed = connection.ownerType === "user"
+          ? connection.ownerId === scope.actorUserId
+          : scope.workspaceId !== undefined && connection.ownerId === scope.workspaceId;
+        if (!allowed) throw new Error(`Connector connection is not authorized for this Run: ${connectionId}`);
+      }
       return connection;
     },
   };
