@@ -6,7 +6,7 @@ import type { RuntimeResultBinding, RuntimeResultCard, RuntimeResultRecord, Runt
 import type { ToolSourceDescriptor } from "../tools/tool-registry.ts";
 import type { AssessmentEvidenceBundles } from "./runtime-evidence-bundle.ts";
 import type { CanonicalRunState, CanonicalRunStateRef } from "../runtime/canonical-run-state.ts";
-import type { MemoryIntentCandidate, MemoryProjection } from "../runtime/memory-plugin.ts";
+import type { InteractionMemoryProjection, MemoryIntentCandidate, MemoryProjection } from "../runtime/memory-plugin.ts";
 
 export type PlanStatus = "pending" | "admitted" | "running" | "completed" | "failed";
 export type PlanStepStatus = "pending" | "running" | "completed" | "failed";
@@ -676,6 +676,11 @@ export interface StepAssessmentInput {
   readonly skills: readonly PrivateSkill[];
   readonly evidence: StepEvidence;
   readonly modelEvidence?: StepEvidence;
+  /**
+   * Server-authorized profile facts already supplied to this response-only
+   * execution turn. Assessment may use them as evidence for the same reply.
+   */
+  readonly confirmedResponseMemory?: Pick<InteractionMemoryProjection, "memoryRevisionIds" | "retrievalReasons" | "facts">;
   readonly contextSummary?: string;
   readonly assessmentProfile?: AssessmentProfileId;
   /** Server-verified Runtime Result evidence bundles. Tool labels remain advisory. */

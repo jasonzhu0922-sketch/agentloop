@@ -1875,6 +1875,7 @@ export class RunService {
       // selector still owns current-task semantics and never treats Memory as
       // an authorization or capability grant.
       let memoryProjection;
+      let responseMemoryProjection: InteractionMemoryProjection | undefined;
       if (this.memory !== undefined) {
         try {
           const memoryTarget = responseOnly ? "response" as const : "planner" as const;
@@ -1889,8 +1890,27 @@ export class RunService {
             },
             budget: { maxItems: 12, maxTokens: 1_200 },
           });
+          if (memoryProjection?.target === "response") responseMemoryProjection = memoryProjection;
         } catch (error) {
           await emit({ type: "memory.recall_failed", data: { runId, target: responseOnly ? "response" : "planner", message: error instanceof Error ? error.message : String(error) } });
+        }
+        if (!responseOnly) {
+          try {
+            const projection = await this.memory.recall({
+              runId,
+              target: "response",
+              taskFingerprint: {
+                taskKind: taskUnderstanding.operation,
+                domain: taskUnderstanding.operationProfiles[0],
+                artifactKind: taskUnderstanding.deliverable.kind,
+                sourceKind: taskUnderstanding.evidence.sourceKinds[0],
+              },
+              budget: { maxItems: 12, maxTokens: 1_200 },
+            });
+            if (projection?.target === "response") responseMemoryProjection = projection;
+          } catch (error) {
+            await emit({ type: "memory.recall_failed", data: { runId, target: "response", message: error instanceof Error ? error.message : String(error) } });
+          }
         }
       }
 
@@ -2106,9 +2126,12 @@ export class RunService {
         sources: availableSources,
         ...(conversationHistory === undefined ? {} : { conversationHistory }),
         ...(conversationWorkingSet === undefined ? {} : { conversationWorkingSet }),
-        ...(memoryProjection?.target === "response"
-          ? { initialRuntimePromptAugmentations: [interactionMemoryPromptAugmentation(memoryProjection)] }
-          : {}),
+        ...(responseMemoryProjection === undefined
+          ? {}
+          : { initialRuntimePromptAugmentations: [interactionMemoryPromptAugmentation(responseMemoryProjection)] }),
+        ...(responseMemoryProjection === undefined
+          ? {}
+          : { confirmedResponseMemory: responseMemoryProjection }),
         signal: runController.signal,
         onStepChanged: (stepId) => {
           runningStepId = stepId;
@@ -2337,6 +2360,7 @@ export class RunService {
     conversationHistory?: readonly ModelMessage[];
     conversationWorkingSet?: ConversationWorkingSet;
     initialRuntimePromptAugmentations?: readonly RuntimePromptAugmentation[];
+    confirmedResponseMemory?: InteractionMemoryProjection;
     initialRecovery?: Readonly<{
       stepIds: readonly string[];
       resumeStepId?: string;
@@ -2921,6 +2945,13 @@ export class RunService {
             skills: activatedStepSkills,
             evidence,
             modelEvidence,
+            ...(input.confirmedResponseMemory?.facts === undefined ? {} : {
+              confirmedResponseMemory: {
+                memoryRevisionIds: input.confirmedResponseMemory.memoryRevisionIds,
+                retrievalReasons: input.confirmedResponseMemory.retrievalReasons,
+                facts: input.confirmedResponseMemory.facts.filter((fact) => !fact.stale),
+              },
+            }),
             runtimeEvidenceBundles,
             ...(candidate.contextSummary === undefined ? {} : { contextSummary: candidate.contextSummary }),
             assessmentProfile,

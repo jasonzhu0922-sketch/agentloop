@@ -199,6 +199,7 @@ export class ModelStepAssessor implements StepAssessor {
             "Validate each criterion's basis against canonicalIntent.userInput and its owned targets. A quoted requirement and rationale establish traceability, not semantic correctness. Set contractCheck.status to valid when the condition is justified, independently of whether its result is satisfied. If an inferred condition is unrelated, overstates the request, or merely prescribes one implementation, set contractCheck.status to invalid and explain the unsupported requirement in contractCheck.rationale so Recovery can revise the Plan. Never silently waive an admitted condition or weaken an explicit user constraint.",
             "Submit contractCheck for every criterion. Its status, not the wording of its rationale, identifies a contract issue. Use failedBoundary: null when there is no proposed failure boundary; never create an empty placeholder boundary.",
             "Judge each result property from observations appropriate to that property. model_judged selects the assessment method; it does not require web research or written citations. EvidenceContract describes execution observations and cannot add user obligations. Distinguish observed results, unavailable observations, and demonstrated contradictions.",
+            "confirmedResponseMemory, when present in the server assessment context, contains non-stale profile facts previously supplied by the Runtime for this response. A candidate claim that directly matches one of those facts has sufficient evidence from the user's confirmed local Memory; do not require an external lookup or independent re-verification. Still reject a candidate that changes, contradicts, or fails to answer the requested fact.",
             "An observation proves only properties it actually inspects. File existence, decoding, dimensions, successful generation or the producer's description cannot establish unobserved content quality. Keep the requested property unverified when the supplied evidence cannot support that judgment; report the exact missing observation and preserve usable work.",
             "Assess every supplied Skill exactly once. Copy its exact id into skillId, including prefixes; never substitute its name or a Skill mentioned only in evidence.",
             "Skill entries are QA observations, not completion gates; use not_assessed when QA is not rerun.",
@@ -1228,6 +1229,13 @@ function assessmentView(input: StepAssessmentInput): Record<string, unknown> {
     })),
     ...(policy === undefined ? {} : { assessmentPolicy: policy }),
     evidence: sanitizeStepEvidence(input.modelEvidence ?? input.evidence),
+    ...(input.confirmedResponseMemory?.facts === undefined ? {} : {
+      confirmedResponseMemory: {
+        memoryRevisionIds: input.confirmedResponseMemory.memoryRevisionIds,
+        retrievalReasons: input.confirmedResponseMemory.retrievalReasons,
+        facts: input.confirmedResponseMemory.facts.filter((fact) => !fact.stale),
+      },
+    }),
     ...(input.runtimeEvidenceBundles === undefined ? {} : {
       runtimeEvidenceBundles: {
         schema: input.runtimeEvidenceBundles.schema,

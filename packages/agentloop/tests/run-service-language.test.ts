@@ -99,6 +99,94 @@ test("Run resolves a structured preference before committing Local Memory", asyn
   }
 });
 
+test("response assessment receives confirmed local Memory facts used by the reply", async () => {
+  const database = new AppDatabase(":memory:");
+  const input = "我的邮箱是什么";
+  let assessed = false;
+  const memory: AgentLoopMemoryPlugin = {
+    name: "test-memory",
+    commitExplicit: async () => ({ kind: "not_applicable" }),
+    recall: async () => ({
+      schema: "agentloop.memoryProjection/v1",
+      id: "email-projection",
+      runId: "run-test",
+      target: "response",
+      memoryEpoch: 1,
+      memoryRevisionIds: ["email-revision"],
+      retrievalReasons: ["fact:contact.email"],
+      contentHash: "email-hash",
+      createdAt: 1,
+      expiresAt: 2,
+      guidance: {},
+      facts: [{
+        memoryRevisionId: "email-revision",
+        subtype: "contact.email",
+        value: { email: "12875549@qq.com" },
+        stale: false,
+      }],
+      promptMarkdown: "已确认事实（contact.email）：{\"email\":\"12875549@qq.com\"}",
+    }),
+    enqueueSettlement: async () => ({ kind: "enqueued", settlementJobId: "settlement-test", enqueuedAt: 1 }),
+  };
+  try {
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      memory,
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async (request) => {
+          if (request.phase === "planning") {
+            return {
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [{
+                id: "intent",
+                name: "resolve_conversation_turn",
+                arguments: {
+                  mode: "reply", relation: "new_goal", inputMode: "none", effectiveGoal: input,
+                  taskIntent: {
+                    schema: "agentloop.conversationTaskIntent/v1", operation: "answer", requiresExecution: false,
+                    deliverables: [{ targetId: "email", purpose: input, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }],
+                  },
+                  evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [], memoryIntents: [],
+                },
+              }],
+            };
+          }
+          if (request.phase === "assessment") {
+            assessed = true;
+            assert.match(request.runtimeContext?.content ?? "", /confirmedResponseMemory/);
+            assert.match(request.runtimeContext?.content ?? "", /12875549@qq\.com/);
+            return {
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [{
+                id: "assessment",
+                name: "submit_assessment",
+                arguments: {
+                  criteria: [
+                    { criterionId: "answered", satisfied: true, rationale: "The reply is non-empty.", evidenceRefs: ["candidateOutput"], contractCheck: { status: "valid", rationale: "The user asked for an answer." } },
+                    { criterionId: "delivery_target:email", satisfied: true, rationale: "The reply matches the confirmed contact.email fact.", evidenceRefs: ["email-revision"], contractCheck: { status: "valid", rationale: "The target matches the user request." } },
+                  ],
+                  skills: [], feedback: "", failedBoundary: null,
+                },
+              }],
+            };
+          }
+          return { content: "你的邮箱是 12875549@qq.com。", finishReason: "stop", toolCalls: [] };
+        },
+      }),
+    });
+    const run = await runs.executeConversation(testOwner().user.id, input);
+    assert.equal(run.status, "completed");
+    assert.equal(run.output, "你的邮箱是 12875549@qq.com。");
+    assert.equal(assessed, true);
+  } finally {
+    await database.close();
+  }
+});
+
 test("Memory settlement uses the committed Runtime result reference", () => {
   assert.equal(memorySettlementCommitRef("run-1", {
     status: "completed",
