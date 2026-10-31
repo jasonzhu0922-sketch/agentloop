@@ -44,6 +44,7 @@ export async function taskFromRequest(
     ...(value.requestedRuntimeId === undefined ? {} : { requestedRuntimeId: stringValue(value.requestedRuntimeId, "requestedRuntimeId") }),
     ...(value.requestedProfile === undefined ? {} : { requestedProfile: value.requestedProfile as SubmitConversationTask["requestedProfile"] }),
     ...(value.requiredCapabilities === undefined ? {} : { requiredCapabilities: stringArray(value.requiredCapabilities, "requiredCapabilities") }),
+    ...(value.connectorConnectionIds === undefined ? {} : { connectorConnectionIds: stringArray(value.connectorConnectionIds, "connectorConnectionIds") }),
     ...(value.requestedModelKey === undefined ? {} : { requestedModelKey: stringValue(value.requestedModelKey, "requestedModelKey") }),
     allowDangerousTools: value.allowDangerousTools !== false, resourceRefs,
   };
