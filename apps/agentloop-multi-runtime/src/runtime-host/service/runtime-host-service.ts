@@ -220,6 +220,7 @@ export class RuntimeHostService implements RuntimeControlPort {
       return await this.runs.startConversation(envelope.subject.userId, envelope.input, {
           conversationId: envelope.conversationId,
           sourceIds,
+          ...(envelope.connectorConnectionIds === undefined ? {} : { connectorConnectionIds: envelope.connectorConnectionIds }),
           allowDangerousTools: envelope.allowDangerousTools,
           ...(envelope.requestedModelKey === undefined ? {} : { modelKey: envelope.requestedModelKey }),
         });
