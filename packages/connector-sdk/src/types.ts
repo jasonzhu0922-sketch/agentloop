@@ -143,6 +143,16 @@ export interface ConnectorProjection {
   readonly runtimeTools: readonly unknown[];
 }
 
+export interface ConnectorModuleFactoryContext {
+  readonly modulePath?: string;
+  readonly config: Readonly<Record<string, unknown>>;
+  readonly fetch: typeof globalThis.fetch;
+}
+
+export type ConnectorModuleFactory = (
+  context: ConnectorModuleFactoryContext,
+) => ConnectorModule | Promise<ConnectorModule>;
+
 export interface ConnectorModule {
   readonly definition: ConnectorDefinition;
   connect(input: ConnectorConnectionInput): Promise<ConnectorInstance>;
