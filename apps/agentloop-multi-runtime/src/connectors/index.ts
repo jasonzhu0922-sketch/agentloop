@@ -13,3 +13,9 @@ export {
   connectorConnectionsFromEnvironment,
   environmentConnectorRuntime,
 } from "./environment-connector-connections.ts";
+export {
+  loadConnectorModules,
+  registrationsFromEnvironment,
+  type ConnectorModuleLoaderOptions,
+  type ConnectorModuleRegistration,
+} from "./connector-module-loader.ts";
