@@ -73,6 +73,27 @@ export class ConnectorRuntimeService {
     return { connection, instance, projection, source, tools };
   }
 
+  /**
+   * RunToolProvider implementation used by AgentLoop Kernel. The returned
+   * tools are scoped to the supplied Connection IDs and Run context.
+   */
+  async resolve(input: {
+    readonly runId: string;
+    readonly actorUserId: string;
+    readonly conversationId?: string;
+    readonly connectionIds: readonly string[];
+  }): Promise<readonly import("@zhujun/agentloop").RuntimeTool<unknown>[]> {
+    const materialized = await this.materializeMany(
+      input.connectionIds.map((connectionId) => ({
+        connectionId,
+        runId: input.runId,
+        actorUserId: input.actorUserId,
+        ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+      })),
+    );
+    return materialized.flatMap((item) => item.tools);
+  }
+
   async materializeMany(
     contexts: readonly ConnectorRunContext[],
   ): Promise<readonly MaterializedConnectorRuntime[]> {
