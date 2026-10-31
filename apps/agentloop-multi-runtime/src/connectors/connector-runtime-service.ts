@@ -48,6 +48,10 @@ export class ConnectorRuntimeService {
     const connection = await requireActiveConnection(
       this.connectionRuntime,
       context.connectionId,
+      {
+        actorUserId: context.actorUserId,
+        ...(context.workspaceId === undefined ? {} : { workspaceId: context.workspaceId }),
+      },
     );
     const instance = await this.registry.connect({
       connectorKey: connection.connectorKey,
