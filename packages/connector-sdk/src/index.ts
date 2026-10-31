@@ -18,3 +18,11 @@ export type {
   ConnectorSourceKind,
   ConnectorEvidenceKind,
 } from "./types.ts";
+
+export {
+  connectorSourceDescriptor,
+  connectorPlanningCapabilities,
+  connectorOperationTools,
+} from "./agentloop-adapter.ts";
+
+export type { PlanningCapabilityProjection } from "./agentloop-adapter.ts";
