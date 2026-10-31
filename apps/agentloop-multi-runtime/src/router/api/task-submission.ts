@@ -20,6 +20,10 @@ export async function taskFromRequest(
   if (Object.hasOwn(value, "conversationIntent")) throw new TypeError("conversationIntent is Runtime-owned and cannot be supplied by callers");
   if (Object.hasOwn(value, "resourceRefs")) throw new TypeError("resourceRefs are Router-owned; submit attachmentIds instead");
   const executionTarget = parseExecutionTarget(value.executionTarget ?? { kind: "cloud_pool" });
+  const connectorConnectionIds = value.connectorConnectionIds === undefined ? undefined : stringArray(value.connectorConnectionIds, "connectorConnectionIds");
+  if (connectorConnectionIds !== undefined && connectorConnectionIds.length > 0 && executionTarget.kind !== "local_device") {
+    throw new TypeError("personal Connector connections require a local_device execution target");
+  }
   const dataPolicy = parseDataPolicy(value.dataPolicy ?? { mode: "cloud" });
   if (typeof value.requestedModelKey !== "string" || value.requestedModelKey.trim().length === 0) throw conflict("model_required: choose a model before sending");
   if (executionTarget.kind === "cloud_pool" && value.requestedModelKey.trim().startsWith("local:")) throw conflict("local_model_requires_local_runtime: cloud execution cannot use a device-local model");
@@ -44,7 +48,7 @@ export async function taskFromRequest(
     ...(value.requestedRuntimeId === undefined ? {} : { requestedRuntimeId: stringValue(value.requestedRuntimeId, "requestedRuntimeId") }),
     ...(value.requestedProfile === undefined ? {} : { requestedProfile: value.requestedProfile as SubmitConversationTask["requestedProfile"] }),
     ...(value.requiredCapabilities === undefined ? {} : { requiredCapabilities: stringArray(value.requiredCapabilities, "requiredCapabilities") }),
-    ...(value.connectorConnectionIds === undefined ? {} : { connectorConnectionIds: stringArray(value.connectorConnectionIds, "connectorConnectionIds") }),
+    ...(connectorConnectionIds === undefined ? {} : { connectorConnectionIds }),
     ...(value.requestedModelKey === undefined ? {} : { requestedModelKey: stringValue(value.requestedModelKey, "requestedModelKey") }),
     allowDangerousTools: value.allowDangerousTools !== false, resourceRefs,
   };
