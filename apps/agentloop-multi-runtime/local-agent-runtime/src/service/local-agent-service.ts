@@ -340,7 +340,7 @@ export class LocalAgentService {
     await this.supervisor.runtime(runtimeId).runs.deleteConversation(session.ownerUserId, conversationId);
   }
 
-  async startStrictLocalRun(session: LocalSession, value: { runtimeId: string; conversationId: string; clientMessageId: string; input: string; localDirectoryScopeIds: readonly string[]; localUploadedSourceIds: readonly string[]; allowDangerousTools: boolean; requestedModelKey?: string }): Promise<unknown> {
+  async startStrictLocalRun(session: LocalSession, value: { runtimeId: string; conversationId: string; clientMessageId: string; input: string; localDirectoryScopeIds: readonly string[]; localUploadedSourceIds: readonly string[]; connectorConnectionIds?: readonly string[]; allowDangerousTools: boolean; requestedModelKey?: string }): Promise<unknown> {
     if (typeof value.requestedModelKey !== "string" || value.requestedModelKey.trim().length === 0) {
       throw new LocalAgentApplicationError(400, "model_required");
     }
