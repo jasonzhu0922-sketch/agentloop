@@ -1,0 +1,24 @@
+{
+  "name": "@zhujun/connector-126-mail",
+  "version": "0.1.0",
+  "description": "Read-only 126 Mail connector for AgentLoop",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@zhujun/agentloop-connector-sdk": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "typescript": "^7.0.2"
+  }
+}
