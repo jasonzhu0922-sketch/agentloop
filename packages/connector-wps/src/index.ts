@@ -24,7 +24,7 @@ export interface OnlineDocument extends OnlineDocumentSummary {
     readonly id: string;
     readonly name: string;
     readonly columns?: readonly string[];
-    readonly rows?: readonly readonly unknown[][];
+    readonly rows?: readonly (readonly unknown[])[];
   }[];
 }
 
