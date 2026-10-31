@@ -2,6 +2,8 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { AppDatabase, AppError, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools, loadMcpToolsFromConfig, type ModelAdapter, type ModelInvocation, type ModelResponse, type ModelRetryReporter, type ModelStreamSink } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
+import { feishuConnector } from "@zhujun/connector-feishu";
+import { ConnectorRegistry, ConnectorRuntimeService, environmentConnectorRuntime } from "../../src/connectors/index.ts";
 import { loadPracticeProfileConfig, loadStepExecutionStrategyProfileConfig, webToolsOptionsFromEnvironment } from "../../../src/shared/config.ts";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
 import { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.ts";
@@ -147,6 +149,12 @@ export class LocalRuntimeFactory {
     await skills.syncSkillDirectories();
     const strategy = await loadStepExecutionStrategyProfileConfig(this.input.stepExecutionStrategyConfigPath);
     const practiceProfiles = await loadPracticeProfileConfig(this.input.practiceProfileConfigPath ?? join(this.input.appRoot, "config", "practice-profiles.json"));
+    const connectorRegistry = new ConnectorRegistry();
+    connectorRegistry.register(feishuConnector);
+    const connectorRuntimeService = new ConnectorRuntimeService(
+      connectorRegistry,
+      environmentConnectorRuntime(undefined, integrationEnvironment),
+    );
     const mcpIntegration = await loadMcpToolsFromConfig(
       { servers: configuration.mcpServers },
       { environment: integrationEnvironment },
@@ -173,6 +181,7 @@ export class LocalRuntimeFactory {
       ownerScopedWorkspace: true,
       stepExecutionStrategy: createStepExecutionStrategyProfile(strategy.profile, strategy.projection),
       practiceProfileCatalog: practiceProfiles,
+      runToolProvider: connectorRuntimeService,
       tools: [
         ...(integrationEnvironment.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptionsFromEnvironment(integrationEnvironment))),
         ...mcpIntegration.tools,
