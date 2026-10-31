@@ -36,7 +36,7 @@ Workspace scope.
 
 ## Development configuration
 
-The Host discovers independently deployed Connector modules from its registration configuration. The Feishu, 126 Mail and WPS packages are examples of separately deployable modules; 126 Mail and WPS require an application-supplied IMAP or platform API transport adapter before registration.
+The Local Agent discovers independently deployed Connector modules from its local configuration store. The Feishu, 126 Mail and WPS packages are examples of separately deployable modules; 126 Mail and WPS require an application-supplied IMAP or platform API transport adapter before registration.
 
 The current Host foundation includes an environment-backed resolver for local
 development. Configure connection metadata with `CONNECTOR_CONNECTIONS_JSON`:
