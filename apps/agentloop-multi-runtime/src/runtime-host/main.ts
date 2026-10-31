@@ -20,7 +20,6 @@ import {
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../shared/persistence/state-database.ts";
 import { migrateRuntimeState } from "./persistence/state-migrations.ts";
 import { loadOptionalPlanTemplateObserver } from "./plan-template-observer.ts";
-import { ConnectorRegistry, ConnectorRuntimeService, environmentConnectorRuntime, loadConnectorModules } from "../connectors/index.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const host = process.env.HOST ?? "127.0.0.1";
@@ -95,14 +94,6 @@ const skillDirectorySync = await skills.syncSkillDirectories();
 // MCP connections are Host-owned deployment integrations. The Router selects a
 // Host but never receives MCP credentials or materializes its tool catalog.
 const mcpIntegration = await loadOptionalMcpToolsFromConfigFile(mcpServersConfigPath);
-const connectorRegistry = new ConnectorRegistry();
-for (const connectorModule of await loadConnectorModules({ baseDirectory: appRoot })) {
-  connectorRegistry.register(connectorModule);
-}
-const connectorRuntimeService = new ConnectorRuntimeService(
-  connectorRegistry,
-  environmentConnectorRuntime(),
-);
 const planTemplateObserver = await loadOptionalPlanTemplateObserver({
   appRoot,
   enabled: process.env.PLAN_TEMPLATE_ENABLED,
@@ -125,7 +116,6 @@ const runs = new RunService({
   stepExecutionStrategy,
   practiceProfileCatalog,
   tools: [...integrationTools, ...mcpIntegration.tools],
-  runToolProvider: connectorRuntimeService,
   ...(planTemplateObserver === undefined ? {} : { planningExtensions: [planTemplateObserver.extension()] }),
   runEventLogSink: (line) => process.stdout.write(`${runtimeLogLabel} ${colorizeTerminalLogLine(line, logColorOptions)}\n`),
 });
