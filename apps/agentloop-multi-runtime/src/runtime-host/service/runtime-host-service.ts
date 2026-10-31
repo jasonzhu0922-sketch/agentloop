@@ -288,6 +288,18 @@ export function assertRuntimeDispatchEnvelope(input: unknown): asserts input is 
   if (!isRecord(value.subject) || nonEmptyString(value.subject.tenantId) === undefined || nonEmptyString(value.subject.userId) === undefined) {
     throw new TypeError("subject must contain tenantId and userId");
   }
+  if (Object.hasOwn(value, "connectorConnectionIds")) {
+    if (!Array.isArray(value.connectorConnectionIds) || value.connectorConnectionIds.length > 20) {
+      throw new TypeError("connectorConnectionIds must be an array with at most 20 entries");
+    }
+    const connectorConnectionIds = value.connectorConnectionIds;
+    if (connectorConnectionIds.some((item) => nonEmptyString(item) === undefined)) {
+      throw new TypeError("connectorConnectionIds must contain non-empty strings");
+    }
+    if (new Set(connectorConnectionIds).size !== connectorConnectionIds.length) {
+      throw new TypeError("connectorConnectionIds must not contain duplicates");
+    }
+  }
   if (!Array.isArray(value.resourceRefs)) throw new TypeError("resourceRefs must be an array");
   for (const [index, resource] of value.resourceRefs.entries()) {
     if (!isRecord(resource)) throw new TypeError(`resourceRefs[${index}] must be an object`);
