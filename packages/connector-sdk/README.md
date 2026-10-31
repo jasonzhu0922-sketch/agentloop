@@ -16,7 +16,9 @@ their operations into AgentLoop tools.
 - `CanonicalConnectorEvidence`: normalized evidence returned to the kernel.
 
 This package intentionally contains no database adapter, OAuth UI, provider-specific
-API client or application persistence implementation.
+API client or application persistence implementation. Connector modules are loaded
+by Runtime registration and do not need to be compile-time dependencies of the
+Multi Runtime application.
 
 ## Current status
 
