@@ -22,7 +22,8 @@
     "sharp": "^0.34.5",
     "ws": "^8.21.3",
     "@zhujun/agentloop-connector-sdk": "*",
-    "@zhujun/connector-feishu": "*"
+    "@zhujun/connector-feishu": "*",
+    "@zhujun/connector-126-mail": "*"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",
