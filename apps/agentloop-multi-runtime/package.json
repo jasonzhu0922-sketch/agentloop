@@ -20,7 +20,9 @@
     "react-dom": "^19.2.4",
     "react-icons": "^5.5.0",
     "sharp": "^0.34.5",
-    "ws": "^8.21.3"
+    "ws": "^8.21.3",
+    "@zhujun/agentloop-connector-sdk": "*",
+    "@zhujun/connector-feishu": "*"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",
