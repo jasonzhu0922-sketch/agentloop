@@ -9,3 +9,7 @@ export {
   type ConnectorRunContext,
   type MaterializedConnectorRuntime,
 } from "./connector-runtime-service.ts";
+export {
+  connectorConnectionsFromEnvironment,
+  environmentConnectorRuntime,
+} from "./environment-connector-connections.ts";
