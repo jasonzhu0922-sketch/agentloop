@@ -2,12 +2,13 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { AppDatabase, AppError, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools, loadMcpToolsFromConfig, type ModelAdapter, type ModelInvocation, type ModelResponse, type ModelRetryReporter, type ModelStreamSink } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
-import { ConnectorRegistry, ConnectorRuntimeService, environmentConnectorRuntime, loadConnectorModules } from "../../../src/connectors/index.ts";
+import { ConnectorRegistry, ConnectorRuntimeService, loadConnectorModules } from "../../../src/connectors/index.ts";
 import { loadPracticeProfileConfig, loadStepExecutionStrategyProfileConfig, webToolsOptionsFromEnvironment } from "../../../src/shared/config.ts";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
 import { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.ts";
 import type { ResolvedLocalRuntimeConfiguration } from "../persistence/local-runtime-configuration-store.ts";
 import type { LocalModelConfigurationStore } from "../persistence/local-model-configuration-store.ts";
+import type { LocalConnectorConfigurationStore } from "../persistence/local-connector-configuration-store.ts";
 import { LocalModelStreamCaptureStore } from "../persistence/model-stream-capture-store.ts";
 import { LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
 import { LocalAgentStateStore } from "../persistence/local-agent-state-store.ts";
@@ -85,10 +86,12 @@ export function redactMcpDiagnostic(message: string, secretValues: readonly stri
 export class LocalRuntimeFactory {
   private readonly input: LocalAgentOptions;
   private readonly modelConfigurations?: LocalModelConfigurationStore;
+  private readonly connectorConfigurations: LocalConnectorConfigurationStore;
 
-  constructor(input: LocalAgentOptions, modelConfigurations?: LocalModelConfigurationStore) {
+  constructor(input: LocalAgentOptions, modelConfigurations: LocalModelConfigurationStore | undefined, connectorConfigurations: LocalConnectorConfigurationStore) {
     this.input = input;
     this.modelConfigurations = modelConfigurations;
+    this.connectorConfigurations = connectorConfigurations;
   }
 
   async create(
@@ -148,13 +151,17 @@ export class LocalRuntimeFactory {
     await skills.syncSkillDirectories();
     const strategy = await loadStepExecutionStrategyProfileConfig(this.input.stepExecutionStrategyConfigPath);
     const practiceProfiles = await loadPracticeProfileConfig(this.input.practiceProfileConfigPath ?? join(this.input.appRoot, "config", "practice-profiles.json"));
+    const connectorConfiguration = await this.connectorConfigurations.resolve(definition.id);
     const connectorRegistry = new ConnectorRegistry();
-    for (const connectorModule of await loadConnectorModules({ baseDirectory: this.input.appRoot })) {
+    for (const connectorModule of await loadConnectorModules({
+      baseDirectory: this.input.appRoot,
+      registrations: connectorConfiguration.modules,
+    })) {
       connectorRegistry.register(connectorModule);
     }
     const connectorRuntimeService = new ConnectorRuntimeService(
       connectorRegistry,
-      environmentConnectorRuntime(undefined, integrationEnvironment),
+      connectorConfiguration.runtime,
     );
     const mcpIntegration = await loadMcpToolsFromConfig(
       { servers: configuration.mcpServers },
