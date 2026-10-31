@@ -3,7 +3,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { AppDatabase, AppError, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools, loadMcpToolsFromConfig, type ModelAdapter, type ModelInvocation, type ModelResponse, type ModelRetryReporter, type ModelStreamSink } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { feishuConnector } from "@zhujun/connector-feishu";
-import { ConnectorRegistry, ConnectorRuntimeService, environmentConnectorRuntime } from "../../src/connectors/index.ts";
+import { ConnectorRegistry, ConnectorRuntimeService, environmentConnectorRuntime } from "../../../src/connectors/index.ts";
 import { loadPracticeProfileConfig, loadStepExecutionStrategyProfileConfig, webToolsOptionsFromEnvironment } from "../../../src/shared/config.ts";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
 import { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.ts";
