@@ -2,6 +2,24 @@
 
 The Multi Runtime Host resolves Connector tools per Run.
 
+## Module registration
+
+Multi Runtime does not import platform Connector packages at compile time. The
+Host loads self-contained Connector modules from `CONNECTOR_MODULES_JSON`:
+
+```json
+[
+  {
+    "modulePath": "/opt/agentloop/connectors/feishu/dist/index.js",
+    "exportName": "feishuConnector"
+  }
+]
+```
+
+The module path may point to a separately deployed Connector bundle or package.
+A Connector can be upgraded, disabled or rolled back by changing the Runtime
+registration configuration without changing the Host application.
+
 ## Run contract
 
 A dispatch may carry application-authorized connection IDs:
