@@ -26,6 +26,8 @@
     "build": "npm run build:kernel && npm run build:artifact-preview && npm run build:skills && npm run build:plan-template && npm run build:memory && npm run build:web",
     "start:multi-runtime": "MAX_CONCURRENT_RUNS=20 npm run start:local --workspace agentloop-multi-runtime --",
     "start:multi-runtime:build": "npm run build:kernel && npm run build:artifact-preview && npm run build:skills && npm run build:plan-template && npm run start:local --workspace agentloop-multi-runtime --",
+    "start:desktop-app": "npm run start --workspace agentloop-desktop",
+    "typecheck:desktop-app": "npm run typecheck --workspace agentloop-desktop",
     "package:local-agent:mac": "npm run package:local-agent:mac --workspace agentloop-multi-runtime",
     "package:local-agent:win": "npm run package:local-agent:win --workspace agentloop-multi-runtime",
     "start:multi-runtime:docker": "MULTI_RUNTIME_IMAGE=${MULTI_RUNTIME_IMAGE:-agentloop-multi-runtime:runtime-baseline-local} docker compose --env-file apps/agentloop-multi-runtime/.env.docker -f apps/agentloop-multi-runtime/compose.yaml up --no-build",
