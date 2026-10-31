@@ -1259,3 +1259,14 @@ body.workspace-resizing * {
 .runtime-skill-upload-status{display:block;min-height:1.3em;color:var(--text-3);font-size:11px;font-weight:400;line-height:1.4}.runtime-skill-upload-status[data-tone="running"]{color:var(--brand)}.runtime-skill-upload-status[data-tone="ok"]{color:var(--ok)}.runtime-skill-upload-status[data-tone="error"]{color:var(--bad)}
 .local-runtime-entry{display:grid;gap:4px}.local-runtime-operation-status{display:block;min-height:1.3em;color:var(--text-3);font-size:11px;line-height:1.4}.local-runtime-operation-status[data-tone="running"]{color:var(--brand)}.local-runtime-operation-status[data-tone="ok"]{color:var(--ok)}.local-runtime-operation-status[data-tone="error"]{color:var(--bad)}.local-runtime-action-menu.pending{pointer-events:none;opacity:.55}.local-runtime-actions>button:disabled{opacity:.42;pointer-events:none}
 .local-skill-manager-section{display:grid;gap:9px}.local-skill-package-list{display:grid;gap:7px}.local-skill-package{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2)}.local-skill-package>div{display:grid;min-width:0;gap:3px}.local-skill-package strong{font-size:12px}.local-skill-package small{color:var(--text-3);font-size:10px;line-height:1.4}.local-skill-package-status{color:var(--text-3);font-size:10px}.local-skill-package-actions{display:flex;align-items:center;gap:6px}.local-skill-package-actions button{border:1px solid var(--border);border-radius:6px;padding:5px 8px;background:transparent;color:var(--brand);font-size:10px}.local-skill-package-actions button:hover{background:var(--bg-3)}
+
+
+/* Device-owned Connector settings. */
+.local-connector-layout{display:grid;gap:12px;min-width:0}
+.local-connector-list{display:grid;gap:8px}
+.local-connector-choice{display:grid;gap:3px;padding:11px 13px;border:1px solid var(--border);border-radius:7px;background:var(--bg-2);text-align:left}
+.local-connector-choice:hover,.local-connector-choice.selected{border-color:var(--brand);background:color-mix(in srgb,var(--brand) 6%,var(--bg))}
+.local-connector-choice strong{font-size:12px}
+.local-connector-choice small{color:var(--text-3);font-size:10px}
+.local-connector-empty{padding:14px;border:1px dashed var(--border-2);border-radius:6px;color:var(--text-3);font-size:11px;text-align:center}
+.local-connector-layout textarea{min-height:320px}
