@@ -426,6 +426,7 @@ function toEnvelope(task: SubmitConversationTask, assignment: StoredAssignment):
     ...(task.requestedModelKey === undefined ? {} : { requestedModelKey: task.requestedModelKey }),
     allowDangerousTools: task.allowDangerousTools !== false,
     resourceRefs: task.resourceRefs ?? [],
+    ...(task.connectorConnectionIds === undefined ? {} : { connectorConnectionIds: task.connectorConnectionIds }),
     ...(task.localDirectoryScopeIds === undefined ? {} : { localDirectoryScopeIds: task.localDirectoryScopeIds }),
     ...(task.localUploadedSourceIds === undefined ? {} : { localUploadedSourceIds: task.localUploadedSourceIds }),
   };
