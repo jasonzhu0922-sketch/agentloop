@@ -23,7 +23,8 @@
     "ws": "^8.21.3",
     "@zhujun/agentloop-connector-sdk": "*",
     "@zhujun/connector-feishu": "*",
-    "@zhujun/connector-126-mail": "*"
+    "@zhujun/connector-126-mail": "*",
+    "@zhujun/connector-wps": "*"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",
