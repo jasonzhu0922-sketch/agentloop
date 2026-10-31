@@ -46,7 +46,7 @@ export function connectorSourceDescriptor(
 export function connectorPlanningCapabilities(
   instance: ConnectorInstance,
 ): readonly PlanningCapabilityProjection[] {
-  const sourceId = `connector.${instance.definition.manifest.key}`;
+  const sourceId = `connector.${instance.definition.manifest.key}.${instance.connection.id}`;
   return instance.definition.capabilities.map((capability) => ({
     id: capability.id,
     category: capability.category,
