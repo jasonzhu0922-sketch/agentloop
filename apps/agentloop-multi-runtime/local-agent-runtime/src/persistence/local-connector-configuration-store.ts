@@ -58,14 +58,29 @@ export interface LocalConnectorRuntimeResolution {
 }
 
 export class LocalConnectorConfigurationStore {
+  private readonly database: { exec(sql: string): Promise<void>; prepare(sql: string): any };
+  private readonly secretStore: {
+    write(values: Readonly<Record<string, string>>): Promise<string>;
+    read(key: string): Promise<Readonly<Record<string, string>> | undefined>;
+    remove(key: string): Promise<void>;
+    replace?(key: string, values: Readonly<Record<string, string>>): Promise<void>;
+  };
+  private readonly credentialRefresher?: (credentials: Readonly<Record<string, string>>) => Promise<Readonly<Record<string, string>>>;
+
   constructor(
-    private readonly database: { exec(sql: string): Promise<void>; prepare(sql: string): any },
-    private readonly secretStore: {
+    database: { exec(sql: string): Promise<void>; prepare(sql: string): any },
+    secretStore: {
       write(values: Readonly<Record<string, string>>): Promise<string>;
       read(key: string): Promise<Readonly<Record<string, string>> | undefined>;
       remove(key: string): Promise<void>;
+      replace?(key: string, values: Readonly<Record<string, string>>): Promise<void>;
     },
-  ) {}
+    credentialRefresher?: (credentials: Readonly<Record<string, string>>) => Promise<Readonly<Record<string, string>>>,
+  ) {
+    this.database = database;
+    this.secretStore = secretStore;
+    this.credentialRefresher = credentialRefresher;
+  }
 
   async ready(): Promise<void> {
     await this.database.exec(`
@@ -194,11 +209,15 @@ export class LocalConnectorConfigurationStore {
         return connection;
       },
     };
+    const secretStore = this.secretStore;
+    const credentialRefresher = this.credentialRefresher;
     const credentialProvider: CredentialProvider = {
       async get(credentialRef) {
-        const value = await this.secretStore.read(credentialRef);
+        const value = await secretStore.read(credentialRef);
         if (value === undefined) throw new Error("local_connector_credential_not_configured");
-        return value;
+        const refreshed = await credentialRefresher?.(value) ?? value;
+        if (refreshed !== value) await secretStore.replace?.(credentialRef, refreshed);
+        return refreshed;
       },
     };
     return { modules, connections, runtime: { resolver, credentialProvider } };

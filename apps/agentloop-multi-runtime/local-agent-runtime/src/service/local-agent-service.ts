@@ -15,6 +15,8 @@ import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local
 import { LocalSkillPackageInstaller, type LocalSkillUploadFile } from "./local-skill-package-installer.ts";
 import { generateSkillMetadata, type SkillMetadataModelInvoker } from "./local-skill-metadata-generator.ts";
 import { LOCAL_AGENT_VERSION } from "../config/local-agent-version.ts";
+import { localConnectorCatalog } from "./local-connector-catalog.ts";
+import { WpsOAuthService } from "./wps-oauth-service.ts";
 
 export { LOCAL_AGENT_VERSION };
 export const LOCAL_AGENT_PROTOCOL_VERSION = "1";
@@ -40,13 +42,14 @@ export class LocalAgentService {
   private readonly picker: () => Promise<string | undefined>;
   private readonly sharedStorageRoot: { value: string };
   private readonly uploadStorageRoot: { value: string };
+  private readonly wpsOAuth: WpsOAuthService;
   private constructor(
     input: LocalAgentOptions, stateStore: LocalAgentStateStore,
     supervisor: LocalRuntimeSupervisor, configurations: LocalRuntimeConfigurationStore, connectorConfigurations: LocalConnectorConfigurationStore, modelConfigurations: LocalModelConfigurationStore, skillPackageInstaller: LocalSkillPackageInstaller, picker: () => Promise<string | undefined>,
-    sharedStorageRoot: { value: string }, uploadStorageRoot: { value: string },
+    sharedStorageRoot: { value: string }, uploadStorageRoot: { value: string }, wpsOAuth: WpsOAuthService,
   ) {
     this.input = input; this.stateStore = stateStore;
-    this.supervisor = supervisor; this.configurations = configurations; this.connectorConfigurations = connectorConfigurations; this.modelConfigurations = modelConfigurations; this.skillPackageInstaller = skillPackageInstaller; this.picker = picker; this.sharedStorageRoot = sharedStorageRoot; this.uploadStorageRoot = uploadStorageRoot;
+    this.supervisor = supervisor; this.configurations = configurations; this.connectorConfigurations = connectorConfigurations; this.modelConfigurations = modelConfigurations; this.skillPackageInstaller = skillPackageInstaller; this.picker = picker; this.sharedStorageRoot = sharedStorageRoot; this.uploadStorageRoot = uploadStorageRoot; this.wpsOAuth = wpsOAuth;
   }
 
   static async create(input: LocalAgentOptions): Promise<LocalAgentService> {
@@ -68,7 +71,8 @@ export class LocalAgentService {
     const modelSecretStore = new EncryptedLocalRuntimeSecretStore(join(dirname(supervisorDatabasePath), "model-secrets"));
     const modelConfigurations = new LocalModelConfigurationStore(supervisorDatabase, modelSecretStore);
     await modelConfigurations.ready();
-    const connectorConfigurations = new LocalConnectorConfigurationStore(supervisorDatabase, secretStore);
+    const wpsOAuth = new WpsOAuthService(input.integrationEnvironment);
+    const connectorConfigurations = new LocalConnectorConfigurationStore(supervisorDatabase, secretStore, async (credentials) => await wpsOAuth.refreshCredentials(credentials));
     await connectorConfigurations.ready();
     const factory = new LocalRuntimeFactory(input, modelConfigurations, connectorConfigurations);
     const uploadedSkillPackageRoot = join(input.skillPackageStoreRoot, "uploaded");
@@ -91,7 +95,7 @@ export class LocalAgentService {
       mcpConfiguration: await readLegacyLocalMcpConfiguration(input.mcpServersConfigPath),
       integrationEnvironment: input.integrationEnvironment,
     });
-    const service = new LocalAgentService(input, stateStore, supervisor, configurations, connectorConfigurations, modelConfigurations, skillPackageInstaller, input.directoryPicker ?? pickNativeDirectory, sharedStorageRoot, uploadStorageRoot);
+    const service = new LocalAgentService(input, stateStore, supervisor, configurations, connectorConfigurations, modelConfigurations, skillPackageInstaller, input.directoryPicker ?? pickNativeDirectory, sharedStorageRoot, uploadStorageRoot, wpsOAuth);
     service.connection = new RuntimeConnectionClient(input.routerUrl, supervisor, (method, payload) => service.agentControl(method, payload));
     await service.connection.ready();
     if (state.device !== undefined) service.connection.setDevice(state.device);
@@ -141,6 +145,10 @@ export class LocalAgentService {
 
   async localConnectorConfigurations(runtimeId: string): Promise<unknown> {
     return { connectors: await this.connectorConfigurations.list(runtimeId) };
+  }
+
+  async availableLocalConnectors(): Promise<unknown> {
+    return { connectors: localConnectorCatalog(this.input.appRoot) };
   }
 
   async updateLocalConnectorConfiguration(runtimeId: string, value: LocalConnectorConfigurationInput): Promise<unknown> {

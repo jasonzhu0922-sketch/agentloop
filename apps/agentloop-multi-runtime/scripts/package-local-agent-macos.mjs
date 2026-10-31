@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { PACKAGED_LOCAL_AGENT_PORT } from "../src/shared/local-agent-endpoint.mjs";
-import { copyPackagedNodeModules, PACKAGED_NODE_MAJOR, preparePackagedPythonRuntime } from "./package-local-agent-runtime.mjs";
+import { bundleBuiltInConnectorModules, copyPackagedNodeModules, PACKAGED_NODE_MAJOR, preparePackagedPythonRuntime } from "./package-local-agent-runtime.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(appRoot, "../..");
@@ -122,6 +122,7 @@ exec "$RESOURCE_ROOT/agentloop-local-runtime-node" "$RESOURCE_ROOT/rotating-log-
 await chmod(launcher, 0o755);
 await cp(join(repositoryRoot, "packages/agentloop-skills/skills"), join(resources, "skills"), { recursive: true });
 await cp(join(appRoot, "local-agent-runtime"), join(resources, "agent-loop-runtime"), { recursive: true });
+await bundleBuiltInConnectorModules({ repositoryRoot, destinationRoot: join(resources, "connectors") });
 await preparePackagedPythonRuntime({
   sourceRoot: packagedPythonRoot,
   destinationRoot: join(resources, "runtime-python"),

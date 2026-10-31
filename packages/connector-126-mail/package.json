@@ -10,12 +10,16 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@zhujun/agentloop-connector-sdk": "*"
+    "@zhujun/agentloop-connector-sdk": "*",
+    "imapflow": "^2.10.0"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",

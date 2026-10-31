@@ -37,10 +37,16 @@ export interface MaterializedConnectorRuntime {
  * materializes the immutable tool projection used by one Run.
  */
 export class ConnectorRuntimeService {
+  private readonly registry: ConnectorRegistry;
+  private readonly connectionRuntime: ConnectorConnectionRuntime;
+
   constructor(
-    private readonly registry: ConnectorRegistry,
-    private readonly connectionRuntime: ConnectorConnectionRuntime,
-  ) {}
+    registry: ConnectorRegistry,
+    connectionRuntime: ConnectorConnectionRuntime,
+  ) {
+    this.registry = registry;
+    this.connectionRuntime = connectionRuntime;
+  }
 
   async materialize(
     context: ConnectorRunContext,

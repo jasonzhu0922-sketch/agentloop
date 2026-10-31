@@ -589,12 +589,14 @@ export class RunService {
     await this.checkpoints.claim(checkpoint.id);
     const visibleDirectories = (await this.runs.visibleDirectoriesForRun(parent.id)).map((item) => item.path);
     const sourceIds = (await this.sources.listByRun(parent.id)).map((item) => item.id);
+    const connectorConnectionIds = await this.connectorConnectionIdsFromEvents(parent.id);
     const options: ExecuteOptions = {
       allowDangerousTools: parent.allowDangerousTools,
       ...(parent.conversationId === undefined ? {} : { conversationId: parent.conversationId }),
       ...(parent.modelKey === undefined ? {} : { modelKey: parent.modelKey }),
       visibleDirectories,
       sourceIds,
+      connectorConnectionIds,
     };
     let returned = false;
     const created = new Promise<RunRecord>((resolve, reject) => {

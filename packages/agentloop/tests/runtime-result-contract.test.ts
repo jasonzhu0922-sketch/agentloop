@@ -494,6 +494,88 @@ test("authority-loss reconciliation aborts the active Tool executor", async () =
   }
 });
 
+test("checkpoint continuation preserves the parent Run's connector selections", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const skills = new SkillService(database);
+    let releaseExecution!: () => void;
+    const executionEntered = new Promise<void>((resolve) => { releaseExecution = resolve; });
+    let releaseAbort!: () => void;
+    const executionAborted = new Promise<void>((resolve) => { releaseAbort = resolve; });
+    let modelCalls = 0;
+    let resolveChildConnectorResolution!: () => void;
+    const childConnectorResolution = new Promise<void>((resolve) => { resolveChildConnectorResolution = resolve; });
+    let parentRunId: string | undefined;
+    let childConnectionIds: readonly string[] | undefined;
+    const tool: RuntimeTool<unknown> = {
+      name: "blocking_tool",
+      description: "Wait until its Run is cancelled.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      executionMode: "exclusive",
+      replaySafe: false,
+      parse: (input) => input,
+      execute: async (context) => {
+        releaseExecution();
+        await new Promise<never>((_resolve, reject) => {
+          context.signal?.addEventListener("abort", () => {
+            releaseAbort();
+            reject(new AppError("CANCELLED", "Tool execution was aborted", 409));
+          }, { once: true });
+        });
+      },
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      tools: [tool],
+      runToolProvider: {
+        resolve: async (input) => {
+          if (parentRunId !== undefined && input.runId !== parentRunId) {
+            childConnectionIds = input.connectionIds;
+            resolveChildConnectorResolution();
+          }
+          return [];
+        },
+      },
+      plannerFactory: () => singleStepTestPlanner(),
+      modelFactory: () => ({
+        limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
+        complete: async () => {
+          if (modelCalls++ === 0) {
+            return {
+              content: "",
+              finishReason: "tool_calls" as const,
+              toolCalls: [{ id: "block", name: "blocking_tool", arguments: {} }],
+            };
+          }
+          return { content: "done", finishReason: "stop" as const, toolCalls: [] };
+        },
+      }),
+    });
+    const parent = await runs.start(owner.user.id, "resume with the same connector", {
+      connectorConnectionIds: ["connector:mail-primary"],
+    });
+    parentRunId = parent.id;
+    await executionEntered;
+    const action = (await runs.actionsForRun(owner.user.id, parent.id)).find((item) => item.kind === "tool_call");
+    assert.ok(action);
+    await database.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?").run(action.id);
+
+    assert.equal(await runs.reconcileInterruptedRuns([parent.id]), 1);
+    await executionAborted;
+    const checkpoint = await runs.checkpointForRun(owner.user.id, parent.id);
+    assert.ok(checkpoint);
+
+    const child = await runs.startFromCheckpoint(owner.user.id, checkpoint.id);
+    await childConnectorResolution;
+    assert.notEqual(child.id, parent.id);
+    assert.deepEqual(childConnectionIds, ["connector:mail-primary"]);
+  } finally {
+    await database.close();
+  }
+});
+
 test("RunService records read_result as an audited observation without publishing a derived Runtime Result", async () => {
   const database = new AppDatabase(":memory:");
   try {

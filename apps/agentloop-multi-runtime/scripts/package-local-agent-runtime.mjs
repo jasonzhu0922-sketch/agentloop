@@ -2,6 +2,7 @@ import { chmod, cp, mkdir, readFile, readdir, symlink, writeFile } from "node:fs
 import { existsSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { build } from "esbuild";
 
 export const PACKAGED_NODE_MAJOR = 26;
 export const PACKAGED_PYTHON_MAJOR_MINOR = "3.12";
@@ -14,6 +15,33 @@ export function packagedRuntimePythonManifestPath(platformName = process.platfor
 /** Node's CLI prefixes the semantic version with `v`, while release manifests do not. */
 export function normalizePackagedNodeVersion(output) {
   return output.trim().replace(/^v/, "");
+}
+
+/** Bundle built-in Connector modules so installed Agents never depend on a source checkout. */
+export async function bundleBuiltInConnectorModules({ repositoryRoot, destinationRoot } = {}) {
+  if (repositoryRoot === undefined || destinationRoot === undefined) {
+    throw new Error("repositoryRoot and destinationRoot are required");
+  }
+  const source = resolve(repositoryRoot, "packages");
+  const destination = resolve(destinationRoot);
+  await mkdir(destination, { recursive: true });
+  for (const [packageName, outputName] of [
+    ["connector-feishu", "feishu"],
+    ["connector-126-mail", "126-mail"],
+    ["connector-wps", "wps"],
+  ]) {
+    await build({
+      entryPoints: [join(source, packageName, "src", "index.ts")],
+      bundle: true,
+      external: ["imapflow"],
+      format: "esm",
+      platform: "node",
+      target: "node26",
+      outfile: join(destination, `${outputName}.mjs`),
+      sourcemap: false,
+      legalComments: "none",
+    });
+  }
 }
 
 /**
@@ -90,7 +118,7 @@ export async function copyPackagedNodeModules({ repositoryRoot, destinationRoot 
   const sourceRoot = resolve(repositoryRoot, "node_modules");
   const targetRoot = resolve(destinationRoot, "node_modules");
   await mkdir(targetRoot, { recursive: true });
-  const queue = ["docx", "pptxgenjs", "jszip"];
+  const queue = ["docx", "pptxgenjs", "jszip", "imapflow"];
   const copied = new Set();
   while (queue.length > 0) {
     const name = queue.shift();

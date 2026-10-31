@@ -36,7 +36,36 @@ Workspace scope.
 
 ## Development configuration
 
-The Local Agent discovers independently deployed Connector modules from its local configuration store. The Feishu, 126 Mail and WPS packages are examples of separately deployable modules; 126 Mail and WPS require an application-supplied IMAP or platform API transport adapter before registration.
+The Local Agent presents a built-in Connector catalog and owns the module
+registration details. The packaged Agent ships Feishu, 126 Mail and WPS
+Connector bundles. 126 Mail connects directly using the locally encrypted
+mailbox account and client authorization code over IMAP. WPS uses WPS Cloud
+Document REST APIs after its Local Agent OAuth callback has stored the user
+token in the local encrypted Secret Store; no endpoint or access token is
+entered in the browser.
+
+For WPS OAuth, the device owner creates a WPS Open Platform application and
+adds its registered application credentials to the Local Agent's private
+`.env` file. The user then only clicks **Connect** in the Connector dialog:
+
+```ini
+WPS_OAUTH_CLIENT_ID=
+WPS_OAUTH_CLIENT_SECRET=
+WPS_OAUTH_REDIRECT_URI=http://127.0.0.1:18790/v1/local-connectors/kingsoft-wps/callback
+WPS_OAUTH_SCOPES=kso.file.read,kso.file_search.readwrite
+```
+
+The redirect URI must exactly match the one registered in WPS Open Platform.
+Never place these values, an authorization code, or a refresh token in a
+Runtime JSON configuration or a cloud-side Router setting.
+
+The WPS application must be a third-party/personal application that has been
+approved for the listed user-level REST scopes. The current WPS permission
+catalog exposes these as `kso.file.read` and
+`kso.file_search.readwrite`; use the exact names shown in the app console.
+The Cloud Document MCP scope is not required and must not be configured for
+this Connector. Do not start authorization until both requested permissions
+are approved.
 
 The current Host foundation includes an environment-backed resolver for local
 development. Configure connection metadata with `CONNECTOR_CONNECTIONS_JSON`:

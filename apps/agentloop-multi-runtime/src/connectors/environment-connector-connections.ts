@@ -77,7 +77,7 @@ export function environmentConnectorRuntime(
     },
   };
   const credentialProvider: CredentialProvider = {
-    async get(credentialRef: string): Promise<Readonly<Record<string, string>> {
+    async get(credentialRef: string): Promise<Readonly<Record<string, string>>> {
       const raw = environment[credentialRef];
       if (raw === undefined || raw.length === 0) {
         throw new Error(`Connector credential is not configured: ${credentialRef}`);

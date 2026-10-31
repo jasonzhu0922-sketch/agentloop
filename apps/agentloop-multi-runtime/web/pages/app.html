@@ -131,13 +131,26 @@
               <div class="settings-page-heading"><div><h2>Connector 配置</h2><p>个人 Connector 只保存在 Local Agent；配置凭据不会上传到云端。</p></div><span class="settings-local-badge">仅本机保存</span></div>
               <div id="local-connector-editable" class="local-connector-layout">
                 <section class="local-model-section">
-                  <div class="settings-section-title"><strong>本机 Connectors</strong><button id="local-connector-add" type="button">＋ 添加 Connector</button></div>
+                  <div class="settings-section-title"><strong>可添加的 Connectors</strong></div>
+                  <p class="local-model-field-note">选择下方服务即可生成对应的本机配置；模块路径和能力范围由 Local Agent 预置。</p>
+                  <div id="local-connector-catalog" class="local-connector-catalog" aria-live="polite"></div>
+                </section>
+                <section class="local-model-section">
+                  <div class="settings-section-title"><strong>已添加的 Connectors</strong></div>
                   <div id="local-connector-list" class="local-connector-list"></div>
                 </section>
-                <div id="local-connector-json-empty" class="local-connector-empty">添加 Connector 后，填写模块路径、连接配置和凭据。</div>
+                <section id="local-connector-binding" class="local-connector-binding" hidden aria-labelledby="local-connector-binding-title">
+                  <div class="local-connector-binding-head"><div><strong id="local-connector-binding-title">绑定 Connector</strong><p id="local-connector-binding-description"></p></div><button id="local-connector-binding-close" type="button" class="runtime-modal-close" title="关闭" aria-label="关闭 Connector 绑定"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg></button></div>
+                  <div id="local-connector-binding-brand" class="local-connector-binding-brand" hidden aria-hidden="true"><span class="local-connector-agent-mark">✦</span><i></i><span class="local-connector-wps-mark">WPS</span></div>
+                  <div id="local-connector-binding-fields" class="local-connector-binding-fields"></div>
+                  <div id="local-connector-binding-examples" class="local-connector-binding-examples"></div>
+                  <p id="local-connector-binding-status" class="settings-save-status" role="status" aria-live="polite"></p>
+                  <div class="local-model-actions"><button id="local-connector-binding-cancel" type="button">取消</button><button id="local-connector-binding-save" type="button" class="primary">绑定并保存</button></div>
+                </section>
+                <div id="local-connector-json-empty" class="local-connector-empty">从上方选择一个 Connector 开始配置。</div>
                 <section id="local-connector-json-editor" class="local-model-section" hidden>
                   <div class="settings-section-title"><strong>Connector 配置</strong><div class="local-model-actions"><button id="local-connector-format" type="button">格式化</button><button id="local-connector-delete" type="button" class="danger">删除 Connector</button></div></div>
-                  <p class="local-model-field-note">modulePath 指向本机独立 Connector 模块；credentials 只会写入本机加密 Secret Store。</p>
+                  <p class="local-model-field-note">凭据只会写入本机加密 Secret Store。请按所选 Connector 的提示填写连接参数和凭据；预置的 modulePath 通常不需要修改。</p>
                   <textarea id="local-connector-json" class="local-model-json" spellcheck="false" autocomplete="off" autocapitalize="off" rows="18"></textarea>
                 </section>
               </div>
