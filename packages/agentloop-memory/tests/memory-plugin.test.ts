@@ -249,6 +249,59 @@ test("structured contact email is stored as a fact and recalled for responses", 
   assert.match(projection && "promptMarkdown" in projection ? projection.promptMarkdown : "", /12875549@qq\.com/u);
 });
 
+test("structured generic facts are stored and recalled without a per-fact adapter", async () => {
+  const memory = plugin();
+  const result = await memory.commitExplicit({
+    runId: "runA",
+    messageId: "m-residence",
+    userText: "你再记录一下，我现在住在上海。",
+    memoryIntents: [{
+      schema: "agentloop.memoryIntentCandidate/v1",
+      kind: "fact",
+      subtype: "profile.residence",
+      canonicalKey: "profile.residence",
+      value: { city: "上海" },
+      contentMarkdown: "用户目前居住在上海。",
+      sourceQuote: "我现在住在上海",
+      persistenceIntent: "explicit",
+      sensitivity: "private",
+      applicationTargets: ["response", "human_loop", "planner"],
+      confidence: 1,
+    }],
+  });
+  assert.equal(result.kind, "committed");
+  const active = await memory.store.active(scopes.runA);
+  assert.equal(active[0]?.item.kind, "fact");
+  assert.equal(active[0]?.item.subtype, "profile.residence");
+  assert.deepEqual(active[0]?.revision.value, { city: "上海" });
+  const projection = await memory.recall({ runId: "runA", target: "response", budget: { maxItems: 10, maxTokens: 300 } });
+  assert.deepEqual(projection && "facts" in projection ? projection.facts?.[0]?.value : undefined, { city: "上海" });
+  assert.match(projection && "promptMarkdown" in projection ? projection.promptMarkdown : "", /上海/u);
+});
+
+test("generic fact intake still rejects unsafe or unbounded values", async () => {
+  const memory = plugin();
+  const invalid: MemoryIntentCandidate[] = [
+    {
+      ...preference("profile.residence", { city: "x".repeat(2_001) }),
+      kind: "fact",
+      sensitivity: "normal",
+      sourceQuote: "我住在上海",
+    },
+    {
+      ...preference("profile.secret", { value: "password: secret" }),
+      kind: "fact",
+      sourceQuote: "我的密码是 secret",
+      sensitivity: "secret",
+    },
+  ];
+  for (const [index, intent] of invalid.entries()) {
+    const result = await memory.commitExplicit({ runId: "runA", messageId: `invalid-fact-${index}`, userText: intent.sourceQuote ?? "事实", memoryIntents: [intent] });
+    assert.equal(result.kind, "not_applicable");
+  }
+  assert.equal((await memory.store.active(scopes.runA)).length, 0);
+});
+
 test("explicit email fact survives when the resolver supplies no intent", async () => {
   const memory = plugin();
   const result = await memory.commitExplicit({ runId: "runA", messageId: "m-email-fallback", userText: "记住我的邮箱是 fallback@example.com" });

@@ -61,7 +61,7 @@ export interface MemoryProjectionBase {
   readonly contentHash: string;
   readonly createdAt: number;
   readonly expiresAt: number;
-  /** Open-ended confirmed preferences, bounded for this application target. */
+  /** Open-ended confirmed preferences and facts, bounded for this application target. */
   readonly preferences?: readonly {
     readonly memoryRevisionId: string;
     readonly subtype: string;

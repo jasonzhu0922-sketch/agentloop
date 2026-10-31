@@ -125,10 +125,6 @@ function candidateFromIntent(
   if (intent.canonicalKey.length > 120 || !/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/u.test(intent.canonicalKey)) return undefined;
   if (!boundedMemoryValue(intent.value)) return undefined;
   if (intent.sourceQuote !== undefined && (intent.sourceQuote.trim().length === 0 || intent.sourceQuote.length > 1_000 || !input.userText.includes(intent.sourceQuote))) return undefined;
-  // Facts retain their existing privacy/schema contract; the open-ended
-  // contract in this change belongs to explicit preferences.
-  if (intent.kind === "fact" && (intent.canonicalKey !== "contact.email"
-    || typeof intent.value.email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(intent.value.email.trim()))) return undefined;
   const proposedValue = intent.value;
   return {
     schema: "agentloop.userMemoryCandidate/v1",
@@ -140,7 +136,7 @@ function candidateFromIntent(
     proposedCanonicalKey: intent.canonicalKey,
     proposedValue,
     proposedContentMarkdown: intent.contentMarkdown
-      ?? (intent.kind === "fact" && intent.canonicalKey === "contact.email" ? "用户提供了联系邮箱。" : "用户明确指定了交互偏好。"),
+      ?? (intent.kind === "fact" ? "用户明确提供了一条事实。" : "用户明确指定了交互偏好。"),
     persistenceIntent: intent.persistenceIntent,
     authority: intent.persistenceIntent === "inferred" ? "inferred" : "explicit_user",
     sensitivity: intent.sensitivity,
