@@ -1,0 +1,25 @@
+{
+  "name": "@zhujun/agentloop-connector-sdk",
+  "version": "0.1.0",
+  "description": "Connector contracts and adapters for AgentLoop runtimes",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@zhujun/agentloop": "*"
+  },
+  "devDependencies": {
+    "@zhujun/agentloop": "*",
+    "@types/node": "^26.3.0",
+    "typescript": "^7.0.2"
+  }
+}
