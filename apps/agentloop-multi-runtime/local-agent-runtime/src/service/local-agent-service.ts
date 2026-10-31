@@ -356,6 +356,7 @@ export class LocalAgentService {
       await runtime.runs.ensureConversation(session.ownerUserId, value.conversationId, value.input);
       const run = await runtime.runs.startConversation(session.ownerUserId, value.input, {
         conversationId: value.conversationId, visibleDirectories, sourceIds: value.localUploadedSourceIds,
+        ...(value.connectorConnectionIds === undefined ? {} : { connectorConnectionIds: value.connectorConnectionIds }),
         allowDangerousTools: value.allowDangerousTools, ...(value.requestedModelKey === undefined ? {} : { modelKey: value.requestedModelKey }),
       });
       await runtime.database.prepare("INSERT INTO local_runtime_dispatches(dispatch_key, assignment_id, owner_user_id, remote_run_id, created_at) VALUES (?, ?, ?, ?, ?)")
