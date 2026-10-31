@@ -9,6 +9,7 @@ import { RuntimeConnectionClient } from "../connection/router-runtime-control-cl
 import { pickNativeDirectory } from "../infrastructure/native-directory-picker.ts";
 import { LocalAgentStateStore, type LocalAgentState } from "../persistence/local-agent-state-store.ts";
 import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, type LocalRuntimeMcpServerInput } from "../persistence/local-runtime-configuration-store.ts";
+import { LocalConnectorConfigurationStore, type LocalConnectorConfigurationInput } from "../persistence/local-connector-configuration-store.ts";
 import { LocalModelConfigurationStore, type LocalModelConfigurationInput } from "../persistence/local-model-configuration-store.ts";
 import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local-runtime-secret-store.ts";
 import { LocalSkillPackageInstaller, type LocalSkillUploadFile } from "./local-skill-package-installer.ts";
@@ -32,6 +33,7 @@ export class LocalAgentService {
   private readonly stateStore: LocalAgentStateStore;
   private readonly supervisor: LocalRuntimeSupervisor;
   private readonly configurations: LocalRuntimeConfigurationStore;
+  private readonly connectorConfigurations: LocalConnectorConfigurationStore;
   private readonly modelConfigurations: LocalModelConfigurationStore;
   private modelConfigurationUpdate: Promise<unknown> = Promise.resolve();
   private readonly skillPackageInstaller: LocalSkillPackageInstaller;
@@ -40,11 +42,11 @@ export class LocalAgentService {
   private readonly uploadStorageRoot: { value: string };
   private constructor(
     input: LocalAgentOptions, stateStore: LocalAgentStateStore,
-    supervisor: LocalRuntimeSupervisor, configurations: LocalRuntimeConfigurationStore, modelConfigurations: LocalModelConfigurationStore, skillPackageInstaller: LocalSkillPackageInstaller, picker: () => Promise<string | undefined>,
+    supervisor: LocalRuntimeSupervisor, configurations: LocalRuntimeConfigurationStore, connectorConfigurations: LocalConnectorConfigurationStore, modelConfigurations: LocalModelConfigurationStore, skillPackageInstaller: LocalSkillPackageInstaller, picker: () => Promise<string | undefined>,
     sharedStorageRoot: { value: string }, uploadStorageRoot: { value: string },
   ) {
     this.input = input; this.stateStore = stateStore;
-    this.supervisor = supervisor; this.configurations = configurations; this.modelConfigurations = modelConfigurations; this.skillPackageInstaller = skillPackageInstaller; this.picker = picker; this.sharedStorageRoot = sharedStorageRoot; this.uploadStorageRoot = uploadStorageRoot;
+    this.supervisor = supervisor; this.configurations = configurations; this.connectorConfigurations = connectorConfigurations; this.modelConfigurations = modelConfigurations; this.skillPackageInstaller = skillPackageInstaller; this.picker = picker; this.sharedStorageRoot = sharedStorageRoot; this.uploadStorageRoot = uploadStorageRoot;
   }
 
   static async create(input: LocalAgentOptions): Promise<LocalAgentService> {
@@ -66,7 +68,9 @@ export class LocalAgentService {
     const modelSecretStore = new EncryptedLocalRuntimeSecretStore(join(dirname(supervisorDatabasePath), "model-secrets"));
     const modelConfigurations = new LocalModelConfigurationStore(supervisorDatabase, modelSecretStore);
     await modelConfigurations.ready();
-    const factory = new LocalRuntimeFactory(input, modelConfigurations);
+    const connectorConfigurations = new LocalConnectorConfigurationStore(supervisorDatabase, secretStore);
+    await connectorConfigurations.ready();
+    const factory = new LocalRuntimeFactory(input, modelConfigurations, connectorConfigurations);
     const uploadedSkillPackageRoot = join(input.skillPackageStoreRoot, "uploaded");
     const skillPackageInstaller = new LocalSkillPackageInstaller(uploadedSkillPackageRoot);
     // Local Agent extensions are device-owned uploads. The cloud/development
@@ -87,7 +91,7 @@ export class LocalAgentService {
       mcpConfiguration: await readLegacyLocalMcpConfiguration(input.mcpServersConfigPath),
       integrationEnvironment: input.integrationEnvironment,
     });
-    const service = new LocalAgentService(input, stateStore, supervisor, configurations, modelConfigurations, skillPackageInstaller, input.directoryPicker ?? pickNativeDirectory, sharedStorageRoot, uploadStorageRoot);
+    const service = new LocalAgentService(input, stateStore, supervisor, configurations, connectorConfigurations, modelConfigurations, skillPackageInstaller, input.directoryPicker ?? pickNativeDirectory, sharedStorageRoot, uploadStorageRoot);
     service.connection = new RuntimeConnectionClient(input.routerUrl, supervisor, (method, payload) => service.agentControl(method, payload));
     await service.connection.ready();
     if (state.device !== undefined) service.connection.setDevice(state.device);
@@ -133,6 +137,18 @@ export class LocalAgentService {
 
   async pickUploadStorage(): Promise<unknown> {
     return await this.pickStorage("upload");
+  }
+
+  async localConnectorConfigurations(runtimeId: string): Promise<unknown> {
+    return { connectors: await this.connectorConfigurations.list(runtimeId) };
+  }
+
+  async updateLocalConnectorConfiguration(runtimeId: string, value: LocalConnectorConfigurationInput): Promise<unknown> {
+    return { connector: await this.connectorConfigurations.upsert(runtimeId, value) };
+  }
+
+  async removeLocalConnectorConfiguration(runtimeId: string, connectorId: string): Promise<void> {
+    await this.connectorConfigurations.remove(runtimeId, connectorId);
   }
 
   async localModelConfiguration(): Promise<unknown> {
