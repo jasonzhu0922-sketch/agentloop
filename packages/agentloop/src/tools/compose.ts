@@ -39,10 +39,12 @@ export interface ComposeRunToolsOptions {
   privateSkills?: readonly PrivateSkill[];
   visibleDirectories?: readonly VisibleDirectoryGrant[];
   uploadedSources?: readonly UploadedSourceSummary[];
+  /** Run-scoped tools supplied by a Connector or other host integration. */
+  additionalTools?: readonly RuntimeTool<unknown>[];
 }
 
 export function composeRunTools(options: ComposeRunToolsOptions): RuntimeTool<unknown>[] {
-  const tools: RuntimeTool<unknown>[] = [...options.coreTools];
+  const tools: RuntimeTool<unknown>[] = [...options.coreTools, ...(options.additionalTools ?? [])];
   const visibleDirectories = options.visibleDirectories ?? [];
   const uploadedSources = options.uploadedSources ?? [];
   const privateSkills = options.privateSkills ?? [];
