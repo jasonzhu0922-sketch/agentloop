@@ -36,9 +36,9 @@ export function connectorSourceDescriptor(
     sourceKinds: capability.sourceKinds,
   }));
   return {
-    id: `connector.${manifest.key}`,
+    id: `connector.${manifest.key}.${instance.connection.id}`,
     transport: "connector",
-    aliases: [manifest.key],
+    aliases: [manifest.key, instance.connection.id],
     capabilities,
   };
 }
@@ -66,7 +66,7 @@ export function connectorOperationTools(
 ): readonly RuntimeTool[] {
   const source = connectorSourceDescriptor(instance);
   return instance.operations.map((operation) => ({
-    name: `connector_${instance.definition.manifest.key}_${operation.id.replaceAll(".", "_").replaceAll("-", "_")}`,
+    name: `connector_${instance.definition.manifest.key}_${safeIdentifier(instance.connection.id)}_${operation.id.replaceAll(".", "_").replaceAll("-", "_")}`,
     description: operationDescription(instance.definition.capabilities, operation),
     source,
     inputSchema: operation.inputSchema,
@@ -84,6 +84,10 @@ export function connectorOperationTools(
       };
     },
   }));
+}
+
+function safeIdentifier(value: string): string {
+  return value.replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "") || "connection";
 }
 
 function operationDescription(
