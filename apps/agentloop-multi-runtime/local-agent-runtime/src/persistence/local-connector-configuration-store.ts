@@ -188,7 +188,7 @@ export class LocalConnectorConfigurationStore {
       async resolve(connectionId, scope) {
         const connection = byId.get(connectionId);
         if (connection === undefined) throw new Error("local_connector_connection_not_found");
-        if (scope !== undefined && connection.ownerId !== scope.actorUserId && connection.ownerId !== scope.workspaceId) {
+        if (scope !== undefined && connection.ownerId !== runtimeId && connection.ownerId !== scope.actorUserId && connection.ownerId !== scope.workspaceId) {
           throw new Error("local_connector_connection_not_authorized");
         }
         return connection;
