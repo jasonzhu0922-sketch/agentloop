@@ -274,6 +274,9 @@ export function assertRuntimeDispatchEnvelope(input: unknown): asserts input is 
   if (Object.hasOwn(input, "localUploadedSourceIds")) {
     throw new TypeError("localUploadedSourceIds are Local Agent-owned and cannot be dispatched to cloud Runtime Hosts");
   }
+  if (Object.hasOwn(input, "connectorConnectionIds")) {
+    throw new TypeError("personal Connector connections are Local Agent-owned and cannot be dispatched to cloud Runtime Hosts");
+  }
   const value = input as Record<string, unknown>;
   if (value.schema !== "agentloop.runtimeDispatch/v1") throw new TypeError("unsupported runtime dispatch schema");
   for (const field of ["assignmentId", "dispatchKey", "conversationId", "input"]) {
