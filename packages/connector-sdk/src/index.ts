@@ -9,6 +9,8 @@ export type {
   ConnectorExecutionResult,
   ConnectorInstance,
   ConnectorModule,
+  ConnectorModuleFactory,
+  ConnectorModuleFactoryContext,
   ConnectorProjection,
   ConnectorEvidenceMapper,
   CanonicalConnectorEvidence,
