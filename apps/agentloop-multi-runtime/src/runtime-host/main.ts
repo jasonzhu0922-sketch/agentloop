@@ -20,8 +20,7 @@ import {
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../shared/persistence/state-database.ts";
 import { migrateRuntimeState } from "./persistence/state-migrations.ts";
 import { loadOptionalPlanTemplateObserver } from "./plan-template-observer.ts";
-import { feishuConnector } from "@zhujun/connector-feishu";
-import { ConnectorRegistry, ConnectorRuntimeService, environmentConnectorRuntime } from "../connectors/index.ts";
+import { ConnectorRegistry, ConnectorRuntimeService, environmentConnectorRuntime, loadConnectorModules } from "../connectors/index.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const host = process.env.HOST ?? "127.0.0.1";
@@ -97,7 +96,9 @@ const skillDirectorySync = await skills.syncSkillDirectories();
 // Host but never receives MCP credentials or materializes its tool catalog.
 const mcpIntegration = await loadOptionalMcpToolsFromConfigFile(mcpServersConfigPath);
 const connectorRegistry = new ConnectorRegistry();
-connectorRegistry.register(feishuConnector);
+for (const connectorModule of await loadConnectorModules({ baseDirectory: appRoot })) {
+  connectorRegistry.register(connectorModule);
+}
 const connectorRuntimeService = new ConnectorRuntimeService(
   connectorRegistry,
   environmentConnectorRuntime(),
