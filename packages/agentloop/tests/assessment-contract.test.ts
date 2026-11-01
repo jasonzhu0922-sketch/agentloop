@@ -95,6 +95,39 @@ test("a JSON-encoded assessment is rejected with shape diagnostics and repaired 
   assert.deepEqual(rejected.data.argumentShape, { topLevelType: "string", characters: JSON.stringify(submission(input).toolCalls[0]!.arguments).length });
 });
 
+test("streamed assessment is internally visible while retaining telemetry and the structured judgment", async () => {
+  const input = assessmentInput();
+  const events: RuntimeEvent[] = [];
+  const result = await new ModelStepAssessor({
+    limits: TEST_MODEL_LIMITS,
+    async complete() { throw new Error("streaming path expected"); },
+    async streamComplete(request, sink) {
+      assert.match(request.systemPrompt, /internal structured adjudication/);
+      assert.match(request.systemPrompt, /do not repeat or paraphrase the candidate/i);
+      await sink({ type: "reasoning_delta", text: "The candidate says the requested reply." });
+      await sink({ type: "text_delta", text: "browser production smoke passed" });
+      await sink({
+        type: "tool_call_delta",
+        index: 0,
+        id: "assessment",
+        name: "submit_assessment",
+        argumentsDelta: '{"criteria":[]}',
+      });
+      const response = submission(input);
+      const call = response.toolCalls[0]!;
+      await sink({ type: "tool_call_ready", index: 0, ...call });
+      return response;
+    },
+  }).assess(input, undefined, async (event) => { events.push(event); });
+
+  assert.equal(result.approved, true);
+  assert.equal(events.some((event) => event.type === "assistant.streaming"), false);
+  assert.equal(events.some((event) => event.type === "assessment.turn.completed"), true);
+  for (const event of events.filter((event) => event.type === "model.request.started" || event.type === "model.request.completed")) {
+    assert.equal(event.data.responseVisibility, "internal");
+  }
+});
+
 for (const rationale of ["None.", "No unsupported requirement was added.", "该条件忠实反映用户要求，没有契约问题。", "This condition is necessary for the original goal."]) {
   test(`a valid contract check cannot become a conflict because of explanatory prose: ${rationale}`, async () => {
     const input = assessmentInput();
