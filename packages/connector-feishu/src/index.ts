@@ -106,16 +106,24 @@ export const feishuConnector: ConnectorModule = {
         const operation = operations.find((item) => item.id === operationId);
         if (operation === undefined) throw new Error(`Unknown Feishu operation: ${operationId}`);
         const body = operationInput as Record<string, unknown>;
-        const path = operationId === "document.search"
-          ? "/search/v2/object"
+        const searching = operationId === "document.search";
+        const path = searching
+          ? "/suite/docs-api/search/object"
           : `/docx/v1/documents/${encodeURIComponent(String(body.documentId))}/raw_content`;
+        const requestBody = searching
+          ? {
+            search_key: body.query,
+            count: body.pageSize ?? 20,
+            ...(body.pageToken === undefined ? {} : { offset: numericOffset(body.pageToken) }),
+          }
+          : undefined;
         const response = await fetch(`${FEISHU_BASE_URL}${path}`, {
-          method: "POST",
+          method: searching ? "POST" : "GET",
           headers: {
             "Authorization": `Bearer ${accessToken}`,
             "Content-Type": "application/json; charset=utf-8",
           },
-          body: JSON.stringify(body),
+          ...(requestBody === undefined ? {} : { body: JSON.stringify(requestBody) }),
           signal: context.signal,
         });
         const responseText = await response.text();
@@ -127,6 +135,9 @@ export const feishuConnector: ConnectorModule = {
           data = JSON.parse(responseText);
         } catch {
           data = { raw: responseText };
+        }
+        if (isRecord(data) && typeof data.code === "number" && data.code !== 0) {
+          throw new Error(`Feishu API request failed (${data.code}): ${typeof data.msg === "string" ? data.msg : "unknown error"}`);
         }
         return {
           operationId,
@@ -161,3 +172,13 @@ export const feishuConnector: ConnectorModule = {
     };
   },
 };
+
+function numericOffset(value: unknown): number {
+  const offset = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Feishu document search pageToken must be a non-negative numeric offset");
+  return offset;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}

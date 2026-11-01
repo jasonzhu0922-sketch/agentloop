@@ -13,6 +13,11 @@ test("Local Agent exposes named first-party Connector presets instead of asking 
   assert.equal(mail?.template.exportName, "createConfigured126MailConnector");
   assert.equal(mail?.template.modulePath.endsWith("/packages/connector-126-mail/src/index.ts"), true);
   assert.match(mail?.setupHint ?? "", /客户端授权码/);
+  assert.match(mail?.binding.description ?? "", /OAuth/);
+  const feishu = catalog.find((item) => item.key === "feishu");
+  assert.equal(feishu?.binding.kind, "oauth");
+  assert.deepEqual(feishu?.binding.fields, []);
+  assert.match(feishu?.setupHint ?? "", /扫码登录/);
   const wps = catalog.find((item) => item.key === "kingsoft-wps");
   assert.equal(wps?.binding.kind, "oauth");
   assert.deepEqual(wps?.binding.fields, []);

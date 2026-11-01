@@ -107,6 +107,15 @@ export class LocalConnectorConfigurationStore {
     return Promise.all(rows.map((row) => this.toPublic(row)));
   }
 
+  /** All retained references, including disabled connectors and other Runtimes. */
+  async secretStorageKeys(): Promise<readonly string[]> {
+    const rows = await this.database.prepare(`
+      SELECT DISTINCT secret_storage_key FROM local_runtime_connectors
+      WHERE secret_storage_key IS NOT NULL
+    `).all() as Array<{ secret_storage_key: string }>;
+    return rows.map((row) => row.secret_storage_key);
+  }
+
   async get(runtimeId: string, connectorId: string): Promise<LocalConnectorConfiguration> {
     const row = await this.database.prepare(`
       SELECT connector_id, runtime_id, connector_key, display_name, module_path,
@@ -244,7 +253,7 @@ export class LocalConnectorConfigurationStore {
       ...(row.export_name === null ? {} : { exportName: row.export_name }),
       enabled: row.enabled === 1,
       config: JSON.parse(row.config_json) as Readonly<Record<string, unknown>>,
-      credentialConfigured: row.secret_storage_key !== null,
+      credentialConfigured: row.secret_storage_key !== null && await this.secretStore.read(row.secret_storage_key) !== undefined,
       updatedAt: row.updated_at,
     };
   }

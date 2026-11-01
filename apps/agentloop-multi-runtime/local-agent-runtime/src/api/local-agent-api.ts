@@ -114,6 +114,19 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
         });
         return oauthCompletion(response, result);
       }
+      const feishuAuthorization = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)\/connectors\/feishu\/authorization$/);
+      if (request.method === "POST" && feishuAuthorization !== null) {
+        await session(request, service);
+        return json(response, 201, await service.startFeishuAuthorization(origin, decodeURIComponent(feishuAuthorization[1])));
+      }
+      if (request.method === "GET" && url.pathname === "/v1/local-connectors/feishu/callback") {
+        const result = await service.completeFeishuAuthorization({
+          ...(url.searchParams.has("state") ? { state: url.searchParams.get("state") ?? undefined } : {}),
+          ...(url.searchParams.has("code") ? { code: url.searchParams.get("code") ?? undefined } : {}),
+          ...(url.searchParams.has("error") ? { error: url.searchParams.get("error") ?? undefined } : {}),
+        });
+        return oauthCompletion(response, result, "agentloop-feishu-oauth", "飞书");
+      }
       const runtimeConnector = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)\/connectors$/);
       if (request.method === "GET" && runtimeConnector !== null) {
         await session(request, service);
@@ -187,6 +200,7 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
         return json(response, 202, await service.startStrictLocalRun(localSession, {
           runtimeId: stringValue(value.runtimeId, "runtimeId"), conversationId: stringValue(value.conversationId, "conversationId"), clientMessageId: stringValue(value.clientMessageId, "clientMessageId"), input: stringValue(value.input, "input"),
           localDirectoryScopeIds: stringArray(value.localDirectoryScopeIds ?? [], "localDirectoryScopeIds"), localUploadedSourceIds: stringArray(value.localUploadedSourceIds ?? [], "localUploadedSourceIds"), allowDangerousTools: value.allowDangerousTools !== false,
+          ...(value.connectorConnectionIds === undefined ? {} : { connectorConnectionIds: stringArray(value.connectorConnectionIds, "connectorConnectionIds") }),
           ...(value.requestedModelKey === undefined ? {} : { requestedModelKey: stringValue(value.requestedModelKey, "requestedModelKey") }),
         }));
       }
@@ -239,15 +253,15 @@ function directoryFiles(value: unknown): readonly LocalSkillUploadFile[] {
   });
 }
 function json(response: ServerResponse, status: number, value: unknown): void { response.statusCode = status; response.setHeader("content-type", "application/json; charset=utf-8"); response.end(value === undefined ? "" : JSON.stringify(value)); }
-function oauthCompletion(response: ServerResponse, result: { readonly origin?: string; readonly attemptId?: string; readonly error?: string }): void {
+function oauthCompletion(response: ServerResponse, result: { readonly origin?: string; readonly attemptId?: string; readonly error?: string }, source = "agentloop-kingsoft-wps-oauth", displayName = "金山文档"): void {
   const success = result.error === undefined;
-  const payload = JSON.stringify({ source: "agentloop-wps-oauth", attemptId: result.attemptId, status: success ? "completed" : "failed" });
+  const payload = JSON.stringify({ source, attemptId: result.attemptId, status: success ? "completed" : "failed" });
   const targetOrigin = result.origin === undefined ? undefined : JSON.stringify(result.origin);
-  const message = success ? "金山文档已连接。你可以关闭此窗口并返回 AgentLoop。" : "连接未完成，请关闭此窗口并返回 AgentLoop 后重试。";
+  const message = success ? `${displayName}已连接。你可以关闭此窗口并返回 AgentLoop。` : "连接未完成，请关闭此窗口并返回 AgentLoop 后重试。";
   response.statusCode = success ? 200 : 400;
   response.setHeader("content-type", "text/html; charset=utf-8");
   response.setHeader("cache-control", "no-store");
-  response.end(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>${success ? "连接完成" : "连接失败"}</title><body><main><h1>${success ? "已连接金山文档" : "金山文档连接未完成"}</h1><p>${message}</p></main><script>if(window.opener&&${targetOrigin === undefined ? "false" : "true"})window.opener.postMessage(${payload},${targetOrigin ?? '""'});</script></body></html>`);
+  response.end(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>${success ? `连接${displayName}完成` : "连接失败"}</title><body><main><h1>${success ? `已连接${displayName}` : `${displayName}连接未完成`}</h1><p>${message}</p></main><script>if(window.opener&&${targetOrigin === undefined ? "false" : "true"})window.opener.postMessage(${payload},${targetOrigin ?? '""'});</script></body></html>`);
 }
 function originAllowed(origin: string | undefined, configured: string | undefined): boolean { return origin !== undefined && configured !== undefined && configured.split(",").map((value) => value.trim()).includes(origin); }
 function errorStatus(error: unknown): number { return typeof error === "object" && error !== null && "status" in error && typeof error.status === "number" ? error.status : 400; }

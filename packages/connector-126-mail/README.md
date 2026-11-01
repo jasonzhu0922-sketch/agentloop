@@ -19,5 +19,11 @@ Current operations:
 - `email.search`
 - `email.read`
 
+Reads decode MIME multipart bodies, transfer encodings and declared character
+sets, returning plain text and/or HTML separately from attachment metadata.
+Messages over 10 MiB and incomplete downloads are rejected explicitly rather
+than returned as silently truncated content. HTML is untrusted source content,
+not instructions or safe-to-render markup.
+
 Write operations, sending mail and automatic attachment materialization are
 deferred until the read-only path and idempotency policy are validated.

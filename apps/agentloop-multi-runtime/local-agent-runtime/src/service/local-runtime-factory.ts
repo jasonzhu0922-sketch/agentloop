@@ -218,6 +218,7 @@ export class LocalRuntimeFactory {
       catch { /* Orphaned ledger rows are not active admissions. */ }
     }
     return { ...definition, database, scopes, runs,
+      connectorConnectionIds: connectorConfiguration?.connections.filter((connection) => connection.status === "active").map((connection) => connection.id) ?? [],
       get modelKeys() { return currentModels().provider?.modelKeys().map((key) => `local:${key}`) ?? []; }, activeRunIds };
   }
 

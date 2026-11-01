@@ -39,7 +39,10 @@ Workspace scope.
 The Local Agent presents a built-in Connector catalog and owns the module
 registration details. The packaged Agent ships Feishu, 126 Mail and WPS
 Connector bundles. 126 Mail connects directly using the locally encrypted
-mailbox account and client authorization code over IMAP. WPS uses WPS Cloud
+mailbox account and client authorization code over IMAP. 126's public help
+currently documents this third-party-client path, not a general OAuth app
+authorization/callback flow, so it cannot use the Feishu OAuth integration.
+WPS uses WPS Cloud
 Document REST APIs after its Local Agent OAuth callback has stored the user
 token in the local encrypted Secret Store; no endpoint or access token is
 entered in the browser.
@@ -66,6 +69,27 @@ catalog exposes these as `kso.file.read` and
 The Cloud Document MCP scope is not required and must not be configured for
 this Connector. Do not start authorization until both requested permissions
 are approved.
+
+For Feishu, the packaged Agent uses the same device-local OAuth boundary. The
+deployment owner creates a Feishu store/ISV app in the
+[Feishu Open Platform](https://open.feishu.cn/app), follows the [QR-code web
+login guide](https://open.feishu.cn/document/qr-code-scanning-login-for-web-app/introduction),
+requests only the user-level document read/search permissions needed by the Connector, and registers the
+loopback callback exactly as follows:
+
+```ini
+FEISHU_OAUTH_APP_ID=
+FEISHU_OAUTH_APP_SECRET=
+FEISHU_OAUTH_REDIRECT_URI=http://127.0.0.1:18790/v1/local-connectors/feishu/callback
+FEISHU_OAUTH_SCOPES=
+FEISHU_OAUTH_APP_ACCESS_TOKEN_URL=https://open.feishu.cn/open-apis/auth/v3/app_access_token
+```
+
+`FEISHU_OAUTH_APP_ACCESS_TOKEN_URL` is optional for a store/ISV app. A self-built
+enterprise app must use the `/internal` variant instead. End users never obtain
+or paste an access token: the browser performs the Feishu QR/login consent flow,
+the loopback callback exchanges the one-time code, and the Local Agent stores
+and refreshes the resulting user credentials locally.
 
 The current Host foundation includes an environment-backed resolver for local
 development. Configure connection metadata with `CONNECTOR_CONNECTIONS_JSON`:

@@ -10,6 +10,11 @@ import type {
   ConnectorModuleFactoryContext,
 } from "@zhujun/agentloop-connector-sdk";
 import { ImapFlow, type FetchMessageObject, type MessageAddressObject } from "imapflow";
+import { simpleParser } from "mailparser";
+
+// Parse complete, bounded messages. Truncated MIME can silently lose body parts
+// or turn encoded attachment bytes into apparent mail content.
+const MAX_MESSAGE_BYTES = 10 * 1024 * 1024;
 
 export interface MailMessageSummary {
   readonly id: string;
@@ -240,9 +245,19 @@ function createImapTransport(input: {
         const uid = parseUid(messageId);
         const lock = await client.getMailboxLock(folder, { readOnly: true });
         try {
-          const message = await client.fetchOne(uid, { envelope: true, internalDate: true, source: { maxLength: 512_000 }, bodyStructure: true }, { uid: true });
+          const metadata = await client.fetchOne(uid, { size: true }, { uid: true });
+          if (metadata === false) throw new Error("126 Mail message was not found");
+          if (typeof metadata.size !== "number" || !Number.isSafeInteger(metadata.size) || metadata.size < 0) {
+            throw new Error("126 Mail message size is unavailable");
+          }
+          if (metadata.size > MAX_MESSAGE_BYTES) throw new Error("126 Mail message exceeds the 10 MiB size limit");
+          const message = await client.fetchOne(uid, { envelope: true, internalDate: true, size: true, source: { maxLength: MAX_MESSAGE_BYTES + 1 }, bodyStructure: true }, { uid: true });
           if (message === false) throw new Error("126 Mail message was not found");
-          return mailMessage(message);
+          if (message.source === undefined || message.source.length < (message.size ?? metadata.size)) {
+            throw new Error("126 Mail message source is incomplete");
+          }
+          if (message.source.length > MAX_MESSAGE_BYTES) throw new Error("126 Mail message exceeds the 10 MiB size limit");
+          return await mailMessage(message);
         } finally {
           lock.release();
         }
@@ -320,16 +335,18 @@ function parseUid(value: string): number {
   return uid;
 }
 
-function mailMessage(message: FetchMessageObject): MailMessage {
+async function mailMessage(message: FetchMessageObject): Promise<MailMessage> {
   const summary = messageSummary(message);
   const envelope = message.envelope;
-  const source = message.source?.toString("utf8");
-  const text = source === undefined ? undefined : messageBody(source);
+  // Keep the original bytes until MIME transfer encodings and declared
+  // charsets have been decoded. No remote resources are fetched by the parser.
+  const parsed = await simpleParser(message.source!, { skipImageLinks: true, skipTextToHtml: true });
   return {
     ...summary,
     ...(addresses(envelope?.to).length === 0 ? {} : { to: addresses(envelope?.to) }),
     ...(addresses(envelope?.cc).length === 0 ? {} : { cc: addresses(envelope?.cc) }),
-    ...(text === undefined || text.length === 0 ? {} : { text }),
+    ...(parsed.text === undefined || parsed.text.length === 0 ? {} : { text: parsed.text }),
+    ...(typeof parsed.html !== "string" || parsed.html.length === 0 ? {} : { html: parsed.html }),
     ...(message.bodyStructure === undefined ? {} : { attachments: attachments(message.bodyStructure) }),
   };
 }
@@ -341,11 +358,6 @@ function addresses(value: readonly MessageAddressObject[] | undefined): string[]
 function dateValue(value: Date | string | undefined): string | undefined {
   if (value === undefined) return undefined;
   return value instanceof Date ? value.toISOString() : value;
-}
-
-function messageBody(source: string): string {
-  const boundary = source.search(/\r?\n\r?\n/);
-  return (boundary < 0 ? source : source.slice(boundary)).trim().slice(0, 512_000);
 }
 
 function attachments(node: NonNullable<FetchMessageObject["bodyStructure"]>): MailMessage["attachments"] {

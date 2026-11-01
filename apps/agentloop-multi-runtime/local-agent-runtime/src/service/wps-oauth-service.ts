@@ -82,6 +82,7 @@ export class WpsOAuthService {
   }
 
   async refreshCredentials(credentials: Readonly<Record<string, string>>): Promise<Readonly<Record<string, string>>> {
+    if (credentials.provider !== undefined && credentials.provider !== "wps") return credentials;
     const refreshToken = string(credentials.refreshToken);
     const expiresAt = string(credentials.expiresAt);
     if (refreshToken === undefined || expiresAt === undefined || Date.parse(expiresAt) > Date.now() + 60_000) return credentials;

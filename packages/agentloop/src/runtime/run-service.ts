@@ -1632,6 +1632,28 @@ export class RunService {
         await this.skills.refreshSkillDirectory();
       }
       let privateSkills = await this.skills.resolveForConversation(actorUserId);
+      // Intent resolution needs the same authorized capability metadata as
+      // Planner. Materialization discovers tools; it does not invoke them.
+      // Resolve Run-scoped providers once so intent and execution see the same
+      // selected connections, including an explicitly empty selection.
+      const connectorTools = await this.connectorToolsForRun({
+        runId,
+        actorUserId,
+        conversationId,
+        connectionIds: executeOptions.connectorConnectionIds,
+      });
+      const intentTools = composeRunTools({
+        coreTools: this.coreTools,
+        sourceRepository: this.sources,
+        privateSkills,
+        visibleDirectories,
+        uploadedSources: availableSources,
+        additionalTools: connectorTools,
+      });
+      assertNoDuplicateTools(intentTools);
+      const intentToolNames = new Set(intentTools.filter((tool) =>
+        executeOptions.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(tool.name)
+      ).map((tool) => tool.name));
       const turnResolution = !conversationEntry
         ? undefined
         : await resolveConversationTurn(
@@ -1644,6 +1666,7 @@ export class RunService {
               sources: availableSources,
               conversationWorkingSet,
               availableSkills: privateSkills,
+              availableTools: toolSummaries(intentTools, intentToolNames),
             },
             runController.signal,
           );
@@ -1726,12 +1749,7 @@ export class RunService {
         privateSkills,
         visibleDirectories,
         uploadedSources: availableSources,
-        additionalTools: await this.connectorToolsForRun({
-          runId,
-          actorUserId,
-          conversationId,
-          connectionIds: executeOptions.connectorConnectionIds,
-        }),
+        additionalTools: connectorTools,
       });
       assertNoDuplicateTools(allTools);
       const catalogToolNames = [...allTools.map((tool) => tool.name)].filter((name) =>
@@ -8054,6 +8072,8 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "When the user disputes an unsupported prior factual answer, bind to that prior Run, use correct_prior or challenge_prior, and require source_grounded evidence.",
       "Use strict_user_source only when the user explicitly requires official, authoritative, or exact-source verification.",
       "Use clarify when the semantic target or requested external side effect is materially ambiguous. This resolution never grants permission for destructive or external side effects.",
+      "availableTools is the authorized capability catalog for this Run, including connected services. Its metadata is available for intent classification even though those tools cannot be invoked in this resolver phase. A tool-free resolver is not an unavailable service. Do not return clarify merely because no visible directory or uploaded source is bound when the request can acquire evidence through this catalog.",
+      "A user may describe the needed capability without naming a provider or tool. Preserve that functional need and return execute when it requires capability use; Planner selects the matching authorized capability. Catalog availability is not by itself a request to use a tool, and must not narrow or replace the user's semantic goal.",
       "Candidate selectors are closed-world Runtime handles, not values you may construct. Use only selector fields and enum values exposed by the current tool schema; never infer an ID from its pattern.",
       "For relation=new_goal, omit targetGoalCandidateId, targetArtifact, and resultCandidateId. targetArtifact always means an existing reusable prior artifact, never the output path of a new artifact.",
       "targetGoalCandidateId must be one of priorGoalCandidates and is required for every relation except new_goal. Never reconstruct or emit a Run ID.",
@@ -8064,10 +8084,11 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "Goal lineage and input ownership are separate: targetGoalCandidateId may identify a failed goal being continued while targetArtifact selects an earlier reusable file or resultCandidateId identifies the published Runtime Result supplying its content. Preserve both identities; the input producer need not be the goal being continued.",
       "For requests such as 'turn this analysis into a PDF', bind the prior result and use evidenceStrategy=none. For 'reanalyze the source and make a PDF', use refresh_sources with source_grounded evidence.",
       "Use runtimeContext as server-authored context and identity metadata, not as unverified source content.",
-      "You cannot load or execute Skills or Tools in this resolver phase. Use availableSkills metadata only to decide whether the turn asks Runtime to execute a named capability.",
+      "You cannot load or execute Skills or Tools in this resolver phase. Use availableSkills and availableTools only as capability metadata; input schemas, credentials, and source content are not exposed here. Actual discovery, workflow selection and invocation belong to Planner and execution.",
       "When the latest turn explicitly asks to use an available Skill, return execute; do not return clarify merely because no visible directory or uploaded source is bound.",
       "Preserve all explicitly mandatory Skill, MCP/tool source, and tool names in requiredCapabilityReferences independently of catalog availability. Unavailable does not mean unrequested. For an actionable request with unavailable requirements, return execute with those references; Runtime will explain and end the task before planning or execution. Do not silently substitute another provider or Skill.",
       "For a method on a named MCP provider, record the provider as tool_source. Do not reconstruct a Runtime-prefixed tool name from a method name; method selection remains part of the exact requested goal for planning.",
+      "Generic capability or service descriptions are not exact Skill, source, or tool identities. Do not copy them into requiredCapabilityReferences unless the user explicitly named that exact identity; keep them in effectiveGoal and userConstraints for semantic planning instead.",
       "Return exactly one resolve_conversation_turn tool call and no prose.",
       ...(repairFeedback === undefined
         ? []
@@ -8516,6 +8537,7 @@ interface ConversationIntentExternalContext {
   readonly visibleDirectories: readonly VisibleDirectoryGrant[];
   readonly sources: readonly UploadedSourceSummary[];
   readonly availableSkills?: readonly PrivateSkill[];
+  readonly availableTools?: readonly PlanningToolSummary[];
   readonly conversationWorkingSet?: ConversationWorkingSet;
 }
 
@@ -8530,6 +8552,7 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
       contentAccess: "metadata_only",
       replyBoundary: "Reply may use transcript and this metadata only; execute is required to inspect resources, verify external facts, or perform capability work.",
       sideEffectBoundary: "This resolution expresses semantic need only and cannot authorize destructive or external side effects.",
+      capabilityBoundary: "Authorized catalog metadata describes acquisition options, not user intent, source content, or execution permission. A reply or clarification still receives no executable tools.",
     },
     visibleDirectories: context.visibleDirectories.map((directory) => ({
       id: directory.id,
@@ -8552,6 +8575,12 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
       .map((skill) => ({
       id: skill.id,
       name: skill.name,
+    })),
+    availableTools: (context.availableTools ?? []).map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      ...(tool.dangerous === undefined ? {} : { dangerous: tool.dangerous }),
+      ...(tool.source === undefined ? {} : { source: tool.source }),
     })),
     conversationWorkingSet: {
       priorGoalCandidates: goalRunIds.map((runId, index) => {

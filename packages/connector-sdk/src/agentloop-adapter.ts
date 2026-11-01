@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   ConnectorCapabilityDefinition,
   ConnectorExecutionContext,
@@ -66,7 +67,7 @@ export function connectorOperationTools(
 ): readonly RuntimeTool[] {
   const source = connectorSourceDescriptor(instance);
   return instance.operations.map((operation) => ({
-    name: `connector_${instance.definition.manifest.key}_${safeIdentifier(instance.connection.id)}_${operation.id.replaceAll(".", "_").replaceAll("-", "_")}`,
+    name: operationToolName(instance, operation),
     description: operationDescription(instance.definition.capabilities, operation),
     source,
     inputSchema: operation.inputSchema,
@@ -88,6 +89,16 @@ export function connectorOperationTools(
 
 function safeIdentifier(value: string): string {
   return value.replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "") || "connection";
+}
+
+function operationToolName(instance: ConnectorInstance, operation: ConnectorOperation): string {
+  const key = instance.definition.manifest.key;
+  // Provider function names have a 64-character limit. Full Connection IDs
+  // belong in source metadata, not the wire identifier. Hash the complete tuple
+  // so truncation/normalization cannot merge different connections or actions.
+  const identity = JSON.stringify([key, instance.connection.id, operation.id]);
+  const digest = createHash("sha256").update(identity).digest("hex").slice(0, 20);
+  return `connector_${safeIdentifier(key).slice(0, 16)}_${safeIdentifier(operation.id).slice(0, 16)}_${digest}`;
 }
 
 function operationDescription(

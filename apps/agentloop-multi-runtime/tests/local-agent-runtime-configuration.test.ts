@@ -98,7 +98,7 @@ test("new packaged application roots reopen the existing model, MCP credentials,
         database: new AppDatabase(":memory:"),
         runs: {} as LocalRuntimeControl["runs"],
         scopes: {} as LocalRuntimeControl["scopes"],
-        modelKeys: [], activeRunIds: new Set<string>(),
+        modelKeys: [], connectorConnectionIds: [], activeRunIds: new Set<string>(),
       }), undefined, undefined, runtimes);
       await supervisor.ready("device-runtime");
       return { secrets, models, runtimes };

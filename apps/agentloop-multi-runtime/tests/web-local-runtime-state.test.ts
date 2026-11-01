@@ -66,7 +66,7 @@ test("settings preserve the active tab across Agent refreshes and reopen on mode
     return elements.get(id)!;
   };
   let selectedTab = "models";
-  const buttons = ["models", "skills", "general", "runtimes"].map((view) => ({
+  const buttons = ["models", "skills", "connectors", "general", "runtimes"].map((view) => ({
     dataset: { agentSettingsView: view },
     classList: { toggle(_name: string, active: boolean) { if (active) selectedTab = view; } },
   }));
@@ -86,15 +86,16 @@ test("settings preserve the active tab across Agent refreshes and reopen on mode
     modelCatalog: { load() {} }, modelCatalogContext: () => ({}),
     syncModelSelection() {},
     syncLocalRuntimeManager() {}, renderLocalScopes() {}, renderLocalAgentConfig() {},
-    loadLocalAgentConfig() {}, loadLocalRuntimes() {}, loadLocalModelConfiguration() {}, loadLocalSkillPackages() {},
+    loadLocalAgentConfig() {}, loadLocalRuntimes() {}, loadLocalModelConfiguration() {}, loadLocalSkillPackages() {}, loadLocalConnectorConfiguration() {},
   });
 
-  for (const view of ["models", "skills", "general", "runtimes"]) {
+  for (const view of ["models", "skills", "connectors", "general", "runtimes"]) {
     controls.activateAgentSettingsView(view);
     controls.updateLocalControls();
     assert.equal(selectedTab, view);
     assert.equal(element("agent-model-settings").hidden, view !== "models");
     assert.equal(element("agent-skill-settings").hidden, view !== "skills");
+    assert.equal(element("agent-connector-settings").hidden, view !== "connectors");
     assert.equal(element("agent-general-settings").hidden, view !== "general");
     assert.equal(element("local-runtime-manager").hidden, view !== "runtimes");
   }

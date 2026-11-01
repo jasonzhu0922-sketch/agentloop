@@ -1,4 +1,3 @@
-const json = (value) => JSON.stringify(value, null, 2);
 const bindingFieldId = (key) => `local-connector-binding-field-${key}`;
 
 export function createLocalConnectorSettings({
@@ -10,16 +9,12 @@ export function createLocalConnectorSettings({
 }) {
   let connectors = [];
   let catalog = [];
-  let saved = [];
-  let selectedIndex = -1;
   let pendingBinding;
   let pendingAuthorization;
   let bindingInputs = new Map();
-  let dirty = false;
   let busy = false;
   let loaded = false;
-
-  const editor = $("local-connector-json");
+  let instanceButtons = [];
 
   function runtimeId() {
     const value = getRuntimeId();
@@ -39,68 +34,34 @@ export function createLocalConnectorSettings({
 
   function controls() {
     $("local-connector-editable").inert = busy || !loaded;
-    $("local-connector-save").disabled = busy || !loaded || !dirty;
-    $("local-connector-discard").disabled = busy || !loaded || !dirty;
-    $("local-connector-save").textContent = busy ? "正在保存…" : "保存配置";
     $("local-connector-binding-save").disabled = busy || !loaded || pendingBinding === undefined;
-  }
-
-  function markDirty() {
-    dirty = true;
-    status("有未保存的更改，保存后用于本机 Runtime。");
-    controls();
-  }
-
-  function parseEditor() {
-    let value;
-    try { value = JSON.parse(editor.value); }
-    catch { editor.focus(); throw new Error("Connector 配置 JSON 格式错误。"); }
-    if (value === null || typeof value !== "object" || Array.isArray(value)) {
-      editor.focus();
-      throw new Error("Connector 配置必须是 JSON 对象。");
-    }
-    return value;
-  }
-
-  function commitEditor() {
-    if (selectedIndex < 0) return;
-    const value = parseEditor();
-    const current = connectors[selectedIndex];
-    if (typeof value.displayName !== "string" || !value.displayName.trim()) throw new Error("请填写 displayName。");
-    if (typeof value.connectorKey !== "string" || !value.connectorKey.trim()) throw new Error("请填写 connectorKey。");
-    if (typeof value.modulePath !== "string" || !value.modulePath.trim()) throw new Error("请填写 modulePath。");
-    if (value.enabled !== undefined && typeof value.enabled !== "boolean") throw new Error("enabled 必须是布尔值。");
-    connectors[selectedIndex] = {
-      ...current,
-      ...value,
-      ...(value.credentials === undefined ? {} : { credentials: value.credentials }),
-    };
+    instanceButtons.forEach((button) => { button.disabled = busy || !loaded; });
   }
 
   function render() {
     renderCatalog();
     const list = $("local-connector-list");
     list.replaceChildren();
-    connectors.forEach((connector, index) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `local-connector-choice${index === selectedIndex ? " selected" : ""}`;
-      button.setAttribute("aria-pressed", String(index === selectedIndex));
+    instanceButtons = [];
+    connectors.forEach((connector) => {
+      const row = document.createElement("div");
+      row.className = "local-connector-instance";
+      const summary = document.createElement("div");
+      summary.className = "local-connector-choice";
       const title = document.createElement("strong");
       title.textContent = connector.displayName || connector.connectorKey;
       const detail = document.createElement("small");
       detail.textContent = `${connector.connectorKey} · ${connector.enabled ? "已启用" : "已停用"} · ${connector.credentialConfigured ? "凭据已配置" : "待配置凭据"}`;
-      button.append(title, detail);
-      button.addEventListener("click", () => {
-        try {
-          commitEditor();
-          selectedIndex = index;
-          render();
-        } catch (error) {
-          result(error.message, "error");
-        }
-      });
-      list.append(button);
+      summary.append(title, detail);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "local-connector-instance-delete danger";
+      remove.textContent = "删除";
+      remove.setAttribute("aria-label", `删除 ${connector.displayName || connector.connectorKey}`);
+      remove.addEventListener("click", () => void deleteConnector(connector.id));
+      instanceButtons.push(remove);
+      row.append(summary, remove);
+      list.append(row);
     });
     if (connectors.length === 0) {
       const empty = document.createElement("div");
@@ -108,22 +69,6 @@ export function createLocalConnectorSettings({
       empty.textContent = "尚未配置本机 Connector";
       list.append(empty);
     }
-    const connector = connectors[selectedIndex];
-    $("local-connector-json-empty").hidden = Boolean(connector);
-    $("local-connector-json-editor").hidden = !connector;
-    editor.value = connector ? json({
-      id: connector.id,
-      connectorKey: connector.connectorKey,
-      displayName: connector.displayName,
-      modulePath: connector.modulePath,
-      ...(connector.exportName === undefined ? {} : { exportName: connector.exportName }),
-      enabled: connector.enabled,
-      config: connector.config || {},
-      ...(connector.externalAccountId === undefined ? {} : { externalAccountId: connector.externalAccountId }),
-      scopes: connector.scopes || [],
-      ...(connector.credentials === undefined ? {} : { credentials: connector.credentials }),
-      ...(connector.credentialConfigured ? { credentialConfigured: true } : {}),
-    }) : "";
     controls();
   }
 
@@ -255,23 +200,24 @@ export function createLocalConnectorSettings({
 
   async function authorize(item) {
     const authorizationWindow = typeof window.open === "function"
-      ? window.open("about:blank", "agentloop-wps-oauth", "popup=yes,width=760,height=820")
+      ? window.open("about:blank", `agentloop-${item.key}-oauth`, "popup=yes,width=760,height=820")
       : undefined;
     busy = true;
     controls();
-    $("local-connector-binding-status").textContent = "正在打开金山文档授权页…";
+    $("local-connector-binding-status").textContent = `正在打开${item.displayName}授权页…`;
     try {
       const response = await request(`/v1/local-runtimes/${encodeURIComponent(runtimeId())}/connectors/${encodeURIComponent(item.key)}/authorization`, { method: "POST" });
       const body = await response.json();
       if (!response.ok) {
         authorizationWindow?.close?.();
         if (body.error === "wps_oauth_not_configured") throw new Error("本机尚未配置 WPS 开放平台应用。请由管理员在 Local Agent 的 .env 中配置 WPS_OAUTH_CLIENT_ID、WPS_OAUTH_CLIENT_SECRET 和已登记的回调地址。");
+        if (body.error === "feishu_oauth_not_configured") throw new Error("本机尚未配置飞书开放平台应用。请由管理员在 Local Agent 的 .env 中配置 FEISHU_OAUTH_APP_ID、FEISHU_OAUTH_APP_SECRET 和已登记的回调地址。");
         throw new Error(body.error || `HTTP ${response.status}`);
       }
       pendingAuthorization = body.attemptId;
       if (authorizationWindow !== undefined) authorizationWindow.location.assign(body.authorizationUrl);
       else window.location.assign(body.authorizationUrl);
-      $("local-connector-binding-status").textContent = "请在打开的金山文档页面确认授权…";
+      $("local-connector-binding-status").textContent = `请在打开的${item.displayName}页面确认授权…`;
     } catch (error) {
       $("local-connector-binding-status").textContent = `连接失败：${error.message}`;
       busy = false;
@@ -282,15 +228,15 @@ export function createLocalConnectorSettings({
   async function authorizationMessage(event) {
     if (event.origin !== new URL(window.location.href).origin) return;
     const value = event.data;
-    if (value?.source !== "agentloop-wps-oauth" || value.attemptId !== pendingAuthorization) return;
+    if (value?.source !== `agentloop-${pendingBinding?.key}-oauth` || value.attemptId !== pendingAuthorization) return;
     busy = false;
     pendingAuthorization = undefined;
     if (value.status !== "completed") {
-      $("local-connector-binding-status").textContent = "金山文档未完成授权，请重试。";
+      $("local-connector-binding-status").textContent = `${pendingBinding?.displayName || "Connector"}未完成授权，请重试。`;
       controls();
       return;
     }
-    const displayName = pendingBinding?.displayName || "金山文档";
+    const displayName = pendingBinding?.displayName || "Connector";
     await load();
     closeBinding();
     result(`${displayName}已绑定；重启本机 Runtime 后生效。`, "success");
@@ -311,9 +257,6 @@ export function createLocalConnectorSettings({
       if (!catalogResponse.ok) throw new Error(available.error || `HTTP ${catalogResponse.status}`);
       connectors = Array.isArray(configuration.connectors) ? configuration.connectors : [];
       catalog = Array.isArray(available.connectors) ? available.connectors : [];
-      saved = structuredClone(connectors);
-      selectedIndex = connectors.length ? 0 : -1;
-      dirty = false;
       loaded = true;
       render();
       status("");
@@ -322,78 +265,45 @@ export function createLocalConnectorSettings({
     }
   }
 
-  async function save() {
-    if (busy || !loaded || !dirty) return;
-    try { commitEditor(); }
-    catch (error) { result(`保存失败：${error.message}`, "error"); return; }
+  async function deleteConnector(connectorId) {
+    if (busy || !loaded) return;
+    const index = connectors.findIndex((connector) => connector.id === connectorId);
+    const connector = connectors[index];
+    if (!connector) return;
+    const name = connector.displayName || connector.connectorKey;
+    if (!window.confirm(`确定删除“${name}”？\n将删除此实例的本机配置和已保存凭据，不能撤销；可重新绑定。不会删除服务中的邮件或文档。\n重启本机 Runtime 后生效。`)) return;
     busy = true;
     controls();
-    try {
-      const response = await request(`/v1/local-runtimes/${encodeURIComponent(runtimeId())}/connectors`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ connector: connectors[selectedIndex] }),
-      });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
-      await load();
-      result("Connector 配置已保存；重启本机 Runtime 后生效。", "success");
-      await onSaved?.();
-    } catch (error) {
-      result(`保存失败：${error.message}`, "error");
-    } finally {
-      busy = false;
-      controls();
-    }
-  }
-
-  $("local-connector-delete").addEventListener("click", async () => {
-    const connector = connectors[selectedIndex];
-    if (!connector) return;
+    status(`正在删除“${name}”…`);
     try {
       if (connector.id) {
         const response = await request(`/v1/local-runtimes/${encodeURIComponent(runtimeId())}/connectors/${encodeURIComponent(connector.id)}`, { method: "DELETE" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
       }
-      connectors.splice(selectedIndex, 1);
-      selectedIndex = Math.min(selectedIndex, connectors.length - 1);
-      saved = structuredClone(connectors);
-      dirty = false;
+      connectors.splice(index, 1);
       render();
-      result("Connector 已删除。", "success");
+      result(`“${name}”已删除；重启本机 Runtime 后生效。`, "success");
     } catch (error) {
       result(`删除失败：${error.message}`, "error");
+      return;
+    } finally {
+      busy = false;
+      controls();
     }
-  });
+    try { await onSaved?.(); }
+    catch (error) { result(`“${name}”已删除，但刷新 Runtime 状态失败：${error.message}`, "error"); }
+  }
 
-  $("local-connector-format").addEventListener("click", () => {
-    try { editor.value = json(parseEditor()); markDirty(); }
-    catch (error) { result(error.message, "error"); }
-  });
   $("local-connector-binding-close").addEventListener("click", closeBinding);
   $("local-connector-binding-cancel").addEventListener("click", closeBinding);
   $("local-connector-binding-save").addEventListener("click", () => void saveBinding());
   if (typeof window.addEventListener === "function") window.addEventListener("message", (event) => void authorizationMessage(event));
-  editor.addEventListener("input", markDirty);
-  $("local-connector-save").addEventListener("click", () => void save());
-  $("local-connector-discard").addEventListener("click", () => {
-    connectors = structuredClone(saved);
-    selectedIndex = connectors.length ? 0 : -1;
-    dirty = false;
-    render();
-    status("已恢复为上次保存的配置。");
-  });
 
   controls();
   return {
     load,
     canClose() {
-      if (busy) return false;
-      if (dirty && !window.confirm("Connector 配置尚未保存，确定放弃更改并关闭？")) return false;
-      editor.value = "";
-      dirty = false;
-      controls();
-      return true;
+      return !busy;
     },
   };
 }

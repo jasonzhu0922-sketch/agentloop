@@ -46,11 +46,12 @@ export function localConnectorCatalog(appRoot: string): readonly LocalConnectorC
       displayName: "飞书",
       description: "搜索和读取已获授权的飞书文档。",
       capabilities: ["文档搜索", "文档读取"],
-      setupHint: "使用飞书应用授权令牌绑定；当前仅提供只读访问。",
+      setupHint: "扫码登录飞书并确认文档只读授权；当前仅提供只读访问。",
       binding: {
+        kind: "oauth",
         title: "绑定飞书",
-        description: "请粘贴由飞书应用 OAuth 流程取得的用户 access token。完整的网页 OAuth 跳转将在 Local Agent 配置飞书应用 Client ID 与回调地址后启用。",
-        fields: [{ key: "accessToken", label: "用户 Access Token", target: "credential", secret: true, placeholder: "粘贴飞书 OAuth access token" }],
+        description: "将打开飞书授权页。请扫码登录并确认只读文档权限，授权令牌会安全保存在本机。",
+        fields: [],
       },
       template: {
         connectorKey: "feishu",
@@ -67,10 +68,10 @@ export function localConnectorCatalog(appRoot: string): readonly LocalConnectorC
       displayName: "126 邮箱",
       description: "搜索和读取已授权的 126 邮件。",
       capabilities: ["邮件搜索", "邮件读取"],
-      setupHint: "填写 126 邮箱账号和在邮箱设置中生成的客户端授权码；默认通过 imap.126.com:993/TLS 只读连接。",
+      setupHint: "126 目前通过 IMAP 客户端协议连接；填写邮箱账号和客户端授权码。默认使用 imap.126.com:993/TLS 只读连接。",
       binding: {
         title: "绑定 126 邮箱",
-        description: "请先在 126 邮箱设置中开启 IMAP/SMTP，并生成客户端授权码。该授权码仅保存在这台设备的加密 Secret Store 中。",
+        description: "126 暂未提供可供第三方应用使用的扫码 OAuth 授权流程。请在网页版邮箱设置中开启 IMAP，并生成客户端授权码；该授权码仅保存在这台设备的加密 Secret Store 中。",
         fields: [
           { key: "email", label: "126 邮箱账号", target: "credential", placeholder: "name@126.com" },
           { key: "authorizationCode", label: "客户端授权码", target: "credential", secret: true, placeholder: "粘贴授权码，不是网页登录密码" },

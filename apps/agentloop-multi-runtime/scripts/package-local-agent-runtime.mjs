@@ -33,7 +33,7 @@ export async function bundleBuiltInConnectorModules({ repositoryRoot, destinatio
     await build({
       entryPoints: [join(source, packageName, "src", "index.ts")],
       bundle: true,
-      external: ["imapflow"],
+      external: ["imapflow", "mailparser"],
       format: "esm",
       platform: "node",
       target: "node26",
@@ -118,7 +118,7 @@ export async function copyPackagedNodeModules({ repositoryRoot, destinationRoot 
   const sourceRoot = resolve(repositoryRoot, "node_modules");
   const targetRoot = resolve(destinationRoot, "node_modules");
   await mkdir(targetRoot, { recursive: true });
-  const queue = ["docx", "pptxgenjs", "jszip", "imapflow"];
+  const queue = ["docx", "pptxgenjs", "jszip", "imapflow", "mailparser"];
   const copied = new Set();
   while (queue.length > 0) {
     const name = queue.shift();

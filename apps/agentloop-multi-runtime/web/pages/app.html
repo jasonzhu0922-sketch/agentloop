@@ -147,14 +147,8 @@
                   <p id="local-connector-binding-status" class="settings-save-status" role="status" aria-live="polite"></p>
                   <div class="local-model-actions"><button id="local-connector-binding-cancel" type="button">取消</button><button id="local-connector-binding-save" type="button" class="primary">绑定并保存</button></div>
                 </section>
-                <div id="local-connector-json-empty" class="local-connector-empty">从上方选择一个 Connector 开始配置。</div>
-                <section id="local-connector-json-editor" class="local-model-section" hidden>
-                  <div class="settings-section-title"><strong>Connector 配置</strong><div class="local-model-actions"><button id="local-connector-format" type="button">格式化</button><button id="local-connector-delete" type="button" class="danger">删除 Connector</button></div></div>
-                  <p class="local-model-field-note">凭据只会写入本机加密 Secret Store。请按所选 Connector 的提示填写连接参数和凭据；预置的 modulePath 通常不需要修改。</p>
-                  <textarea id="local-connector-json" class="local-model-json" spellcheck="false" autocomplete="off" autocapitalize="off" rows="18"></textarea>
-                </section>
               </div>
-              <div class="local-model-save-bar"><p id="local-connector-save-status" class="settings-save-status" role="status" aria-live="polite"></p><div class="local-model-actions"><button id="local-connector-discard" type="button" disabled>放弃更改</button><button id="local-connector-save" type="button" class="primary" disabled>保存配置</button></div></div>
+              <p id="local-connector-save-status" class="settings-save-status" role="status" aria-live="polite"></p>
             </section>
             <section id="agent-general-settings" class="agent-settings-view" hidden>
               <dl class="settings-detail"><dt>Agent</dt><dd id="agent-settings-version">-</dd><dt>服务端</dt><dd id="agent-router-url">-</dd><dt>共享工作目录</dt><dd class="settings-detail-value"><span id="agent-settings-storage">-</span><button id="agent-storage-pick" class="icon-button" type="button" title="编辑共享工作目录" aria-label="编辑共享工作目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg></button></dd><dt>上传源文件目录</dt><dd class="settings-detail-value"><span id="agent-settings-upload-storage">-</span><button id="agent-upload-storage-pick" class="icon-button" type="button" title="编辑上传源文件目录" aria-label="编辑上传源文件目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg></button></dd><dt>Skill 模式</dt><dd>Runtime 启动时统一加载</dd></dl><p class="install-security-note">切换任一目录前必须没有活动任务；原位置数据不会被自动删除。上传源文件在公共根目录内按 Runtime 分区。</p></section>

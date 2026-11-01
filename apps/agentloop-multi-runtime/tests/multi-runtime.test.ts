@@ -414,8 +414,9 @@ test("packaged Local Runtime can invoke Skill-owned Node scripts without host no
     const modules = await copyPackagedNodeModules({ repositoryRoot: resolve(fileURLToPath(new URL("../../..", import.meta.url))), destinationRoot: root });
     assert.ok(modules.includes("docx"));
     assert.ok(modules.includes("pptxgenjs"));
+    assert.ok(modules.includes("mailparser"));
     const probe = join(root, "probe.cjs");
-    await writeFile(probe, "require('docx'); require('pptxgenjs'); process.stdout.write('runtime-node-ok\\n');\n", "utf8");
+    await writeFile(probe, "require('docx'); require('pptxgenjs'); require('mailparser'); process.stdout.write('runtime-node-ok\\n');\n", "utf8");
     const result = spawnSync(process.execPath, [probe], { encoding: "utf8", env: { ...process.env, NODE_PATH: join(root, "node_modules") } });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), "runtime-node-ok");
