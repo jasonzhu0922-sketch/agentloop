@@ -76,6 +76,7 @@ import { createCapabilityGrant } from "./capability-grant.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatPracticePromptAugmentation, type ArtifactKind, type DynamicPromptProfile, type TaskProfile } from "./dynamic-prompt.ts";
 import { resolvePracticeProfileResolution, type PracticeProfileCatalog, type PracticeProfileResolution } from "./practice-profiles.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "./execution-context-policy.ts";
+import { createRuntimeCapabilitySnapshot, requestsCurrentCapabilityInventory, type RuntimeCapabilitySnapshot } from "./capability-snapshot.ts";
 import { deriveStepSemanticFrame } from "./step-semantic-frame.ts";
 import { observeSourceFamiliesFromToolEvidence } from "./source-family-observation.ts";
 import type { StepExecutionStrategy } from "./step-execution-strategy.ts";
@@ -1669,6 +1670,16 @@ export class RunService {
       const intentToolNames = new Set(intentTools.filter((tool) =>
         executeOptions.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(tool.name)
       ).map((tool) => tool.name));
+      // Capture the selected source metadata before intent resolution. This is
+      // immutable Run context, not an executable catalog and not a grant.
+      const runtimeCapabilitySnapshot = createRuntimeCapabilitySnapshot(
+        intentTools.filter((tool) => intentToolNames.has(tool.name)),
+        Date.parse(runtimeClock.anchorDateTimeIso),
+      );
+      await emit({
+        type: "runtime.capability_snapshot.created",
+        data: { snapshot: runtimeCapabilitySnapshot },
+      });
       const turnResolution = !conversationEntry
         ? undefined
         : await resolveConversationTurn(
@@ -1687,6 +1698,7 @@ export class RunService {
             runController.signal,
           );
       const responseOnly = turnResolution !== undefined && turnResolution.mode !== "execute";
+      const replyNeedsCapabilityInventory = turnResolution?.mode === "reply" && requestsCurrentCapabilityInventory(input);
       model.setTemporalScope(turnResolution?.temporalScope);
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       if (conversationEntry) {
@@ -2093,6 +2105,7 @@ export class RunService {
         sources: availableSources,
         ...(conversationHistory === undefined ? {} : { conversationHistory }),
         ...(conversationWorkingSet === undefined ? {} : { conversationWorkingSet }),
+        ...(replyNeedsCapabilityInventory ? { runtimeCapabilitySnapshot } : {}),
         signal: runController.signal,
         onStepChanged: (stepId) => {
           runningStepId = stepId;
@@ -2318,6 +2331,8 @@ export class RunService {
     sources: readonly UploadedSourceSummary[];
     conversationHistory?: readonly ModelMessage[];
     conversationWorkingSet?: ConversationWorkingSet;
+    /** Informational, frozen source metadata for a response-only capability reply. */
+    runtimeCapabilitySnapshot?: RuntimeCapabilitySnapshot;
     initialRecovery?: Readonly<{
       stepIds: readonly string[];
       resumeStepId?: string;
@@ -2607,6 +2622,7 @@ export class RunService {
             input.conversationWorkingSet,
             decisionLedger,
             resolvedOperationBindings,
+            input.runtimeCapabilitySnapshot,
           )
           : buildRecoveredStepRuntimeContext(
             activeStep,
@@ -2621,6 +2637,7 @@ export class RunService {
             input.conversationWorkingSet,
             decisionLedger,
             resolvedOperationBindings,
+            input.runtimeCapabilitySnapshot,
           ),
         input: canonicalState.intent.userInput,
         ...(input.conversationHistory === undefined ? {} : { conversationHistory: input.conversationHistory }),
@@ -6955,6 +6972,7 @@ function buildStepRuntimeContext(
   conversationWorkingSet?: ConversationWorkingSet,
   decisionLedger: readonly RuntimeDecisionCommit[] = [],
   resolvedOperationBindings: readonly import("./decision-binding.ts").ResolvedOperationBinding[] = [],
+  runtimeCapabilitySnapshot?: RuntimeCapabilitySnapshot,
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   const operationProfile = taskProfile.operations[0] ?? executionOperationProfile({
     objective: step.objective,
@@ -6962,7 +6980,7 @@ function buildStepRuntimeContext(
     toolNames: stepResolvedToolNames(step),
     skillNames: skills.map((skill) => skill.name),
   });
-  return buildStepRuntimeContextSnapshot({
+  return appendRuntimeCapabilitySnapshot(buildStepRuntimeContextSnapshot({
     step,
     plan,
     skills,
@@ -6976,7 +6994,7 @@ function buildStepRuntimeContext(
     conversationWorkingSet,
     decisionLedger,
     resolvedOperationBindings,
-  });
+  }), runtimeCapabilitySnapshot);
 }
 
 function buildRecoveredStepRuntimeContext(
@@ -6992,6 +7010,7 @@ function buildRecoveredStepRuntimeContext(
   conversationWorkingSet?: ConversationWorkingSet,
   decisionLedger: readonly RuntimeDecisionCommit[] = [],
   resolvedOperationBindings: readonly import("./decision-binding.ts").ResolvedOperationBinding[] = [],
+  runtimeCapabilitySnapshot?: RuntimeCapabilitySnapshot,
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   // Draft bodies are persisted for Runtime identity/rejection decisions,
   // not evidence for the resumed model. Keep only their neutral identities
@@ -7026,6 +7045,7 @@ function buildRecoveredStepRuntimeContext(
     conversationWorkingSet,
     decisionLedger,
     resolvedOperationBindings,
+    runtimeCapabilitySnapshot,
   );
   return {
     ...base,
@@ -7037,6 +7057,25 @@ function buildRecoveredStepRuntimeContext(
         recoveryFacts: promptRecoveryFacts,
       }),
       "</recovery_context>",
+    ].join("\n"),
+  };
+}
+
+function appendRuntimeCapabilitySnapshot(
+  context: Omit<RuntimeContextSnapshot, "id" | "supersedesId">,
+  runtimeCapabilitySnapshot: RuntimeCapabilitySnapshot | undefined,
+): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
+  if (runtimeCapabilitySnapshot === undefined) return context;
+  return {
+    ...context,
+    content: [
+      context.content,
+      '<runtime_capability_inventory source="server">',
+      JSON.stringify({
+        runtimeCapabilitySnapshot,
+        instruction: "This frozen inventory describes only services selected and authorized for this Run. Use it to answer the user's capability question accurately. It is not user business data, a credential record, a Tool input schema, or execution authority. Do not infer that any listed operation was invoked. If sources is empty, state that no selected authorized service is available for this Run without asking for credentials unless the user asks how to add one.",
+      }),
+      "</runtime_capability_inventory>",
     ].join("\n"),
   };
 }

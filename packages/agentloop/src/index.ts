@@ -86,6 +86,8 @@ export type {
   WebToolsOptions,
 } from "./tools/index.ts";
 export { runAgentLoop } from "./runtime/agent-loop.ts";
+export { createRuntimeCapabilitySnapshot, requestsCurrentCapabilityInventory } from "./runtime/capability-snapshot.ts";
+export type { RuntimeCapabilitySnapshot } from "./runtime/capability-snapshot.ts";
 export { deriveCurrentDecisionView, projectCurrentDecisionView } from "./runtime/current-decision-view.ts";
 export type {
   CurrentDecisionContext,
