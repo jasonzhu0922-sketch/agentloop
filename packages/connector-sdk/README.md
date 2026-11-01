@@ -20,6 +20,15 @@ API client or application persistence implementation. Connector modules are load
 by Runtime registration and do not need to be compile-time dependencies of the
 Multi Runtime application.
 
+`connectorOperationTools` preserves canonical Connector evidence for audit and
+also projects it as `agentloop.toolEvidenceReceipt/v1`, the neutral receipt used
+by ordinary MCP tools. The receipt preserves source references, facts and
+caveats. Semantic kinds must be both declared by the executing operation's
+capability and present in returned, connection/operation-bound evidence with
+facts; capability inventory alone never becomes proof. Mismatched evidence
+identity and mismatched result operation IDs fail closed. The adapter does not
+invent a file artifact or relax the kernel's evidence admission rules.
+
 ## Current status
 
 This is the foundation contract on `feature/connectors-foundation`. The next

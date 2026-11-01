@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type {
+  CanonicalConnectorEvidence,
   ConnectorCapabilityDefinition,
   ConnectorExecutionContext,
   ConnectorInstance,
@@ -79,12 +80,51 @@ export function connectorOperationTools(
     },
     async execute(_toolContext, input: unknown): Promise<unknown> {
       const result = await instance.execute(operation.id, input, context);
+      if (result.operationId !== operation.id) throw new Error("Connector returned a result for a different operation");
+      const evidence = instance.mapEvidence(result, context);
       return {
         ...result,
-        evidence: instance.mapEvidence(result, context),
+        evidence,
+        evidenceReceipt: connectorEvidenceReceipt(instance, operation, evidence),
       };
     },
   }));
+}
+
+/** Same neutral receipt boundary as MCP. Inventory alone is not proof: only
+ * operation-bound, returned evidence may contribute declared semantic kinds. */
+function connectorEvidenceReceipt(
+  instance: ConnectorInstance,
+  operation: ConnectorOperation,
+  evidence: readonly CanonicalConnectorEvidence[],
+) {
+  const declared = new Set(instance.definition.capabilities
+    .find((capability) => capability.id === operation.capabilityId)?.producesEvidenceKinds ?? []);
+  for (const item of evidence) {
+    if (item.schema !== "agentloop.connectorEvidence/v1"
+      || item.connectorKey !== instance.definition.manifest.key
+      || item.connectionId !== instance.connection.id || item.operationId !== operation.id) {
+      throw new Error("Connector evidence does not match the executing connection and operation");
+    }
+  }
+  const caveats = [...new Set(evidence.flatMap((item) => item.caveats))];
+  const satisfied = [...new Set(evidence.flatMap((item) => item.facts.length === 0 ? [] : item.evidenceKinds))]
+    .filter((kind) => declared.has(kind) && kind !== "explicit_caveats");
+  return {
+    schema: "agentloop.toolEvidenceReceipt/v1",
+    sourceType: "connector",
+    receiptId: createHash("sha256").update(JSON.stringify([
+      instance.definition.manifest.key, instance.connection.id, operation.id, evidence,
+    ])).digest("hex"),
+    sourceRefs: evidence.flatMap((item) => item.sourceRefs),
+    facts: evidence.flatMap((item) => item.facts),
+    caveats,
+    evidenceKinds: {
+      satisfied,
+      caveated: caveats.length > 0 && declared.has("explicit_caveats") ? ["explicit_caveats"] : [],
+      failed: [],
+    },
+  };
 }
 
 function safeIdentifier(value: string): string {

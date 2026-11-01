@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 
 const suites = Object.freeze({
   unit: [
+    "tests/runtime-clock.test.ts",
     "tests/assessment-contract.test.ts",
     "tests/assessment-identity.test.ts",
     "tests/goal-loop-contract.test.ts",

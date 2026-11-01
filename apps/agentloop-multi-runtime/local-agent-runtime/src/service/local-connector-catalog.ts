@@ -67,7 +67,7 @@ export function localConnectorCatalog(appRoot: string): readonly LocalConnectorC
       key: "126-mail",
       displayName: "126 邮箱",
       description: "搜索和读取已授权的 126 邮件。",
-      capabilities: ["邮件搜索", "邮件读取"],
+      capabilities: ["邮件搜索", "邮件读取", "收件时间统计"],
       setupHint: "126 目前通过 IMAP 客户端协议连接；填写邮箱账号和客户端授权码。默认使用 imap.126.com:993/TLS 只读连接。",
       binding: {
         title: "绑定 126 邮箱",

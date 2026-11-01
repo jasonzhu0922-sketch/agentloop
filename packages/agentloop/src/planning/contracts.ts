@@ -259,6 +259,8 @@ export interface ConversationTurnResolution {
   /** Runtime-derived invariant of evidenceStrategy; the model never chooses it independently. */
   readonly evidenceDemand: SourceNeed;
   readonly userConstraints: readonly string[];
+  /** Derived time bounds are not explicit user constraints. */
+  readonly temporalScope?: import("../runtime/runtime-clock.ts").ResolvedTemporalScope;
   /** Explicit execution requirements, independent of catalog availability. */
   readonly requiredCapabilityReferences?: readonly RequiredCapabilityReference[];
   readonly source: "model" | "model_guarded";

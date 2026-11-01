@@ -145,7 +145,6 @@ export function buildDynamicSystemPrompt(input: {
 }
 
 export function formatDynamicPromptContext(taskProfile: TaskProfile): string {
-  const now = new Date();
   const promptSafeProfile = {
     ...taskProfile,
     ...(taskProfile.practices === undefined ? {} : {
@@ -156,11 +155,6 @@ export function formatDynamicPromptContext(taskProfile: TaskProfile): string {
     `<dynamic_prompt_context source="server" phase="${escapeXmlAttribute(taskProfile.phase)}">`,
     JSON.stringify({
       ...promptSafeProfile,
-      runtimeClock: {
-        currentDateTimeIso: now.toISOString(),
-        currentDateUtc: now.toISOString().slice(0, 10),
-        freshnessInstruction: "For latest, current, today, recent, price, quote, or market-data requests, anchor searches and answers to this runtime clock unless the user supplied a different date.",
-      },
     }),
     "</dynamic_prompt_context>",
   ].join("\n");

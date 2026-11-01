@@ -175,6 +175,8 @@ import {
   type CanonicalRunState,
 } from "./canonical-run-state.ts";
 import { CanonicalRunStateRepository } from "./canonical-run-state-repository.ts";
+import { assertNoInferredCalendarDates, createRuntimeClock, parseResolvedTemporalScope, resolveTemporalScope, withRuntimeClock, type RuntimeClock, type ResolvedTemporalScope } from "./runtime-clock.ts";
+import { temporalEvidenceGap } from "./temporal-evidence.ts";
 
 export type ModelFactory = (onRetry?: ModelRetryReporter, modelKey?: string) => ModelAdapter;
 
@@ -304,6 +306,8 @@ export class RunService {
   private readonly coreTools: readonly RuntimeTool<unknown>[];
   /** Resolves Run-scoped Connector tools without exposing Connector persistence to the kernel. */
   private readonly runToolProvider?: RunToolProvider;
+  private readonly timeZone?: string;
+  private readonly clock: () => number;
   private readonly connectorConnectionIdsByRunId = new Map<string, readonly string[]>();
   private readonly plans: PlanRepository;
   private readonly canonicalStates: CanonicalRunStateRepository;
@@ -357,6 +361,9 @@ export class RunService {
     tools?: readonly RuntimeTool<unknown>[];
     /** Optional Run-scoped Connector tool resolver supplied by the host application. */
     runToolProvider?: RunToolProvider;
+    /** Local runtimes default to the device's IANA zone; cloud hosts may configure the user's zone. */
+    timeZone?: string;
+    clock?: () => number;
     systemPrompt?: string;
     /** Bounded model-turn budget per executable Plan step. */
     maxSteps?: number;
@@ -375,6 +382,8 @@ export class RunService {
     this.skills = options.skills;
     this.modelFactory = options.modelFactory;
     this.runToolProvider = options.runToolProvider;
+    this.timeZone = options.timeZone;
+    this.clock = options.clock ?? Date.now;
     this.plannerFactory = options.plannerFactory ?? ((model) => new ModelPlanner(model, {
       ...(options.maxPlanningTurns === undefined ? {} : { maxPlanningTurns: options.maxPlanningTurns }),
     }));
@@ -1009,6 +1018,8 @@ export class RunService {
       this.actions,
       runId,
       () => actionScope,
+      (await this.canonicalStates.getOptional(runId))?.intent.runtimeClock ?? createRuntimeClock(run.createdAt, this.timeZone),
+      (await this.canonicalStates.getOptional(runId))?.intent.turnResolution?.temporalScope,
     );
     let currentPlan: ExecutionPlan | undefined;
     try {
@@ -1175,6 +1186,8 @@ export class RunService {
       this.actions,
       runId,
       () => actionScope,
+      (await this.canonicalStates.getOptional(runId))?.intent.runtimeClock ?? createRuntimeClock(run.createdAt, this.timeZone),
+      (await this.canonicalStates.getOptional(runId))?.intent.turnResolution?.temporalScope,
     );
     const assessor = this.assessorFactory(model);
     const canonicalState = await this.canonicalStates.get(runId);
@@ -1554,7 +1567,8 @@ export class RunService {
     const conversationWorkingSet = conversationId === undefined
       ? undefined
       : await this.buildConversationWorkingSet(conversationId);
-    const createdAt = Date.now();
+    const createdAt = this.clock();
+    const runtimeClock = createRuntimeClock(createdAt, this.timeZone);
     await this.database.transaction(async () => {
       await this.runs.insertRun({
         id: runId,
@@ -1595,6 +1609,7 @@ export class RunService {
       data: {
         runId,
         actorUserId,
+        runtimeClock,
         depth: continuation?.depth ?? 0,
         ...(continuation === undefined ? {} : {
           parentRunId: continuation.parentRunId,
@@ -1625,7 +1640,7 @@ export class RunService {
       // planning and execution so a slow resolver cannot look like an
       // actionless, abandoned Run to a Runtime Host's reconciliation pass.
       const actionScope: { planId?: string; stepId?: string } = {};
-      const model = new ActionTrackedModel(rawModel, this.actions, runId, () => actionScope);
+      const model = new ActionTrackedModel(rawModel, this.actions, runId, () => actionScope, runtimeClock);
       const shouldRefreshSkillsBeforeIntent = latestTurnMayReferenceSkill(input)
         && this.skills.skillDirectories.length > 0;
       if (shouldRefreshSkillsBeforeIntent) {
@@ -1667,10 +1682,12 @@ export class RunService {
               conversationWorkingSet,
               availableSkills: privateSkills,
               availableTools: toolSummaries(intentTools, intentToolNames),
+              runtimeClock,
             },
             runController.signal,
           );
       const responseOnly = turnResolution !== undefined && turnResolution.mode !== "execute";
+      model.setTemporalScope(turnResolution?.temporalScope);
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       if (conversationEntry) {
         await emit({
@@ -1816,6 +1833,7 @@ export class RunService {
       let canonicalState = await this.canonicalStates.create(createCanonicalRunState({
         runId,
         userInput: input,
+        runtimeClock,
         ...(turnResolution === undefined ? {} : { turnResolution }),
         understanding: taskUnderstanding,
         requiredToolSourceIds,
@@ -2776,7 +2794,7 @@ export class RunService {
             toolCalls: mergeAssessmentToolEvidence(inheritedAssessmentToolEvidence, candidate.toolEvidence),
             modelSteps: candidate.modelSteps,
           };
-          const temporalScopeGap = temporalScopeGapForCandidate(canonicalState.intent.userInput, evidence.toolCalls);
+          const temporalScopeGap = temporalEvidenceGap(canonicalState.intent.turnResolution?.temporalScope, evidence.toolCalls.map((call) => call.result));
           if (temporalScopeGap !== undefined) {
             const failedBoundary: FailedBoundary = {
               stepId: activeStep.id,
@@ -2791,9 +2809,8 @@ export class RunService {
                 planId: plan.id,
                 stepId: activeStep.id,
                 attempt: assessmentAttempt,
-                requiredDurationDays: temporalScopeGap.requiredDurationDays,
-                observedDurationDays: temporalScopeGap.observedDurationDays,
-                feedback: temporalScopeGap.feedback,
+                temporalScope: canonicalState.intent.turnResolution?.temporalScope,
+                feedback: temporalScopeGap,
                 failedBoundary,
               },
             });
@@ -2801,7 +2818,7 @@ export class RunService {
               type: "assessment.failed_boundary",
               data: { planId: plan.id, stepId: activeStep.id, attempt: assessmentAttempt, failedBoundary },
             });
-            return { approved: false, feedback: temporalScopeGap.feedback, failedBoundary };
+            return { approved: false, feedback: temporalScopeGap, failedBoundary };
           }
           const holisticSourceContractMismatch = sourceContractNeedsHolisticAssessment(activeStep, evidence);
           const assessmentProfile = selectAssessmentProfile(activeStep, evidence, holisticSourceContractMismatch);
@@ -3296,6 +3313,8 @@ export class RunService {
       this.actions,
       input.run.id,
       () => actionScope,
+      canonicalState.intent.runtimeClock ?? createRuntimeClock(input.run.createdAt, this.timeZone),
+      canonicalState.intent.turnResolution?.temporalScope,
     );
     let decision: RecoveryDecisionRecord | undefined;
     try {
@@ -4591,72 +4610,6 @@ function planContractMismatchRequiresRevision(
   return stepRequiresSourceContract && observedShapes.has("artifact") && !observedShapes.has("source");
 }
 
-interface TemporalScopeGap {
-  readonly requiredDurationDays: number;
-  readonly observedDurationDays: number;
-  readonly feedback: string;
-}
-
-/**
- * Time coverage is neutral source metadata, not a provider- or Skill-specific
- * conclusion. A bounded source receipt may either cover the requested rolling
- * range or explicitly prove that the requested range is unavailable; a
- * shorter successful query may not silently stand in for it.
- */
-function temporalScopeGapForCandidate(
-  userInput: string,
-  toolCalls: readonly ToolEvidence[],
-): TemporalScopeGap | undefined {
-  const requiredDurationDays = requestedRollingDurationDays(userInput);
-  if (requiredDurationDays === undefined) return undefined;
-  const coverage = toolCalls.flatMap((toolCall) => temporalCoverageFromToolResult(toolCall.result));
-  if (coverage.length === 0) return undefined;
-  if (coverage.some((item) => item.durationDays >= requiredDurationDays)) return undefined;
-  if (coverage.some((item) => item.unavailableForDays >= requiredDurationDays)) return undefined;
-  const observedDurationDays = Math.max(0, ...coverage.map((item) => item.durationDays));
-  return {
-    requiredDurationDays,
-    observedDurationDays,
-    feedback: `The user requested a rolling ${requiredDurationDays}-day source range, but the acquired source evidence covers only ${observedDurationDays} day(s). Do not present a shorter period as a substitute. Acquire evidence covering the requested range, or acquire a structured receipt that explicitly establishes that this exact range is unavailable and state only that boundary.`,
-  };
-}
-
-function requestedRollingDurationDays(input: string): number | undefined {
-  if (/(?:近\s*(?:一(?:个)?|1)\s*(?:月|个月)|过去\s*(?:一(?:个)?|1)\s*(?:月|个月)|近\s*30\s*天|过去\s*30\s*天|最近\s*30\s*天|\b(?:last|past|recent)\s*(?:one\s*)?month\b|\b(?:last|past|recent)\s*30\s*days?\b)/iu.test(input)) {
-    return 30;
-  }
-  if (/(?:近\s*(?:一)?周|过去\s*(?:一)?周|近\s*7\s*天|过去\s*7\s*天|最近\s*7\s*天|\b(?:last|past|recent)\s*(?:one\s*)?week\b|\b(?:last|past|recent)\s*7\s*days?\b)/iu.test(input)) {
-    return 7;
-  }
-  return undefined;
-}
-
-function temporalCoverageFromToolResult(value: string): readonly { durationDays: number; unavailableForDays: number }[] {
-  const root = parseToolResultObject(value);
-  return root === undefined ? [] : temporalCoverageFromRecord(root);
-}
-
-function temporalCoverageFromRecord(record: Readonly<Record<string, unknown>>, depth = 0): readonly { durationDays: number; unavailableForDays: number }[] {
-  if (depth > 3) return [];
-  const coverage = asRecord(record.temporalCoverage);
-  const durationDays = typeof coverage?.durationDays === "number" && Number.isFinite(coverage.durationDays)
-    ? Math.max(0, coverage.durationDays)
-    : 0;
-  const unavailableForDays = coverage?.fulfillment === "unavailable"
-    && typeof coverage.requestedDurationDays === "number"
-    && Number.isFinite(coverage.requestedDurationDays)
-    ? Math.max(0, coverage.requestedDurationDays)
-    : 0;
-  const nested = [record.evidenceReceipt, record.stdout, record.content]
-    .flatMap((value) => {
-      const child = typeof value === "string" ? parseToolResultObject(value) : asRecord(value);
-      return child === undefined ? [] : temporalCoverageFromRecord(child, depth + 1);
-    });
-  return durationDays > 0 || unavailableForDays > 0
-    ? [{ durationDays, unavailableForDays }, ...nested]
-    : nested;
-}
-
 type ReceiptShape = "artifact" | "source";
 
 function observedReceiptShapes(
@@ -5585,17 +5538,23 @@ class ActionTrackedModel implements ModelAdapter {
   private readonly actions: RuntimeActionRepository;
   private readonly runId: string;
   private readonly scope: () => { planId?: string; stepId?: string };
+  private readonly runtimeClock: RuntimeClock;
+  private temporalScope?: ResolvedTemporalScope;
 
   constructor(
     model: ModelAdapter,
     actions: RuntimeActionRepository,
     runId: string,
     scope: () => { planId?: string; stepId?: string },
+    runtimeClock: RuntimeClock = createRuntimeClock(),
+    temporalScope?: ResolvedTemporalScope,
   ) {
     this.model = model;
     this.actions = actions;
     this.runId = runId;
     this.scope = scope;
+    this.runtimeClock = runtimeClock;
+    this.temporalScope = temporalScope;
     this.limits = model.limits;
     this.completeTimeoutMs = model.completeTimeoutMs ?? model.operationTimeoutMs ?? 120_000;
     this.operationTimeoutMs = model.operationTimeoutMs ?? 120_000;
@@ -5603,14 +5562,17 @@ class ActionTrackedModel implements ModelAdapter {
   }
 
   estimateInputTokens(invocation: ModelInvocation): number | undefined {
-    return this.model.estimateInputTokens?.(invocation);
+    return this.model.estimateInputTokens?.(withRuntimeClock(invocation, this.runtimeClock, this.temporalScope));
   }
 
   requestLogContext(invocation: ModelInvocation, stream: boolean): ModelRequestLogContext | undefined {
-    return this.model.requestLogContext?.(invocation, stream);
+    return this.model.requestLogContext?.(withRuntimeClock(invocation, this.runtimeClock, this.temporalScope), stream);
   }
 
+  setTemporalScope(scope: ResolvedTemporalScope | undefined): void { this.temporalScope = scope; }
+
   complete(invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse> {
+    invocation = withRuntimeClock(invocation, this.runtimeClock, this.temporalScope);
     const scope = this.scope();
     return this.actions.execute({
       runId: this.runId,
@@ -5633,6 +5595,7 @@ class ActionTrackedModel implements ModelAdapter {
     base: Readonly<Record<string, unknown>>,
     signal?: AbortSignal,
   ): Promise<ModelResponse> {
+    invocation = withRuntimeClock(invocation, this.runtimeClock, this.temporalScope);
     const scope = this.scope();
     let action: RuntimeActionRecord | undefined;
     return this.actions.execute({
@@ -5665,6 +5628,7 @@ class ActionTrackedModel implements ModelAdapter {
     sink: ModelStreamSink,
     signal?: AbortSignal,
   ): Promise<ModelResponse> {
+    invocation = withRuntimeClock(invocation, this.runtimeClock, this.temporalScope);
     const scope = this.scope();
     const stream = this.model.streamComplete;
     return this.actions.execute({
@@ -7419,6 +7383,22 @@ function conversationTurnTool(context: ConversationIntentExternalContext): Model
           maxItems: 8,
           items: { type: "string", minLength: 1, maxLength: 240 },
         },
+        temporalScope: {
+          type: "object", additionalProperties: false,
+          description: "Time scope derived separately from the user's literal constraints. For relative calendar-day ranges use runtime_clock and integer day offsets (start inclusive, end exclusive). For explicit or historical reference ranges use user_explicit and RFC3339 bounds. Omit when no temporal range is requested.",
+          required: ["expression", "basis"],
+          properties: {
+            expression: { type: "string", minLength: 1, maxLength: 240, description: "Verbatim contiguous quote from the user's time requirement, preserving spaces and punctuation. Do not paraphrase or append derived dates or interpretation." },
+            basis: { type: "string", enum: ["runtime_clock", "user_explicit"] },
+            alignment: { type: "string", enum: ["calendar_day", "elapsed_seconds"] },
+            timeZone: { type: "string", maxLength: 100 },
+            startDayOffset: { type: "integer", minimum: -366000, maximum: 366000, description: "Inclusive local-day start relative to today: 0=today, -1=yesterday. An N-day calendar window including today starts at -(N-1)." },
+            endDayOffset: { type: "integer", minimum: -366000, maximum: 366000, description: "Exclusive local-day boundary: 0=START of today (excludes today), +1=START of tomorrow (includes today). Omit when endAtReferenceInstant=true." },
+            endAtReferenceInstant: { type: "boolean", description: "For a calendar-day window through now, use true and omit endDayOffset. Runtime ends the interval at the immutable Run reference instant; this includes only the current partial day." },
+            startSecondOffset: { type: "integer" }, endSecondOffset: { type: "integer" },
+            startInclusive: { type: "string" }, endExclusive: { type: "string" },
+          },
+        },
       },
     },
   };
@@ -7436,6 +7416,21 @@ async function resolveConversationTurn(
 ): Promise<ConversationTurnResolution> {
   const runtimeContextId = `conversation-turn-context:${randomUUID()}`;
   let repairFeedback: string | undefined;
+  const rejectedContracts = new Set<string>();
+  const repairMessages: ModelMessage[] = [];
+  const retainRepairFeedback = (feedback: string, response: ModelResponse) => {
+    rejectedContracts.add(feedback);
+    repairFeedback = [...rejectedContracts].join("\n");
+    // Keep the rejected arguments next to their actual validation result.
+    // A detached error alone makes the model regenerate (and regress) fields
+    // it cannot see. No service operation is invoked by this resolver tool.
+    if (response.toolCalls.length > 0) {
+      repairMessages.push({ role: "assistant", content: response.content, toolCalls: response.toolCalls,
+        ...(response.reasoningContent === undefined ? {} : { reasoningContent: response.reasoningContent }) });
+      for (const call of response.toolCalls) repairMessages.push({ role: "tool", name: call.name, toolCallId: call.id,
+        content: JSON.stringify({ status: "rejected", feedback: repairFeedback, operationExecuted: false }), isError: true });
+    }
+  };
   let semanticFeedback: string | undefined;
   let nonExecutableArtifactResolution: ConversationTurnResolution | undefined;
   for (let attempt = 1; attempt <= CONVERSATION_TURN_RESOLUTION_ATTEMPTS; attempt += 1) {
@@ -7452,6 +7447,7 @@ async function resolveConversationTurn(
       messages: [
         ...(conversationHistory ?? []),
         { role: "user", content: input },
+        ...repairMessages,
       ],
       tools: [resolverTool],
       toolChoice: { name: resolverTool.name },
@@ -7472,7 +7468,7 @@ async function resolveConversationTurn(
       if (nonExecutableArtifactFeedback !== undefined) {
         nonExecutableArtifactResolution = resultBound;
         semanticFeedback = nonExecutableArtifactFeedback;
-        repairFeedback = nonExecutableArtifactFeedback;
+        retainRepairFeedback(nonExecutableArtifactFeedback, response);
         await emit({
           type: "conversation.turn.resolution_rejected",
           data: {
@@ -7498,7 +7494,7 @@ async function resolveConversationTurn(
           input,
         );
       }
-      repairFeedback = semanticFeedback;
+      retainRepairFeedback(semanticFeedback, response);
       await emit({
         type: "conversation.turn.resolution_rejected",
         data: {
@@ -7510,7 +7506,7 @@ async function resolveConversationTurn(
       });
       continue;
     }
-    repairFeedback = parsed.feedback;
+    retainRepairFeedback(parsed.feedback, response);
     await emit({
       type: "conversation.turn.resolution_rejected",
       data: {
@@ -7586,11 +7582,17 @@ function inheritContinuedConversationIntent(
     ...(resolution.requiredCapabilityReferences ?? []),
   ].map((item) => [`${item.kind}:${item.reference}`, item])).values()];
   const sourceBinding = target.sourceBinding;
+  // Continuing an existing result keeps that result's time scope. A deliberate
+  // source refresh is a new observation and may resolve a fresh relative scope.
+  const temporalScope = resolution.inputMode === "refresh_sources"
+    ? resolution.temporalScope
+    : target.temporalScope ?? resolution.temporalScope;
   const evidenceDemand = sourceBinding.mode === "primary_data"
     ? "source_grounded"
     : strongerConversationEvidenceDemand(target.evidenceDemand, resolution.evidenceDemand);
   const evidenceStrategy = conversationEvidenceStrategyForDemand(evidenceDemand, sourceBinding);
   const changed = resolution.effectiveGoal !== target.effectiveGoal
+    || JSON.stringify(temporalScope) !== JSON.stringify(resolution.temporalScope)
     || JSON.stringify(requiredCapabilityReferences) !== JSON.stringify(resolution.requiredCapabilityReferences ?? [])
     || evidenceDemand !== resolution.evidenceDemand
     || evidenceStrategy !== resolution.evidenceStrategy
@@ -7604,6 +7606,7 @@ function inheritContinuedConversationIntent(
     ...resolution,
     mode: "execute",
     effectiveGoal: target.effectiveGoal,
+    ...(temporalScope === undefined ? {} : { temporalScope }),
     evidenceStrategy,
     sourceBinding,
     evidenceDemand,
@@ -8084,6 +8087,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "Goal lineage and input ownership are separate: targetGoalCandidateId may identify a failed goal being continued while targetArtifact selects an earlier reusable file or resultCandidateId identifies the published Runtime Result supplying its content. Preserve both identities; the input producer need not be the goal being continued.",
       "For requests such as 'turn this analysis into a PDF', bind the prior result and use evidenceStrategy=none. For 'reanalyze the source and make a PDF', use refresh_sources with source_grounded evidence.",
       "Use runtimeContext as server-authored context and identity metadata, not as unverified source content.",
+      "runtimeClock is the authoritative current reference. Never invent today's date. Preserve relative time wording in effectiveGoal, taskIntent and userConstraints; do not insert inferred absolute dates there, even when the runtime clock gives the correct date. Put computed bounds only in temporalScope. Quote its expression verbatim from the current user input or selected prior user's input. For relative calendar days, return basis=runtime_clock, alignment=calendar_day and startDayOffset/endDayOffset from the runtime's local day; Runtime computes the actual timestamps. Zero endDayOffset EXCLUDES today. For a calendar-day window through now, use endAtReferenceInstant=true instead of endDayOffset. State whether the current partial day is included in the eventual answer. For elapsed-hour ranges use basis=runtime_clock, alignment=elapsed_seconds and startSecondOffset/endSecondOffset from the reference instant. For explicitly dated or hypothetical ranges return basis=user_explicit with offset-aware timestamps; do not change the runtime clock. Do not label runtime-derived dates as user_explicit.",
       "You cannot load or execute Skills or Tools in this resolver phase. Use availableSkills and availableTools only as capability metadata; input schemas, credentials, and source content are not exposed here. Actual discovery, workflow selection and invocation belong to Planner and execution.",
       "When the latest turn explicitly asks to use an available Skill, return execute; do not return clarify merely because no visible directory or uploaded source is bound.",
       "Preserve all explicitly mandatory Skill, MCP/tool source, and tool names in requiredCapabilityReferences independently of catalog availability. Unavailable does not mean unrequested. For an actionable request with unavailable requirements, return execute with those references; Runtime will explain and end the task before planning or execution. Do not silently substitute another provider or Skill.",
@@ -8122,8 +8126,9 @@ function parseConversationTurnResolution(
   });
   const sourceBinding = parseConversationSourceBinding(argumentsRecord.sourceBinding, context.visibleDirectories);
   const requiredCapabilityReferences = parseRequiredCapabilityReferences(argumentsRecord.requiredCapabilityReferences, input);
+  const groundingFailures: string[] = [];
   if (requiredCapabilityReferences === undefined) {
-    return reject("requiredCapabilityReferences must be an array of at most 32 {kind, reference} entries. kind must be skill, tool_source, or tool; reference must be a non-empty string of at most 200 characters copied exactly from the latest user request. Do not infer mandatory capabilities from output formats or the available catalog; use [] when none were explicitly named.");
+    groundingFailures.push("requiredCapabilityReferences must be an array of at most 32 {kind, reference} entries. kind must be skill, tool_source, or tool; reference must be a non-empty string of at most 200 characters copied exactly from the latest user request. Do not infer mandatory capabilities from output formats or the available catalog; use [] when none were explicitly named.");
   }
   const effectiveGoal = typeof argumentsRecord.effectiveGoal === "string"
     ? argumentsRecord.effectiveGoal.trim()
@@ -8183,6 +8188,22 @@ function parseConversationTurnResolution(
   if (normalizedInputMode !== "prior_artifact" && targetArtifact !== undefined) return reject("targetArtifact requires inputMode=prior_artifact; otherwise omit it.");
   if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000) return reject("effectiveGoal must be a non-empty string no longer than 2000 characters.");
   if (userConstraints === undefined) return reject("userConstraints must be an array of at most 8 non-empty strings, each no longer than 240 characters; use [] when no additional constraint applies.");
+  const priorInput = targetRunId === undefined ? undefined : workset?.planCursors.find((cursor) => cursor.runId === targetRunId)?.input;
+  const temporalUserInputs = [input, ...(priorInput === undefined ? [] : [priorInput])];
+  const groundedFields = [{ field: "effectiveGoal", value: effectiveGoal },
+    ...userConstraints.map((value, index) => ({ field: `userConstraints[${index}]`, value })),
+    ...taskIntent.deliverables.map((item, index) => ({ field: `taskIntent.deliverables[${index}].purpose`, value: item.purpose }))];
+  for (const { field, value } of groundedFields) {
+    try { assertNoInferredCalendarDates([value], temporalUserInputs); }
+    catch (error) { groundingFailures.push(`${field}: ${error instanceof Error ? error.message : "Invalid derived date provenance"}`); }
+  }
+  let temporalScope: ResolvedTemporalScope | undefined;
+  if (argumentsRecord.temporalScope !== undefined) {
+    if (context.runtimeClock === undefined) return reject("Runtime clock is required to resolve a temporal scope");
+    try { temporalScope = resolveTemporalScope(argumentsRecord.temporalScope, context.runtimeClock, temporalUserInputs); }
+    catch (error) { groundingFailures.push(error instanceof Error ? error.message : "Invalid temporalScope"); }
+  }
+  if (groundingFailures.length > 0 || requiredCapabilityReferences === undefined) return reject(groundingFailures.join("\n"));
   const evidenceDemand = conversationEvidenceDemandForStrategy(evidenceStrategy);
   if (!isConversationSourceBindingConsistent(evidenceStrategy, sourceBinding)) return reject("evidenceStrategy and sourceBinding must agree: bound_visible_sources requires sourceBinding.mode=primary_data with at least one Runtime-issued visibleDirectoryId. All other evidence strategies require mode=none and visibleDirectoryIds=[]. For uploaded or non-directory evidence, choose a non-bound evidenceStrategy.");
   if (mode !== "execute" && (evidenceDemand !== "none" || sourceBinding.mode !== "none")) return reject("mode=reply or clarify requires evidenceStrategy=none and sourceBinding.mode=none. Acquiring evidence requires mode=execute.");
@@ -8214,6 +8235,7 @@ function parseConversationTurnResolution(
     sourceBinding,
     evidenceDemand,
     userConstraints,
+    ...(temporalScope === undefined ? {} : { temporalScope }),
     requiredCapabilityReferences,
     source: guardedPriorArtifact ? "model_guarded" : "model",
   } };
@@ -8349,6 +8371,8 @@ function conversationTurnResolutionFromEvents(
     const targetArtifact = conversationArtifactReference(data.targetArtifact);
     const targetResult = parseResultReference(data.targetResult);
     const userConstraints = stringArrayField(data.userConstraints).map((item) => item.trim());
+    const temporalScope = parseResolvedTemporalScope(data.temporalScope);
+    if (data.temporalScope !== undefined && temporalScope === undefined) return undefined;
     const requiredCapabilityReferences = parseRequiredCapabilityReferences(data.requiredCapabilityReferences);
     if (requiredCapabilityReferences === undefined) return undefined;
     if (data.schema !== "agentloop.conversationTurnResolution/v1") return undefined;
@@ -8387,6 +8411,7 @@ function conversationTurnResolutionFromEvents(
       sourceBinding,
       evidenceDemand,
       userConstraints,
+      ...(temporalScope === undefined ? {} : { temporalScope }),
       requiredCapabilityReferences,
       source,
     };
@@ -8534,6 +8559,7 @@ function optionalRecord(value: unknown): Record<string, unknown> {
 }
 
 interface ConversationIntentExternalContext {
+  readonly runtimeClock?: RuntimeClock;
   readonly visibleDirectories: readonly VisibleDirectoryGrant[];
   readonly sources: readonly UploadedSourceSummary[];
   readonly availableSkills?: readonly PrivateSkill[];
@@ -8547,6 +8573,7 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
   const goalCandidateIdByRunId = new Map(goalRunIds.map((runId, index) => [runId, `goal_candidate_${index + 1}`]));
   const payload = {
     schema: "agentloop.conversationTurnContext/v1",
+    ...(context.runtimeClock === undefined ? {} : { runtimeClock: context.runtimeClock }),
     externalContextPolicy: {
       purpose: "intent_classification_only",
       contentAccess: "metadata_only",
@@ -8609,6 +8636,7 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
               sourceBinding: intent.sourceBinding,
               evidenceDemand: intent.evidenceDemand,
               userConstraints: intent.userConstraints,
+              ...(intent.temporalScope === undefined ? {} : { temporalScope: intent.temporalScope }),
             },
           }),
           ...(failure === undefined ? {} : {
