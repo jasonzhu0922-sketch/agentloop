@@ -28,6 +28,8 @@ export interface LocalRuntimeControl extends LocalRuntimeDefinition {
   readonly runs: RunService;
   readonly scopes: LocalDirectoryScopeStore;
   readonly modelKeys: readonly string[];
+  /** Enabled connections loaded for this Runtime, never other device Runtimes. */
+  readonly connectorConnectionIds: readonly string[];
   readonly activeRunIds: Set<string>;
   /** Present only when device Memory is enabled; the tenant is device-local. */
   readonly memory?: { readonly store: MemoryStore; readonly tenantId: string };

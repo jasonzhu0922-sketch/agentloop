@@ -981,6 +981,7 @@ function fakeRuntime(definition: LocalRuntimeDefinition): LocalRuntimeControl {
     runs: {} as LocalRuntimeControl["runs"],
     scopes: {} as LocalRuntimeControl["scopes"],
     modelKeys: ["shared-model"],
+    connectorConnectionIds: [],
     activeRunIds: new Set<string>(),
   };
 }

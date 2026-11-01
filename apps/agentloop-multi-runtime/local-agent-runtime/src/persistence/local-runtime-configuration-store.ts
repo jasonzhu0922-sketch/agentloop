@@ -227,6 +227,7 @@ export class LocalRuntimeConfigurationStore {
   private readonly customSkillDirectories: readonly string[];
   private readonly uploadedPackageRoot?: string;
   private readonly modelConfigurations?: LocalModelConfigurationStore;
+  private readonly additionalSecretReferences: () => Promise<readonly string[]>;
 
   constructor(
     database: AppDatabase,
@@ -234,12 +235,14 @@ export class LocalRuntimeConfigurationStore {
     customSkillDirectories: readonly string[] = [],
     uploadedPackageRoot?: string,
     modelConfigurations?: LocalModelConfigurationStore,
+    additionalSecretReferences: () => Promise<readonly string[]> = async () => [],
   ) {
     this.database = database;
     this.secretStore = secretStore;
     this.customSkillDirectories = customSkillDirectories;
     this.uploadedPackageRoot = uploadedPackageRoot;
     this.modelConfigurations = modelConfigurations;
+    this.additionalSecretReferences = additionalSecretReferences;
   }
 
   async ready(): Promise<void> {
@@ -339,7 +342,13 @@ export class LocalRuntimeConfigurationStore {
     const referencedRows = await this.database.prepare(`
       SELECT DISTINCT secret_storage_key FROM local_runtime_mcp_servers WHERE secret_storage_key IS NOT NULL
     `).all() as Array<{ secret_storage_key: string }>;
-    const referenced = new Set(referencedRows.map((row) => row.secret_storage_key));
+    // This vault may be shared with other device-owned configuration stores.
+    // Only the composition root knows all owners. Resolve every owner's live
+    // references before deleting anything; a failed lookup aborts cleanup.
+    const referenced = new Set([
+      ...referencedRows.map((row) => row.secret_storage_key),
+      ...await this.additionalSecretReferences(),
+    ]);
     const orphaned = (await this.secretStore.listKeys()).filter((key) => !referenced.has(key));
     await Promise.all(orphaned.map((key) => this.secretStore.remove(key)));
   }

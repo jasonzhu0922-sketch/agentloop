@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { LocalAgentService } from "../service/local-agent-service.ts";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
 import type { LocalRuntimeConfigurationInput, LocalRuntimeMcpServerInput } from "../persistence/local-runtime-configuration-store.ts";
+import type { LocalConnectorConfigurationInput } from "../persistence/local-connector-configuration-store.ts";
 import type { ToolSourceCapability } from "@zhujun/agentloop";
 import type { LocalSkillUploadFile } from "../service/local-skill-package-installer.ts";
 
@@ -113,6 +114,59 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
           runtimeConfigurationInput(value),
         ));
       }
+      if (request.method === "GET" && url.pathname === "/v1/local-connectors/catalog") {
+        await session(request, service);
+        return json(response, 200, await service.availableLocalConnectors());
+      }
+      const wpsAuthorization = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)\/connectors\/kingsoft-wps\/authorization$/);
+      if (request.method === "POST" && wpsAuthorization !== null) {
+        await session(request, service);
+        return json(response, 201, await service.startWpsAuthorization(origin, decodeURIComponent(wpsAuthorization[1])));
+      }
+      if (request.method === "GET" && url.pathname === "/v1/local-connectors/kingsoft-wps/callback") {
+        const result = await service.completeWpsAuthorization({
+          ...(url.searchParams.has("state") ? { state: url.searchParams.get("state") ?? undefined } : {}),
+          ...(url.searchParams.has("code") ? { code: url.searchParams.get("code") ?? undefined } : {}),
+          ...(url.searchParams.has("error") ? { error: url.searchParams.get("error") ?? undefined } : {}),
+        });
+        return oauthCompletion(response, result);
+      }
+      const feishuAuthorization = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)\/connectors\/feishu\/authorization$/);
+      if (request.method === "POST" && feishuAuthorization !== null) {
+        await session(request, service);
+        return json(response, 201, await service.startFeishuAuthorization(origin, decodeURIComponent(feishuAuthorization[1])));
+      }
+      if (request.method === "GET" && url.pathname === "/v1/local-connectors/feishu/callback") {
+        const result = await service.completeFeishuAuthorization({
+          ...(url.searchParams.has("state") ? { state: url.searchParams.get("state") ?? undefined } : {}),
+          ...(url.searchParams.has("code") ? { code: url.searchParams.get("code") ?? undefined } : {}),
+          ...(url.searchParams.has("error") ? { error: url.searchParams.get("error") ?? undefined } : {}),
+        });
+        return oauthCompletion(response, result, "agentloop-feishu-oauth", "飞书");
+      }
+      const runtimeConnector = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)\/connectors$/);
+      if (request.method === "GET" && runtimeConnector !== null) {
+        await session(request, service);
+        return json(response, 200, await service.localConnectorConfigurations(decodeURIComponent(runtimeConnector[1])));
+      }
+      if (request.method === "POST" && runtimeConnector !== null) {
+        await session(request, service);
+        const value = await body(request);
+        return json(response, 200, await service.updateLocalConnectorConfiguration(
+          decodeURIComponent(runtimeConnector[1]),
+          connectorConfigurationInput(recordValue(value.connector ?? value, "connector")),
+        ));
+      }
+      const runtimeConnectorDelete = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)\/connectors\/([^/]+)$/);
+      if (request.method === "DELETE" && runtimeConnectorDelete !== null) {
+        await session(request, service);
+        await service.removeLocalConnectorConfiguration(
+          decodeURIComponent(runtimeConnectorDelete[1]),
+          decodeURIComponent(runtimeConnectorDelete[2]),
+        );
+        return json(response, 200, { removed: true });
+      }
+
       const runtimeConfiguration = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)\/configuration$/);
       if (request.method === "GET" && runtimeConfiguration !== null) {
         await session(request, service);
@@ -163,6 +217,7 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
         return json(response, 202, await service.startStrictLocalRun(localSession, {
           runtimeId: stringValue(value.runtimeId, "runtimeId"), conversationId: stringValue(value.conversationId, "conversationId"), clientMessageId: stringValue(value.clientMessageId, "clientMessageId"), input: stringValue(value.input, "input"),
           localDirectoryScopeIds: stringArray(value.localDirectoryScopeIds ?? [], "localDirectoryScopeIds"), localUploadedSourceIds: stringArray(value.localUploadedSourceIds ?? [], "localUploadedSourceIds"), allowDangerousTools: value.allowDangerousTools !== false,
+          ...(value.connectorConnectionIds === undefined ? {} : { connectorConnectionIds: stringArray(value.connectorConnectionIds, "connectorConnectionIds") }),
           ...(value.requestedModelKey === undefined ? {} : { requestedModelKey: stringValue(value.requestedModelKey, "requestedModelKey") }),
         }));
       }
@@ -215,6 +270,16 @@ function directoryFiles(value: unknown): readonly LocalSkillUploadFile[] {
   });
 }
 function json(response: ServerResponse, status: number, value: unknown): void { response.statusCode = status; response.setHeader("content-type", "application/json; charset=utf-8"); response.end(value === undefined ? "" : JSON.stringify(value)); }
+function oauthCompletion(response: ServerResponse, result: { readonly origin?: string; readonly attemptId?: string; readonly error?: string }, source = "agentloop-kingsoft-wps-oauth", displayName = "金山文档"): void {
+  const success = result.error === undefined;
+  const payload = JSON.stringify({ source, attemptId: result.attemptId, status: success ? "completed" : "failed" });
+  const targetOrigin = result.origin === undefined ? undefined : JSON.stringify(result.origin);
+  const message = success ? `${displayName}已连接。你可以关闭此窗口并返回 AgentLoop。` : "连接未完成，请关闭此窗口并返回 AgentLoop 后重试。";
+  response.statusCode = success ? 200 : 400;
+  response.setHeader("content-type", "text/html; charset=utf-8");
+  response.setHeader("cache-control", "no-store");
+  response.end(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>${success ? `连接${displayName}完成` : "连接失败"}</title><body><main><h1>${success ? `已连接${displayName}` : `${displayName}连接未完成`}</h1><p>${message}</p></main><script>if(window.opener&&${targetOrigin === undefined ? "false" : "true"})window.opener.postMessage(${payload},${targetOrigin ?? '""'});</script></body></html>`);
+}
 function originAllowed(origin: string | undefined, configured: string | undefined): boolean { return origin !== undefined && configured !== undefined && configured.split(",").map((value) => value.trim()).includes(origin); }
 function errorStatus(error: unknown): number { return typeof error === "object" && error !== null && "status" in error && typeof error.status === "number" ? error.status : 400; }
 function alreadyRegistered(value: unknown): boolean { return typeof value === "object" && value !== null && "alreadyRegistered" in value && value.alreadyRegistered === true; }
@@ -237,6 +302,23 @@ function parseMemoryConfigurationInput(value: Record<string, unknown>): { enable
   return {
     ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
     ...(input.settlementModelKey === undefined ? {} : { settlementModelKey: input.settlementModelKey }),
+  };
+}
+
+function connectorConfigurationInput(value: Record<string, unknown>): LocalConnectorConfigurationInput {
+  const credentials = value.credentials === undefined ? undefined : stringRecord(value.credentials, "connector.credentials");
+  const config = value.config === undefined ? {} : recordValue(value.config, "connector.config");
+  return {
+    ...(value.id === undefined ? {} : { id: stringValue(value.id, "connector.id") }),
+    connectorKey: stringValue(value.connectorKey, "connector.connectorKey"),
+    displayName: stringValue(value.displayName, "connector.displayName"),
+    modulePath: stringValue(value.modulePath, "connector.modulePath"),
+    ...(value.exportName === undefined ? {} : { exportName: stringValue(value.exportName, "connector.exportName") }),
+    ...(value.enabled === undefined ? {} : { enabled: value.enabled === true }),
+    config,
+    ...(value.externalAccountId === undefined ? {} : { externalAccountId: stringValue(value.externalAccountId, "connector.externalAccountId") }),
+    ...(value.scopes === undefined ? {} : { scopes: stringArray(value.scopes, "connector.scopes") }),
+    ...(credentials === undefined ? {} : { credentials }),
   };
 }
 

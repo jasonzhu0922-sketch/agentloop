@@ -10,12 +10,16 @@ import { RuntimeConnectionClient } from "../connection/router-runtime-control-cl
 import { pickNativeDirectory } from "../infrastructure/native-directory-picker.ts";
 import { LocalAgentStateStore, type LocalAgentState } from "../persistence/local-agent-state-store.ts";
 import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, type LocalRuntimeMemoryConfigurationInput, type LocalRuntimeMcpServerInput } from "../persistence/local-runtime-configuration-store.ts";
+import { LocalConnectorConfigurationStore, type LocalConnectorConfigurationInput } from "../persistence/local-connector-configuration-store.ts";
 import { LocalModelConfigurationStore, type LocalModelConfigurationInput } from "../persistence/local-model-configuration-store.ts";
 import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local-runtime-secret-store.ts";
 import { LocalSkillPackageInstaller, type LocalSkillUploadFile } from "./local-skill-package-installer.ts";
 import { generateSkillMetadata, type SkillMetadataModelInvoker } from "./local-skill-metadata-generator.ts";
 import { LOCAL_AGENT_VERSION } from "../config/local-agent-version.ts";
 import { LocalRuntimeArtifactReadPlane } from "../persistence/local-runtime-artifact-read-plane.ts";
+import { localConnectorCatalog } from "./local-connector-catalog.ts";
+import { WpsOAuthService } from "./wps-oauth-service.ts";
+import { FeishuOAuthService } from "./feishu-oauth-service.ts";
 
 export { LOCAL_AGENT_VERSION };
 export const LOCAL_AGENT_PROTOCOL_VERSION = "1";
@@ -34,6 +38,7 @@ export class LocalAgentService {
   private readonly stateStore: LocalAgentStateStore;
   private readonly supervisor: LocalRuntimeSupervisor;
   private readonly configurations: LocalRuntimeConfigurationStore;
+  private readonly connectorConfigurations: LocalConnectorConfigurationStore;
   private readonly modelConfigurations: LocalModelConfigurationStore;
   private modelConfigurationUpdate: Promise<unknown> = Promise.resolve();
   private readonly skillPackageInstaller: LocalSkillPackageInstaller;
@@ -41,13 +46,15 @@ export class LocalAgentService {
   private readonly sharedStorageRoot: { value: string };
   private readonly uploadStorageRoot: { value: string };
   private readonly artifactReadPlane: LocalRuntimeArtifactReadPlane;
+  private readonly wpsOAuth: WpsOAuthService;
+  private readonly feishuOAuth: FeishuOAuthService;
   private constructor(
     input: LocalAgentOptions, stateStore: LocalAgentStateStore,
-    supervisor: LocalRuntimeSupervisor, configurations: LocalRuntimeConfigurationStore, modelConfigurations: LocalModelConfigurationStore, skillPackageInstaller: LocalSkillPackageInstaller, picker: () => Promise<string | undefined>,
-    sharedStorageRoot: { value: string }, uploadStorageRoot: { value: string }, artifactReadPlane: LocalRuntimeArtifactReadPlane,
+    supervisor: LocalRuntimeSupervisor, configurations: LocalRuntimeConfigurationStore, connectorConfigurations: LocalConnectorConfigurationStore, modelConfigurations: LocalModelConfigurationStore, skillPackageInstaller: LocalSkillPackageInstaller, picker: () => Promise<string | undefined>,
+    sharedStorageRoot: { value: string }, uploadStorageRoot: { value: string }, artifactReadPlane: LocalRuntimeArtifactReadPlane, wpsOAuth: WpsOAuthService, feishuOAuth: FeishuOAuthService,
   ) {
     this.input = input; this.stateStore = stateStore;
-    this.supervisor = supervisor; this.configurations = configurations; this.modelConfigurations = modelConfigurations; this.skillPackageInstaller = skillPackageInstaller; this.picker = picker; this.sharedStorageRoot = sharedStorageRoot; this.uploadStorageRoot = uploadStorageRoot; this.artifactReadPlane = artifactReadPlane;
+    this.supervisor = supervisor; this.configurations = configurations; this.connectorConfigurations = connectorConfigurations; this.modelConfigurations = modelConfigurations; this.skillPackageInstaller = skillPackageInstaller; this.picker = picker; this.sharedStorageRoot = sharedStorageRoot; this.uploadStorageRoot = uploadStorageRoot; this.artifactReadPlane = artifactReadPlane; this.wpsOAuth = wpsOAuth; this.feishuOAuth = feishuOAuth;
   }
 
   static async create(input: LocalAgentOptions): Promise<LocalAgentService> {
@@ -69,12 +76,20 @@ export class LocalAgentService {
     const modelSecretStore = new EncryptedLocalRuntimeSecretStore(join(dirname(supervisorDatabasePath), "model-secrets"));
     const modelConfigurations = new LocalModelConfigurationStore(supervisorDatabase, modelSecretStore);
     await modelConfigurations.ready();
-    const factory = new LocalRuntimeFactory(input, modelConfigurations);
+    const wpsOAuth = new WpsOAuthService(input.integrationEnvironment);
+    const feishuOAuth = new FeishuOAuthService(input.integrationEnvironment);
+    const connectorConfigurations = new LocalConnectorConfigurationStore(supervisorDatabase, secretStore, async (credentials) => {
+      const wpsRefreshed = await wpsOAuth.refreshCredentials(credentials);
+      return await feishuOAuth.refreshCredentials(wpsRefreshed);
+    });
+    await connectorConfigurations.ready();
+    const factory = new LocalRuntimeFactory(input, modelConfigurations, connectorConfigurations);
     const uploadedSkillPackageRoot = join(input.skillPackageStoreRoot, "uploaded");
     const skillPackageInstaller = new LocalSkillPackageInstaller(uploadedSkillPackageRoot);
     // Local Agent extensions are device-owned uploads. The cloud/development
     // custom-skills directory is not an implicit Local Runtime source.
-    const configurations = new LocalRuntimeConfigurationStore(supervisorDatabase, secretStore, [], uploadedSkillPackageRoot, modelConfigurations);
+    const configurations = new LocalRuntimeConfigurationStore(supervisorDatabase, secretStore, [], uploadedSkillPackageRoot, modelConfigurations,
+      () => connectorConfigurations.secretStorageKeys());
     const supervisor = new LocalRuntimeSupervisor(
       supervisorDatabase,
       (definition, configuration) => factory.create(definition, configuration, sharedStorageRoot.value, uploadStorageRoot.value),
@@ -95,7 +110,7 @@ export class LocalAgentService {
       runtimeDataRoot: input.runtimeDataRoot,
       workspaceRoot: () => sharedStorageRoot.value,
     });
-    const service = new LocalAgentService(input, stateStore, supervisor, configurations, modelConfigurations, skillPackageInstaller, input.directoryPicker ?? pickNativeDirectory, sharedStorageRoot, uploadStorageRoot, artifactReadPlane);
+    const service = new LocalAgentService(input, stateStore, supervisor, configurations, connectorConfigurations, modelConfigurations, skillPackageInstaller, input.directoryPicker ?? pickNativeDirectory, sharedStorageRoot, uploadStorageRoot, artifactReadPlane, wpsOAuth, feishuOAuth);
     service.connection = new RuntimeConnectionClient(input.routerUrl, supervisor, (method, payload) => service.agentControl(method, payload));
     await service.connection.ready();
     if (state.device !== undefined) service.connection.setDevice(state.device);
@@ -141,6 +156,72 @@ export class LocalAgentService {
 
   async pickUploadStorage(): Promise<unknown> {
     return await this.pickStorage("upload");
+  }
+
+  async localConnectorConfigurations(runtimeId: string): Promise<unknown> {
+    return { connectors: await this.connectorConfigurations.list(runtimeId) };
+  }
+
+  async availableLocalConnectors(): Promise<unknown> {
+    return { connectors: localConnectorCatalog(this.input.appRoot) };
+  }
+
+  async updateLocalConnectorConfiguration(runtimeId: string, value: LocalConnectorConfigurationInput): Promise<unknown> {
+    return { connector: await this.connectorConfigurations.upsert(runtimeId, value) };
+  }
+
+  async removeLocalConnectorConfiguration(runtimeId: string, connectorId: string): Promise<void> {
+    await this.connectorConfigurations.remove(runtimeId, connectorId);
+  }
+
+  async startWpsAuthorization(origin: string | undefined, runtimeId: string): Promise<unknown> {
+    this.requireOrigin(origin);
+    return this.wpsOAuth.start({ runtimeId, origin: origin! });
+  }
+
+  async completeWpsAuthorization(input: { readonly state?: string; readonly code?: string; readonly error?: string }): Promise<{ readonly origin?: string; readonly attemptId?: string; readonly error?: string }> {
+    const completion = await this.wpsOAuth.complete(input);
+    if (completion.pending === undefined || completion.token === undefined) return { origin: completion.pending?.origin, attemptId: completion.pending?.attemptId, error: completion.error ?? "授权未完成。" };
+    const preset = localConnectorCatalog(this.input.appRoot).find((item) => item.key === "kingsoft-wps");
+    if (preset === undefined) throw new Error("wps_connector_preset_missing");
+    const previous = (await this.connectorConfigurations.list(completion.pending.runtimeId)).find((connector) => connector.connectorKey === preset.template.connectorKey);
+    await this.connectorConfigurations.upsert(completion.pending.runtimeId, {
+      ...preset.template,
+      ...(previous === undefined ? {} : { id: previous.id }),
+      enabled: true,
+      credentials: {
+        accessToken: completion.token.accessToken,
+        refreshToken: completion.token.refreshToken,
+        expiresAt: completion.token.expiresAt,
+      },
+    });
+    return { origin: completion.pending.origin, attemptId: completion.pending.attemptId };
+  }
+
+  async startFeishuAuthorization(origin: string | undefined, runtimeId: string): Promise<unknown> {
+    this.requireOrigin(origin);
+    return this.feishuOAuth.start({ runtimeId, origin: origin! });
+  }
+
+  async completeFeishuAuthorization(input: { readonly state?: string; readonly code?: string; readonly error?: string }): Promise<{ readonly origin?: string; readonly attemptId?: string; readonly error?: string }> {
+    const completion = await this.feishuOAuth.complete(input);
+    if (completion.pending === undefined || completion.token === undefined) return { origin: completion.pending?.origin, attemptId: completion.pending?.attemptId, error: completion.error ?? "授权未完成。" };
+    const preset = localConnectorCatalog(this.input.appRoot).find((item) => item.key === "feishu");
+    if (preset === undefined) throw new Error("feishu_connector_preset_missing");
+    const previous = (await this.connectorConfigurations.list(completion.pending.runtimeId)).find((connector) => connector.connectorKey === preset.template.connectorKey);
+    await this.connectorConfigurations.upsert(completion.pending.runtimeId, {
+      ...preset.template,
+      ...(previous === undefined ? {} : { id: previous.id }),
+      enabled: true,
+      credentials: {
+        provider: "feishu",
+        accessToken: completion.token.accessToken,
+        refreshToken: completion.token.refreshToken,
+        expiresAt: completion.token.expiresAt,
+        ...(completion.token.refreshExpiresAt === undefined ? {} : { refreshExpiresAt: completion.token.refreshExpiresAt }),
+      },
+    });
+    return { origin: completion.pending.origin, attemptId: completion.pending.attemptId };
   }
 
   async localModelConfiguration(): Promise<unknown> {
@@ -413,7 +494,7 @@ export class LocalAgentService {
     await this.supervisor.runtime(runtimeId).runs.deleteConversation(session.ownerUserId, conversationId);
   }
 
-  async startStrictLocalRun(session: LocalSession, value: { runtimeId: string; conversationId: string; clientMessageId: string; input: string; localDirectoryScopeIds: readonly string[]; localUploadedSourceIds: readonly string[]; allowDangerousTools: boolean; requestedModelKey?: string }): Promise<unknown> {
+  async startStrictLocalRun(session: LocalSession, value: { runtimeId: string; conversationId: string; clientMessageId: string; input: string; localDirectoryScopeIds: readonly string[]; localUploadedSourceIds: readonly string[]; connectorConnectionIds?: readonly string[]; allowDangerousTools: boolean; requestedModelKey?: string }): Promise<unknown> {
     if (typeof value.requestedModelKey !== "string" || value.requestedModelKey.trim().length === 0) {
       throw new LocalAgentApplicationError(400, "model_required");
     }
@@ -429,6 +510,7 @@ export class LocalAgentService {
       await runtime.runs.ensureConversation(session.ownerUserId, value.conversationId, value.input);
       const run = await runtime.runs.startConversation(session.ownerUserId, value.input, {
         conversationId: value.conversationId, visibleDirectories, sourceIds: value.localUploadedSourceIds,
+        connectorConnectionIds: value.connectorConnectionIds ?? runtime.connectorConnectionIds,
         allowDangerousTools: value.allowDangerousTools, ...(value.requestedModelKey === undefined ? {} : { modelKey: value.requestedModelKey }),
       });
       await runtime.database.prepare("INSERT INTO local_runtime_dispatches(dispatch_key, assignment_id, owner_user_id, remote_run_id, created_at) VALUES (?, ?, ?, ?, ?)")

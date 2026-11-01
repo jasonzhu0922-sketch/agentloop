@@ -266,6 +266,8 @@ export interface ConversationTurnResolution {
   readonly memoryAction: "none" | "commit";
   /** Model proposals only; the Local Memory plugin validates and commits them. */
   readonly memoryIntents: readonly MemoryIntentCandidate[];
+  /** Derived time bounds are not explicit user constraints. */
+  readonly temporalScope?: import("../runtime/runtime-clock.ts").ResolvedTemporalScope;
   /** Explicit execution requirements, independent of catalog availability. */
   readonly requiredCapabilityReferences?: readonly RequiredCapabilityReference[];
   readonly source: "model" | "model_guarded";

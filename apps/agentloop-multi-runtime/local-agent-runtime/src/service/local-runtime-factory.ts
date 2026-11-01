@@ -3,11 +3,13 @@ import { dirname, join, relative, resolve } from "node:path";
 import { AppDatabase, AppError, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools, loadMcpToolsFromConfig, type ModelAdapter, type ModelInvocation, type ModelResponse, type ModelRetryReporter, type ModelStreamSink } from "@zhujun/agentloop";
 import { createLocalMemoryPlugin, MemorySettlementWorker, type MemorySettlementModel } from "@zhujun/agentloop-memory";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
+import { ConnectorRegistry, ConnectorRuntimeService, environmentConnectorRuntime, loadConnectorModules } from "../../../src/connectors/index.ts";
 import { loadPracticeProfileConfig, loadStepExecutionStrategyProfileConfig, webToolsOptionsFromEnvironment } from "../../../src/shared/config.ts";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
 import { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.ts";
 import type { ResolvedLocalRuntimeConfiguration } from "../persistence/local-runtime-configuration-store.ts";
 import type { LocalModelConfigurationStore } from "../persistence/local-model-configuration-store.ts";
+import type { LocalConnectorConfigurationStore } from "../persistence/local-connector-configuration-store.ts";
 import { LocalModelStreamCaptureStore } from "../persistence/model-stream-capture-store.ts";
 import { LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
 import { LocalAgentStateStore } from "../persistence/local-agent-state-store.ts";
@@ -113,10 +115,12 @@ function localSettlementModel(
 export class LocalRuntimeFactory {
   private readonly input: LocalAgentOptions;
   private readonly modelConfigurations?: LocalModelConfigurationStore;
+  private readonly connectorConfigurations?: LocalConnectorConfigurationStore;
 
-  constructor(input: LocalAgentOptions, modelConfigurations?: LocalModelConfigurationStore) {
+  constructor(input: LocalAgentOptions, modelConfigurations?: LocalModelConfigurationStore, connectorConfigurations?: LocalConnectorConfigurationStore) {
     this.input = input;
     this.modelConfigurations = modelConfigurations;
+    this.connectorConfigurations = connectorConfigurations;
   }
 
   async create(
@@ -225,6 +229,20 @@ export class LocalRuntimeFactory {
     await skills.syncSkillDirectories();
     const strategy = await loadStepExecutionStrategyProfileConfig(this.input.stepExecutionStrategyConfigPath);
     const practiceProfiles = await loadPracticeProfileConfig(this.input.practiceProfileConfigPath ?? join(this.input.appRoot, "config", "practice-profiles.json"));
+    const connectorConfiguration = this.connectorConfigurations === undefined
+      ? undefined
+      : await this.connectorConfigurations.resolve(definition.id);
+    const connectorRegistry = new ConnectorRegistry();
+    for (const connectorModule of await loadConnectorModules({
+      baseDirectory: this.input.appRoot,
+      registrations: connectorConfiguration?.modules,
+    })) {
+      connectorRegistry.register(connectorModule);
+    }
+    const connectorRuntimeService = new ConnectorRuntimeService(
+      connectorRegistry,
+      connectorConfiguration?.runtime ?? environmentConnectorRuntime(undefined, integrationEnvironment),
+    );
     const mcpIntegration = await loadMcpToolsFromConfig(
       { servers: configuration.mcpServers },
       { environment: integrationEnvironment },
@@ -251,6 +269,7 @@ export class LocalRuntimeFactory {
       ownerScopedWorkspace: true,
       stepExecutionStrategy: createStepExecutionStrategyProfile(strategy.profile, strategy.projection),
       practiceProfileCatalog: practiceProfiles,
+      runToolProvider: connectorRuntimeService,
       tools: [
         ...(integrationEnvironment.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptionsFromEnvironment(integrationEnvironment))),
         ...mcpIntegration.tools,
@@ -299,6 +318,7 @@ export class LocalRuntimeFactory {
     return { ...definition, database, scopes, runs,
       ...(memory === undefined || memoryTenantId === undefined ? {} : { memory: { store: memory.store, tenantId: memoryTenantId } }),
       close: async () => { if (settlementTimer !== undefined) clearInterval(settlementTimer); await memory?.close?.(); await memoryDatabase?.close(); unregisterLocalRuntimeDatabase(definition.id, database); },
+      connectorConnectionIds: connectorConfiguration?.connections.filter((connection) => connection.status === "active").map((connection) => connection.id) ?? [],
       get modelKeys() { return currentModels().provider?.modelKeys().map((key) => `local:${key}`) ?? []; }, activeRunIds };
   }
 

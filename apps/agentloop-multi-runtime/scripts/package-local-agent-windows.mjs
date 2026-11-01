@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { PACKAGED_LOCAL_AGENT_PORT } from "../src/shared/local-agent-endpoint.mjs";
 import { windowsMsiPayload } from "./windows-msi-payload.mjs";
-import { copyPackagedAgentRuntimeSupportFiles, copyPackagedNodeModules, PACKAGED_NODE_MAJOR, preparePackagedPythonRuntime } from "./package-local-agent-runtime.mjs";
+import { bundleBuiltInConnectorModules, copyPackagedAgentRuntimeSupportFiles, copyPackagedNodeModules, PACKAGED_NODE_MAJOR, preparePackagedPythonRuntime } from "./package-local-agent-runtime.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(appRoot, "../..");
@@ -108,6 +108,7 @@ async function copyRuntimePayload() {
   await cp(join(appRoot, "distribution/rotating-log-launcher.mjs"), join(resources, "rotating-log-launcher.mjs"));
   await cp(join(repositoryRoot, "packages/agentloop-skills/skills"), join(resources, "skills"), { recursive: true });
   await copyPackagedAgentRuntimeSupportFiles({ appRoot, destinationRoot: resources });
+  await bundleBuiltInConnectorModules({ repositoryRoot, destinationRoot: join(resources, "connectors") });
   const runtimeNode = join(resources, "agentloop-local-runtime-node.exe");
   if (!existsSync(runtimeNode)) await cp(process.execPath, runtimeNode);
   await cp(runtimeNode, join(resources, "node.exe"));

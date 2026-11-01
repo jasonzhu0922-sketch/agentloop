@@ -28,7 +28,7 @@ test("an omitted Memory decision is repaired before an unseen preference is comm
       assessorFactory: approvingTestAssessor,
       modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
         if (request.runId.startsWith("conversation-turn:")) {
-          const latest = request.messages.at(-1)?.content;
+          const latest = request.messages.findLast((message) => message.role === "user")?.content;
           const establishing = latest === input;
           const queryingName = latest === nameQuery;
           const renaming = latest === rename;

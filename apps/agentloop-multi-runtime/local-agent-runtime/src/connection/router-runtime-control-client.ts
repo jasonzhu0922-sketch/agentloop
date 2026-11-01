@@ -241,6 +241,7 @@ export class RuntimeConnectionClient {
       conversationId: envelope.conversationId,
       visibleDirectories,
       sourceIds: envelope.localUploadedSourceIds ?? [],
+      connectorConnectionIds: envelope.connectorConnectionIds ?? runtime.connectorConnectionIds,
       allowDangerousTools: envelope.allowDangerousTools,
       ...(envelope.requestedModelKey === undefined ? {} : { modelKey: envelope.requestedModelKey }),
     });

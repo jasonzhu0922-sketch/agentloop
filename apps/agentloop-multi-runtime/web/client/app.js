@@ -1,5 +1,6 @@
 import { createLocalModelSettings } from "./local-runtime/local-model-settings.js";
 import { createLocalMemorySettings } from "./local-runtime/local-memory-settings.js";
+import { createLocalConnectorSettings } from "./local-runtime/local-connector-settings.js";
 import { clearToast, showToast } from "./ui/toast.js";
 import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "./projections/assistant-event-projection.js";
 import { conversationMessagesFromTurns } from "./projections/conversation-history.js";
@@ -1129,7 +1130,9 @@ function defaultUploadStoragePath(sharedStoragePath) {
 
 async function openLocalAgentSettings() {
   if (!sessionState.localSessionToken) return;
-  await Promise.all([loadLocalAgentConfig(), loadLocalRuntimes(), loadLocalModelConfiguration(), loadLocalMemoryConfiguration(), loadLocalSkillPackages(true)]);
+  await loadLocalAgentConfig();
+  await loadLocalRuntimes();
+  await Promise.all([loadLocalModelConfiguration(), loadLocalMemoryConfiguration(), loadLocalConnectorConfiguration(), loadLocalSkillPackages(true)]);
   renderLocalAgentConfig();
   syncLocalRuntimeManager();
   activateAgentSettingsView("models");
@@ -1138,13 +1141,15 @@ async function openLocalAgentSettings() {
 
 const localMemorySettings = createLocalMemorySettings({ getElement: $, request: localAgentFetch, notify: showToast });
 const localModelSettings = createLocalModelSettings({ getElement: $, request: localAgentFetch, onSaved: async () => { await loadModels(); await localMemorySettings.refreshModels(); }, notify: showToast });
+const localConnectorSettings = createLocalConnectorSettings({ getElement: $, request: localAgentFetch, getRuntimeId: () => localRuntimeState.runtimeId, notify: showToast });
 let activeAgentSettingsView = "models";
 
 async function loadLocalModelConfiguration() { await localModelSettings.load(); }
 async function loadLocalMemoryConfiguration() { await localMemorySettings.load(); }
+async function loadLocalConnectorConfiguration() { await localConnectorSettings.load(); }
 
 function activateAgentSettingsView(view) {
-  if (view !== "models" && view !== "skills" && view !== "general" && view !== "runtimes") view = "models";
+  if (view !== "models" && view !== "skills" && view !== "connectors" && view !== "general" && view !== "runtimes") view = "models";
   activeAgentSettingsView = view;
   const paired = localRuntimeState.agentStatus === "online"
     && Boolean(localRuntimeState.device && sessionState.localSessionToken);
@@ -1155,12 +1160,13 @@ function syncAgentSettingsView(paired) {
   document.querySelectorAll("[data-agent-settings-view]").forEach((button) => button.classList.toggle("active", button.dataset.agentSettingsView === activeAgentSettingsView));
   $("agent-model-settings").hidden = activeAgentSettingsView !== "models";
   $("agent-skill-settings").hidden = activeAgentSettingsView !== "skills";
+  $("agent-connector-settings").hidden = activeAgentSettingsView !== "connectors" || !paired;
   $("agent-general-settings").hidden = activeAgentSettingsView !== "general";
   $("local-runtime-manager").hidden = activeAgentSettingsView !== "runtimes" || !paired;
 }
 
 function closeLocalAgentSettings() {
-  if (!$("agent-settings-modal").hidden && localModelSettings.canClose() && localMemorySettings.canClose()) {
+  if (!$("agent-settings-modal").hidden && localModelSettings.canClose() && localMemorySettings.canClose() && localConnectorSettings.canClose()) {
     $("agent-settings-modal").hidden = true;
     clearToast();
   }

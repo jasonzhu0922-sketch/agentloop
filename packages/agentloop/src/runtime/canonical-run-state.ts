@@ -4,6 +4,7 @@ import type { ConversationTurnResolution, ExecutionPlan, FailedBoundary, SkillCo
 import type { StructuredTaskUnderstanding } from "./task-intent.ts";
 import type { WorkProductSemantics } from "./work-product-semantics.ts";
 import type { RuntimeDeliveryClaim } from "./contracts.ts";
+import type { RuntimeClock } from "./runtime-clock.ts";
 
 export type CanonicalRunPhase =
   | "understood"
@@ -92,6 +93,7 @@ export interface CanonicalRunState {
     readonly id: string;
     readonly revision: 1;
     readonly userInput: string;
+    readonly runtimeClock?: RuntimeClock;
     readonly turnResolution?: ConversationTurnResolution;
     readonly understanding: StructuredTaskUnderstanding;
     /** Exact ToolSource identities explicitly required by the user for this Run. */
@@ -117,6 +119,7 @@ export interface CanonicalRunState {
 export function createCanonicalRunState(input: {
   readonly runId: string;
   readonly userInput: string;
+  readonly runtimeClock?: RuntimeClock;
   readonly turnResolution?: ConversationTurnResolution;
   readonly understanding: StructuredTaskUnderstanding;
   readonly requiredToolSourceIds?: readonly string[];
@@ -158,6 +161,7 @@ export function createCanonicalRunState(input: {
       id: randomUUID(),
       revision: 1 as const,
       userInput: input.userInput,
+      ...(input.runtimeClock === undefined ? {} : { runtimeClock: input.runtimeClock }),
       ...(input.turnResolution === undefined ? {} : { turnResolution: input.turnResolution }),
       understanding: input.understanding,
       requiredToolSourceIds: Object.freeze([...new Set((input.requiredToolSourceIds ?? []).map((id) => id.trim()).filter(Boolean))]),

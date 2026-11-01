@@ -21,9 +21,21 @@ export class EncryptedLocalRuntimeSecretStore implements LocalRuntimeSecretStore
   private readonly root: string;
 
   async write(values: Readonly<Record<string, string>>): Promise<string> {
+    const id = `local_secret_${randomUUID()}`;
+    await this.writeAt(id, values, true);
+    return id;
+  }
+
+  /** Rotate a secret in place so credential references remain stable. */
+  async replace(secretStorageKey: string, values: Readonly<Record<string, string>>): Promise<void> {
+    await this.writeAt(secretStorageKey, values, false);
+  }
+
+  private async writeAt(secretStorageKey: string, values: Readonly<Record<string, string>>, exclusive: boolean): Promise<void> {
     const normalized = validateSecretValues(values);
     const key = await this.encryptionKey();
-    const id = `local_secret_${randomUUID()}`;
+    const id = secretStorageKey;
+    if (!/^local_secret_[0-9a-f-]{36}$/.test(id)) throw new Error("local_runtime_secret_key_invalid");
     const iv = randomBytes(12);
     const cipher = createCipheriv("aes-256-gcm", key, iv);
     const ciphertext = Buffer.concat([cipher.update(JSON.stringify(normalized), "utf8"), cipher.final()]);
@@ -36,9 +48,12 @@ export class EncryptedLocalRuntimeSecretStore implements LocalRuntimeSecretStore
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     const temporary = join(this.root, `.${id}.${randomUUID()}.tmp`);
     const target = this.path(id);
+    if (!exclusive) await readFile(target).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") throw new Error("local_runtime_secret_not_found");
+      throw error;
+    });
     await writeFile(temporary, JSON.stringify(document), { encoding: "utf8", mode: 0o600, flag: "wx" });
     await rename(temporary, target);
-    return id;
   }
 
   async read(secretStorageKey: string): Promise<Readonly<Record<string, string>> | undefined> {
