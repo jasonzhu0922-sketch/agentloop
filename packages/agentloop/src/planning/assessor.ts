@@ -179,6 +179,7 @@ export class ModelStepAssessor implements StepAssessor {
           baseInstructions: [
             "You are the Assessor for a Plan-first Runtime.",
             "Assess only the supplied candidate and canonical evidence.",
+            "This is an internal structured adjudication, not a user-facing reply. Do not emit prose outside submit_assessment, and do not repeat or paraphrase the candidate. Keep tool-call rationales limited to the decisive criterion, evidence, and any gap.",
             "Return exactly one submit_assessment tool call. Do not execute, rewrite, or continue dangling tool invocations found in evidence.",
           ],
           contractLines: [
@@ -213,6 +214,7 @@ export class ModelStepAssessor implements StepAssessor {
           emit,
           signal,
           base: { phase: "assessment", stepId: input.step.id, attempt },
+          responseVisibility: "internal",
         });
       await emit?.({
         type: "assessment.turn.completed",

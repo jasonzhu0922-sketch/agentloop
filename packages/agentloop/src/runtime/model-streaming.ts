@@ -32,6 +32,12 @@ export interface ModelStreamingOptions {
   readonly signal?: AbortSignal;
   /** Extra fields carried on each `assistant.streaming` event (e.g. phase). */
   readonly base: Readonly<Record<string, unknown>>;
+  /**
+   * `internal` turns still publish request lifecycle telemetry, but their
+   * provider text, reasoning, and tool-call argument deltas must not become a
+   * user-facing assistant draft.
+   */
+  readonly responseVisibility?: "public" | "internal";
   /** Keep provider reasoning internal for phases such as planning. */
   readonly suppressReasoningContent?: boolean;
   /** Invoked when one tool call's arguments are confirmed complete. */
@@ -103,21 +109,24 @@ export async function completeWithRequestTelemetry(options: ModelRequestTelemetr
  */
 export async function completeWithStreaming(options: ModelStreamingOptions): Promise<ModelResponse> {
   const { model, invocation, emit, signal, base, onToolCallReady } = options;
+  const internalResponse = options.responseVisibility === "internal";
+  const visibility = internalResponse ? { responseVisibility: "internal" } : {};
   // Planner responses never retain reasoning. The global visibility setting
   // instead hides only events: DeepSeek still needs the opaque state in the
   // internal response/transcript for the next Chat Completions turn.
-  const suppressResponseReasoning = options.suppressReasoningContent === true || invocation.plannerRequest === true;
+  const suppressResponseReasoning = internalResponse || options.suppressReasoningContent === true || invocation.plannerRequest === true;
   const suppressReasoningEvents = suppressResponseReasoning || model.reasoningVisibility === "hidden";
   const stream = model.streamComplete !== undefined;
   const request = model.requestLogContext?.(invocation, stream) ?? fallbackRequestLogContext(invocation, stream);
   const startedAt = Date.now();
   let firstEventAt: number | undefined;
-  await emit({ type: "model.request.started", data: { ...base, request } });
+  await emit({ type: "model.request.started", data: { ...base, ...visibility, request } });
   const completed = async (response: ModelResponse): Promise<ModelResponse> => {
     await emit({
       type: "model.request.completed",
       data: {
         ...base,
+        ...visibility,
         request,
         durationMs: Date.now() - startedAt,
         ...(firstEventAt === undefined ? {} : { timeToFirstEventMs: firstEventAt - startedAt }),
@@ -138,6 +147,7 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
       type: "model.request.failed",
       data: {
         ...base,
+        ...visibility,
         request,
         durationMs: Date.now() - startedAt,
         ...(firstEventAt === undefined ? {} : { timeToFirstEventMs: firstEventAt - startedAt }),
@@ -173,6 +183,7 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
       }));
 
   const flush = async (force: boolean): Promise<void> => {
+    if (internalResponse) return;
     const now = Date.now();
     if (!force && now - lastFlush < STREAM_FLUSH_INTERVAL_MS) return;
     if (partialContent.length === 0 && partialReasoningContent.length === 0 && partialToolCalls.size === 0) return;
@@ -196,6 +207,7 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
           type: "model.stream.first_event",
           data: {
             ...base,
+            ...visibility,
             request,
             elapsedMs: firstEventAt - startedAt,
             eventType: event.type,
