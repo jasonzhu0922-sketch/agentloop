@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { RunService } from "../src/runtime/run-service.ts";
+import { createRuntimeCapabilitySnapshotFromSources } from "../src/runtime/capability-snapshot.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { AppError } from "../src/shared/errors.ts";
@@ -14,7 +15,7 @@ function fixtureTool(name: string, transport: string): RuntimeTool {
   return {
     name, description: "Find items in the authorized archive.",
     source: {
-      id: `${transport}.unseen-service`, transport, aliases: ["unseen-service"],
+      id: `${transport}.unseen-service`, displayName: `${transport} archive service`, transport, aliases: ["unseen-service"],
       capabilities: [{ id: "custom_archive.find", category: "read", label: "Find archive items" }],
     },
     inputSchema: { type: "object", properties: { privateInputField: { type: "string" } } },
@@ -151,5 +152,197 @@ test("intent catalog honors empty connection selection and dangerous-tool restri
     const run = await runs.executeConversation("owner", "Hello", { allowDangerousTools: false, connectorConnectionIds: [] });
     assert.equal(run.status, "completed");
     assert.equal(discoveries, 0);
+  } finally { database.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a current authorized-capability reply receives a frozen redacted inventory without gaining tool authority", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-capability-reply-"));
+  const database = new AppDatabase(":memory:");
+  const connector = fixtureTool("archive_find", "connector");
+  const mcp = fixtureTool("archive_lookup", "mcp");
+  const goal = "我当前已授权的服务能做什么？";
+  try {
+    const runs = new RunService({
+      database, skills: new SkillService(database), workspaceRoot: root, tools: [mcp],
+      assessorFactory: () => approvingTestAssessor(),
+      runToolProvider: { resolve: async () => [connector] },
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        if (request.runId.startsWith("conversation-turn:")) return resolution("reply", goal);
+        assert.deepEqual(request.tools, [], "an informational capability reply remains tool-free");
+        const content = request.runtimeContext!.content;
+        assert.match(content, /agentloop\.runtimeCapabilitySnapshot\/v1/);
+        assert.match(content, /connector archive service/);
+        assert.match(content, /mcp archive service/);
+        assert.equal(content.includes("privateInputField"), false, "schemas must not enter the reply context");
+        assert.equal(content.includes("chosen-connection"), false, "connection identifiers must not enter the reply context");
+        return { content: "已授权的服务可以检索归档内容。", finishReason: "stop" as const, toolCalls: [] };
+      } }),
+    });
+    const run = await runs.executeConversation("owner", goal, { connectorConnectionIds: ["chosen-connection"] });
+    assert.equal(run.status, "completed", run.output);
+    const events = await runs.events("owner", run.id);
+    const snapshotEvent = events.find((event) => event.type === "runtime.capability_snapshot.created");
+    assert.ok(snapshotEvent, "the selected capability inventory is auditable");
+    const snapshot = snapshotEvent.data.snapshot as { schema: string; scope: string; capturedAt: number; sources: Array<{ state: string; label: string }> };
+    assert.equal(snapshot.schema, "agentloop.runtimeCapabilitySnapshot/v1");
+    assert.equal(snapshot.scope, "run_authorized");
+    assert.equal(typeof snapshot.capturedAt, "number");
+    assert.deepEqual(snapshot.sources.map((source) => source.state), ["selected_for_run", "selected_for_run"]);
+    assert.equal(JSON.stringify(snapshot).includes("chosen-connection"), false);
+    assert.equal(events.some((event) => event.type === "tool.dispatched"), false);
+  } finally { database.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("an empty selected capability inventory is a truthful tool-free reply context", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-empty-capability-reply-"));
+  const database = new AppDatabase(":memory:");
+  const goal = "What can my currently authorized services do?";
+  try {
+    const runs = new RunService({
+      database, skills: new SkillService(database), workspaceRoot: root,
+      assessorFactory: () => approvingTestAssessor(),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        if (request.runId.startsWith("conversation-turn:")) return resolution("reply", goal);
+        assert.deepEqual(request.tools, []);
+        assert.match(request.runtimeContext!.content, /"sources":\[\]/);
+        return { content: "No selected authorized service is available for this Run.", finishReason: "stop" as const, toolCalls: [] };
+      } }),
+    });
+    const run = await runs.executeConversation("owner", goal, { connectorConnectionIds: [] });
+    assert.equal(run.status, "completed", run.output);
+    const events = await runs.events("owner", run.id);
+    assert.equal(events.some((event) => event.type === "tool.dispatched"), false);
+  } finally { database.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("assessment receives the same frozen capability inventory as a capability reply", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-capability-assessment-"));
+  const database = new AppDatabase(":memory:");
+  const tool = fixtureTool("archive_find", "connector");
+  const goal = "What can my currently authorized services do?";
+  try {
+    const runs = new RunService({
+      database, skills: new SkillService(database), workspaceRoot: root,
+      runToolProvider: { resolve: async () => [tool] },
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        if (request.runId.startsWith("conversation-turn:")) return resolution("reply", goal);
+        if (request.phase === "assessment") {
+          const match = request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n<\/assessment_context>/);
+          assert.ok(match, "assessment must receive server-authored context");
+          const context = JSON.parse(match[1]!);
+          assert.equal(context.runtimeCapabilitySnapshot.schema, "agentloop.runtimeCapabilitySnapshot/v1");
+          assert.equal(context.runtimeCapabilitySnapshot.sources[0].state, "selected_for_run");
+          assert.match(context.evidence.candidateOutput, /authorized archive/);
+          assert.match(request.systemPrompt, /frozen server-authored fact/);
+          return { content: "", finishReason: "tool_calls" as const, toolCalls: [{
+            id: "assessment", name: "submit_assessment", arguments: {
+              criteria: context.step.successCriteria.map((criterion: { id: string }) => ({
+                criterionId: criterion.id, satisfied: true,
+                rationale: "The candidate accurately summarizes the frozen selected-service capability inventory.",
+                evidenceRefs: ["candidateOutput", "runtimeCapabilitySnapshot"],
+                contractCheck: { status: "valid", rationale: "A direct answer to the requested inventory is required." },
+              })),
+              skills: [], feedback: "", failedBoundary: null,
+            },
+          }] };
+        }
+        assert.deepEqual(request.tools, []);
+        return { content: "The authorized archive service can find archive items.", finishReason: "stop" as const, toolCalls: [] };
+      } }),
+    });
+    const run = await runs.executeConversation("owner", goal, { connectorConnectionIds: ["chosen-connection"] });
+    assert.equal(run.status, "completed", run.output);
+    const events = await runs.events("owner", run.id);
+    assert.equal(events.find((event) => event.type === "skill.compliance.assessed")?.data.approved, true);
+    assert.equal(events.some((event) => event.type === "tool.dispatched"), false);
+  } finally { database.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a system-wide MCP inventory uses configured scope, not the selected-Run inventory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-configured-capability-reply-"));
+  const database = new AppDatabase(":memory:");
+  const selected = fixtureTool("selected_archive_find", "connector");
+  const goal = "系统当前已接入的 MCP 工具有什么能力？";
+  const configured = createRuntimeCapabilitySnapshotFromSources({
+    scope: "runtime_configured",
+    capturedAt: 1,
+    sources: [{
+      label: "Route guidance service",
+      transport: "mcp",
+      state: "loaded_for_runtime",
+      capabilities: [{ id: "route.plan", category: "navigation", label: "Plan a route" }],
+      operations: [{ label: "plan_route", description: "Plan a route at https://internal.example/route with secret=route-secret-value without invoking it." }],
+      identityValues: ["private-route-key", "route-secret-alias"],
+    }],
+  });
+  try {
+    const runs = new RunService({
+      database, skills: new SkillService(database), workspaceRoot: root,
+      runToolProvider: { resolve: async () => [selected] },
+      runtimeCapabilitySnapshotProvider: () => [configured],
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        if (request.runId.startsWith("conversation-turn:")) {
+          const context = contextPayload(request.runtimeContext!.content);
+          assert.deepEqual(context.runtimeCapabilityInventories.map((item: { scope: string }) => item.scope), ["run_authorized", "runtime_configured"]);
+          return resolution("reply", goal);
+        }
+        if (request.phase === "assessment") {
+          const match = request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n<\/assessment_context>/);
+          assert.ok(match);
+          const context = JSON.parse(match[1]!);
+          assert.equal(context.runtimeCapabilitySnapshot.scope, "runtime_configured");
+          assert.equal(context.runtimeCapabilityInventory.availability, "available");
+          return { content: "", finishReason: "tool_calls" as const, toolCalls: [{
+            id: "assessment", name: "submit_assessment", arguments: {
+              criteria: context.step.successCriteria.map((criterion: { id: string }) => ({
+                criterionId: criterion.id, satisfied: true, rationale: "The reply describes the frozen configured-service inventory.",
+                evidenceRefs: ["candidateOutput", "runtimeCapabilitySnapshot"],
+                contractCheck: { status: "valid", rationale: "The user requested this inventory." },
+              })), skills: [], feedback: "", failedBoundary: null,
+            },
+          }] };
+        }
+        assert.deepEqual(request.tools, [], "configured metadata never grants reply-time tool authority");
+        const content = request.runtimeContext!.content;
+        assert.match(content, /Route guidance service/);
+        assert.match(content, /runtime_configured/);
+        assert.equal(content.includes("connector archive service"), false, "only the requested scope enters the reply context");
+        assert.equal(content.includes("private-route-key"), false, "configuration identity is redacted");
+        assert.equal(content.includes("https://internal.example/route"), false, "endpoints are redacted");
+        assert.equal(content.includes("route-secret-value"), false, "credential-like values are redacted");
+        return { content: "已配置并加载的 Route guidance service 可规划路线。", finishReason: "stop" as const, toolCalls: [] };
+      } }),
+    });
+    const run = await runs.executeConversation("owner", goal, { connectorConnectionIds: ["chosen-connection"] });
+    assert.equal(run.status, "completed", run.output);
+    const events = await runs.events("owner", run.id);
+    const snapshots = events.filter((event) => event.type === "runtime.capability_snapshot.created")
+      .map((event) => (event.data.snapshot as { scope: string }).scope);
+    assert.deepEqual(snapshots, ["run_authorized", "runtime_configured"]);
+    assert.equal(events.some((event) => event.type === "tool.dispatched"), false);
+  } finally { database.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("missing configured metadata cannot turn a selected-Run inventory into a system absence claim", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-missing-configured-capability-"));
+  const database = new AppDatabase(":memory:");
+  const goal = "列出所有已配置的 MCP 工具能力";
+  try {
+    const runs = new RunService({
+      database, skills: new SkillService(database), workspaceRoot: root,
+      assessorFactory: () => approvingTestAssessor(),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        if (request.runId.startsWith("conversation-turn:")) {
+          const context = contextPayload(request.runtimeContext!.content);
+          assert.deepEqual(context.runtimeCapabilityInventories.map((item: { scope: string }) => item.scope), ["run_authorized"]);
+          return resolution("reply", goal);
+        }
+        assert.deepEqual(request.tools, []);
+        assert.match(request.runtimeContext!.content, /"availability":"not_provided"/);
+        return { content: "此运行时没有提供“已配置 MCP 目录”的元数据，因此不能据本次运行的授权清单判断系统是否配置了服务。", finishReason: "stop" as const, toolCalls: [] };
+      } }),
+    });
+    const run = await runs.executeConversation("owner", goal);
+    assert.equal(run.status, "completed", run.output);
   } finally { database.close(); await rm(root, { recursive: true, force: true }); }
 });

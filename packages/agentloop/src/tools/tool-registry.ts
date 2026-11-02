@@ -36,6 +36,12 @@ export interface ToolSourceCapability {
  */
 export interface ToolSourceDescriptor {
   readonly id: string;
+  /**
+   * Host-approved label that may be shown in a capability inventory.  Unlike
+   * `id` and `aliases`, this must never contain a connection identifier,
+   * credential reference, endpoint, or configuration value.
+   */
+  readonly displayName?: string;
   /** Exact tool name advertised by this source, before Runtime namespacing. */
   readonly toolName?: string;
   readonly aliases?: readonly string[];

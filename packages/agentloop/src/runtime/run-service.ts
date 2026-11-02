@@ -77,6 +77,12 @@ import { createCapabilityGrant } from "./capability-grant.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatPracticePromptAugmentation, type ArtifactKind, type DynamicPromptProfile, type TaskProfile } from "./dynamic-prompt.ts";
 import { resolvePracticeProfileResolution, type PracticeProfileCatalog, type PracticeProfileResolution } from "./practice-profiles.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "./execution-context-policy.ts";
+import {
+  createRuntimeCapabilitySnapshot,
+  freezeRuntimeCapabilitySnapshot,
+  requestedRuntimeCapabilityScope,
+  type RuntimeCapabilitySnapshot,
+} from "./capability-snapshot.ts";
 import { deriveStepSemanticFrame } from "./step-semantic-frame.ts";
 import { observeSourceFamiliesFromToolEvidence } from "./source-family-observation.ts";
 import type { StepExecutionStrategy } from "./step-execution-strategy.ts";
@@ -191,6 +197,10 @@ export interface RunToolProvider {
     readonly connectionIds: readonly string[];
   }): Promise<readonly RuntimeTool<unknown>[]>;
 }
+/** Host-owned, safe capability knowledge. It is metadata, never a Tool grant. */
+export type RuntimeCapabilitySnapshotProvider = () =>
+  | readonly RuntimeCapabilitySnapshot[]
+  | Promise<readonly RuntimeCapabilitySnapshot[]>;
 export type PlannerFactory = (model: ModelAdapter) => Planner;
 export type AssessorFactory = (model: ModelAdapter) => StepAssessor;
 export type RecoveryPlannerFactory = (model: ModelAdapter) => RecoveryPlanner;
@@ -383,6 +393,7 @@ export class RunService {
   private readonly coreTools: readonly RuntimeTool<unknown>[];
   /** Resolves Run-scoped Connector tools without exposing Connector persistence to the kernel. */
   private readonly runToolProvider?: RunToolProvider;
+  private readonly runtimeCapabilitySnapshotProvider?: RuntimeCapabilitySnapshotProvider;
   private readonly timeZone?: string;
   private readonly clock: () => number;
   private readonly connectorConnectionIdsByRunId = new Map<string, readonly string[]>();
@@ -439,6 +450,8 @@ export class RunService {
     tools?: readonly RuntimeTool<unknown>[];
     /** Optional Run-scoped Connector tool resolver supplied by the host application. */
     runToolProvider?: RunToolProvider;
+    /** Optional host-owned configured/catalog capability metadata; this does not grant Tool execution. */
+    runtimeCapabilitySnapshotProvider?: RuntimeCapabilitySnapshotProvider;
     /** Local runtimes default to the device's IANA zone; cloud hosts may configure the user's zone. */
     timeZone?: string;
     clock?: () => number;
@@ -462,6 +475,7 @@ export class RunService {
     this.skills = options.skills;
     this.modelFactory = options.modelFactory;
     this.runToolProvider = options.runToolProvider;
+    this.runtimeCapabilitySnapshotProvider = options.runtimeCapabilitySnapshotProvider;
     this.timeZone = options.timeZone;
     this.clock = options.clock ?? Date.now;
     this.plannerFactory = options.plannerFactory ?? ((model) => new ModelPlanner(model, {
@@ -1784,6 +1798,20 @@ export class RunService {
       const intentToolNames = new Set(intentTools.filter((tool) =>
         executeOptions.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(tool.name)
       ).map((tool) => tool.name));
+      // Capture source metadata before intent resolution. These are immutable
+      // knowledge documents, not executable catalogs or grants.
+      const runCapabilitySnapshot = createRuntimeCapabilitySnapshot(
+        intentTools.filter((tool) => intentToolNames.has(tool.name)),
+        Date.parse(runtimeClock.anchorDateTimeIso),
+      );
+      const hostCapabilitySnapshots = this.runtimeCapabilitySnapshotProvider === undefined
+        ? []
+        : (await this.runtimeCapabilitySnapshotProvider()).map((snapshot) =>
+          freezeRuntimeCapabilitySnapshot(snapshot, Date.parse(runtimeClock.anchorDateTimeIso)));
+      const runtimeCapabilitySnapshots = [runCapabilitySnapshot, ...hostCapabilitySnapshots];
+      for (const snapshot of runtimeCapabilitySnapshots) {
+        await emit({ type: "runtime.capability_snapshot.created", data: { snapshot } });
+      }
       const turnResolution = !conversationEntry
         ? undefined
         : await resolveConversationTurn(
@@ -1798,11 +1826,21 @@ export class RunService {
               availableSkills: privateSkills,
               ...(priorPreferences === undefined ? {} : { priorPreferences }),
               availableTools: toolSummaries(intentTools, intentToolNames),
+              runtimeCapabilitySnapshots,
               runtimeClock,
             },
             runController.signal,
           );
       const responseOnly = turnResolution !== undefined && turnResolution.mode !== "execute";
+      const requestedCapabilityScope = requestedRuntimeCapabilityScope(input);
+      const runtimeCapabilitySnapshot = requestedCapabilityScope === undefined
+        ? undefined
+        : runtimeCapabilitySnapshots.find((snapshot) => snapshot.scope === requestedCapabilityScope);
+      const runtimeCapabilityInventory = requestedCapabilityScope === undefined ? undefined : {
+        requestedScope: requestedCapabilityScope,
+        availability: runtimeCapabilitySnapshot === undefined ? "not_provided" as const : "available" as const,
+      };
+      const replyNeedsCapabilityInventory = turnResolution?.mode === "reply" && runtimeCapabilityInventory !== undefined;
       model.setTemporalScope(turnResolution?.temporalScope);
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       if (conversationEntry) {
@@ -2301,6 +2339,10 @@ export class RunService {
           ? {}
           : { confirmedResponseMemory: responseMemoryProjection }),
         ...(currentTurnMemoryCommit === undefined ? {} : { currentTurnMemoryCommit }),
+        ...(replyNeedsCapabilityInventory ? {
+          ...(runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot }),
+          runtimeCapabilityInventory,
+        } : {}),
         signal: runController.signal,
         onStepChanged: (stepId) => {
           runningStepId = stepId;
@@ -2531,6 +2573,13 @@ export class RunService {
     initialRuntimePromptAugmentations?: readonly RuntimePromptAugmentation[];
     confirmedResponseMemory?: InteractionMemoryProjection;
     currentTurnMemoryCommit?: CurrentTurnMemoryCommitState;
+    /** Informational, frozen source metadata for a response-only capability reply. */
+    runtimeCapabilitySnapshot?: RuntimeCapabilitySnapshot;
+    /** Availability of the requested capability-knowledge scope; it never grants a Tool. */
+    runtimeCapabilityInventory?: {
+      readonly requestedScope: import("./capability-snapshot.ts").RuntimeCapabilitySnapshotScope;
+      readonly availability: "available" | "not_provided";
+    };
     initialRecovery?: Readonly<{
       stepIds: readonly string[];
       resumeStepId?: string;
@@ -2820,6 +2869,8 @@ export class RunService {
             input.conversationWorkingSet,
             decisionLedger,
             resolvedOperationBindings,
+            input.runtimeCapabilitySnapshot,
+            input.runtimeCapabilityInventory,
           )
           : buildRecoveredStepRuntimeContext(
             activeStep,
@@ -2834,6 +2885,8 @@ export class RunService {
             input.conversationWorkingSet,
             decisionLedger,
             resolvedOperationBindings,
+            input.runtimeCapabilitySnapshot,
+            input.runtimeCapabilityInventory,
           ),
         input: canonicalState.intent.userInput,
         ...(input.conversationHistory === undefined ? {} : { conversationHistory: input.conversationHistory }),
@@ -3057,6 +3110,8 @@ export class RunService {
             activatedSkills: activatedStepSkills,
             evidence,
             modelEvidence,
+            ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
+            ...(input.runtimeCapabilityInventory === undefined ? {} : { runtimeCapabilityInventory: input.runtimeCapabilityInventory }),
             decisionLedger,
           });
           const reusedAssessment = assessedCandidates.get(assessmentSignature);
@@ -3125,6 +3180,8 @@ export class RunService {
               currentTurnMemoryCommit: input.currentTurnMemoryCommit,
             }),
             runtimeEvidenceBundles,
+            ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
+            ...(input.runtimeCapabilityInventory === undefined ? {} : { runtimeCapabilityInventory: input.runtimeCapabilityInventory }),
             ...(candidate.contextSummary === undefined ? {} : { contextSummary: candidate.contextSummary }),
             assessmentProfile,
             ...(canonicalState.intent.understanding.practiceProfiles === undefined ? {} : { practiceProfiles: canonicalState.intent.understanding.practiceProfiles }),
@@ -6594,6 +6651,11 @@ function stepAssessmentSignature(input: {
   activatedSkills: readonly PrivateSkill[];
   evidence: StepEvidence;
   modelEvidence: StepEvidence;
+  runtimeCapabilitySnapshot?: RuntimeCapabilitySnapshot;
+  runtimeCapabilityInventory?: {
+    readonly requestedScope: import("./capability-snapshot.ts").RuntimeCapabilitySnapshotScope;
+    readonly availability: "available" | "not_provided";
+  };
   decisionLedger: readonly RuntimeDecisionCommit[];
 }): string {
   return createHash("sha256").update(JSON.stringify({
@@ -6605,6 +6667,8 @@ function stepAssessmentSignature(input: {
       .sort((left, right) => left.id.localeCompare(right.id, "en")),
     evidence: assessmentEvidenceSignature(input.evidence),
     modelEvidence: assessmentEvidenceSignature(input.modelEvidence),
+    ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
+    ...(input.runtimeCapabilityInventory === undefined ? {} : { runtimeCapabilityInventory: input.runtimeCapabilityInventory }),
     decisionLedger: input.decisionLedger.map((commit) => ({
       id: commit.id,
       hash: commit.hash,
@@ -7198,6 +7262,11 @@ function buildStepRuntimeContext(
   conversationWorkingSet?: ConversationWorkingSet,
   decisionLedger: readonly RuntimeDecisionCommit[] = [],
   resolvedOperationBindings: readonly import("./decision-binding.ts").ResolvedOperationBinding[] = [],
+  runtimeCapabilitySnapshot?: RuntimeCapabilitySnapshot,
+  runtimeCapabilityInventory?: {
+    readonly requestedScope: import("./capability-snapshot.ts").RuntimeCapabilitySnapshotScope;
+    readonly availability: "available" | "not_provided";
+  },
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   const operationProfile = taskProfile.operations[0] ?? executionOperationProfile({
     objective: step.objective,
@@ -7205,7 +7274,7 @@ function buildStepRuntimeContext(
     toolNames: stepResolvedToolNames(step),
     skillNames: skills.map((skill) => skill.name),
   });
-  return buildStepRuntimeContextSnapshot({
+  return appendRuntimeCapabilitySnapshot(buildStepRuntimeContextSnapshot({
     step,
     plan,
     skills,
@@ -7219,7 +7288,7 @@ function buildStepRuntimeContext(
     conversationWorkingSet,
     decisionLedger,
     resolvedOperationBindings,
-  });
+  }), runtimeCapabilitySnapshot, runtimeCapabilityInventory);
 }
 
 function buildRecoveredStepRuntimeContext(
@@ -7235,6 +7304,11 @@ function buildRecoveredStepRuntimeContext(
   conversationWorkingSet?: ConversationWorkingSet,
   decisionLedger: readonly RuntimeDecisionCommit[] = [],
   resolvedOperationBindings: readonly import("./decision-binding.ts").ResolvedOperationBinding[] = [],
+  runtimeCapabilitySnapshot?: RuntimeCapabilitySnapshot,
+  runtimeCapabilityInventory?: {
+    readonly requestedScope: import("./capability-snapshot.ts").RuntimeCapabilitySnapshotScope;
+    readonly availability: "available" | "not_provided";
+  },
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   // Draft bodies are persisted for Runtime identity/rejection decisions,
   // not evidence for the resumed model. Keep only their neutral identities
@@ -7269,6 +7343,8 @@ function buildRecoveredStepRuntimeContext(
     conversationWorkingSet,
     decisionLedger,
     resolvedOperationBindings,
+    runtimeCapabilitySnapshot,
+    runtimeCapabilityInventory,
   );
   return {
     ...base,
@@ -7280,6 +7356,30 @@ function buildRecoveredStepRuntimeContext(
         recoveryFacts: promptRecoveryFacts,
       }),
       "</recovery_context>",
+    ].join("\n"),
+  };
+}
+
+function appendRuntimeCapabilitySnapshot(
+  context: Omit<RuntimeContextSnapshot, "id" | "supersedesId">,
+  runtimeCapabilitySnapshot: RuntimeCapabilitySnapshot | undefined,
+  runtimeCapabilityInventory?: {
+    readonly requestedScope: import("./capability-snapshot.ts").RuntimeCapabilitySnapshotScope;
+    readonly availability: "available" | "not_provided";
+  },
+): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
+  if (runtimeCapabilitySnapshot === undefined && runtimeCapabilityInventory === undefined) return context;
+  return {
+    ...context,
+    content: [
+      context.content,
+      '<runtime_capability_inventory source="server">',
+      JSON.stringify({
+        ...(runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot }),
+        ...(runtimeCapabilityInventory === undefined ? {} : { runtimeCapabilityInventory }),
+        instruction: "This frozen inventory describes only its explicit scope and source states. run_authorized means selected and authorized for this Run; runtime_configured means Local Runtime configuration and, where stated, load state; platform_catalog means product availability only. It is not user business data, a credential record, a Tool input schema, service-health proof, or execution authority. Do not infer that any listed operation was invoked. Do not infer a service is unconfigured or unavailable merely because it is absent from a run_authorized inventory. If runtimeCapabilityInventory.availability is not_provided, state only that this Runtime did not provide the requested catalog metadata; it is not evidence of absence.",
+      }),
+      "</runtime_capability_inventory>",
     ].join("\n"),
   };
 }
@@ -8393,6 +8493,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "When multiple visible directories could plausibly satisfy the goal and the transcript does not distinguish one, return clarify rather than guessing. Do not bind a directory merely because it is available.",
       "For lookup, uploaded, or other non-directory evidence, keep sourceBinding.mode=none and choose the matching non-bound evidenceStrategy.",
       "Return reply only when the effective goal can be satisfied solely from the existing transcript and supplied metadata.",
+      "runtimeCapabilityInventories are frozen capability knowledge with explicit scopes. For a capability-inventory question, choose reply when the requested scope is supplied: run_authorized for current/selected/authorized services; runtime_configured for system-wide, configured, installed, connected, or MCP-service directory questions; platform_catalog only for product-supported/installable questions. Never use a run_authorized inventory to claim that a service is absent from the Runtime configuration. If the requested broader scope is not supplied, a reply may state only that this Runtime did not provide that catalog metadata; do not invent a directory Tool or assert absence.",
       "Return execute when faithful completion requires external state acquisition or capability use, even when the user only rejects, questions, or refines a prior answer.",
       "A request for specific externally verifiable facts that are not grounded in the transcript needs lookup_lite or source_grounded evidence even when the user did not explicitly say search or browse.",
       "When the user disputes an unsupported prior factual answer, bind to that prior Run, use correct_prior or challenge_prior, and require source_grounded evidence.",
@@ -8914,6 +9015,8 @@ interface ConversationIntentExternalContext {
   readonly sources: readonly UploadedSourceSummary[];
   readonly availableSkills?: readonly PrivateSkill[];
   readonly availableTools?: readonly PlanningToolSummary[];
+  /** Frozen, redacted metadata scopes available for this Run; never Tool authority. */
+  readonly runtimeCapabilitySnapshots?: readonly RuntimeCapabilitySnapshot[];
   readonly conversationWorkingSet?: ConversationWorkingSet;
   readonly priorPreferences?: InteractionMemoryProjection["preferences"];
 }
@@ -8931,7 +9034,7 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
       contentAccess: "metadata_only",
       replyBoundary: "Reply may use transcript and this metadata only; execute is required to inspect resources, verify external facts, or perform capability work.",
       sideEffectBoundary: "This resolution expresses semantic need only and cannot authorize destructive or external side effects.",
-      capabilityBoundary: "Authorized catalog metadata describes acquisition options, not user intent, source content, or execution permission. A reply or clarification still receives no executable tools.",
+      capabilityBoundary: "Capability inventories describe only their explicit scope and source state. They are metadata, not user intent, source content, or execution permission. A reply or clarification still receives no executable tools.",
     },
     visibleDirectories: context.visibleDirectories.map((directory) => ({
       id: directory.id,
@@ -8960,6 +9063,11 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
       description: tool.description,
       ...(tool.dangerous === undefined ? {} : { dangerous: tool.dangerous }),
       ...(tool.source === undefined ? {} : { source: tool.source }),
+    })),
+    runtimeCapabilityInventories: (context.runtimeCapabilitySnapshots ?? []).map((snapshot) => ({
+      scope: snapshot.scope,
+      capturedAt: snapshot.capturedAt,
+      sources: snapshot.sources,
     })),
     conversationWorkingSet: {
       priorGoalCandidates: goalRunIds.map((runId, index) => {

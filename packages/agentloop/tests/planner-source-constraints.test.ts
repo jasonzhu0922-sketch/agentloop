@@ -176,8 +176,12 @@ test("Planner previews a proposal against the selected Skill capability closure"
 
   assert.equal(calls, 2);
   assert.equal(failures.length, 1);
-  assert.match(failures[0]!, /requires unknown capabilities: .*discovered:unselected-source/);
+  // Inventory knowledge does not expand the selected Skill execution closure.
+  // The preview rejects this capability before it can reach Plan admission.
+  assert.match(failures[0]!, /requires unknown capabilities:/);
+  assert.ok(failures[0]!.includes(unselectedCapability));
   assert.deepEqual(proposal.steps[0]?.requiredCapabilities, [selectedCapability]);
+  assert.deepEqual(proposal.steps[0]?.skillIds, [selectedSource.id]);
 });
 
 function retryingPlannerModel(): { readonly model: ModelAdapter; readonly calls: () => number } {

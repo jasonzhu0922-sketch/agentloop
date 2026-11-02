@@ -39,6 +39,7 @@ export function connectorSourceDescriptor(
   }));
   return {
     id: `connector.${manifest.key}.${instance.connection.id}`,
+    displayName: manifest.displayName,
     transport: "connector",
     aliases: [manifest.key, instance.connection.id],
     capabilities,

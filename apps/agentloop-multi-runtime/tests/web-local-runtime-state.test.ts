@@ -172,7 +172,6 @@ test("page bootstrap and the Local Runtime button both reconnect a registered di
   assert.equal(reconnects, 2, "the visible Local Runtime control must also request reconnect");
   assert.equal(button.disabled, false);
 });
-
 test("browser keeps Agent settings and Runtime deletion on the loopback service", async () => {
   const [app, api] = await Promise.all([
     readFile(new URL("../web/client/app.js", import.meta.url), "utf8"),

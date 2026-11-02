@@ -62,6 +62,7 @@ interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
   readonly topP?: number;
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   readonly thinkingMode?: "enabled" | "disabled";
+  /** Bailian's vendor-specific root-level `enable_thinking` request flag. */
   readonly enableThinking?: boolean;
   readonly thinkingEffort?: "low" | "medium" | "high";
   readonly reasoningVisibility: "visible" | "hidden";
@@ -88,6 +89,7 @@ interface OpenAICompatibleModelConfig extends LlmModelSummary {
   readonly topP?: number;
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   readonly thinkingMode?: "enabled" | "disabled";
+  /** Bailian's vendor-specific root-level `enable_thinking` request flag. */
   readonly enableThinking?: boolean;
   readonly thinkingEffort?: "low" | "medium" | "high";
   readonly reasoningVisibility: "visible" | "hidden";
