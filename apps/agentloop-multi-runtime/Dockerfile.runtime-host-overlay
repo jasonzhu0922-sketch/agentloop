@@ -45,12 +45,20 @@ COPY package.json package-lock.json ./
 COPY packages/agentloop ./packages/agentloop
 COPY packages/agentloop-artifact-preview ./packages/agentloop-artifact-preview
 COPY packages/agentloop-plan-template ./packages/agentloop-plan-template
+COPY packages/agentloop-skills ./packages/agentloop-skills
+COPY packages/agentloop-memory ./packages/agentloop-memory
+COPY packages/agentloop-local-runtime ./packages/agentloop-local-runtime
+COPY packages/connector-sdk ./packages/connector-sdk
 COPY apps/agentloop-multi-runtime ./apps/agentloop-multi-runtime
 RUN npm install --workspace agentloop-multi-runtime --ignore-scripts --no-audit --no-fund \
   && npm rebuild sharp --workspace agentloop-multi-runtime --foreground-scripts \
+  && npm run build --workspace @zhujun/agentloop \
   && npm run build --workspace @zhujun/agentloop-artifact-preview \
   && npm run build --workspace @zhujun/agentloop-plan-template \
-  && npm run build --workspace @zhujun/agentloop
+  && npm run build --workspace @zhujun/agentloop-skills \
+  && npm run build --workspace @zhujun/agentloop-memory \
+  && npm run build --workspace @zhujun/agentloop-connector-sdk \
+  && npm run build --workspace @zhujun/agentloop-local-runtime
 # Do not inherit the base image's default workdir: the Runtime Host package
 # script lives here, while some older local images use /app as their default.
 WORKDIR /app/apps/agentloop-multi-runtime

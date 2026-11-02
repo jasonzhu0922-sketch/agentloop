@@ -371,7 +371,16 @@ export interface RecoveryDetail {
   readonly userResponses: readonly RecoveryUserResponse[];
 }
 
+/** Trusted embedding hook. Write only through this RunService's database;
+ * called inside the Run/source transaction, before execution or notifications.
+ * Throwing rolls back Run creation. Never perform network or filesystem work here.
+ */
+export interface RunStartPersistence {
+  persist(run: { readonly id: string; readonly ownerUserId: string; readonly conversationId?: string }): Promise<void>;
+}
+
 export class RunService {
+  private readonly executionIdle = new Map<string, Promise<void>>();
   private readonly database: SqlConnection;
   private readonly runs: RunRepository;
   private readonly skills: SkillService;
@@ -636,19 +645,30 @@ export class RunService {
     actorUserId: string,
     inputValue: unknown,
     optionsValue?: unknown,
+    persistence?: RunStartPersistence,
   ): Promise<RunRecord> {
-    return this.startInternal(actorUserId, inputValue, optionsValue, true);
+    return this.startInternal(actorUserId, inputValue, optionsValue, true, persistence);
   }
+
+  /** Process-local execution liveness, separate from persisted/human-paused status. */
+  isRunExecuting(runId: string): boolean { return this.activeRunControllers.has(runId); }
+
+  /** Settles after a start/startConversation execution has unwound, including cancellation. */
+  whenRunIdle(runId: string): Promise<void> { return this.executionIdle.get(runId) ?? Promise.resolve(); }
 
   private async startInternal(
     actorUserId: string,
     inputValue: unknown,
     optionsValue: unknown,
     conversationEntry: boolean,
+    persistence?: RunStartPersistence,
   ): Promise<RunRecord> {
     const input = requireString(inputValue, "input", { max: 200_000 });
     const options = parseExecuteOptions(optionsValue);
     let returned = false;
+    let startedId: string | undefined;
+    let finish!: () => void;
+    const idle = new Promise<void>(resolve => { finish = resolve; });
     const created = new Promise<RunRecord>((resolve, reject) => {
       void this.executeInternal(
         actorUserId,
@@ -656,12 +676,19 @@ export class RunService {
         options,
         conversationEntry,
         (run) => {
+          startedId = run.id;
+          this.executionIdle.set(run.id, idle);
           returned = true;
           resolve(run);
         },
+        undefined,
+        persistence,
       ).catch((error) => {
         if (!returned) reject(error);
         else if (process.env.AGENTLOOP_DEBUG_ERRORS === "1") console.error(error);
+      }).finally(() => {
+        if (startedId !== undefined) this.executionIdle.delete(startedId);
+        finish();
       });
     });
     return created;
@@ -1660,6 +1687,7 @@ export class RunService {
     conversationEntry: boolean,
     onRunStarted?: (run: RunRecord) => void,
     continuation?: ContinuationOptions,
+    persistence?: RunStartPersistence,
   ): Promise<RunRecord> {
     const runId = randomUUID();
     const runController = new AbortController();
@@ -1711,6 +1739,7 @@ export class RunService {
         createdAt,
       });
       await this.runs.bindRunVisibleDirectories({ runId, visibleDirectories });
+      await persistence?.persist({ id: runId, ownerUserId: actorUserId, conversationId });
     });
     const availableSources = mergeUploadedSources(
       await Promise.all(

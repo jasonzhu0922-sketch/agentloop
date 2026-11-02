@@ -1,21 +1,14 @@
-import { mkdir } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
-import { AppDatabase, AppError, LlmProviderRegistry, RunService, SkillService, createRuntimeCapabilitySnapshotFromSources, createStepExecutionStrategyProfile, createWebTools, loadMcpToolsFromConfig, type LoadedMcpIntegration, type ModelAdapter, type ModelInvocation, type ModelResponse, type ModelRetryReporter, type ModelStreamSink, type RuntimeCapabilitySnapshot } from "@zhujun/agentloop";
-import { createLocalMemoryPlugin, MemorySettlementWorker, type MemorySettlementModel } from "@zhujun/agentloop-memory";
-import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
-import { ConnectorRegistry, ConnectorRuntimeService, environmentConnectorRuntime, loadConnectorModules } from "../../../src/connectors/index.ts";
+import { join } from "node:path";
+import { createStepExecutionStrategyProfile, type ModelAdapter, type ModelInvocation, type ModelResponse, type ModelRetryReporter, type ModelStreamSink } from "@zhujun/agentloop";
+import { LocalRuntimeFactory as SharedLocalRuntimeFactory, LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition, type ResolvedLocalRuntimeConfiguration } from "@zhujun/agentloop-local-runtime/host";
+import { registrationsFromEnvironment, environmentConnectorRuntime } from "@zhujun/agentloop-local-runtime/connectors";
 import { loadPracticeProfileConfig, loadStepExecutionStrategyProfileConfig, webToolsOptionsFromEnvironment } from "../../../src/shared/config.ts";
+import { consumeModelResponse } from "../../../src/shared/model-proxy.ts";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
-import { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.ts";
-import type { ResolvedLocalRuntimeConfiguration } from "../persistence/local-runtime-configuration-store.ts";
 import type { LocalModelConfigurationStore } from "../persistence/local-model-configuration-store.ts";
 import type { LocalConnectorConfigurationStore } from "../persistence/local-connector-configuration-store.ts";
-import { LocalModelStreamCaptureStore } from "../persistence/model-stream-capture-store.ts";
-import { LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
 import { LocalAgentStateStore } from "../persistence/local-agent-state-store.ts";
-import { consumeModelResponse } from "../../../src/shared/model-proxy.ts";
-import { LocalMemorySettlementReader } from "../persistence/local-memory-settlement-reader.ts";
-import { localRuntimeDatabases, registerLocalRuntimeDatabase, unregisterLocalRuntimeDatabase } from "../persistence/local-memory-runtime-database-registry.ts";
+export { RESTORED_RUN_ACTIVITY_WINDOW_MS, shouldRetainRestoredRunActivity, localRuntimeMcpStartupLogLines, redactMcpDiagnostic } from "@zhujun/agentloop-local-runtime/host";
 
 export class CloudProxyModel implements ModelAdapter {
   readonly limits = { contextWindowTokens: 1_000_000, maxOutputTokens: 1_000_000 };
@@ -45,335 +38,47 @@ export class CloudProxyModel implements ModelAdapter {
   }
 }
 
-interface McpStartupIntegration {
-  readonly loadedServers: readonly { readonly key: string; readonly toolCount: number }[];
-  readonly failedServers: readonly { readonly key: string; readonly message: string }[];
-}
-
-/**
- * Project Local Runtime configuration into a redacted knowledge document.
- * This deliberately uses configuration/load state, not Run grants: seeing a
- * configured MCP service never makes its tools executable in a reply turn.
- */
-function configuredMcpCapabilitySnapshot(
-  configuration: ResolvedLocalRuntimeConfiguration,
-  integration: LoadedMcpIntegration,
-): RuntimeCapabilitySnapshot {
-  const loaded = new Set(integration.loadedServers.map((server) => server.key));
-  const failed = new Set(integration.failedServers.map((server) => server.key));
-  return createRuntimeCapabilitySnapshotFromSources({
-    scope: "runtime_configured",
-    capturedAt: Date.now(),
-    sources: configuration.mcpServers.map((server) => ({
-      label: server.displayName ?? "Configured MCP service",
-      transport: server.transport,
-      state: loaded.has(server.key)
-        ? "loaded_for_runtime"
-        : failed.has(server.key) ? "load_failed" : "configured_for_runtime",
-      capabilities: server.capabilities,
-      operations: integration.tools
-        .filter((tool) => tool.source?.id === server.key)
-        .map((tool) => ({
-          label: tool.source?.toolName ?? tool.name,
-          description: tool.description,
-        })),
-      identityValues: [server.key, ...(server.aliases ?? [])],
-    })),
-  });
-}
-
-export const RESTORED_RUN_ACTIVITY_WINDOW_MS = 10 * 60 * 1_000;
-
-export function shouldRetainRestoredRunActivity(
-  run: { readonly status: string; readonly createdAt: number },
-  now = Date.now(),
-): boolean {
-  return run.status === "running" && now - run.createdAt <= RESTORED_RUN_ACTIVITY_WINDOW_MS;
-}
-
-export function localRuntimeMcpStartupLogLines(integration: McpStartupIntegration): readonly { readonly stream: "stdout" | "stderr"; readonly text: string }[] {
-  return [
-    ...integration.loadedServers.map((server) => ({
-      stream: "stdout" as const,
-      text: `Local Runtime MCP server ${server.key} loaded ${server.toolCount} tool(s)`,
-    })),
-    ...integration.failedServers.map((server) => ({
-      stream: "stderr" as const,
-      text: `Local Runtime MCP server ${server.key} failed: ${server.message}`,
-    })),
-  ];
-}
-
-export function redactMcpDiagnostic(message: string, secretValues: readonly string[]): string {
-  const variants = new Set<string>();
-  for (const value of secretValues) {
-    if (value.length === 0) continue;
-    variants.add(value);
-    variants.add(encodeURIComponent(value));
-    variants.add(new URLSearchParams({ value }).toString().slice("value=".length));
-  }
-  return [...variants]
-    .sort((left, right) => right.length - left.length)
-    .reduce((result, value) => result.replaceAll(value, "[redacted]"), message);
-}
-
-function localSettlementModel(
-  modelKey: string,
-  resolveProvider: () => LlmProviderRegistry | undefined,
-): MemorySettlementModel {
-  if (!modelKey.startsWith("local:") || modelKey.length <= "local:".length) {
-    throw new LocalRuntimeSupervisorError(400, "memory_settlement_model_must_be_local");
-  }
-  return {
-    modelKey,
-    complete: async ({ runId, systemPrompt, input, signal }) => {
-      const provider = resolveProvider();
-      if (provider === undefined) throw new LocalRuntimeSupervisorError(409, "memory_settlement_model_unavailable");
-      const model = provider.create(modelKey.slice("local:".length));
-      const response = await model.complete({
-        runId,
-        phase: "compaction",
-        systemPrompt,
-        messages: [{ role: "user", content: JSON.stringify(input) }],
-        tools: [],
-        maxOutputTokens: 6_000,
-      }, signal);
-      return { content: response.content, usage: response.usage };
-    },
-  };
-}
-
-/** Creates the isolated kernel, storage and skill catalog for one device Runtime. */
+/** Router and deployment adapters for the shared local Runtime composition root. */
 export class LocalRuntimeFactory {
-  private readonly input: LocalAgentOptions;
-  private readonly modelConfigurations?: LocalModelConfigurationStore;
-  private readonly connectorConfigurations?: LocalConnectorConfigurationStore;
-
-  constructor(input: LocalAgentOptions, modelConfigurations?: LocalModelConfigurationStore, connectorConfigurations?: LocalConnectorConfigurationStore) {
-    this.input = input;
-    this.modelConfigurations = modelConfigurations;
-    this.connectorConfigurations = connectorConfigurations;
-  }
-
-  async create(
-    definition: LocalRuntimeDefinition,
-    configuration: ResolvedLocalRuntimeConfiguration,
-    sharedStorageRoot: string,
-    uploadStorageRoot: string,
-  ): Promise<LocalRuntimeControl> {
-    const environment = this.input.environment ?? process.env;
-    const integrationEnvironment = {
-      ...(this.input.integrationEnvironment ?? {}),
-      ...configuration.integrationEnvironment,
-    };
-    const runtimeRoot = this.runtimeRootFor(definition) ?? dirname(this.input.databasePath);
-    const databasePath = definition.isDefault ? this.input.databasePath : join(runtimeRoot, "agentloop.db");
-    const sourceStorageRoot = this.runtimeUploadRootFor(definition, uploadStorageRoot);
-    await mkdir(dirname(databasePath), { recursive: true });
-    await mkdir(sharedStorageRoot, { recursive: true });
-    await mkdir(this.input.skillPackageStoreRoot, { recursive: true });
-    const database = new AppDatabase(databasePath);
-    registerLocalRuntimeDatabase(definition.id, database);
-    // Memory is an explicitly opted-in Local Agent feature. When disabled we
-    // do not even create the SQLite file, plugin, settlement worker, or timer.
-    const memoryEnabled = configuration.memory?.enabled === true;
-    let memoryDatabase: AppDatabase | undefined;
-    let memory: Awaited<ReturnType<typeof createLocalMemoryPlugin>> | undefined;
-    let memoryTenantId: string | undefined;
-    let settlementWorker: MemorySettlementWorker | undefined;
-    if (memoryEnabled) {
-      // Memory is device-local and shared by all Local Runtime instances. Run
-      // evidence remains in each Runtime database; only the Memory SQLite file
-      // is shared, so Runtime lifecycle cannot fork user preferences.
-      memoryDatabase = new AppDatabase(join(dirname(this.input.databasePath), "memory.db"));
-      const localState = await new LocalAgentStateStore(this.input.statePath).read();
-      // A device is the local tenant boundary. Cloud tenant/user identity never
-      // enters the Memory store or crosses the model proxy.
-      memoryTenantId = `local-device:${localState.defaultRuntimeId}`;
-      memory = await createLocalMemoryPlugin({
-        database: memoryDatabase,
-        resolveRunScope: async (runId) => {
-          const row = await database.prepare("SELECT owner_user_id, conversation_id, parent_run_id FROM runs WHERE id = ?").get(runId) as { owner_user_id: string; conversation_id: string | null; parent_run_id: string | null } | undefined;
-          if (row === undefined) return undefined;
-          return {
-            tenantId: memoryTenantId!,
-            ownerUserId: row.owner_user_id,
-            runId,
-            ...(row.conversation_id === null ? {} : { conversationId: row.conversation_id }),
-            ...(row.parent_run_id === null ? {} : { parentRunId: row.parent_run_id }),
-          };
-        },
-      });
-    }
-    let settlementTimer: NodeJS.Timeout | undefined;
-    await database.exec(`
-      CREATE TABLE IF NOT EXISTS local_runtime_dispatches (
-        dispatch_key TEXT PRIMARY KEY, assignment_id TEXT NOT NULL, owner_user_id TEXT NOT NULL,
-        remote_run_id TEXT NOT NULL, created_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS local_runtime_dispatches_run_idx ON local_runtime_dispatches(remote_run_id);
-    `);
-    const scopes = new LocalDirectoryScopeStore(database);
-    await scopes.ready();
-    const streamCaptures = new LocalModelStreamCaptureStore(join(runtimeRoot, "diagnostics", "model-streams"));
-    let localModelConfiguration = this.modelConfigurations?.current() ?? configuration.modelConfiguration;
-    const modelEnvironment = { ...integrationEnvironment, ...(localModelConfiguration?.environment ?? {}) };
-    // Empty catalogs are editable configuration states. Model admission below
-    // rejects unavailable selections while Runtime management remains usable.
-    const legacyProvider = localModelConfiguration?.configured === true ? undefined
-      : await LlmProviderRegistry.fromConfigFile(this.input.providerConfigPath, modelEnvironment, { streamRawCaptureWriter: streamCaptures.capture });
-    let provider = localModelConfiguration?.configured === true
-      ? localModelConfiguration.registryConfig === undefined ? undefined : LlmProviderRegistry.fromConfigObject(localModelConfiguration.registryConfig, modelEnvironment, { streamRawCaptureWriter: streamCaptures.capture })
-      : legacyProvider;
-    const currentModels = () => {
-      const latest = this.modelConfigurations?.current() ?? configuration.modelConfiguration;
-      if (latest !== localModelConfiguration) {
-        const updated = latest?.configured !== true ? legacyProvider : latest.registryConfig === undefined ? undefined : LlmProviderRegistry.fromConfigObject(
-          latest.registryConfig, { ...integrationEnvironment, ...latest.environment }, { streamRawCaptureWriter: streamCaptures.capture },
-        );
-        provider = updated;
-        localModelConfiguration = latest;
-      }
-      return { provider, configuration: localModelConfiguration };
-    };
-    if (memory !== undefined && memoryTenantId !== undefined) {
-      const settlementModel = configuration.memory?.settlementModelKey === undefined
-        ? undefined
-        : localSettlementModel(
-          configuration.memory.settlementModelKey,
-          () => currentModels().provider,
-        );
-      settlementWorker = new MemorySettlementWorker({
-        store: memory.store,
-        reader: new LocalMemorySettlementReader(localRuntimeDatabases, memoryTenantId),
-        consolidate: true,
-        requireSettlementModel: true,
-        experienceBatchSize: 10,
-        ...(settlementModel === undefined ? {} : { settlementModel }),
-      });
-    }
-    const packaged = environment.AGENTLOOP_BUNDLED_SKILL_DIRECTORIES?.split(",").map((path) => path.trim()).filter(Boolean);
-    const skills = new SkillService(database, {
-      packageStoreRoot: this.input.skillPackageStoreRoot,
-      skillDirectories: packaged?.length ? packaged : bundledSkillDirectories(),
-      skillPackageRoots: configuration.customSkillDirectories,
-    });
-    await skills.syncSkillDirectories();
-    const strategy = await loadStepExecutionStrategyProfileConfig(this.input.stepExecutionStrategyConfigPath);
-    const practiceProfiles = await loadPracticeProfileConfig(this.input.practiceProfileConfigPath ?? join(this.input.appRoot, "config", "practice-profiles.json"));
-    const connectorConfiguration = this.connectorConfigurations === undefined
-      ? undefined
-      : await this.connectorConfigurations.resolve(definition.id);
-    const connectorRegistry = new ConnectorRegistry();
-    for (const connectorModule of await loadConnectorModules({
-      baseDirectory: this.input.appRoot,
-      registrations: connectorConfiguration?.modules,
-    })) {
-      connectorRegistry.register(connectorModule);
-    }
-    const connectorRuntimeService = new ConnectorRuntimeService(
-      connectorRegistry,
-      connectorConfiguration?.runtime ?? environmentConnectorRuntime(undefined, integrationEnvironment),
-    );
-    const mcpIntegration = await loadMcpToolsFromConfig(
-      { servers: configuration.mcpServers },
-      { environment: integrationEnvironment },
-    );
-    const runs = new RunService({
-      requireExplicitModel: true,
-      database, skills, ...(memory === undefined ? {} : { memory }), modelFactory: (onRetry, modelKey) => {
-        const { provider, configuration: modelConfiguration } = currentModels();
-        if (modelKey === undefined || modelKey.length === 0) throw new AppError("MODEL_ERROR", "model_required", 400);
-        if (typeof modelKey === "string" && modelKey.startsWith("cloud:")) {
-          if (modelConfiguration?.reuseCloudModels !== true) throw new AppError("MODEL_ERROR", "cloud_model_reuse_disabled", 409);
-          if (modelKey.length === "cloud:".length) throw new AppError("MODEL_ERROR", "model_key_invalid", 400);
-          return new CloudProxyModel(this.input, modelKey.slice("cloud:".length), onRetry);
-        }
-        if (typeof modelKey === "string" && modelKey.startsWith("local:")) {
-          if (provider === undefined) throw new AppError("MODEL_ERROR", "local_model_unavailable", 409);
-          return provider.create(modelKey.slice("local:".length), onRetry);
-        }
-        throw new AppError("MODEL_ERROR", "model_source_required: choose a model from the Local Runtime catalog", 400);
+  private readonly shared: SharedLocalRuntimeFactory;
+  constructor(input: LocalAgentOptions, models?: LocalModelConfigurationStore, connectors?: LocalConnectorConfigurationStore) {
+    this.shared = new SharedLocalRuntimeFactory({
+      databasePath: input.databasePath,
+      runtimeDataRoot: input.runtimeDataRoot,
+      skillPackageStoreRoot: input.skillPackageStoreRoot,
+      extensionBaseDirectory: input.appRoot,
+      providerConfigPath: input.providerConfigPath,
+      planningMaxTurns: input.planningMaxTurns,
+      stepMaxTurns: input.stepMaxTurns,
+      integrationEnvironment: input.integrationEnvironment,
+      environment: input.environment,
+      computerCommandEnvironment: input.computerCommandEnvironment,
+      runEventLogSink: input.runEventLogSink,
+      identity: { installationId: async () => (await new LocalAgentStateStore(input.statePath).read()).defaultRuntimeId },
+      cloudModelFactory: (onRetry, modelKey) => new CloudProxyModel(input, modelKey!, onRetry),
+      // Deployment config parsing stays with the existing Host. The shared
+      // package receives Kernel policies, never a Multi Runtime config module.
+      loadExecutionPolicy: async () => {
+        const strategy = await loadStepExecutionStrategyProfileConfig(input.stepExecutionStrategyConfigPath);
+        return {
+          stepExecutionStrategy: createStepExecutionStrategyProfile(strategy.profile, strategy.projection),
+          practiceProfileCatalog: await loadPracticeProfileConfig(input.practiceProfileConfigPath ?? join(input.appRoot, "config", "practice-profiles.json")),
+        };
       },
-      ...(this.input.planningMaxTurns === undefined ? {} : { maxPlanningTurns: this.input.planningMaxTurns }),
-      ...(this.input.stepMaxTurns === undefined ? {} : { maxSteps: this.input.stepMaxTurns }),
-      workspaceRoot: sharedStorageRoot, sourceStorageRoot,
-      ownerScopedWorkspace: true,
-      stepExecutionStrategy: createStepExecutionStrategyProfile(strategy.profile, strategy.projection),
-      practiceProfileCatalog: practiceProfiles,
-      runToolProvider: connectorRuntimeService,
-      runtimeCapabilitySnapshotProvider: () => [configuredMcpCapabilitySnapshot(configuration, mcpIntegration)],
-      tools: [
-        ...(integrationEnvironment.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptionsFromEnvironment(integrationEnvironment))),
-        ...mcpIntegration.tools,
-      ],
-      computerCommandEnvironment: this.input.computerCommandEnvironment,
-      ...(this.input.runEventLogSink === undefined ? {} : { runEventLogSink: (line) => this.input.runEventLogSink!(definition, line) }),
+    }, models, {
+      resolve: async (runtimeId) => await connectors?.resolve(runtimeId) ?? {
+        modules: registrationsFromEnvironment(), connections: [],
+        runtime: environmentConnectorRuntime(undefined, input.integrationEnvironment),
+      },
     });
-    const secretValues = Object.values(configuration.integrationEnvironment).filter((value): value is string => typeof value === "string" && value.length > 0);
-    const sanitizedMcpIntegration = {
-      ...mcpIntegration,
-      failedServers: mcpIntegration.failedServers.map((server) => ({
-        ...server,
-        message: redactMcpDiagnostic(server.message, secretValues),
-      })),
-    };
-    for (const line of localRuntimeMcpStartupLogLines(sanitizedMcpIntegration)) {
-      (line.stream === "stdout" ? process.stdout : process.stderr).write(`${line.text}\n`);
-    }
-    // A configured MCP source is part of this Runtime's execution contract.
-    // Do not construct a superficially-ready Runtime with a partial tool
-    // catalog: Router admission would succeed and the first Run would only
-    // fail later with CAPABILITY_UNAVAILABLE.  Keep the diagnostic limited to
-    // source keys; the loader's messages may contain endpoint or credential
-    // details even after redaction.
-    if (mcpIntegration.failedServers.length > 0) {
-      await memory?.close?.();
-      await memoryDatabase?.close();
-      unregisterLocalRuntimeDatabase(definition.id, database);
-      await database.close();
-      throw new LocalRuntimeSupervisorError(
-        503,
-        `mcp_startup_failed:${mcpIntegration.failedServers.map((server) => server.key).join(",")}`,
-      );
-    }
-    if (settlementWorker !== undefined) {
-      settlementTimer = setInterval(() => { void settlementWorker!.runOnce(); }, 5_000);
-      settlementTimer.unref();
-    }
-    const activeRunIds = new Set<string>();
-    const dispatched = await database.prepare("SELECT owner_user_id, remote_run_id FROM local_runtime_dispatches").all() as Array<{ owner_user_id: string; remote_run_id: string }>;
-    const restoredAt = Date.now();
-    for (const row of dispatched) {
-      try { if (shouldRetainRestoredRunActivity(await runs.get(row.owner_user_id, row.remote_run_id), restoredAt)) activeRunIds.add(row.remote_run_id); }
-      catch { /* Orphaned ledger rows are not active admissions. */ }
-    }
-    return { ...definition, database, scopes, runs,
-      ...(memory === undefined || memoryTenantId === undefined ? {} : { memory: { store: memory.store, tenantId: memoryTenantId } }),
-      close: async () => { if (settlementTimer !== undefined) clearInterval(settlementTimer); await memory?.close?.(); await memoryDatabase?.close(); unregisterLocalRuntimeDatabase(definition.id, database); },
-      connectorConnectionIds: connectorConfiguration?.connections.filter((connection) => connection.status === "active").map((connection) => connection.id) ?? [],
-      get modelKeys() { return currentModels().provider?.modelKeys().map((key) => `local:${key}`) ?? []; }, activeRunIds };
+    this.input = input;
   }
-
-  runtimeRootFor(definition: LocalRuntimeDefinition): string | undefined {
-    if (definition.isDefault) return undefined;
-    const dataRoot = resolve(this.input.runtimeDataRoot ?? join(dirname(this.input.databasePath), "runtimes"));
-    const runtimeRoot = resolve(dataRoot, definition.storageKey);
-    this.assertChild(dataRoot, runtimeRoot, "runtime_storage_key_outside_data_root");
-    return runtimeRoot;
+  private readonly input: LocalAgentOptions;
+  async create(definition: LocalRuntimeDefinition, configuration: ResolvedLocalRuntimeConfiguration, sharedStorageRoot: string, uploadStorageRoot: string): Promise<LocalRuntimeControl> {
+    // Search credentials may be Runtime-specific; do not snapshot them globally.
+    return await this.shared.create(definition, configuration, sharedStorageRoot, uploadStorageRoot,
+      webToolsOptionsFromEnvironment({ ...this.input.integrationEnvironment, ...configuration.integrationEnvironment }));
   }
-
-  runtimeUploadRootFor(definition: LocalRuntimeDefinition, uploadStorageRoot: string): string {
-    const root = resolve(uploadStorageRoot);
-    const target = resolve(root, definition.storageKey);
-    this.assertChild(root, target, "runtime_upload_storage_key_outside_root");
-    return target;
-  }
-
-  private assertChild(root: string, target: string, message: string): void {
-    const suffix = relative(root, target);
-    if (suffix === "" || suffix === ".." || suffix.startsWith(`..${process.platform === "win32" ? "\\\\" : "/"}`)) {
-      throw new LocalRuntimeSupervisorError(500, message);
-    }
-  }
+  runtimeRootFor(definition: LocalRuntimeDefinition): string | undefined { return this.shared.runtimeRootFor(definition); }
+  runtimeUploadRootFor(definition: LocalRuntimeDefinition, uploadStorageRoot: string): string { return this.shared.runtimeUploadRootFor(definition, uploadStorageRoot); }
 }
