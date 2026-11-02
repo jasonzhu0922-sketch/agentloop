@@ -786,7 +786,7 @@ test("web keeps strict_local recovery support while normal placement uses the Lo
     readFile(new URL("../web/pages/app.html", import.meta.url), "utf8"),
     readFile(new URL("../local-agent-runtime/src/api/local-agent-api.ts", import.meta.url), "utf8"),
     readFile(new URL("../local-agent-runtime/src/service/local-agent-service.ts", import.meta.url), "utf8"),
-    readFile(new URL("../local-agent-runtime/src/service/local-runtime-factory.ts", import.meta.url), "utf8"),
+    readFile(new URL("../../../packages/agentloop-local-runtime/src/service/local-runtime-factory.ts", import.meta.url), "utf8"),
     readFile(new URL("../web/client/local-runtime/local-agent-client.js", import.meta.url), "utf8"),
   ]);
   assert.match(app, /\/v1\/strict-local-runs/);

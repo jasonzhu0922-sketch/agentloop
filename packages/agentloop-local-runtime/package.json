@@ -1,0 +1,27 @@
+{
+  "name": "@zhujun/agentloop-local-runtime",
+  "version": "0.1.0",
+  "description": "Shared device-local AgentLoop runtime with host-provided identity and model ports",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": { "node": ">=26" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./host": { "types": "./dist/host.d.ts", "default": "./dist/host.js" },
+    "./connectors": { "types": "./dist/connectors/index.d.ts", "default": "./dist/connectors/index.js" },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --test-isolation=process tests/*.test.ts"
+  },
+  "dependencies": {
+    "@zhujun/agentloop": "*",
+    "@zhujun/agentloop-connector-sdk": "*",
+    "@zhujun/agentloop-memory": "*",
+    "@zhujun/agentloop-skills": "*"
+  },
+  "devDependencies": { "@types/node": "^26.3.0", "typescript": "^7.0.2" }
+}

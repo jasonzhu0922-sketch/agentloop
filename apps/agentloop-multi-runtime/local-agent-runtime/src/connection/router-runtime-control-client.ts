@@ -1,6 +1,8 @@
 import { WebSocket } from "ws";
+import { createHash } from "node:crypto";
 import type { RuntimeArtifact, RuntimeDispatchEnvelope, RuntimeRunStatus } from "../../../src/shared/contracts.ts";
 import { LocalRuntimeSupervisor, type LocalRuntimeControl } from "../service/runtime-supervisor.ts";
+import { LocalRunAdmissionService } from "@zhujun/agentloop-local-runtime/host";
 
 export interface DeviceCredential {
   readonly id: string;
@@ -17,7 +19,7 @@ export class RuntimeConnectionClient {
   private stopped = false;
   private connected = false;
   private credential?: DeviceCredential;
-  private readonly dispatches = new Map<string, Promise<{ readonly remoteRunId: string }>>();
+  private readonly admissions = new WeakMap<LocalRuntimeControl, LocalRunAdmissionService>();
   private readonly connectionWaiters = new Set<{ readonly resolve: (connected: boolean) => void; readonly timer: NodeJS.Timeout }>();
   private routerUrl?: string;
   private readonly supervisor: LocalRuntimeSupervisor;
@@ -167,53 +169,54 @@ export class RuntimeConnectionClient {
     if ((method === "artifacts" || method === "readArtifact" || method === "previewArtifact") && this.agentControl !== undefined) {
       return await this.agentControl(`runtime.${method}`, { ...payload, runtimeId });
     }
-    const runtime = this.supervisor.runtime(runtimeId);
-    if (method === "dispatch") return await this.dispatch(runtime, payload as unknown as RuntimeDispatchEnvelope);
-    if (method === "models") return runtime.modelKeys.map((key) => ({ key, displayName: key }));
-    const remoteRunId = stringValue(payload.remoteRunId, "remoteRunId");
-    const ownerUserId = await this.ownerForRun(runtime, remoteRunId);
-    if (method === "getRun") {
-      const run = await runtime.runs.get(ownerUserId, remoteRunId);
-      if (run.status !== "running") await this.supervisor.runSettled(runtime.id, remoteRunId);
-      return toStatus(run);
-    }
-    if (method === "events") {
-      const afterSeq = Number.isSafeInteger(payload.afterSeq) ? Number(payload.afterSeq) : 0;
-      return (await runtime.runs.events(ownerUserId, remoteRunId)).filter((event) => event.seq > afterSeq);
-    }
-    if (method === "latestEvent") {
-      return await runtime.runs.latestEvent(ownerUserId, remoteRunId);
-    }
-    if (method === "cancelRun") {
-      const run = await runtime.runs.cancel(ownerUserId, remoteRunId);
-      await this.supervisor.runSettled(runtime.id, remoteRunId);
-      return toStatus(run);
-    }
-    if (method === "artifacts") {
-      return (await runtime.runs.processArtifacts(ownerUserId, remoteRunId)).map((artifact) => ({
-        ...artifact,
-        path: `local-artifact:${artifact.id}`,
-      }));
-    }
-    if (method === "readArtifact") {
-      const result = await runtime.runs.readProcessArtifact(ownerUserId, remoteRunId, stringValue(payload.artifactId, "artifactId"));
-      return {
-        artifact: localArtifact(result.artifact),
-        // RPC is JSON-framed. The Router decodes this transient value and
-        // streams it to the authenticated browser; it is never persisted by
-        // the cloud artifact catalog for a local Runtime.
-        contentBase64: result.content.toString("base64"),
-      };
-    }
-    if (method === "previewArtifact") {
-      return await runtime.runs.previewProcessArtifact(ownerUserId, remoteRunId, stringValue(payload.artifactId, "artifactId"));
-    }
-    if (method === "currentHumanLoop") return await runtime.runs.currentHumanLoop(ownerUserId, remoteRunId);
-    if (method === "respondHumanLoop") {
-      const input = record(payload.input);
-      return await runtime.runs.respondHumanLoop(ownerUserId, remoteRunId, stringValue(payload.requestId, "requestId"), input.value, input.expectedRevision);
-    }
-    throw new Error(`local_runtime_method_unsupported:${method}`);
+    return this.supervisor.withRuntimeUse(runtimeId, async runtime => {
+      if (method === "dispatch") return await this.dispatch(runtime, payload as unknown as RuntimeDispatchEnvelope);
+      if (method === "models") return runtime.modelKeys.map((key) => ({ key, displayName: key }));
+      const remoteRunId = stringValue(payload.remoteRunId, "remoteRunId");
+      const ownerUserId = await this.ownerForRun(runtime, remoteRunId);
+      if (method === "getRun") {
+        const run = await runtime.runs.get(ownerUserId, remoteRunId);
+        if (run.status !== "running") await this.supervisor.runSettled(runtime.id, remoteRunId);
+        return toStatus(run);
+      }
+      if (method === "events") {
+        const afterSeq = Number.isSafeInteger(payload.afterSeq) ? Number(payload.afterSeq) : 0;
+        return (await runtime.runs.events(ownerUserId, remoteRunId)).filter((event) => event.seq > afterSeq);
+      }
+      if (method === "latestEvent") {
+        return await runtime.runs.latestEvent(ownerUserId, remoteRunId);
+      }
+      if (method === "cancelRun") {
+        const run = await runtime.runs.cancel(ownerUserId, remoteRunId);
+        await this.supervisor.runSettled(runtime.id, remoteRunId);
+        return toStatus(run);
+      }
+      if (method === "artifacts") {
+        return (await runtime.runs.processArtifacts(ownerUserId, remoteRunId)).map((artifact) => ({
+          ...artifact,
+          path: `local-artifact:${artifact.id}`,
+        }));
+      }
+      if (method === "readArtifact") {
+        const result = await runtime.runs.readProcessArtifact(ownerUserId, remoteRunId, stringValue(payload.artifactId, "artifactId"));
+        return {
+          artifact: localArtifact(result.artifact),
+          // RPC is JSON-framed. The Router decodes this transient value and
+          // streams it to the authenticated browser; it is never persisted by
+          // the cloud artifact catalog for a local Runtime.
+          contentBase64: result.content.toString("base64"),
+        };
+      }
+      if (method === "previewArtifact") {
+        return await runtime.runs.previewProcessArtifact(ownerUserId, remoteRunId, stringValue(payload.artifactId, "artifactId"));
+      }
+      if (method === "currentHumanLoop") return await runtime.runs.currentHumanLoop(ownerUserId, remoteRunId);
+      if (method === "respondHumanLoop") {
+        const input = record(payload.input);
+        return await runtime.runs.respondHumanLoop(ownerUserId, remoteRunId, stringValue(payload.requestId, "requestId"), input.value, input.expectedRevision);
+      }
+      throw new Error(`local_runtime_method_unsupported:${method}`);
+    });
   }
 
   private async dispatch(runtime: LocalRuntimeControl, envelope: RuntimeDispatchEnvelope): Promise<{ readonly remoteRunId: string }> {
@@ -221,38 +224,24 @@ export class RuntimeConnectionClient {
     if (envelope.executionTarget?.kind !== "local_device" || envelope.executionTarget.runtimeId !== runtime.id) {
       throw new TypeError("runtime_dispatch_target_mismatch");
     }
-    const existing = await runtime.database.prepare("SELECT remote_run_id FROM local_runtime_dispatches WHERE dispatch_key = ?")
-      .get(envelope.dispatchKey) as { remote_run_id: string } | undefined;
-    if (existing !== undefined) return { remoteRunId: existing.remote_run_id };
-    const inFlight = this.dispatches.get(envelope.dispatchKey);
-    if (inFlight !== undefined) return await inFlight;
-    const dispatch = this.supervisor.admitRun(runtime.id, async (admittedRuntime) => {
-      const value = await this.start(admittedRuntime, envelope);
-      return { runId: value.remoteRunId, value };
-    }).finally(() => this.dispatches.delete(envelope.dispatchKey));
-    this.dispatches.set(envelope.dispatchKey, dispatch);
-    return await dispatch;
-  }
-
-  private async start(runtime: LocalRuntimeControl, envelope: RuntimeDispatchEnvelope): Promise<{ readonly remoteRunId: string }> {
-    const visibleDirectories = await runtime.scopes.paths(envelope.localDirectoryScopeIds ?? []);
-    await runtime.runs.ensureConversation(envelope.subject.userId, envelope.conversationId, envelope.input);
-    const run = await runtime.runs.startConversation(envelope.subject.userId, envelope.input, {
-      conversationId: envelope.conversationId,
-      visibleDirectories,
-      sourceIds: envelope.localUploadedSourceIds ?? [],
-      connectorConnectionIds: envelope.connectorConnectionIds ?? runtime.connectorConnectionIds,
-      allowDangerousTools: envelope.allowDangerousTools,
-      ...(envelope.requestedModelKey === undefined ? {} : { modelKey: envelope.requestedModelKey }),
+    return this.supervisor.withRuntimeUse(runtime.id, async current => {
+      let admissions = this.admissions.get(current);
+      if (admissions === undefined) {
+        admissions = new LocalRunAdmissionService(current, {
+          validateModel: current.assertModelAvailable,
+          admit: start => this.supervisor.admitRun(current.id, start),
+          settled: id => this.supervisor.runSettled(current.id, id),
+        });
+        this.admissions.set(current, admissions);
+      }
+      const run = await admissions.start(envelope.subject.userId, {
+        requestId: `rpc:${createHash("sha256").update(envelope.dispatchKey).digest("hex")}`, input: envelope.input, modelKey: envelope.requestedModelKey ?? "",
+        conversationId: envelope.conversationId, directoryScopeIds: envelope.localDirectoryScopeIds ?? [],
+        uploadedSourceIds: envelope.localUploadedSourceIds ?? [], connectorConnectionIds: envelope.connectorConnectionIds,
+        allowDangerousTools: envelope.allowDangerousTools,
+      }, { dispatchKey: envelope.dispatchKey, assignmentId: envelope.assignmentId });
+      return { remoteRunId: run.id };
     });
-    await runtime.database.prepare(`
-      INSERT INTO local_runtime_dispatches(dispatch_key, assignment_id, owner_user_id, remote_run_id, created_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(dispatch_key) DO NOTHING
-    `).run(envelope.dispatchKey, envelope.assignmentId, envelope.subject.userId, run.id, Date.now());
-    const persisted = await runtime.database.prepare("SELECT remote_run_id FROM local_runtime_dispatches WHERE dispatch_key = ?")
-      .get(envelope.dispatchKey) as { remote_run_id: string };
-    return { remoteRunId: persisted.remote_run_id };
   }
 
   private async ownerForRun(runtime: LocalRuntimeControl, remoteRunId: string): Promise<string> {

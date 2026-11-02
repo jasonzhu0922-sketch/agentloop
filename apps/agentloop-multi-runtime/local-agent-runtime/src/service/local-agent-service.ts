@@ -1,4 +1,5 @@
 import { basename, dirname, join, resolve } from "node:path";
+import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { AppDatabase, loadMcpToolsFromConfig, parseMcpServersConfig, type McpServerRegistration, type McpServersConfig } from "@zhujun/agentloop";
@@ -20,6 +21,7 @@ import { LocalRuntimeArtifactReadPlane } from "../persistence/local-runtime-arti
 import { localConnectorCatalog } from "./local-connector-catalog.ts";
 import { WpsOAuthService } from "./wps-oauth-service.ts";
 import { FeishuOAuthService } from "./feishu-oauth-service.ts";
+import { LocalRunAdmissionService } from "@zhujun/agentloop-local-runtime/host";
 
 export { LOCAL_AGENT_VERSION };
 export const LOCAL_AGENT_PROTOCOL_VERSION = "1";
@@ -33,6 +35,7 @@ export interface LocalSession { readonly ownerUserId: string; }
 
 /** Local Agent use cases and composition root. HTTP only decodes and encodes these operations. */
 export class LocalAgentService {
+  private readonly admissions = new WeakMap<LocalRuntimeControl, LocalRunAdmissionService>();
   private connection?: RuntimeConnectionClient;
   private readonly input: LocalAgentOptions;
   private readonly stateStore: LocalAgentStateStore;
@@ -499,43 +502,46 @@ export class LocalAgentService {
       throw new LocalAgentApplicationError(400, "model_required");
     }
     const dispatchId = `strict:${session.ownerUserId}:${value.clientMessageId}`;
-    const current = this.supervisor.runtime(value.runtimeId);
-    const existing = await current.database.prepare("SELECT remote_run_id FROM local_runtime_dispatches WHERE dispatch_key = ? AND owner_user_id = ?").get(dispatchId, session.ownerUserId) as { remote_run_id: string } | undefined;
-    if (existing !== undefined) {
-      const run = await current.runs.get(session.ownerUserId, existing.remote_run_id);
-      return { runtimeId: current.id, run: toStatus(run), replayed: true };
-    }
-    return await this.supervisor.admitRun(value.runtimeId, async (runtime) => {
-      const visibleDirectories = await runtime.scopes.paths(value.localDirectoryScopeIds);
-      await runtime.runs.ensureConversation(session.ownerUserId, value.conversationId, value.input);
-      const run = await runtime.runs.startConversation(session.ownerUserId, value.input, {
-        conversationId: value.conversationId, visibleDirectories, sourceIds: value.localUploadedSourceIds,
-        connectorConnectionIds: value.connectorConnectionIds ?? runtime.connectorConnectionIds,
-        allowDangerousTools: value.allowDangerousTools, ...(value.requestedModelKey === undefined ? {} : { modelKey: value.requestedModelKey }),
-      });
-      await runtime.database.prepare("INSERT INTO local_runtime_dispatches(dispatch_key, assignment_id, owner_user_id, remote_run_id, created_at) VALUES (?, ?, ?, ?, ?)")
-        .run(dispatchId, dispatchId, session.ownerUserId, run.id, Date.now());
-      return { runId: run.id, value: { runtimeId: runtime.id, run: toStatus(run) } };
+    return this.supervisor.withRuntimeUse(value.runtimeId, async current => {
+      let admissions = this.admissions.get(current);
+      if (admissions === undefined) {
+        admissions = new LocalRunAdmissionService(current, {
+          validateModel: current.assertModelAvailable,
+          admit: start => this.supervisor.admitRun(current.id, start),
+          settled: id => this.supervisor.runSettled(current.id, id),
+        });
+        this.admissions.set(current, admissions);
+      }
+      // Old dispatch rows remain readable. New requests use the shared atomic
+      // ledger, including concurrent payload comparison and lifecycle admission.
+      const result = await admissions.startResult(session.ownerUserId, {
+        requestId: `strict:${createHash("sha256").update(value.clientMessageId).digest("hex")}`, input: value.input, modelKey: value.requestedModelKey!,
+        conversationId: value.conversationId, directoryScopeIds: value.localDirectoryScopeIds,
+        uploadedSourceIds: value.localUploadedSourceIds, connectorConnectionIds: value.connectorConnectionIds,
+        allowDangerousTools: value.allowDangerousTools,
+      }, { dispatchKey: dispatchId, assignmentId: dispatchId });
+      return { runtimeId: current.id, run: toStatus(result.run), ...(result.replayed ? { replayed: true } : {}) };
     });
   }
 
   async strictLocalRun(session: LocalSession, runtimeId: string, runId: string): Promise<unknown> {
-    const runtime = this.supervisor.runtime(runtimeId);
-    const run = await runtime.runs.get(session.ownerUserId, runId);
-    if (run.status !== "running") await this.supervisor.runSettled(runtime.id, run.id);
-    return { runtimeId: runtime.id, run: toStatus(run) };
+    return this.supervisor.withRuntimeUse(runtimeId, async runtime => {
+      const run = await runtime.runs.get(session.ownerUserId, runId);
+      if (run.status !== "running") await this.supervisor.runSettled(runtime.id, run.id);
+      return { runtimeId: runtime.id, run: toStatus(run) };
+    });
   }
 
   async strictLocalEvents(session: LocalSession, runtimeId: string, runId: string, afterSeq: number): Promise<unknown> {
-    const runtime = this.supervisor.runtime(runtimeId);
-    return { events: (await runtime.runs.events(session.ownerUserId, runId)).filter((event) => event.seq > afterSeq) };
+    return this.supervisor.withRuntimeUse(runtimeId, async runtime => ({ events: (await runtime.runs.events(session.ownerUserId, runId)).filter((event) => event.seq > afterSeq) }));
   }
 
   async cancelStrictLocalRun(session: LocalSession, runtimeId: string, runId: string): Promise<unknown> {
-    const runtime = this.supervisor.runtime(runtimeId);
-    const run = await runtime.runs.cancel(session.ownerUserId, runId);
-    await this.supervisor.runSettled(runtime.id, run.id);
-    return { runtimeId: runtime.id, run: toStatus(run) };
+    return this.supervisor.withRuntimeUse(runtimeId, async runtime => {
+      const run = await runtime.runs.cancel(session.ownerUserId, runId);
+      await this.supervisor.runSettled(runtime.id, run.id);
+      return { runtimeId: runtime.id, run: toStatus(run) };
+    });
   }
 
   async artifacts(session: LocalSession, runtimeId: string, runId: string): Promise<unknown> {

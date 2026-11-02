@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "target": "es2023", "module": "nodenext", "moduleResolution": "nodenext",
+    "rewriteRelativeImportExtensions": true, "allowImportingTsExtensions": true,
+    "outDir": "dist", "rootDir": "src", "types": ["node"],
+    "skipLibCheck": true, "strict": true
+  },
+  "include": ["src/**/*.ts"]
+}

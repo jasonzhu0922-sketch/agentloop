@@ -1,0 +1,20 @@
+{
+  "name": "agentloop-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=26" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "start": "node src/main.ts",
+    "test": "node --test --test-isolation=process tests/*.test.ts"
+  },
+  "dependencies": {
+    "@zhujun/agentloop-artifact-preview": "*",
+    "esbuild": "^0.28.2",
+    "@zhujun/agentloop": "*",
+    "@zhujun/agentloop-local-runtime": "*"
+  },
+  "devDependencies": { "@types/node": "^26.3.0", "typescript": "^7.0.2" }
+}
