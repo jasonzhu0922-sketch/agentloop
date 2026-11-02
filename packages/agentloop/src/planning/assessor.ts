@@ -188,6 +188,7 @@ export class ModelStepAssessor implements StepAssessor {
             "Validate each criterion's basis against canonicalIntent.userInput and its owned targets. A quoted requirement and rationale establish traceability, not semantic correctness. Set contractCheck.status to valid when the condition is justified, independently of whether its result is satisfied. If an inferred condition is unrelated, overstates the request, or merely prescribes one implementation, set contractCheck.status to invalid and explain the unsupported requirement in contractCheck.rationale so Recovery can revise the Plan. Never silently waive an admitted condition or weaken an explicit user constraint.",
             "Submit contractCheck for every criterion. Its status, not the wording of its rationale, identifies a contract issue. Use failedBoundary: null when there is no proposed failure boundary; never create an empty placeholder boundary.",
             "Judge each result property from observations appropriate to that property. model_judged selects the assessment method; it does not require web research or written citations. EvidenceContract describes execution observations and cannot add user obligations. Distinguish observed results, unavailable observations, and demonstrated contradictions.",
+            "When assessment_context contains runtimeCapabilitySnapshot, it is a frozen server-authored fact about the sources selected and authorized for this Run and their declared capabilities. It is sufficient support for a requested capability-inventory reply when the candidate accurately describes that inventory. It does not prove an operation was invoked, a service is healthy beyond its selected authorization state, or any user business data.",
             "An observation proves only properties it actually inspects. File existence, decoding, dimensions, successful generation or the producer's description cannot establish unobserved content quality. Keep the requested property unverified when the supplied evidence cannot support that judgment; report the exact missing observation and preserve usable work.",
             "Assess every supplied Skill exactly once. Copy its exact id into skillId, including prefixes; never substitute its name or a Skill mentioned only in evidence.",
             "Skill entries are QA observations, not completion gates; use not_assessed when QA is not rerun.",
@@ -1226,6 +1227,9 @@ function assessmentView(input: StepAssessmentInput): Record<string, unknown> {
         rejected: input.runtimeEvidenceBundles.rejected,
       },
     }),
+    ...(input.runtimeCapabilitySnapshot === undefined ? {} : {
+      runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot,
+    }),
     ...(input.contextSummary === undefined ? {} : { contextSummary: input.contextSummary }),
   };
 }
@@ -1263,6 +1267,14 @@ function assessmentPolicy(input: StepAssessmentInput): Record<string, unknown> |
         "Judge the goal, candidate, successful tool evidence, and explicit limitations together. A missing source-summary or caveat receipt shape is not automatic failure.",
       boundary:
         "Approve only supported conclusions. If a material fact remains missing, reject it with failedBoundary: name the missing evidence kind and choose repair_leaf only when a current-step tool can obtain it; otherwise choose revise_plan, ask_user, or fail.",
+    };
+  }
+  if (input.runtimeCapabilitySnapshot !== undefined) {
+    policy.serverCapabilityInventory = {
+      support:
+        "runtimeCapabilitySnapshot is Runtime-authored evidence of the services selected and authorized for this Run, plus their declared capability and operation metadata. It may support an inventory answer about those declarations without a Tool call.",
+      limit:
+        "It does not prove a service operation was executed, service health, availability outside this Run, or user business data. Reject claims beyond the snapshot rather than requiring a Tool merely to re-read the same static declaration.",
     };
   }
   return Object.keys(policy).length === 0 ? undefined : policy;

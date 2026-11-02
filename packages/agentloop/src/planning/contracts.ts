@@ -677,6 +677,12 @@ export interface StepAssessmentInput {
   readonly assessmentProfile?: AssessmentProfileId;
   /** Server-verified Runtime Result evidence bundles. Tool labels remain advisory. */
   readonly runtimeEvidenceBundles?: AssessmentEvidenceBundles;
+  /**
+   * Frozen server-authored selected-service metadata. It can support a reply
+   * about the Run's authorized capability inventory, but never attests that a
+   * service operation succeeded or that any user business data was read.
+   */
+  readonly runtimeCapabilitySnapshot?: import("../runtime/capability-snapshot.ts").RuntimeCapabilitySnapshot;
   /** The admission-pinned professional guidance snapshot for this Plan. */
   readonly practiceProfiles?: readonly import("../runtime/practice-profiles.ts").PracticeProfileSelection[];
   /** This candidate has an artifact/source-receipt shape mismatch for holistic assessment. */

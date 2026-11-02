@@ -211,3 +211,46 @@ test("an empty selected capability inventory is a truthful tool-free reply conte
     assert.equal(events.some((event) => event.type === "tool.dispatched"), false);
   } finally { database.close(); await rm(root, { recursive: true, force: true }); }
 });
+
+test("assessment receives the same frozen capability inventory as a capability reply", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-capability-assessment-"));
+  const database = new AppDatabase(":memory:");
+  const tool = fixtureTool("archive_find", "connector");
+  const goal = "What can my currently authorized services do?";
+  try {
+    const runs = new RunService({
+      database, skills: new SkillService(database), workspaceRoot: root,
+      runToolProvider: { resolve: async () => [tool] },
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        if (request.runId.startsWith("conversation-turn:")) return resolution("reply", goal);
+        if (request.phase === "assessment") {
+          const match = request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n<\/assessment_context>/);
+          assert.ok(match, "assessment must receive server-authored context");
+          const context = JSON.parse(match[1]!);
+          assert.equal(context.runtimeCapabilitySnapshot.schema, "agentloop.runtimeCapabilitySnapshot/v1");
+          assert.equal(context.runtimeCapabilitySnapshot.sources[0].authorization, "selected_for_run");
+          assert.match(context.evidence.candidateOutput, /authorized archive/);
+          assert.match(request.systemPrompt, /frozen server-authored fact/);
+          return { content: "", finishReason: "tool_calls" as const, toolCalls: [{
+            id: "assessment", name: "submit_assessment", arguments: {
+              criteria: context.step.successCriteria.map((criterion: { id: string }) => ({
+                criterionId: criterion.id, satisfied: true,
+                rationale: "The candidate accurately summarizes the frozen selected-service capability inventory.",
+                evidenceRefs: ["candidateOutput", "runtimeCapabilitySnapshot"],
+                contractCheck: { status: "valid", rationale: "A direct answer to the requested inventory is required." },
+              })),
+              skills: [], feedback: "", failedBoundary: null,
+            },
+          }] };
+        }
+        assert.deepEqual(request.tools, []);
+        return { content: "The authorized archive service can find archive items.", finishReason: "stop" as const, toolCalls: [] };
+      } }),
+    });
+    const run = await runs.executeConversation("owner", goal, { connectorConnectionIds: ["chosen-connection"] });
+    assert.equal(run.status, "completed", run.output);
+    const events = await runs.events("owner", run.id);
+    assert.equal(events.find((event) => event.type === "skill.compliance.assessed")?.data.approved, true);
+    assert.equal(events.some((event) => event.type === "tool.dispatched"), false);
+  } finally { database.close(); await rm(root, { recursive: true, force: true }); }
+});

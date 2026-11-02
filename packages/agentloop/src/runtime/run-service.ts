@@ -2858,6 +2858,7 @@ export class RunService {
             activatedSkills: activatedStepSkills,
             evidence,
             modelEvidence,
+            ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
             decisionLedger,
           });
           const reusedAssessment = assessedCandidates.get(assessmentSignature);
@@ -2916,6 +2917,7 @@ export class RunService {
             evidence,
             modelEvidence,
             runtimeEvidenceBundles,
+            ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
             ...(candidate.contextSummary === undefined ? {} : { contextSummary: candidate.contextSummary }),
             assessmentProfile,
             ...(canonicalState.intent.understanding.practiceProfiles === undefined ? {} : { practiceProfiles: canonicalState.intent.understanding.practiceProfiles }),
@@ -6368,6 +6370,7 @@ function stepAssessmentSignature(input: {
   activatedSkills: readonly PrivateSkill[];
   evidence: StepEvidence;
   modelEvidence: StepEvidence;
+  runtimeCapabilitySnapshot?: RuntimeCapabilitySnapshot;
   decisionLedger: readonly RuntimeDecisionCommit[];
 }): string {
   return createHash("sha256").update(JSON.stringify({
@@ -6379,6 +6382,7 @@ function stepAssessmentSignature(input: {
       .sort((left, right) => left.id.localeCompare(right.id, "en")),
     evidence: assessmentEvidenceSignature(input.evidence),
     modelEvidence: assessmentEvidenceSignature(input.modelEvidence),
+    ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
     decisionLedger: input.decisionLedger.map((commit) => ({
       id: commit.id,
       hash: commit.hash,
