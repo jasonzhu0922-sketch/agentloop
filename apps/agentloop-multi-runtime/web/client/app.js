@@ -69,6 +69,7 @@ let localSkillPackagesLoaded = false;
 let editingSkillPackageId;
 let availableModels = [];
 let modelsLoading = false;
+let localDeviceRecovery;
 const modelSelection = createModelSelection({ storage: localStorage });
 const liveUpdates = createCoalescedUpdater({ render: renderPendingLiveAssistantMessages, persist: saveSessions });
 
@@ -285,7 +286,11 @@ function sessionKey(userId) { return `${STORAGE_KEY}.${encodeURIComponent(userId
 async function bootstrapAuthenticatedApp() {
   if (!(await restoreIdentitySession())) return;
   render();
-  await Promise.all([loadModels(), loadDevices(), loadConversationPage(true)]);
+  // Recover the device/session before a local model catalog is requested.
+  // Otherwise a refresh can race the first local request and misreport the
+  // still-valid device as not paired.
+  localDeviceRecovery = loadDevices();
+  await Promise.all([loadModels(), localDeviceRecovery, loadConversationPage(true)]);
 }
 
 async function restoreIdentitySession() {
@@ -393,7 +398,14 @@ async function loadDevices() {
       localSkillPackagesLoaded = false;
     }
     localRuntimeState.device = device;
-    if (localRuntimeState.device && localRuntimeState.agentStatus === "online") await connectRegisteredLocalAgent();
+    if (localRuntimeState.device && (localRuntimeState.agentStatus === "online" || localRuntimeState.agentStatus === "router_disconnected")) {
+      try {
+        await connectRegisteredLocalAgent();
+      } catch {
+        localRuntimeState.agentStatus = "router_disconnected";
+      }
+      await probeLocalAgent();
+    }
   } catch {}
   if (localRuntimeState.agentStatus === "router_disconnected") scheduleLocalAgentReprobe();
   updateLocalControls();
@@ -412,7 +424,9 @@ function scheduleLocalAgentReprobe() {
 async function connectRegisteredLocalAgent() {
   if (!localRuntimeState.device?.id) return;
   await refreshLocalSession();
-  await localAgentFetch("/v1/agent/reconnect", { method: "POST" });
+  const reconnect = await localAgentFetch("/v1/agent/reconnect", { method: "POST" });
+  const reconnectBody = await reconnect.json().catch(() => ({}));
+  if (!reconnect.ok || reconnectBody.routerConnected !== true) throw new Error("router_connection_pending");
   await loadLocalRuntimes();
   await loadLocalScopes();
   await reconcileStrictLocalRuns();
@@ -652,7 +666,11 @@ function updateLocalControls() {
   $("upload-file").toggleAttribute("disabled", view.uploadDisabled);
   syncLocalRuntimeManager();
   renderLocalScopes();
-  void modelCatalog.load(modelCatalogContext());
+  const modelContext = modelCatalogContext();
+  // A bound local conversation can make the checkbox local during the first
+  // render, before device/session recovery starts. Do not turn that expected
+  // ordering gap into a false "not paired" model error.
+  if (!modelContext.local || (localRuntimeState.device?.id && sessionState.localSessionToken)) void modelCatalog.load(modelContext);
   syncModelSelection();
 }
 
@@ -1755,6 +1773,7 @@ function syncModelSelection() {
 }
 
 async function loadModels() {
+  if (isLocalExecution() && localDeviceRecovery !== undefined) await localDeviceRecovery;
   await modelCatalog.load(modelCatalogContext(), { force: true });
 }
 

@@ -35,9 +35,17 @@ test("browser does not report a failed Local Agent health probe as uninstalled",
 test("browser keeps Agent reconnect and Runtime lifecycle on the loopback service", async () => {
   const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
   assert.match(app, /localAgentFetch\("\/v1\/agent\/reconnect", \{ method: "POST" \}\)/);
+  assert.match(app, /reconnectBody\.routerConnected !== true/);
   assert.match(app, /localAgentFetch\("\/v1\/local-runtimes"\)/);
   assert.match(app, /localAgentFetch\(`\/v1\/local-runtimes\/\$\{encodeURIComponent\(runtimeId\)\}\/\$\{action\}`/);
   assert.doesNotMatch(app, /routerClient\.request\(localAgentRouterPath\("\/runtimes"\)\)/);
+});
+
+test("browser recovers the paired device before requesting a local model catalog", async () => {
+  const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  assert.match(app, /localDeviceRecovery = loadDevices\(\)/);
+  assert.match(app, /if \(isLocalExecution\(\) && localDeviceRecovery !== undefined\) await localDeviceRecovery/);
+  assert.match(app, /if \(!modelContext\.local \|\| \(localRuntimeState\.device\?\.id && sessionState\.localSessionToken\)\)/);
 });
 
 test("browser keeps Agent settings and Runtime deletion on the loopback service", async () => {

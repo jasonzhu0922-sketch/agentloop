@@ -47,6 +47,8 @@ interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
   readonly topP?: number;
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   readonly thinkingMode?: "enabled" | "disabled";
+  /** Bailian's vendor-specific root-level `enable_thinking` request flag. */
+  readonly enableThinking?: boolean;
   readonly thinkingEffort?: "low" | "medium" | "high";
   readonly reasoningVisibility: "visible" | "hidden";
   readonly planningThinkingMode?: "enabled" | "disabled";
@@ -70,6 +72,8 @@ interface OpenAICompatibleModelConfig extends LlmModelSummary {
   readonly topP?: number;
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   readonly thinkingMode?: "enabled" | "disabled";
+  /** Bailian's vendor-specific root-level `enable_thinking` request flag. */
+  readonly enableThinking?: boolean;
   readonly thinkingEffort?: "low" | "medium" | "high";
   readonly reasoningVisibility: "visible" | "hidden";
   readonly planningThinkingMode?: "enabled" | "disabled";
@@ -228,6 +232,7 @@ export class LlmProviderRegistry {
       ...(model.topP === undefined ? {} : { topP: model.topP }),
       ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
       ...(model.thinkingMode === undefined ? {} : { thinkingMode: model.thinkingMode }),
+      ...(model.enableThinking === undefined ? {} : { enableThinking: model.enableThinking }),
       ...(model.thinkingEffort === undefined ? {} : { thinkingEffort: model.thinkingEffort }),
       reasoningVisibility: model.reasoningVisibility,
       ...(model.planningThinkingMode === undefined ? {} : { planningThinkingMode: model.planningThinkingMode }),
@@ -311,6 +316,7 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
       "temperature",
       "topP",
       "thinkingMode",
+      "enableThinking",
       "thinkingEffort",
       "reasoningVisibility",
       "planningThinkingMode",
@@ -371,6 +377,9 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
   const topP = optionalSamplingNumber(config.topP, 1, `${label}.topP`);
   const reasoningEffort = optionalReasoningEffort(config.reasoningEffort, `${label}.reasoningEffort`);
   const thinkingMode = optionalThinkingMode(config.thinkingMode, `${label}.thinkingMode`);
+  const enableThinking = config.enableThinking === undefined
+    ? undefined
+    : optionalBoolean(config.enableThinking, false, `${label}.enableThinking`);
   const thinkingEffort = optionalThinkingEffort(config.thinkingEffort, `${label}.thinkingEffort`);
   const reasoningVisibility = optionalReasoningVisibility(config.reasoningVisibility, `${label}.reasoningVisibility`);
   const planningThinkingMode = optionalThinkingMode(config.planningThinkingMode, `${label}.planningThinkingMode`);
@@ -410,6 +419,7 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     ...(topP === undefined ? {} : { topP }),
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     ...(thinkingMode === undefined ? {} : { thinkingMode }),
+    ...(enableThinking === undefined ? {} : { enableThinking }),
     ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
     reasoningVisibility,
     ...(planningThinkingMode === undefined ? {} : { planningThinkingMode }),
@@ -458,6 +468,7 @@ function parseModel(
       "temperature",
       "topP",
       "thinkingMode",
+      "enableThinking",
       "thinkingEffort",
       "reasoningVisibility",
       "planningThinkingMode",
@@ -479,6 +490,9 @@ function parseModel(
   );
   const protocol = optionalProtocol(config.protocol, `${label}.protocol`, provider.protocol);
   const thinkingMode = optionalThinkingMode(config.thinkingMode, `${label}.thinkingMode`, provider.thinkingMode);
+  const enableThinking = config.enableThinking === undefined
+    ? provider.enableThinking
+    : optionalBoolean(config.enableThinking, false, `${label}.enableThinking`);
   const planningThinkingMode = optionalThinkingMode(
     config.planningThinkingMode,
     `${label}.planningThinkingMode`,
@@ -561,6 +575,7 @@ function parseModel(
     ...(topP === undefined ? {} : { topP }),
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     ...(thinkingMode === undefined ? {} : { thinkingMode }),
+    ...(enableThinking === undefined ? {} : { enableThinking }),
     ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
     reasoningVisibility,
     ...(planningThinkingMode === undefined ? {} : { planningThinkingMode }),

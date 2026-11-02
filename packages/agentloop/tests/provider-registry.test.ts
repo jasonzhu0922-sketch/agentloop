@@ -228,6 +228,41 @@ test("the provider registry inherits planner-only thinking for the selected chat
   }
 });
 
+test("the provider registry sends Bailian enableThinking as enable_thinking", async (t) => {
+  const registry = LlmProviderRegistry.fromEnvironment({
+    LLM_PROVIDERS_JSON: JSON.stringify({
+      defaultProvider: "bailian",
+      defaultModelKey: "bailian-chat",
+      providers: {
+        bailian: {
+          kind: "openai-compatible",
+          baseUrl: "https://models.example.test/v1",
+          apiKeyEnv: "BAILIAN_API_KEY",
+          defaultModel: "bailian-chat",
+        },
+      },
+      models: {
+        "bailian-chat": {
+          providerKey: "bailian",
+          providerModel: "qwen-plus",
+          enableThinking: false,
+          thinkingMode: "enabled",
+        },
+      },
+    }),
+    BAILIAN_API_KEY: "bailian-secret",
+  });
+  let body: Record<string, unknown> | undefined;
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    return Response.json({ choices: [{ finish_reason: "stop", message: { content: "ok" } }] });
+  });
+
+  await registry.create().complete({ runId: "bailian-thinking", phase: "execution", systemPrompt: "Test", messages: [], tools: [] });
+  assert.equal(body?.enable_thinking, false);
+  assert.equal(Object.hasOwn(body ?? {}, "thinking"), false);
+});
+
 test("the provider registry forwards model chat template kwargs over provider defaults", async () => {
   const registry = LlmProviderRegistry.fromEnvironment({
     LLM_PROVIDERS_JSON: JSON.stringify({

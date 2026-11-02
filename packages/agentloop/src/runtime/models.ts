@@ -50,6 +50,8 @@ export interface OpenAICompatibleModelOptions {
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   /** Control thinking for Chat Completions providers that expose DeepSeek's thinking extension. */
   readonly thinkingMode?: "enabled" | "disabled";
+  /** Bailian's vendor-specific switch, serialized as root-level `enable_thinking`. */
+  readonly enableThinking?: boolean;
   /** Optional DeepSeek Chat Completions reasoning effort when thinking is enabled. */
   readonly thinkingEffort?: "low" | "medium" | "high";
   /** Whether provider reasoning may be projected into Runtime events. */
@@ -295,6 +297,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
   private readonly topP?: number;
   private readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   private readonly thinkingMode?: "enabled" | "disabled";
+  private readonly enableThinking?: boolean;
   private readonly thinkingEffort?: "low" | "medium" | "high";
   private readonly planningThinkingMode?: "enabled" | "disabled";
   private readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
@@ -341,6 +344,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
     this.topP = options.topP;
     this.reasoningEffort = options.reasoningEffort;
     this.thinkingMode = options.thinkingMode;
+    this.enableThinking = options.enableThinking;
     this.thinkingEffort = options.thinkingEffort;
     this.planningThinkingMode = options.planningThinkingMode;
     this.chatTemplateKwargs = options.chatTemplateKwargs;
@@ -618,6 +622,10 @@ export class OpenAICompatibleModel implements ModelAdapter {
     const thinkingMode = invocation.plannerRequest && this.planningThinkingMode !== undefined
       ? this.planningThinkingMode
       : this.thinkingMode;
+    // Bailian uses a root-level boolean, which must not be combined with the
+    // DeepSeek-compatible `thinking` envelope.
+    const wireThinkingMode = this.enableThinking === undefined ? thinkingMode : undefined;
+    const wireThinkingEffort = this.enableThinking === false ? undefined : this.thinkingEffort;
     const body = JSON.stringify({
       model: this.model,
       ...(this.temperature === undefined ? {} : { temperature: this.temperature }),
@@ -625,14 +633,15 @@ export class OpenAICompatibleModel implements ModelAdapter {
       messages: prompt.messages,
       tools: providerTools,
       ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
-      ...(thinkingMode === undefined && this.thinkingEffort === undefined
+      ...(wireThinkingMode === undefined && wireThinkingEffort === undefined
         ? {}
         : {
-            ...(thinkingMode === undefined ? {} : { thinking: { type: thinkingMode } }),
-            ...(this.thinkingEffort === undefined ? {} : { reasoning_effort: this.thinkingEffort }),
+            ...(wireThinkingMode === undefined ? {} : { thinking: { type: wireThinkingMode } }),
+            ...(wireThinkingEffort === undefined ? {} : { reasoning_effort: wireThinkingEffort }),
           }),
       ...(this.reasoningEffort === undefined ? {} : { reasoning_effort: this.reasoningEffort }),
       ...(this.chatTemplateKwargs === undefined ? {} : { chat_template_kwargs: this.chatTemplateKwargs }),
+      ...(this.enableThinking === undefined ? {} : { enable_thinking: this.enableThinking }),
       max_tokens: Math.min(invocation.maxOutputTokens ?? this.limits.maxOutputTokens, this.limits.maxOutputTokens),
       ...(stream ? { stream: true } : {}),
     });

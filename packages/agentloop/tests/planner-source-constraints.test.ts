@@ -84,7 +84,7 @@ function planningRetryTask(): TaskSpec {
   };
 }
 
-test("Planner previews a proposal against the selected Skill capability closure", async () => {
+test("Planner rejects known but unbound Skill capabilities while preserving the selected closure", async () => {
   const selectedSource = {
     id: "discovered:selected-source",
     name: "selected-source",
@@ -176,8 +176,12 @@ test("Planner previews a proposal against the selected Skill capability closure"
 
   assert.equal(calls, 2);
   assert.equal(failures.length, 1);
-  assert.match(failures[0]!, /requires unknown capabilities: .*discovered:unselected-source/);
+  // The frozen capability inventory knows the declaring Skill. Knowledge is
+  // not execution authority: the proposal must still reject its unbound use.
+  assert.match(failures[0]!, /requires source-provider capability\(ies\) without binding the declaring Skill:/);
+  assert.ok(failures[0]!.includes(unselectedCapability));
   assert.deepEqual(proposal.steps[0]?.requiredCapabilities, [selectedCapability]);
+  assert.deepEqual(proposal.steps[0]?.skillIds, [selectedSource.id]);
 });
 
 function retryingPlannerModel(): { readonly model: ModelAdapter; readonly calls: () => number } {
