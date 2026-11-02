@@ -589,6 +589,7 @@ function transientMcpRegistration(server: LocalRuntimeMcpServerInput): { registr
   }
   const registration = parseMcpServersConfig({ servers: [{
     key: server.key,
+    displayName: server.displayName,
     transport: server.transport,
     url: server.url,
     ...(server.protocolVersion === undefined ? {} : { protocolVersion: server.protocolVersion }),

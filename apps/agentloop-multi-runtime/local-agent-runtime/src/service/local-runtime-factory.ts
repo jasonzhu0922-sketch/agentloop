@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
-import { AppDatabase, AppError, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools, loadMcpToolsFromConfig, type ModelAdapter, type ModelInvocation, type ModelResponse, type ModelRetryReporter, type ModelStreamSink } from "@zhujun/agentloop";
+import { AppDatabase, AppError, LlmProviderRegistry, RunService, SkillService, createRuntimeCapabilitySnapshotFromSources, createStepExecutionStrategyProfile, createWebTools, loadMcpToolsFromConfig, type LoadedMcpIntegration, type ModelAdapter, type ModelInvocation, type ModelResponse, type ModelRetryReporter, type ModelStreamSink, type RuntimeCapabilitySnapshot } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { ConnectorRegistry, ConnectorRuntimeService, environmentConnectorRuntime, loadConnectorModules } from "../../../src/connectors/index.ts";
 import { loadPracticeProfileConfig, loadStepExecutionStrategyProfileConfig, webToolsOptionsFromEnvironment } from "../../../src/shared/config.ts";
@@ -45,6 +45,38 @@ export class CloudProxyModel implements ModelAdapter {
 interface McpStartupIntegration {
   readonly loadedServers: readonly { readonly key: string; readonly toolCount: number }[];
   readonly failedServers: readonly { readonly key: string; readonly message: string }[];
+}
+
+/**
+ * Project Local Runtime configuration into a redacted knowledge document.
+ * This deliberately uses configuration/load state, not Run grants: seeing a
+ * configured MCP service never makes its tools executable in a reply turn.
+ */
+function configuredMcpCapabilitySnapshot(
+  configuration: ResolvedLocalRuntimeConfiguration,
+  integration: LoadedMcpIntegration,
+): RuntimeCapabilitySnapshot {
+  const loaded = new Set(integration.loadedServers.map((server) => server.key));
+  const failed = new Set(integration.failedServers.map((server) => server.key));
+  return createRuntimeCapabilitySnapshotFromSources({
+    scope: "runtime_configured",
+    capturedAt: Date.now(),
+    sources: configuration.mcpServers.map((server) => ({
+      label: server.displayName ?? "Configured MCP service",
+      transport: server.transport,
+      state: loaded.has(server.key)
+        ? "loaded_for_runtime"
+        : failed.has(server.key) ? "load_failed" : "configured_for_runtime",
+      capabilities: server.capabilities,
+      operations: integration.tools
+        .filter((tool) => tool.source?.id === server.key)
+        .map((tool) => ({
+          label: tool.source?.toolName ?? tool.name,
+          description: tool.description,
+        })),
+      identityValues: [server.key, ...(server.aliases ?? [])],
+    })),
+  });
 }
 
 export const RESTORED_RUN_ACTIVITY_WINDOW_MS = 10 * 60 * 1_000;
@@ -192,6 +224,7 @@ export class LocalRuntimeFactory {
       stepExecutionStrategy: createStepExecutionStrategyProfile(strategy.profile, strategy.projection),
       practiceProfileCatalog: practiceProfiles,
       runToolProvider: connectorRuntimeService,
+      runtimeCapabilitySnapshotProvider: () => [configuredMcpCapabilitySnapshot(configuration, mcpIntegration)],
       tools: [
         ...(integrationEnvironment.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptionsFromEnvironment(integrationEnvironment))),
         ...mcpIntegration.tools,

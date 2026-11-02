@@ -1031,6 +1031,7 @@ export class LocalRuntimeConfigurationStore {
     const toolBlocklist = optionalNonEmptyStringArray(policy.toolBlocklist, "stored MCP tool blocklist");
     const registration: Record<string, unknown> = {
       key: row.source_key,
+      displayName: row.display_name,
       transport: row.transport,
       url: row.url,
       ...(row.protocol_version === null ? {} : { protocolVersion: row.protocol_version }),
@@ -1098,6 +1099,7 @@ function validateMcpServers(servers: readonly LocalRuntimeMcpServerWrite[], allo
     }
     const parsed = parseMcpServersConfig({ servers: [{
       key: server.key,
+      displayName: server.displayName,
       transport: server.transport,
       url: server.url,
       ...(server.protocolVersion === undefined ? {} : { protocolVersion: server.protocolVersion }),

@@ -188,7 +188,8 @@ export class ModelStepAssessor implements StepAssessor {
             "Validate each criterion's basis against canonicalIntent.userInput and its owned targets. A quoted requirement and rationale establish traceability, not semantic correctness. Set contractCheck.status to valid when the condition is justified, independently of whether its result is satisfied. If an inferred condition is unrelated, overstates the request, or merely prescribes one implementation, set contractCheck.status to invalid and explain the unsupported requirement in contractCheck.rationale so Recovery can revise the Plan. Never silently waive an admitted condition or weaken an explicit user constraint.",
             "Submit contractCheck for every criterion. Its status, not the wording of its rationale, identifies a contract issue. Use failedBoundary: null when there is no proposed failure boundary; never create an empty placeholder boundary.",
             "Judge each result property from observations appropriate to that property. model_judged selects the assessment method; it does not require web research or written citations. EvidenceContract describes execution observations and cannot add user obligations. Distinguish observed results, unavailable observations, and demonstrated contradictions.",
-            "When assessment_context contains runtimeCapabilitySnapshot, it is a frozen server-authored fact about the sources selected and authorized for this Run and their declared capabilities. It is sufficient support for a requested capability-inventory reply when the candidate accurately describes that inventory. It does not prove an operation was invoked, a service is healthy beyond its selected authorization state, or any user business data.",
+            "When assessment_context contains runtimeCapabilitySnapshot, it is a frozen server-authored fact about the snapshot's explicit scope and source states. It is sufficient support for a requested capability-inventory reply when the candidate accurately describes that inventory. run_authorized does not prove runtime configuration; runtime_configured does not prove invocation authority or health; platform_catalog does not prove it is configured. No scope proves an operation was invoked or any user business data.",
+            "When assessment_context says runtimeCapabilityInventory.availability=not_provided, approve only a bounded statement that the requested catalog metadata was not supplied by this Runtime. Never reinterpret it as proof that no service exists, is configured, installed, authorized, or healthy.",
             "An observation proves only properties it actually inspects. File existence, decoding, dimensions, successful generation or the producer's description cannot establish unobserved content quality. Keep the requested property unverified when the supplied evidence cannot support that judgment; report the exact missing observation and preserve usable work.",
             "Assess every supplied Skill exactly once. Copy its exact id into skillId, including prefixes; never substitute its name or a Skill mentioned only in evidence.",
             "Skill entries are QA observations, not completion gates; use not_assessed when QA is not rerun.",
@@ -1230,6 +1231,9 @@ function assessmentView(input: StepAssessmentInput): Record<string, unknown> {
     ...(input.runtimeCapabilitySnapshot === undefined ? {} : {
       runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot,
     }),
+    ...(input.runtimeCapabilityInventory === undefined ? {} : {
+      runtimeCapabilityInventory: input.runtimeCapabilityInventory,
+    }),
     ...(input.contextSummary === undefined ? {} : { contextSummary: input.contextSummary }),
   };
 }
@@ -1272,9 +1276,15 @@ function assessmentPolicy(input: StepAssessmentInput): Record<string, unknown> |
   if (input.runtimeCapabilitySnapshot !== undefined) {
     policy.serverCapabilityInventory = {
       support:
-        "runtimeCapabilitySnapshot is Runtime-authored evidence of the services selected and authorized for this Run, plus their declared capability and operation metadata. It may support an inventory answer about those declarations without a Tool call.",
+        "runtimeCapabilitySnapshot is Runtime-authored evidence of its explicit scope, source states, and declared capability and operation metadata. It may support an inventory answer about exactly those declarations without a Tool call.",
       limit:
-        "It does not prove a service operation was executed, service health, availability outside this Run, or user business data. Reject claims beyond the snapshot rather than requiring a Tool merely to re-read the same static declaration.",
+        "It does not prove a service operation was executed, service health, availability outside its stated scope, or user business data. Reject claims beyond the snapshot rather than requiring a Tool merely to re-read the same static declaration.",
+    };
+  }
+  if (input.runtimeCapabilityInventory?.availability === "not_provided") {
+    policy.serverCapabilityInventoryAvailability = {
+      support: "Runtime states that metadata for the requested capability scope was not provided.",
+      limit: "This supports only a bounded unavailable-catalog reply. It is not evidence that no service is configured, installed, authorized, or healthy.",
     };
   }
   return Object.keys(policy).length === 0 ? undefined : policy;

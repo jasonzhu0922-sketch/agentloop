@@ -17,6 +17,8 @@ export interface McpServersConfig {
 
 export interface McpServerRegistration {
   readonly key: string;
+  /** Host-approved user-facing label; keys can encode configuration identity. */
+  readonly displayName?: string;
   readonly transport: "http";
   readonly url: string;
   /** Protocol version accepted by this server; defaults to the current client version. */
@@ -166,6 +168,7 @@ function parseMcpServerRegistration(value: unknown, label: string): McpServerReg
   const timeoutMs = record.timeoutMs === undefined ? undefined : parsePositiveInteger(record.timeoutMs, `${label}.timeoutMs`);
   return {
     key,
+    ...(record.displayName === undefined ? {} : { displayName: requireString(record.displayName, `${label}.displayName`, { min: 1, max: 160 }) }),
     transport: "http",
     url: requireString(record.url, `${label}.url`, { min: 1 }),
     ...(record.protocolVersion === undefined ? {} : { protocolVersion: requireString(record.protocolVersion, `${label}.protocolVersion`, { min: 1 }) }),
@@ -247,6 +250,7 @@ function createRuntimeTool(
     description: [tool.title, tool.description, `source=${server.key}`, `trust=${trust}`].filter(Boolean).join(" "),
     source: {
       id: server.key,
+      ...(server.displayName === undefined ? {} : { displayName: server.displayName }),
       toolName: tool.name,
       ...(server.aliases === undefined ? {} : { aliases: server.aliases }),
       transport: "mcp",
