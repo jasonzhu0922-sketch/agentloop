@@ -39,7 +39,10 @@ for (const [settings, count, capacity] of [["",2,20], ["RUNTIME_COUNT=1",1,20], 
     assert.equal(compose.status,0,compose.stderr);
     const services = JSON.parse(compose.stdout).services;
     const catalog = JSON.parse(await readFile(join(dirname(path),"runtimes.json"),"utf8"));
-    assert.equal(Object.keys(services).length,count+2);
+    assert.equal(Object.keys(services).length,count+3);
+    assert.ok(services["account-service"]);
+    assert.equal(services["account-service"].environment.ACCOUNT_SERVICE_PORT,"8795");
+    assert.equal(services.router.depends_on["account-service"].condition,"service_healthy");
     assert.equal(catalog.runtimes.length,count);
     const ids = new Set();
     const volumes = new Set();

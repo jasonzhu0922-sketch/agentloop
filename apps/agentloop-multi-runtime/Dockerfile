@@ -27,6 +27,7 @@ COPY packages/connector-feishu/package.json ./packages/connector-feishu/package.
 COPY packages/connector-126-mail/package.json ./packages/connector-126-mail/package.json
 COPY packages/connector-wps/package.json ./packages/connector-wps/package.json
 COPY apps/agentloop-app/package.json ./apps/agentloop-app/package.json
+COPY apps/agentloop-account-service/package.json ./apps/agentloop-account-service/package.json
 COPY apps/agentloop-multi-runtime/package.json ./apps/agentloop-multi-runtime/package.json
 RUN npm config set registry "${NPM_REGISTRY}" \
   # Preserve third-party/private tarball origins recorded in package-lock.json.
@@ -40,6 +41,7 @@ RUN npm config set registry "${NPM_REGISTRY}" \
 FROM dependencies AS application
 WORKDIR /app
 COPY packages ./packages
+COPY apps/agentloop-account-service ./apps/agentloop-account-service
 COPY apps/agentloop-multi-runtime ./apps/agentloop-multi-runtime
 RUN npm run build --workspace @zhujun/agentloop \
   && npm run build --workspace @zhujun/agentloop-artifact-preview \
@@ -49,6 +51,7 @@ RUN npm run build --workspace @zhujun/agentloop \
   && npm run build --workspace @zhujun/agentloop-identity \
   && npm run build --workspace @zhujun/agentloop-connector-sdk \
   && npm run build --workspace @zhujun/agentloop-local-runtime \
+  && npm run build --workspace agentloop-account-service \
   && npm rebuild sharp --workspace agentloop-multi-runtime --foreground-scripts
 
 WORKDIR /app/apps/agentloop-multi-runtime
@@ -93,6 +96,10 @@ CMD ["npm", "run", "start:runtime-host"]
 
 FROM application AS web
 CMD ["npm", "run", "start:web"]
+
+FROM application AS account-service
+WORKDIR /app/apps/agentloop-account-service
+CMD ["npm", "run", "start"]
 
 # Compose runs Router, Web, and Runtime Host from one local image.  Keep the
 # default target Host-capable so `docker compose up --build` cannot publish a

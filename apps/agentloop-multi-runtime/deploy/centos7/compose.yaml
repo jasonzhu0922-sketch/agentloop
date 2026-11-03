@@ -26,6 +26,23 @@ x-runtime-environment: &runtime_environment
 x-app-image: &app_image ${MULTI_RUNTIME_IMAGE:?set in deployment .env}
 
 services:
+  account-service:
+    image: *app_image
+    command: npm run start --workspace agentloop-account-service
+    restart: unless-stopped
+    environment:
+      ACCOUNT_SERVICE_HOST: 0.0.0.0
+      ACCOUNT_SERVICE_PORT: 8795
+      ACCOUNT_SERVICE_DATABASE_PATH: /var/lib/agentloop-account/accounts.db
+    volumes:
+      - ${ACCOUNT_SERVICE_DATA_PATH:-${DEPLOY_ROOT:-/opt/agentloop}/data/accounts}:/var/lib/agentloop-account
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8795/healthz').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
   router:
     image: *app_image
     command: npm run start:router
@@ -70,6 +87,9 @@ services:
       timeout: 3s
       retries: 12
       start_period: 10s
+    depends_on:
+      account-service:
+        condition: service_healthy
 
   # RUNTIME_SERVICES
 

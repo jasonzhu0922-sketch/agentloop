@@ -39,18 +39,33 @@ case "$identity_service_url" in
   http://*|https://*) ;;
   *) echo 'IDENTITY_SERVICE_URL must be an http(s) URL for the independent account-service.' >&2; exit 1 ;;
 esac
+account_data_path=$(python3 - "$root/.env" <<'PY'
+from pathlib import Path
+import sys
+values=[line.split('=',1)[1].strip().strip("\"'") for line in Path(sys.argv[1]).read_text().splitlines() if line.startswith('ACCOUNT_SERVICE_DATA_PATH=')]
+if len(values) > 1: raise SystemExit('ACCOUNT_SERVICE_DATA_PATH must be defined once')
+value=values[0] if values else str(Path(sys.argv[1]).parent / 'data/accounts')
+if not value.startswith('/') or '$' in value: raise SystemExit('ACCOUNT_SERVICE_DATA_PATH must be an absolute path')
+print(value)
+PY
+)
+account_db_path=$account_data_path/accounts.db
 load_services() {
   local service services
   services=$(dc config --services)
-  runtime_services=(); runtime_names=()
+  runtime_services=(); runtime_names=(); account_service_present=false; account_name=agentloop-account-service-1
   while IFS= read -r service; do
-    if [[ "$service" =~ ^runtime-general-[0-9]{2,3}$ ]]; then
-      runtime_services+=("$service")
-      runtime_names+=("agentloop-$service-1")
-    fi
+    case "$service" in
+      account-service) account_service_present=true ;;
+      runtime-general-[0-9][0-9]|runtime-general-[0-9][0-9][0-9])
+        runtime_services+=("$service")
+        runtime_names+=("agentloop-$service-1") ;;
+    esac
   done <<< "$services"
   [ "${#runtime_services[@]}" -gt 0 ] || { echo 'No Runtime services in current deployment.' >&2; return 1; }
-  all_names=(agentloop-router-1 agentloop-web-1 "${runtime_names[@]}")
+  all_names=(agentloop-router-1 agentloop-web-1)
+  if [ "$account_service_present" = true ]; then all_names+=("$account_name"); fi
+  all_names+=("${runtime_names[@]}")
 }
 load_services
 previous_services=("${runtime_services[@]}")
@@ -189,6 +204,7 @@ TOPOLOGY_PY
   if [ "$operation" = cloud ] || [ "$operation" = skills ] || [ "$operation" = skills-remove ]; then
     cp -a "$skills_path" "$backup/custom-skills"
   fi
+  if [ -f "$account_db_path" ]; then cp -p "$account_db_path" "$backup/accounts.db"; fi
   {
     echo '#!/usr/bin/env bash'
     echo 'set -euo pipefail'
@@ -204,6 +220,11 @@ TOPOLOGY_PY
     if [ "$operation" = cloud ] || [ "$operation" = skills ] || [ "$operation" = skills-remove ]; then
       printf 'rm -rf %q\n' "$skills_path"
       printf 'cp -a %q %q\n' "$backup/custom-skills" "$skills_path"
+    fi
+    if [ -f "$backup/accounts.db" ]; then
+      printf 'install -d -m 700 %q\ncp -p %q %q\n' "$account_data_path" "$backup/accounts.db" "$account_db_path"
+    else
+      printf 'rm -f %q\n' "$account_db_path"
     fi
     printf 'docker compose --project-directory %q --env-file %q -f %q up -d --no-build' "$root" "$root/.env" "$previous_compose"
     if [ "$operation" = llm ]; then
@@ -223,12 +244,87 @@ rollback() {
   echo "Operation failed. Restoring backup: $backup" >&2
   # Release the lock for the explicit rollback script, which acquires it again.
   flock -u 9
+  if [ -f "$backup/router-identity.dump" ]; then
+    if ! sudo -u postgres pg_restore --data-only --disable-triggers --dbname=agentloop_router "$backup/router-identity.dump"; then
+      echo 'IDENTITY RESTORE FAILED; inspect the account and Router databases before further changes.' >&2
+      exit "$status"
+    fi
+  fi
   if ! bash "$backup/rollback.sh"; then
     echo 'ROLLBACK FAILED; inspect production containers before further changes.' >&2
     exit "$status"
   fi
   if ! ready "${previous_names[@]}"; then echo 'ROLLBACK READINESS FAILED' >&2; fi
   exit "$status"
+}
+migrate_account_identity() {
+  local staging
+  install -d -m 700 "$account_data_path"
+  if [ -f "$account_db_path" ]; then
+    local existing
+    existing=$(python3 - "$account_db_path" <<'PY'
+import sqlite3,sys
+try:
+    db=sqlite3.connect(sys.argv[1])
+    row=db.execute("SELECT count(*) FROM mr_identity_users").fetchone()
+    print(row[0] if row else 0)
+except sqlite3.Error:
+    print(-1)
+finally:
+    try: db.close()
+    except Exception: pass
+PY
+)
+    [ "$existing" -ge 0 ] || { echo 'Existing account-service database is unreadable.' >&2; return 1; }
+    if [ "$existing" -gt 0 ]; then
+      echo "Account Service database already contains $existing user(s); preserving it."
+      return 0
+    fi
+  fi
+  staging=$(mktemp "$account_data_path/accounts.db.migrate.XXXXXX")
+  rm -f "$staging"
+  python3 - "$staging" <<'PY'
+import csv, os, sqlite3, subprocess, sys
+target=sys.argv[1]
+tables=[
+  ('mr_identity_users', ('id','email','password_hash','created_at')),
+  ('mr_identity_tenants', ('id','name','created_at')),
+  ('mr_identity_memberships', ('tenant_id','user_id','role','created_at')),
+  ('mr_identity_sessions', ('id','user_id','token_hash','expires_at','created_at')),
+]
+def rows(table, columns):
+    sql='SELECT '+','.join('"'+c+'"' for c in columns)+' FROM "'+table+'" ORDER BY 1'
+    output=subprocess.check_output(['sudo','-u','postgres','psql','-d','agentloop_router','-At','-F','\t','-c',sql], universal_newlines=True)
+    return [line.split('\t') for line in output.splitlines() if line]
+data={table: rows(table, columns) for table,columns in tables}
+db=sqlite3.connect(target)
+try:
+    db.executescript('''
+      PRAGMA foreign_keys=ON;
+      CREATE TABLE mr_identity_users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE mr_identity_tenants (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE mr_identity_memberships (tenant_id TEXT NOT NULL REFERENCES mr_identity_tenants(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES mr_identity_users(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('owner','admin','member')), created_at INTEGER NOT NULL, PRIMARY KEY(tenant_id,user_id));
+      CREATE TABLE mr_identity_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES mr_identity_users(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL);
+      CREATE INDEX mr_identity_sessions_user_idx ON mr_identity_sessions(user_id);
+      CREATE INDEX mr_identity_sessions_expiry_idx ON mr_identity_sessions(expires_at);
+    ''')
+    for table,columns in tables:
+        placeholders=','.join('?' for _ in columns)
+        db.executemany('INSERT INTO "'+table+'" ('+','.join(columns)+') VALUES ('+placeholders+')', data[table])
+    db.commit()
+    counts=[db.execute('SELECT count(*) FROM "'+table+'"').fetchone()[0] for table,_ in tables]
+    print('Migrated account rows: users=%d tenants=%d memberships=%d sessions=%d' % tuple(counts))
+finally:
+    db.close()
+os.chmod(target,0o600)
+PY
+  mv "$staging" "$account_db_path"
+  sudo -u postgres pg_dump --data-only --format=custom \
+    --table=mr_identity_users --table=mr_identity_tenants --table=mr_identity_memberships --table=mr_identity_sessions \
+    agentloop_router > "$backup/router-identity.dump"
+  sudo -u postgres pg_restore --list < "$backup/router-identity.dump" >/dev/null
+  sudo -u postgres psql -v ON_ERROR_STOP=1 -d agentloop_router -c \
+    'DELETE FROM mr_identity_sessions; DELETE FROM mr_identity_memberships; DELETE FROM mr_identity_users; DELETE FROM mr_identity_tenants;' >/dev/null
 }
 if [ "$operation" = cloud ]; then
   sha=${3:?commit SHA required}
@@ -320,6 +416,12 @@ PY
   sudo -u postgres pg_restore --list < "$backup/agentloop_router.dump" >/dev/null
   sudo -u postgres pg_restore --list < "$backup/agentloop_runtime.dump" >/dev/null
   trap rollback ERR
+  new_services=$(docker compose --project-directory "$root" --env-file "$root/.env" -f "$compose_file" config --services)
+  if grep -qx 'account-service' <<< "$new_services"; then
+    migrate_account_identity
+  else
+    echo 'Account-service is absent from the candidate topology; identity migration skipped.'
+  fi
   python3 - "$root/.env" "$image" <<'PY'
 from pathlib import Path
 import os,sys
