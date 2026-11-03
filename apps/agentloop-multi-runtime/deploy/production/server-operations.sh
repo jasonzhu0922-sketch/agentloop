@@ -245,7 +245,7 @@ rollback() {
   # Release the lock for the explicit rollback script, which acquires it again.
   flock -u 9
   if [ -f "$backup/router-identity.dump" ]; then
-    if ! sudo -u postgres pg_restore --data-only --disable-triggers --dbname=agentloop_router "$backup/router-identity.dump"; then
+    if ! sudo -u postgres pg_restore --data-only --disable-triggers --dbname=agentloop_router < "$backup/router-identity.dump"; then
       echo 'IDENTITY RESTORE FAILED; inspect the account and Router databases before further changes.' >&2
       exit "$status"
     fi

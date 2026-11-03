@@ -10,9 +10,14 @@ export interface CloudAuthPort {
   current(token: string): Promise<CloudPrincipal>;
   logout(token: string): Promise<void>;
 }
-export function authBaseUrl(value: string): string {
+export interface AccountServiceClientOptions {
+  readonly allowInternalHttp?: boolean;
+}
+export function authBaseUrl(value: string, options: { readonly allowInternalHttp?: boolean } = {}): string {
   let url: URL; try { url = new URL(value); } catch { throw new Error("desktop_auth_url_invalid"); }
-  if ((url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname)))
+  const loopback = url.protocol === "http:" && ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname);
+  const internal = options.allowInternalHttp === true && url.protocol === "http:" && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/i.test(url.hostname);
+  if ((url.protocol !== "https:" && !loopback && !internal)
     || url.username || url.password || url.search || url.hash || /[?#]/.test(value)) throw new Error("desktop_auth_url_invalid");
   return url.href.replace(/\/+$/, "");
 }
@@ -33,7 +38,7 @@ function principal(value: unknown): CloudPrincipal {
 /** Client for the shared /v1/auth contract, with no local user database. */
 export class AccountServiceClient implements CloudAuthPort {
   readonly issuer: string;
-  constructor(baseUrl: string) { this.issuer = authBaseUrl(baseUrl); }
+  constructor(baseUrl: string, options: AccountServiceClientOptions = {}) { this.issuer = authBaseUrl(baseUrl, options); }
   private async request(path: string, token?: string, credentials?: { email: string; password: string }): Promise<unknown> {
     let response: Response;
     try {

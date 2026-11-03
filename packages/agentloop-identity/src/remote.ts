@@ -4,7 +4,9 @@ import { IdentityError } from "./service.ts";
 /** Same authority for Router and Desktop when the account service is deployed separately. */
 export class RemoteIdentityService {
   private readonly client: AccountServiceClient;
-  constructor(baseUrl: string) { this.client = new AccountServiceClient(baseUrl); }
+  // Router may call an account-service on a private container network. The
+  // public Desktop client keeps the stricter HTTPS/loopback policy.
+  constructor(baseUrl: string) { this.client = new AccountServiceClient(baseUrl, { allowInternalHttp: true }); }
   async ready(): Promise<void> { /* The remote service owns schema and availability. Never create a second user database. */ }
   private credentials(email: unknown, password: unknown): { email: string; password: string } {
     if (typeof email !== "string" || email.length > 254) throw new IdentityError(400, "invalid_email");
