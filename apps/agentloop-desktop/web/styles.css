@@ -143,3 +143,123 @@ button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid va
   .settings-page-heading { flex-wrap:wrap; }
   .desktop-settings-save { bottom:-16px; }
 }
+
+/* Keep the Desktop settings workspace visually aligned with Multi Runtime's
+ * Local Agent settings. Transport and persistence remain Desktop-owned. */
+.desktop-settings.agent-settings-card {
+  width:min(1080px,calc(100vw - 48px));
+  height:min(820px,calc(100dvh - 48px));
+  max-height:none;
+  grid-template-rows:auto minmax(0,1fr);
+  padding:22px;
+  gap:16px;
+  overflow:hidden;
+}
+.desktop-settings.agent-settings-card[open] { display:grid; }
+.desktop-settings-header.agent-settings-header {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  align-items:start;
+  gap:24px;
+  padding:0;
+  border:0;
+}
+.desktop-settings-header.agent-settings-header strong { font-size:18px; }
+.desktop-settings-header.agent-settings-header p { margin:7px 0 0; color:var(--text-2); font-size:12px; line-height:1.6; }
+.desktop-settings-layout.agent-settings-layout {
+  display:grid;
+  grid-template-columns:190px minmax(0,1fr);
+  min-height:0;
+  border-top:1px solid var(--border);
+  border-bottom:1px solid var(--border);
+  overflow:hidden;
+}
+.desktop-settings-nav.agent-settings-nav {
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+  padding:18px 14px 18px 0;
+  border-right:1px solid var(--border);
+  overflow:auto;
+}
+.desktop-settings-nav.agent-settings-nav button,
+.desktop-settings-nav.agent-settings-nav button.active {
+  width:100%;
+  margin:0;
+  padding:9px 11px;
+  border:0;
+  border-radius:6px;
+  background:transparent;
+  color:var(--text-2);
+  font-size:12px;
+  font-weight:400;
+  text-align:left;
+}
+.desktop-settings-nav.agent-settings-nav button:hover,
+.desktop-settings-nav.agent-settings-nav button.active {
+  background:var(--bg-3);
+  color:var(--text);
+  font-weight:650;
+}
+.desktop-settings-content.agent-settings-content {
+  min-width:0;
+  min-height:0;
+  padding:22px 26px;
+  overflow:auto;
+  align-content:start;
+  gap:18px;
+}
+.desktop-settings-content.agent-settings-content .settings-page-heading { gap:18px; }
+.desktop-settings-content.agent-settings-content .settings-page-heading h2 { margin:0; font-size:19px; }
+.desktop-settings-content.agent-settings-content .settings-page-heading p { margin:4px 0 0; color:var(--text-2); font-size:12px; }
+.desktop-settings-content.agent-settings-content .settings-local-badge {
+  display:inline-flex;
+  align-items:center;
+  border-color:color-mix(in srgb,var(--ok) 32%,var(--border));
+  border-radius:5px;
+  padding:3px 7px;
+  background:color-mix(in srgb,var(--ok) 8%,var(--bg));
+  color:var(--ok);
+  white-space:nowrap;
+}
+.desktop-settings-content.agent-settings-content .capability-card {
+  gap:9px;
+  padding:12px;
+  border-radius:8px;
+  background:var(--bg-2);
+}
+.desktop-settings-content.agent-settings-content .capability-card>strong { font-size:13px; }
+.desktop-settings-content.agent-settings-content .capability-card p { font-size:11px; line-height:1.5; }
+.desktop-settings-content.agent-settings-content .capability-field { gap:5px; font-size:10px; font-weight:650; }
+.desktop-settings-content.agent-settings-content .capability-field input,
+.desktop-settings-content.agent-settings-content .capability-field select { border-radius:5px; padding:8px 9px; }
+.desktop-settings-content.agent-settings-content .capability-actions { gap:6px; }
+.desktop-settings-content.agent-settings-content .capability-actions button,
+.desktop-settings-content.agent-settings-content .capability-card button { border-radius:5px; padding:7px 10px; }
+.desktop-settings-content.agent-settings-content .capability-editor { gap:9px; }
+.desktop-settings-content.agent-settings-content .desktop-json { border-radius:6px; background:var(--bg); }
+
+@media(max-width:720px) {
+  .desktop-settings.agent-settings-card {
+    width:calc(100vw - 24px);
+    height:calc(100dvh - 24px);
+    padding:16px;
+    gap:12px;
+  }
+  .desktop-settings-layout.agent-settings-layout { grid-template-columns:120px minmax(0,1fr); }
+  .desktop-settings-nav.agent-settings-nav { padding:12px 8px 12px 0; }
+  .desktop-settings-nav.agent-settings-nav button,
+  .desktop-settings-nav.agent-settings-nav button.active { padding:8px 7px; font-size:11px; }
+  .desktop-settings-content.agent-settings-content { padding:16px 12px; }
+  .desktop-settings-header.agent-settings-header { gap:12px; }
+  .desktop-settings-header.agent-settings-header p { font-size:11px; }
+}
+@media(max-width:560px) {
+  .desktop-settings-layout.agent-settings-layout { grid-template-columns:minmax(0,1fr); grid-template-rows:auto minmax(0,1fr); }
+  .desktop-settings-nav.agent-settings-nav { flex-direction:row; padding:8px 0; border-right:0; border-bottom:1px solid var(--border); overflow-x:auto; }
+  .desktop-settings-nav.agent-settings-nav button,
+  .desktop-settings-nav.agent-settings-nav button.active { flex:none; width:auto; white-space:nowrap; }
+  .desktop-settings-content.agent-settings-content { padding:14px 10px; }
+  .desktop-settings-content.agent-settings-content .settings-page-heading { display:grid; }
+  .desktop-settings-content.agent-settings-content .settings-local-badge { justify-self:start; }
+}

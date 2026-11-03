@@ -42,11 +42,11 @@
       </div>
     </main>
   </div>
-  <dialog id="model-settings" class="desktop-settings" aria-labelledby="model-settings-title">
-    <div class="desktop-settings-header"><div><strong id="model-settings-title">本机能力设置</strong><p>配置仅保存在这台设备上，不复用云端模型。</p></div><button id="model-settings-close" class="icon-btn" type="button" aria-label="关闭模型设置">×</button></div>
-    <div class="desktop-settings-layout"><nav class="desktop-settings-nav" aria-label="设置分类">
-      <button type="button" data-settings-tab="models" class="active">模型配置</button><button type="button" data-settings-tab="skills">Skills</button><button type="button" data-settings-tab="runtimes">Runtime</button><button type="button" data-settings-tab="connectors">Connector</button><button type="button" data-settings-tab="mcp">MCP</button>
-    </nav><section id="settings-models" class="desktop-settings-content" data-settings-page="models">
+  <dialog id="model-settings" class="desktop-settings agent-settings-card" aria-labelledby="model-settings-title">
+    <div class="desktop-settings-header agent-settings-header"><div><strong id="model-settings-title">本机能力设置</strong><p>配置仅保存在这台设备上，不复用云端模型。</p></div><button id="model-settings-close" class="icon-btn" type="button" aria-label="关闭本机能力设置">×</button></div>
+    <div class="desktop-settings-layout agent-settings-layout"><nav class="desktop-settings-nav agent-settings-nav" aria-label="设置分类">
+      <button type="button" data-settings-tab="models" class="active">模型配置</button><button type="button" data-settings-tab="skills">Skill 管理</button><button type="button" data-settings-tab="runtimes">Runtime 管理</button><button type="button" data-settings-tab="connectors">Connector 配置</button><button type="button" data-settings-tab="mcp">MCP 配置</button>
+    </nav><section id="settings-models" class="desktop-settings-content agent-settings-content" data-settings-page="models">
       <div class="settings-page-heading"><div><h2>模型配置</h2><p>使用 JSON 管理 Provider、模型和调用参数。新任务使用保存后的配置。</p></div><span class="settings-local-badge">仅本机保存</span></div>
       <p class="desktop-security-note">API Key 单独填写并加密保存，不写入配置 JSON。当前使用本机文件密钥，不是 OS Keychain；无法防护同用户恶意程序或拿到完整数据目录的攻击者。远程推理会向你指定的模型服务发送内容。支持 HTTP/HTTPS；HTTP 不加密传输 API Key 和推理内容，请优先使用 HTTPS，HTTP 仅用于可信网络。</p>
       <div class="settings-section-title"><strong>本机 Providers</strong><button id="provider-add" type="button">＋ 添加 Provider</button></div>
@@ -62,7 +62,7 @@
       </div>
       <div class="desktop-settings-save"><p id="model-settings-status" role="status" aria-live="polite"></p><div><button id="model-settings-discard" type="button">放弃更改并重新读取</button><button id="model-settings-save" class="primary" type="button" disabled>保存配置</button></div></div>
     </section>
-    <section id="settings-capabilities" class="desktop-settings-content" hidden>
+    <section id="settings-capabilities" class="desktop-settings-content agent-settings-content" hidden>
       <div class="settings-page-heading"><div><h2 id="capability-title"></h2><p id="capability-description"></p></div><span class="settings-local-badge">仅本机保存</span></div>
       <p id="capability-status" class="capability-status" role="status" aria-live="polite"></p>
       <div id="capability-body"></div>

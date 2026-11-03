@@ -5,7 +5,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
   const models = installModelSettings({ api, element, refreshModels, status, managed: true });
   const dialog = element('model-settings'), body = element('capability-body');
   let tab = 'models', target, dirty = false, working = false, snapshot, runtimeList = [], packages = [];
-  const labels = { skills: ['Skills', '导入本机 Skill 包，在 Runtime 中选择启用。内置 Skill 不在扩展包列表中。'], runtimes: ['Runtime', '管理独立的本机执行环境、生命周期和扩展 Skill。'], connectors: ['Connector', '本机模块由启动配置加载；连接和凭据按账号隔离。修改前先停止 Runtime。'], mcp: ['MCP', '每个 Runtime 独立配置 HTTP MCP。修改前先停止 Runtime，保存后启动加载。'] };
+  const labels = { skills: ['Skill 管理', '上传和维护本机 Skill 包；安装后可在各个 Runtime 配置中分别选择。'], runtimes: ['Runtime 管理', '在此新增、停止、重启、删除和进入本机 Runtime 的细节配置。'], connectors: ['Connector 配置', '本机模块由启动配置加载；连接和凭据按账号隔离。修改前先停止 Runtime。'], mcp: ['MCP 配置', '每个 Runtime 独立配置 HTTP MCP。修改前先停止 Runtime，保存后启动加载。'] };
   const errors = { runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。' };
   const message = (text, error = false) => { const e = element('capability-status'); e.textContent = text; e.classList.toggle('error', error); };
   function el(tag, text, className) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (className) e.className = className; return e; }

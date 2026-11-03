@@ -93,6 +93,8 @@ test("Desktop serves its own Multi Runtime presentation without importing the cl
   const page = await (await fetch(app.origin)).text();
   for (const className of ["app-shell", "sidebar", "conversation-scroll", "composer-box", "artifact-workspace"]) assert.ok(page.includes(className));
   assert.match(page, /account-identity/);
+  for (const className of ["agent-settings-card", "agent-settings-layout", "agent-settings-nav", "agent-settings-content"]) assert.ok(page.includes(className), `settings shell missing ${className}`);
+  for (const label of ["模型配置", "Skill 管理", "Runtime 管理", "Connector 配置", "MCP 配置"]) assert.ok(page.includes(label), `settings navigation missing ${label}`);
   for (const path of ["/app.js", "/model-settings.js", "/conversation.js", "/turn-projection.js", "/conversation.css", "/markdown.js", "/markdown.css", "/reference/ui/scroll-follow.js", "/reference/ui/composer-input.js", "/reference/ui/message-selection.js", "/reference/presentation/assistant-message-presentation.js", "/reference/projections/assistant-event-projection.js", "/reference/projections/execution-detail-projection.js", "/styles.css", "/multi-runtime.css", "/assets/xuanwu-mascot-icon.png"]) {
     const response = await fetch(`${app.origin}${path}`); assert.equal(response.status, 200);
     assert.equal(response.headers.get("access-control-allow-origin"), null);
