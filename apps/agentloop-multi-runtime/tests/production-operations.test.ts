@@ -29,7 +29,7 @@ async function fixture(options: { invalid?: boolean; active?: boolean; failReady
   await mkdir(join(root, "config/custom-skills/legacy-skill"));
   await writeFile(join(root, "config/custom-skills/legacy-skill/SKILL.md"), "# Legacy\n");
   await writeFile(join(root, "config/custom-skills/legacy-skill/.env"), "LEGACY_SECRET=keep-me\n", { mode: 0o600 });
-  await writeFile(join(root, ".env"), `RUNTIME_COUNT=${options.desiredCount ?? options.count ?? 2}\nMULTI_RUNTIME_IMAGE=agentloop-multi-runtime:old\nRUNTIME_ENV_FILE=${envFile}\nWEB_PORT=13001\nROUTER_PORT=15001\n`);
+  await writeFile(join(root, ".env"), `RUNTIME_COUNT=${options.desiredCount ?? options.count ?? 2}\nMULTI_RUNTIME_IMAGE=agentloop-multi-runtime:old\nRUNTIME_ENV_FILE=${envFile}\nIDENTITY_SERVICE_URL=http://accounts.example:8795\nWEB_PORT=13001\nROUTER_PORT=15001\n`);
   await writeFile(join(job, "llm-providers.json"), '{"marker":"candidate","models":{"fixture":{"displayName":"Fixture","providerModel":"fixture"}}}\n');
   await writeFile(join(previous, "release-manifest.env"), "NODE_IMAGE=example/node@sha256:" + "a".repeat(64) + "\nAPT_MIRROR=https://apt.example\nPIP_INDEX_URL=https://pip.example\nPIP_FALLBACK_INDEX_URL=https://fallback.example\n");
   const helper = join(root, "helper.sh");

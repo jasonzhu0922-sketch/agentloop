@@ -19,6 +19,26 @@ test -f "$compose_file" || { echo 'Expected exactly one current Compose file.' >
 previous_compose=$compose_file
 image=$(docker inspect agentloop-router-1 --format '{{.Config.Image}}')
 dc() { docker compose --project-directory "$root" --env-file "$root/.env" -f "$compose_file" "$@"; }
+# Since account authority was extracted from Multi Runtime, every production
+# release must point Router at the separately managed account-service before
+# any image build or database backup is attempted.
+identity_service_url=$(python3 - "$root/.env" <<'PY'
+from pathlib import Path
+import sys
+for line in Path(sys.argv[1]).read_text().splitlines():
+    if line.startswith('IDENTITY_SERVICE_URL='):
+        value=line.split('=',1)[1].strip().strip("\"'")
+        if value:
+            print(value)
+            break
+else:
+    raise SystemExit('IDENTITY_SERVICE_URL is required in /opt/agentloop/.env for the independent account-service')
+PY
+)
+case "$identity_service_url" in
+  http://*|https://*) ;;
+  *) echo 'IDENTITY_SERVICE_URL must be an http(s) URL for the independent account-service.' >&2; exit 1 ;;
+esac
 load_services() {
   local service services
   services=$(dc config --services)

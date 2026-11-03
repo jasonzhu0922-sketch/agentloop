@@ -36,6 +36,9 @@ services:
       RUNTIME_CONFIG_PATH: /run/topology/runtimes.json
       WORKSPACE_ROOT: /app/apps/agentloop-multi-runtime/workspace
       ATTACHMENT_BASE_URL: http://router:8788
+      # Account authority is an independent service. Router must never fall
+      # back to a local identity database in the production topology.
+      IDENTITY_SERVICE_URL: ${IDENTITY_SERVICE_URL:?set the independent account-service URL}
       # The Web service proxies browser traffic to Router, but this stays
       # explicit for any direct Router API client.
       WEB_ORIGIN: ${PUBLIC_WEB_ORIGIN:?set the externally visible Web URL}

@@ -16,6 +16,7 @@ async function fixture(settings: string) {
   await writeFile(envFile, `MULTI_RUNTIME_IMAGE=agentloop-multi-runtime:test
 PUBLIC_WEB_ORIGIN=http://example:3001
 PUBLIC_ROUTER_URL=http://example:5001
+IDENTITY_SERVICE_URL=http://accounts.example:8795
 RUNTIME_DISPATCH_TOKEN=fixture-dispatch-secret
 RUNTIME_ATTACHMENT_TOKEN=fixture-attachment-secret
 DEPLOY_ROOT=${root}
@@ -61,6 +62,7 @@ for (const [settings, count, capacity] of [["",2,20], ["RUNTIME_COUNT=1",1,20], 
     assert.equal(ids.size,count);
     assert.equal(volumes.size,count);
     assert.equal(services.router.environment.RUNTIME_CONFIG_PATH,"/run/topology/runtimes.json");
+    assert.equal(services.router.environment.IDENTITY_SERVICE_URL,"http://accounts.example:8795");
     assert.equal(services.router.environment.MODEL_KEY,undefined);
     assert.equal(services.web.environment.MODEL_KEY,undefined);
     for (const file of await readdir(dirname(path))) {
