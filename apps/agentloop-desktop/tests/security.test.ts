@@ -1,23 +1,24 @@
 import assert from "node:assert/strict";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import test from "node:test";
-import { DevelopmentSessions } from "../src/security/loopback.ts";
+import { AccountSessions } from "../src/security/loopback.ts";
+import { fixturePrincipal } from "./fixtures/auth.ts";
 import { loopbackOrigin } from "../src/platform/instance-lock.ts";
 
-test("development Sessions expire, reject duplicate cookies and bound live sessions", () => {
-  let now = 0; const sessions = new DevelopmentSessions(() => now);
+test("account Sessions expire, reject duplicate cookies and bound live sessions", () => {
+  let now = 0; const sessions = new AccountSessions(() => now);
   const req = (headers: Record<string, string> = {}) => ({ headers }) as IncomingMessage;
   const response = { setHeader() {} } as unknown as ServerResponse;
-  const first = sessions.issue(req(), response);
+  const cloud = { principal: fixturePrincipal, token: "test-token", expiresAt: 100_000_000 };
+  const first = sessions.issue(response, "https://accounts.example.test", cloud);
   const cookie = `${sessions.cookieName}=${first.token}`;
-  assert.equal(sessions.issue(req({ cookie }), response), first);
   assert.equal(sessions.require(req({ cookie, "x-desktop-csrf": first.csrf }), true), first);
   assert.throws(() => sessions.require(req({ cookie: `${cookie}; ${cookie}` }), false), /session_required/);
-  for (let index = 1; index < 32; index++) sessions.issue(req(), response);
-  assert.throws(() => sessions.issue(req(), response), /session_limit/);
+  for (let index = 1; index < 32; index++) sessions.issue(response, "https://accounts.example.test", cloud);
+  assert.throws(() => sessions.issue(response, "https://accounts.example.test", cloud), /session_limit/);
   now = first.expiresAt;
   assert.throws(() => sessions.require(req({ cookie }), false), /session_required/);
-  assert.notEqual(sessions.issue(req(), response).token, first.token);
+  assert.notEqual(sessions.issue(response, "https://accounts.example.test", cloud).token, first.token);
   sessions.clear(); assert.throws(() => sessions.require(req({ cookie }), false), /session_required/);
 });
 

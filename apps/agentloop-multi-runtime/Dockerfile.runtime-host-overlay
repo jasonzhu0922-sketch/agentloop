@@ -48,6 +48,7 @@ COPY packages/agentloop-plan-template ./packages/agentloop-plan-template
 COPY packages/agentloop-skills ./packages/agentloop-skills
 COPY packages/agentloop-memory ./packages/agentloop-memory
 COPY packages/agentloop-local-runtime ./packages/agentloop-local-runtime
+COPY packages/agentloop-identity ./packages/agentloop-identity
 COPY packages/connector-sdk ./packages/connector-sdk
 COPY apps/agentloop-multi-runtime ./apps/agentloop-multi-runtime
 RUN npm install --workspace agentloop-multi-runtime --ignore-scripts --no-audit --no-fund \
@@ -57,6 +58,7 @@ RUN npm install --workspace agentloop-multi-runtime --ignore-scripts --no-audit 
   && npm run build --workspace @zhujun/agentloop-plan-template \
   && npm run build --workspace @zhujun/agentloop-skills \
   && npm run build --workspace @zhujun/agentloop-memory \
+  && npm run build --workspace @zhujun/agentloop-identity \
   && npm run build --workspace @zhujun/agentloop-connector-sdk \
   && npm run build --workspace @zhujun/agentloop-local-runtime
 # Do not inherit the base image's default workdir: the Runtime Host package

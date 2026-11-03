@@ -10,7 +10,7 @@ import test from "node:test";
 import { RuntimeWorkspaceService } from "@zhujun/agentloop";
 import type { LocalModelProviderPort } from "@zhujun/agentloop-local-runtime";
 import { startDesktop, type DesktopApplication } from "../src/application.ts";
-import { DEVELOPMENT_OWNER } from "../src/api/desktop-api.ts";
+import { fixtureAuth, TEST_OWNER } from "./fixtures/auth.ts";
 import { modelEndpoint } from "../src/security/model-endpoint.ts";
 import { greetingModel, modelPort } from "../../../packages/agentloop-local-runtime/tests/fixtures/models.ts";
 import { fixtureProvider } from "../../../packages/agentloop-local-runtime/tests/fixtures/http-model.ts";
@@ -20,7 +20,7 @@ async function fixture(t: test.TestContext, models: LocalModelProviderPort | nul
   const root = await mkdtemp(join(tmpdir(), "agentloop-desktop-test-"));
   const skills = join(root, "skills"); await mkdir(skills);
   const directory = join(root, "desktop-data");
-  const options = { mode: "development" as const, dataDirectory: directory, models: models ?? undefined, bundledSkillDirectories: [skills], openBrowser: false };
+  const options = { mode: "development" as const, dataDirectory: directory, cloudAuth: fixtureAuth(), models: models ?? undefined, bundledSkillDirectories: [skills], openBrowser: false };
   let app = await startDesktop(options); assert.equal(app.existing, false);
   t.after(async () => { if (!app.existing) await app.close(); await rm(root, { recursive: true, force: true }); });
   return { root: directory, options, app: app as OwnedApplication, reopen: async () => {
@@ -28,7 +28,7 @@ async function fixture(t: test.TestContext, models: LocalModelProviderPort | nul
   } };
 }
 async function session(origin: string) {
-  const response = await fetch(`${origin}/api/dev/session`, { method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: "{}" });
+  const response = await fetch(`${origin}/api/auth/login`, { method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ email: "test@example.test", password: "fixture-password-only" }) });
   assert.equal(response.status, 200);
   const cookie = response.headers.get("set-cookie")!;
   assert.match(cookie, /HttpOnly/); assert.match(cookie, /SameSite=Strict/); assert.doesNotMatch(cookie, /Domain=/i);
@@ -63,7 +63,7 @@ function raw(origin: string, path: string, headers: Record<string, string>) {
 
 test("loopback HTTP enforces Host, Origin, Session, CSRF and trusted request fields", async t => {
   const { app } = await fixture(t); const origin = app.origin;
-  const page = await fetch(origin); assert.equal(page.status, 200); assert.match(await page.text(), /开发模式/);
+  const page = await fetch(origin); assert.equal(page.status, 200); assert.match(await page.text(), /正在确认云端账号/);
   assert.match(page.headers.get("content-security-policy")!, /frame-ancestors 'none'/);
   assert.equal(await raw(origin, "/", { Host: "evil.example.test" }), 403);
   assert.equal(await raw(origin, "/", { Host: new URL(origin).host, "X-Forwarded-Host": "evil.example.test" }), 200);
@@ -92,7 +92,7 @@ test("Desktop serves its own Multi Runtime presentation without importing the cl
   const { app } = await fixture(t);
   const page = await (await fetch(app.origin)).text();
   for (const className of ["app-shell", "sidebar", "conversation-scroll", "composer-box", "artifact-workspace"]) assert.ok(page.includes(className));
-  assert.match(page, /开发模式 · 非云端登录/);
+  assert.match(page, /account-identity/);
   for (const path of ["/app.js", "/model-settings.js", "/conversation.js", "/turn-projection.js", "/conversation.css", "/markdown.js", "/markdown.css", "/reference/ui/scroll-follow.js", "/reference/ui/composer-input.js", "/reference/ui/message-selection.js", "/reference/presentation/assistant-message-presentation.js", "/reference/projections/assistant-event-projection.js", "/reference/projections/execution-detail-projection.js", "/styles.css", "/multi-runtime.css", "/assets/xuanwu-mascot-icon.png"]) {
     const response = await fetch(`${app.origin}${path}`); assert.equal(response.status, 200);
     assert.equal(response.headers.get("access-control-allow-origin"), null);
@@ -101,7 +101,7 @@ test("Desktop serves its own Multi Runtime presentation without importing the cl
   const icon = Buffer.from(await (await fetch(`${app.origin}/assets/xuanwu-mascot-icon.png`)).arrayBuffer());
   assert.deepEqual(icon, await readFile(new URL("../../agentloop-multi-runtime/web/assets/xuanwu-mascot-icon.png", import.meta.url)));
   const script = await (await fetch(`${app.origin}/app.js`)).text();
-  assert.doesNotMatch(script, /innerHTML|insertAdjacentHTML|runtime-config|\/router\/|\/auth\/|https?:\/\//);
+  assert.doesNotMatch(script, /innerHTML|insertAdjacentHTML|runtime-config|\/router\/|https?:\/\//);
   assert.match(script, /textContent/);
   // Only copied presentation bytes are exposed; other App and filesystem paths stay private.
   for (const path of ["/runtime-config.js", "/client/app.js", "/styles/runtime-overrides.css", "/assets/unknown.png"]) assert.equal((await fetch(`${app.origin}${path}`)).status, 401);
@@ -187,7 +187,7 @@ test("HTTP Run retries, attachment bindings and event cursors survive applicatio
   const input = { requestId: "same-request", input: "你好", modelKey: "local:test" };
   const results = await Promise.all(Array.from({ length: 4 }, () => jsonCall(call, "/api/runs", input)));
   const first = results[0].run; assert.equal(new Set(results.map(item => item.run.id)).size, 1);
-  assert.equal(first.ownerUserId, DEVELOPMENT_OWNER);
+  assert.equal(first.ownerUserId, TEST_OWNER);
   assert.equal((await settled(call, first.id)).status, "completed");
   assert.equal((await call("/api/runs", { ...input, input: "changed" })).status, 409);
   const { source } = await jsonCall(call, "/api/sources", { conversationId: first.conversationId, originalName: "notes.txt", contentBase64: Buffer.from("local evidence").toString("base64") });
@@ -264,7 +264,7 @@ test("a persisted artifact fixture is served as an attachment, never active same
   // Explicit persisted tool-receipt fixture: this test verifies read transport,
   // not a model-generated artifact or final-delivery acceptance.
   const workspace = new RuntimeWorkspaceService(join(root, "workspace"), { ownerScoped: true });
-  await writeFile(join(workspace.forConversation(DEVELOPMENT_OWNER, run.conversationId), "fixture.html"), "<script>throw new Error('must not execute')</script>");
+  await writeFile(join(workspace.forConversation(TEST_OWNER, run.conversationId), "fixture.html"), "<script>throw new Error('must not execute')</script>");
   const database = new DatabaseSync(join(root, "runtime.db"));
   try {
     const { seq } = database.prepare("SELECT MAX(seq) + 1 AS seq FROM run_events WHERE run_id = ?").get(run.id) as { seq: number };

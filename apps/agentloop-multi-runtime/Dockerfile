@@ -21,6 +21,7 @@ COPY packages/agentloop-plan-template/package.json ./packages/agentloop-plan-tem
 COPY packages/agentloop-skills/package.json ./packages/agentloop-skills/package.json
 COPY packages/agentloop-memory/package.json ./packages/agentloop-memory/package.json
 COPY packages/agentloop-local-runtime/package.json ./packages/agentloop-local-runtime/package.json
+COPY packages/agentloop-identity/package.json ./packages/agentloop-identity/package.json
 COPY packages/connector-sdk/package.json ./packages/connector-sdk/package.json
 COPY packages/connector-feishu/package.json ./packages/connector-feishu/package.json
 COPY packages/connector-126-mail/package.json ./packages/connector-126-mail/package.json
@@ -45,6 +46,7 @@ RUN npm run build --workspace @zhujun/agentloop \
   && npm run build --workspace @zhujun/agentloop-plan-template \
   && npm run build --workspace @zhujun/agentloop-skills \
   && npm run build --workspace @zhujun/agentloop-memory \
+  && npm run build --workspace @zhujun/agentloop-identity \
   && npm run build --workspace @zhujun/agentloop-connector-sdk \
   && npm run build --workspace @zhujun/agentloop-local-runtime \
   && npm rebuild sharp --workspace agentloop-multi-runtime --foreground-scripts

@@ -905,7 +905,9 @@ test("Multi Runtime TiDB DDL is owned by Router and Host persistence, not the Ag
     readFile(new URL("../../../packages/agentloop/src/storage/tidb-schema-definitions.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/router/persistence/tidb-schema.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/router/attachments/tidb-schema.ts", import.meta.url), "utf8"),
-    readFile(new URL("../src/router/identity/tidb-schema.ts", import.meta.url), "utf8"),
+    // Identity is shared with the independent account service, not moved into
+    // the Runtime kernel. Router keeps its existing migration/DDL import path.
+    readFile(new URL("../../../packages/agentloop-identity/src/tidb-schema.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/router/devices/tidb-schema.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/runtime-host/persistence/tidb-schema.ts", import.meta.url), "utf8"),
   ]);

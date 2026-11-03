@@ -118,6 +118,7 @@ children.push(start("router", "src/router/main.ts", {
   HOST: routerHost,
   PORT: String(routerPort),
   RUNTIME_CONFIG_PATH: configPath,
+  IDENTITY_SERVICE_URL: process.env.IDENTITY_SERVICE_URL ?? "http://127.0.0.1:8795",
   WEB_ORIGIN: process.env.WEB_ORIGIN ?? defaultWebOrigins,
   ATTACHMENT_BASE_URL: process.env.ATTACHMENT_BASE_URL ?? publicRouterUrl,
   // The Router artifact catalog and Runtime Hosts must resolve the same
@@ -175,7 +176,6 @@ for (let index = 0; index < runtimeCount; index += 1) {
     WORKSPACE_ROOT: sharedWorkspaceRoot,
   }, providerEnvFiles));
 }
-
 children.push(start("web", "web/server.mjs", {
   ...common,
   HOST: routerHost,
@@ -229,7 +229,6 @@ function start(label, entrypoint, environment, envFiles = []) {
   });
   return child;
 }
-
 function parseRuntimeCount(args) {
   if (args.includes("--help") || args.includes("-h")) {
     process.stdout.write("Usage: npm run start:multi-runtime -- --runtimes <count>\n");

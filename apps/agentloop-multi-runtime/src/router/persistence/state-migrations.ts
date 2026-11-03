@@ -82,7 +82,72 @@ const MIGRATIONS: readonly SchemaMigration[] = [{
       ? "ALTER TABLE mr_artifacts ADD COLUMN IF NOT EXISTS verification_json LONGTEXT"
       : "ALTER TABLE mr_artifacts ADD COLUMN IF NOT EXISTS verification_json TEXT");
   },
+}, {
+  id: "router/0006_external_identity_authority",
+  definition: "remove-local-identity-tables-after-explicit-account-service-migration:v1",
+  apply: async (database) => {
+    // 0001 is historical and created these tables. They are now removed only
+    // after the migration tool has copied all rows to Account Service. A
+    // non-empty source fails closed so a Router restart cannot silently strand
+    // accounts or sessions.
+    const users = await database.prepare("SELECT COUNT(*) AS count FROM mr_identity_users").get<{ count: number | bigint }>();
+    const count = typeof users?.count === "bigint" ? Number(users.count) : users?.count ?? 0;
+    if (count > 0) throw new Error("router_local_identity_migration_required");
+    if (database.dialect === "sqlite") await detachSqliteDeviceIdentityForeignKeys(database);
+    // TiDB/PostgreSQL deployments keep empty legacy tables until their
+    // operator-specific FK migration is applied; no account rows remain in
+    // Router and all new schemas omit these references.
+    if (database.dialect === "sqlite") {
+      await database.exec("DROP TABLE IF EXISTS mr_identity_sessions");
+      await database.exec("DROP TABLE IF EXISTS mr_identity_memberships");
+      await database.exec("DROP TABLE IF EXISTS mr_identity_users");
+      await database.exec("DROP TABLE IF EXISTS mr_identity_tenants");
+    }
+  },
 }];
+
+async function detachSqliteDeviceIdentityForeignKeys(database: SqlConnection): Promise<void> {
+  const referencesIdentity = async (table: string): Promise<boolean> => {
+    const rows = await database.prepare(`PRAGMA foreign_key_list(${table})`).all<{ table: string }>();
+    return rows.some(row => row.table.startsWith("mr_identity_"));
+  };
+  if (!await referencesIdentity("mr_devices") && !await referencesIdentity("mr_device_registration_tokens") && !await referencesIdentity("mr_device_local_sessions")) return;
+  await database.exec(`
+    CREATE TABLE mr_devices_external (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, owner_user_id TEXT NOT NULL,
+      display_name TEXT NOT NULL, public_key TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('active', 'revoked')), last_seen_at INTEGER, created_at INTEGER NOT NULL
+    );
+    CREATE TABLE mr_device_registration_tokens_external (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, owner_user_id TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL
+    );
+    CREATE TABLE mr_device_agent_sessions_external (
+      device_id TEXT PRIMARY KEY REFERENCES mr_devices_external(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL
+    );
+    CREATE TABLE mr_device_local_sessions_external (
+      id TEXT PRIMARY KEY, device_id TEXT NOT NULL REFERENCES mr_devices_external(id) ON DELETE CASCADE,
+      tenant_id TEXT NOT NULL, owner_user_id TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL
+    );
+    INSERT INTO mr_devices_external SELECT * FROM mr_devices;
+    INSERT INTO mr_device_registration_tokens_external SELECT * FROM mr_device_registration_tokens;
+    INSERT INTO mr_device_agent_sessions_external SELECT * FROM mr_device_agent_sessions;
+    INSERT INTO mr_device_local_sessions_external SELECT * FROM mr_device_local_sessions;
+    DROP TABLE mr_device_local_sessions;
+    DROP TABLE mr_device_agent_sessions;
+    DROP TABLE mr_device_registration_tokens;
+    DROP TABLE mr_devices;
+    ALTER TABLE mr_devices_external RENAME TO mr_devices;
+    ALTER TABLE mr_device_registration_tokens_external RENAME TO mr_device_registration_tokens;
+    ALTER TABLE mr_device_agent_sessions_external RENAME TO mr_device_agent_sessions;
+    ALTER TABLE mr_device_local_sessions_external RENAME TO mr_device_local_sessions;
+    CREATE INDEX mr_devices_owner_idx ON mr_devices(tenant_id, owner_user_id, created_at DESC);
+    CREATE INDEX mr_device_registration_tokens_owner_idx ON mr_device_registration_tokens(tenant_id, owner_user_id, created_at DESC);
+    CREATE INDEX mr_device_local_sessions_expiry_idx ON mr_device_local_sessions(expires_at);
+  `);
+}
 
 export async function migrateRouterState(database: SqlConnection): Promise<void> {
   await applyVersionedMigrations(database, "router", MIGRATIONS);

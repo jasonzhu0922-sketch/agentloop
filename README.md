@@ -13,16 +13,19 @@ AgentLoop 是一个 Plan-first 的单 Agent Runtime。它把用户任务先转�
 agentloop/
 ├── packages/agentloop/           Runtime 内核：planning/runtime/tools/storage
 ├── packages/agentloop-skills/    可发布的内置 Skills 包
+├── packages/agentloop-identity/  独立账号权威与共享认证协议
 ├── packages/agentloop-plan-template/
 │                                 可选的 Plan Template / fast-path 插件
 ├── apps/agentloop-app/           单 Runtime 参考应用：HTTP API、登录鉴权、React Web
 ├── apps/agentloop-multi-runtime/ 多 Runtime 参考应用：Web、Router、Runtime Host 与 Local Runtime Agent
+├── apps/agentloop-desktop/       标准 Local Runtime 的独立本机宿主
+├── apps/agentloop-account-service/ Desktop 独立云端账号服务（本机可联调）
 └── docs/                         架构、集成、运维和设计文档
 ```
 
 ## 应用形态与定位
 
-`packages/agentloop` 是可复用的 Runtime 内核；两个 `apps/` 目录是建立在该内核之上的不同参考应用与部署拓扑，并不是同一个服务的两种开关。
+`packages/agentloop` 是可复用的 Runtime 内核；`apps/` 目录提供不同应用形态与部署拓扑，并不是同一个服务的不同开关。Desktop 开发态也使用真实账号流程；独立账号服务的启动、共享身份与部署边界见 [Account Service README](apps/agentloop-account-service/README.md)，本机应用见 [Desktop README](apps/agentloop-desktop/README.md)。
 
 | 入口 | 定位 | 运行边界 | 适用场景 |
 |---|---|---|---|

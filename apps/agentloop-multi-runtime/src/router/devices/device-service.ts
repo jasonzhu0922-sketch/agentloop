@@ -70,8 +70,8 @@ export class SqlDeviceRepository implements DeviceRepository {
     const canonicalSchema = `
       CREATE TABLE IF NOT EXISTS mr_devices (
         id TEXT PRIMARY KEY,
-        tenant_id TEXT NOT NULL REFERENCES mr_identity_tenants(id) ON DELETE CASCADE,
-        owner_user_id TEXT NOT NULL REFERENCES mr_identity_users(id) ON DELETE CASCADE,
+        tenant_id TEXT NOT NULL,
+        owner_user_id TEXT NOT NULL,
         display_name TEXT NOT NULL,
         public_key TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('active', 'revoked')),
@@ -81,8 +81,8 @@ export class SqlDeviceRepository implements DeviceRepository {
       CREATE INDEX IF NOT EXISTS mr_devices_owner_idx ON mr_devices(tenant_id, owner_user_id, created_at DESC);
       CREATE TABLE IF NOT EXISTS mr_device_registration_tokens (
         id TEXT PRIMARY KEY,
-        tenant_id TEXT NOT NULL REFERENCES mr_identity_tenants(id) ON DELETE CASCADE,
-        owner_user_id TEXT NOT NULL REFERENCES mr_identity_users(id) ON DELETE CASCADE,
+        tenant_id TEXT NOT NULL,
+        owner_user_id TEXT NOT NULL,
         token_hash TEXT NOT NULL UNIQUE,
         expires_at INTEGER NOT NULL,
         created_at INTEGER NOT NULL
@@ -95,8 +95,8 @@ export class SqlDeviceRepository implements DeviceRepository {
       CREATE TABLE IF NOT EXISTS mr_device_local_sessions (
         id TEXT PRIMARY KEY,
         device_id TEXT NOT NULL REFERENCES mr_devices(id) ON DELETE CASCADE,
-        tenant_id TEXT NOT NULL REFERENCES mr_identity_tenants(id) ON DELETE CASCADE,
-        owner_user_id TEXT NOT NULL REFERENCES mr_identity_users(id) ON DELETE CASCADE,
+        tenant_id TEXT NOT NULL,
+        owner_user_id TEXT NOT NULL,
         token_hash TEXT NOT NULL UNIQUE,
         expires_at INTEGER NOT NULL,
         created_at INTEGER NOT NULL

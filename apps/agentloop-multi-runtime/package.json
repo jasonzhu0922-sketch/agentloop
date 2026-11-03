@@ -9,6 +9,7 @@
     "node": ">=26"
   },
   "dependencies": {
+    "@zhujun/agentloop-identity": "*",
     "@zhujun/agentloop-local-runtime": "*",
     "@zhujun/agentloop": "*",
     "@zhujun/agentloop-memory": "*",

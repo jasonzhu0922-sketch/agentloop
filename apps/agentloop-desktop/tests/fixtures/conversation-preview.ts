@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import type { ModelAdapter } from '@zhujun/agentloop';
 import { startDesktop } from '../../src/application.ts';
+import { fixtureAuth } from './auth.ts';
 import { greetingModel, modelPort } from '../../../../packages/agentloop-local-runtime/tests/fixtures/models.ts';
 
 // Manual browser QA only: a clearly labelled deterministic model, real Kernel
@@ -21,6 +22,6 @@ const model: ModelAdapter = { ...base,
   },
 };
 const root = await mkdtemp(join(tmpdir(), 'agentloop-conversation-preview-')); const skills = join(root, 'skills'); await mkdir(skills);
-const app = await startDesktop({ mode: 'development', dataDirectory: join(root, 'data'), models: modelPort(model), bundledSkillDirectories: [skills], openBrowser: false });
+const app = await startDesktop({ mode: 'development', cloudAuth: fixtureAuth(), dataDirectory: join(root, 'data'), models: modelPort(model), bundledSkillDirectories: [skills], openBrowser: false });
 console.log(JSON.stringify({ fixture: true, origin: app.origin, directory: root }));
 if (!app.existing) for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { void app.close().then(() => process.exit(0)).catch(() => console.error('fixture_has_active_run')); });

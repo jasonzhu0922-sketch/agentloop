@@ -10,7 +10,7 @@ import { RouterService } from "./service/router-service.ts";
 import { startAssignmentReconciler } from "./service/assignment-reconciler.ts";
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../shared/persistence/state-database.ts";
 import { migrateRouterState } from "./persistence/state-migrations.ts";
-import { IdentityService } from "./identity/service.ts";
+import { RemoteIdentityService } from "@zhujun/agentloop-identity";
 import { SharedWorkspaceArtifactCatalog } from "./artifacts/shared-workspace-artifact-catalog.ts";
 import { SqlDeviceRepository } from "./devices/device-service.ts";
 import { LocalAgentRuntimeControl } from "./runtime-control/local-agent-runtime-control.ts";
@@ -35,7 +35,12 @@ const database = await openStateDatabase(stateDatabaseConfigFromEnvironment({
 await migrateRouterState(database);
 const store = new ControlPlaneStore(database);
 await store.ready();
-const identity = new IdentityService(database, positiveInteger(process.env.IDENTITY_SESSION_TTL_MS, 7 * 24 * 60 * 60 * 1000));
+const identityServiceUrl = process.env.IDENTITY_SERVICE_URL;
+if (identityServiceUrl === undefined || identityServiceUrl.trim().length === 0) {
+  await database.close();
+  throw new Error("IDENTITY_SERVICE_URL is required; Router no longer owns a local account database");
+}
+const identity = new RemoteIdentityService(identityServiceUrl);
 await identity.ready();
 const devices = new SqlDeviceRepository(database);
 await devices.ready();
