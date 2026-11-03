@@ -16,7 +16,7 @@ bash apps/agentloop-multi-runtime/deploy/production/release-cloud.sh --ref HEAD 
 
 脚本使用 `git archive` 导出完整源码，在服务器复用上一版 manifest 的固定 Node 镜像摘要、依赖源、BuildKit builder 和缓存；增量指 Docker 层缓存，并非二进制差分。首次安装不适用此脚本，必须先有有效部署和固定基础镜像的发布记录。
 
-Router 的账号权威已独立为 `agentloop-account-service`。发布前必须在 `/opt/agentloop/.env` 设置已部署的 `IDENTITY_SERVICE_URL`（`http://` 或 `https://`）；本脚本只发布 Multi Runtime，不会把账号服务打进 Router/Runtime 镜像，也不会替代账号服务的迁移、备份或进程管理。
+Router 的账号权威已独立为 `agentloop-account-service`。发布前必须在 `/opt/agentloop/.env` 设置 `IDENTITY_SERVICE_URL`（生产 Compose 默认使用内部 `http://account-service:8795`）；发布镜像会以独立 Compose 服务启动账号进程，账号库保存在 `/opt/agentloop/data/accounts/accounts.db`，并在切换前迁移旧 Router 账号数据。账号服务仍有独立的持久数据、健康检查和回滚备份。
 
 镜像构建完成后检查非终态 Run 数量；有任务时停止，待任务结束后重新执行。没有活动任务时备份部署配置、LLM 配置及两个 PostgreSQL 库，切换镜像，并等待 Router、Web、所有已部署 Runtime **各自**就绪。失败恢复旧镜像选择。该单机流程会重建服务，操作期间应暂停新任务提交；活动任务检查本身不提供流量排空或跨库原子快照。
 
