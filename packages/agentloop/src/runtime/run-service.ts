@@ -3348,6 +3348,16 @@ export class RunService {
       .filter((name) => input.run.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)));
     const availableToolSummaries = toolSummaries(allTools, availableToolNames);
     const canonicalState = await this.canonicalStates.get(input.run.id);
+    const failedBoundary = failedBoundaryFromRecoveryAction(input.action, canonicalState);
+    // A model recovery proposal may accidentally reuse the failed Step id
+    // while changing its definition. Convert that narrow case into the
+    // immutable replacement-leaf shape before admission; PlanRepository then
+    // remains the final guard for every other attempted mutation.
+    const planRevision = normalizeRecoveryPlanRevision(
+      input.currentPlan,
+      input.decision.planRevision,
+      failedBoundary?.stepId,
+    );
     const gapId = stringField(input.action.metadata, "canonicalGapId");
     const repairGap = canonicalState.gaps.find((gap) => gap.id === gapId && gap.status === "open");
     if (gapId !== undefined && repairGap === undefined) throw new AppError("CONFLICT", "Recovery revision has no open canonical Gap", 409);
@@ -3356,7 +3366,7 @@ export class RunService {
     }
     const admitted = admitPlan({
       runId: input.run.id,
-      proposal: input.decision.planRevision,
+      proposal: planRevision,
       availableSkills: privateSkills,
       availableToolNames,
       availableTools: availableToolSummaries,
@@ -3365,7 +3375,7 @@ export class RunService {
       // capabilities, or a repair leaf can be rejected as requiring an
       // "unknown" capability that its original admitted Step used.
       availableCapabilities: planningCapabilitiesForAdmittedProposal(
-        input.decision.planRevision,
+        planRevision,
         privateSkills,
         availableToolSummaries,
         sources,
@@ -3396,7 +3406,7 @@ export class RunService {
       userInput: input.run.input,
       canonicalState,
       currentPlan: input.currentPlan,
-      proposal: input.decision.planRevision,
+      proposal: planRevision,
       retiredStepIds,
       recoveryAction: {
         id: input.action.id,
@@ -5059,6 +5069,62 @@ export function repairLeafForFailedBoundary(
     ...(target.evidenceContract === undefined ? {} : { evidenceContract: target.evidenceContract }),
     successCriteria: recoveryProposalSuccessCriteria(target.successCriteria),
   };
+}
+
+/**
+ * Recovery plans are complete proposals, but an existing Step id is an
+ * immutable identity.  Models occasionally return the failed id with a
+ * revised objective or binding; turn that one failed boundary into a new
+ * repair leaf and rewire dependents before Plan admission.
+ */
+export function normalizeRecoveryPlanRevision(
+  current: ExecutionPlan,
+  proposal: PlanProposal,
+  failedStepId: string | undefined,
+): PlanProposal {
+  if (failedStepId === undefined) return proposal;
+  const target = current.steps.find((step) =>
+    step.id === failedStepId && step.retiredAt === undefined && step.status !== "completed",
+  );
+  const proposed = proposal.steps.find((step) => step.id === failedStepId);
+  if (target === undefined || proposed === undefined || !recoveryStepDefinitionChanged(target, proposed)) return proposal;
+  let repairId = repairLeafId(failedStepId, current.version);
+  let offset = 1;
+  while (proposal.steps.some((step) => step.id === repairId)) {
+    offset += 1;
+    repairId = repairLeafId(failedStepId, current.version + offset);
+  }
+  return {
+    ...proposal,
+    steps: proposal.steps.map((step) => ({
+      ...step,
+      ...(step.id === failedStepId ? { id: repairId, role: "repair" as const } : {}),
+      dependencies: step.dependencies.map((dependency) => dependency === failedStepId ? repairId : dependency),
+      ...(step.parentId === failedStepId ? { parentId: repairId } : {}),
+    })),
+  };
+}
+
+function recoveryStepDefinitionChanged(
+  current: ExecutionPlan["steps"][number],
+  proposed: PlanStepProposal,
+): boolean {
+  const comparable = (step: PlanStepProposal | ExecutionPlan["steps"][number], binding?: ExecutionPlan["steps"][number]["executionBinding"]) => JSON.stringify({
+    kind: step.kind ?? "leaf",
+    parentId: step.parentId ?? null,
+    objective: step.objective,
+    dependencies: step.dependencies,
+    role: step.role ?? null,
+    refinementState: step.refinementState ?? "not_refinable",
+    requiredFacts: step.requiredFacts ?? [],
+    skillIds: step.skillIds,
+    requiredCapabilities: step.requiredCapabilities,
+    sourceConstraint: binding === undefined ? step.sourceConstraint ?? null : recoverySourceConstraint(binding).sourceConstraint ?? null,
+    targetIds: binding === undefined ? step.targetIds ?? [] : binding.targetIds,
+    evidenceContract: step.evidenceContract ?? null,
+    successCriteria: step.successCriteria,
+  });
+  return comparable(current, current.executionBinding) !== comparable(proposed);
 }
 
 /** Admission alone derives canonical delivery-target criteria from targetIds. */
@@ -8331,9 +8397,14 @@ function unsupportedPriorArtifactDeliverableFeedback(
   return `Remove unrequested terminal deliverable(s): ${ids}. A prior-artifact transformation may preserve the target artifact family, but any additional terminal artifact family must be explicitly requested in the latest user turn. Keep helper and intermediate artifacts out of taskIntent.deliverables.`;
 }
 
-function referencesPriorConversationResult(input: string): boolean {
+export function referencesPriorConversationResult(input: string): boolean {
   if (!requestsArtifactBuildFromIntent(input)) return false;
-  return /(?:\b(?:this|that|the\s+above|above|previous|prior|earlier|last|latest)\s+(?:analysis|result|answer|summary|report|content|findings?)\b|\b(?:analysis|result|answer|summary|findings?)\s+from\s+(?:the\s+)?(?:previous|prior|last|earlier)\b|(?:这个|该|上述|前述|之前的|先前的|刚才的|上一轮的?|上轮的?)(?:分析(?:结果)?|结果|结论|回答|总结|报告|内容|材料)|(?:分析结果|上述结论|前述结论).{0,12}(?:生成|制作|导出|转换|转成|保存))/iu.test(input);
+  // “这个文件/这个内容” normally points at an uploaded or otherwise
+  // user-supplied source, not at a published Runtime Result.  Only explicit
+  // prior-work markers may enter the reusable-result binding path; otherwise
+  // the resolver would turn a source-backed generation request into a
+  // clarification and Planner would never receive the PPTX request.
+  return /(?:\b(?:this|that|the\s+above|above|previous|prior|earlier|last|latest)\s+(?:analysis|result|answer|summary|report|findings?)\b|\b(?:analysis|result|answer|summary|findings?)\s+from\s+(?:the\s+)?(?:previous|prior|last|earlier)\b|(?:上述|前述|之前的|先前的|刚才的|上一轮的?|上轮的?)(?:分析(?:结果)?|结果|结论|回答|总结|报告|内容|材料)|(?:分析结果|上述结论|前述结论).{0,12}(?:生成|制作|导出|转换|转成|保存))/iu.test(input);
 }
 
 /** Enforce selected input semantics without rediscovering evidence demand from keywords. */
@@ -8630,7 +8701,17 @@ function parseConversationTurnResolution(
   if (!isConversationTurnRelation(normalizedRelation)) return reject("relation must be new_goal, continue_prior, correct_prior, refine_prior, or challenge_prior.");
   if (!isConversationTurnInputMode(normalizedInputMode)) return reject("inputMode must be none, prior_result, prior_artifact, or refresh_sources.");
   if (evidenceStrategy === undefined) return reject("evidenceStrategy must be one of none, lookup_lite, source_grounded, strict_user_source, or bound_visible_sources.");
-  if (sourceBinding === undefined) return reject("sourceBinding must contain mode (none or primary_data) and visibleDirectoryIds (unique Runtime-issued visible directory IDs; use [] with mode=none). Uploaded sources are not visible directory candidates.");
+  if (sourceBinding === undefined) {
+    const rawBinding = optionalRecord(argumentsRecord.sourceBinding);
+    const rawIds = Array.isArray(rawBinding.visibleDirectoryIds)
+      ? rawBinding.visibleDirectoryIds.filter((id): id is string => typeof id === "string")
+      : [];
+    const uploadedIds = new Set(context.sources.map((source) => source.id));
+    if (rawIds.some((id) => uploadedIds.has(id))) {
+      return reject("sourceBinding must contain mode=none and visibleDirectoryIds=[] when the selected ID is an uploaded source. Uploaded source IDs cannot be placed in sourceBinding.visibleDirectoryIds because uploaded sources are not visible directories; choose evidenceStrategy=source_grounded or none as appropriate.");
+    }
+    return reject("sourceBinding must contain mode (none or primary_data) and visibleDirectoryIds (unique Runtime-issued visible directory IDs; use [] with mode=none). Uploaded sources are not visible directory candidates.");
+  }
   if (taskIntent === undefined) return reject(taskIntentFeedback);
   if (taskIntent.requiresExecution !== (mode === "execute")) return reject("taskIntent.requiresExecution must be true exactly when mode=execute.");
   if (
@@ -8668,7 +8749,12 @@ function parseConversationTurnResolution(
   }
   if (groundingFailures.length > 0 || requiredCapabilityReferences === undefined) return reject(groundingFailures.join("\n"));
   const evidenceDemand = conversationEvidenceDemandForStrategy(evidenceStrategy);
-  if (!isConversationSourceBindingConsistent(evidenceStrategy, sourceBinding)) return reject("evidenceStrategy and sourceBinding must agree: bound_visible_sources requires sourceBinding.mode=primary_data with at least one Runtime-issued visibleDirectoryId. All other evidence strategies require mode=none and visibleDirectoryIds=[]. For uploaded or non-directory evidence, choose a non-bound evidenceStrategy.");
+  if (!isConversationSourceBindingConsistent(evidenceStrategy, sourceBinding)) {
+    if (evidenceStrategy === "bound_visible_sources" && sourceBinding.mode === "none" && context.sources.length > 0) {
+      return reject("evidenceStrategy and sourceBinding must agree. Uploaded source(s) are available in this Run, but uploaded sources are not visible directories. Keep sourceBinding.mode=none and visibleDirectoryIds=[]; choose evidenceStrategy=source_grounded when the uploaded source must be read or verified, or evidenceStrategy=none when the supplied content is already sufficient. Use bound_visible_sources only for a Runtime-issued visibleDirectoryId.");
+    }
+    return reject("evidenceStrategy and sourceBinding must agree: bound_visible_sources requires sourceBinding.mode=primary_data with at least one Runtime-issued visibleDirectoryId. All other evidence strategies require mode=none and visibleDirectoryIds=[]. For uploaded or non-directory evidence, choose a non-bound evidenceStrategy.");
+  }
   if (mode !== "execute" && (evidenceDemand !== "none" || sourceBinding.mode !== "none")) return reject("mode=reply or clarify requires evidenceStrategy=none and sourceBinding.mode=none. Acquiring evidence requires mode=execute.");
 
   const priorRunIds = conversationTurnTargetRunIds(workset);

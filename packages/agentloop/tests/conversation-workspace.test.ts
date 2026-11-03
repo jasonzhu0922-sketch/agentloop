@@ -5,13 +5,18 @@ import { join } from "node:path";
 import test from "node:test";
 import type { PlanProposal, Planner, TaskSpec } from "../src/planning/contracts.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
-import { RunService } from "../src/runtime/run-service.ts";
+import { referencesPriorConversationResult, RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { SourceRepository } from "../src/storage/repositories/source-repository.ts";
 import type { RuntimeTool } from "../src/tools/tool-registry.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS, testOwner } from "./runtime-test-helpers.ts";
+
+test("uploaded-source wording is not mistaken for a prior reusable Result", () => {
+  assert.equal(referencesPriorConversationResult("阅读这个文件，结合这个内容给我生成一份介绍 ppt"), false);
+  assert.equal(referencesPriorConversationResult("把上一轮的分析结果生成一份 PPTX"), true);
+});
 
 test("Computer Tool writes are isolated by conversation and reused by follow-up runs", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-conversation-workspace-"));

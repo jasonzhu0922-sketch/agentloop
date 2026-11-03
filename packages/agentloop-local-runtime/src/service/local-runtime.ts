@@ -39,6 +39,7 @@ export interface LocalRuntime {
   getRun(context: LocalExecutionContext, runId: string): ReturnType<RunService["get"]>;
   cancelRun(context: LocalExecutionContext, runId: string): ReturnType<RunService["cancel"]>;
   events(context: LocalExecutionContext, runId: string, afterSeq?: number): ReturnType<RunService["events"]>;
+  ensureConversation(context: LocalExecutionContext, conversationId: string, input: string): Promise<void>;
   conversations(context: LocalExecutionContext): Promise<Awaited<ReturnType<RunService["getConversation"]>>["conversation"][]>;
   conversation(context: LocalExecutionContext, conversationId: string): ReturnType<RunService["getConversation"]>;
   upload(context: LocalExecutionContext, input: Parameters<RunService["uploadSource"]>[1]): ReturnType<RunService["uploadSource"]>;
@@ -102,6 +103,9 @@ export class RuntimeFacade implements LocalRuntime {
   async events(context: LocalExecutionContext, runId: string, afterSeq = 0) {
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new TypeError("event_sequence_invalid");
     return this.#use(async runtime => (await runtime.runs.events(this.#owner(context), runId)).filter(event => event.seq > afterSeq));
+  }
+  ensureConversation(context: LocalExecutionContext, conversationId: string, input: string) {
+    return this.#use(runtime => runtime.runs.ensureConversation(this.#owner(context), conversationId, input));
   }
   conversations(context: LocalExecutionContext): ReturnType<LocalRuntime["conversations"]> { return this.#use(runtime => runtime.runs.listConversations(this.#owner(context))); }
   conversation(context: LocalExecutionContext, conversationId: string): ReturnType<LocalRuntime["conversation"]> { return this.#use(runtime => runtime.runs.getConversation(this.#owner(context), conversationId)); }

@@ -255,6 +255,7 @@ class RuntimeManager implements LocalRuntimeManager {
       getRun: (context, runId) => use(facade => facade.getRun(context, runId)),
       cancelRun: (context, runId) => use(facade => facade.cancelRun(context, runId)),
       events: (context, runId, afterSeq) => use(facade => facade.events(context, runId, afterSeq)),
+      ensureConversation: (context, conversationId, input) => use(facade => facade.ensureConversation(context, conversationId, input)),
       conversations: context => use(facade => facade.conversations(context)),
       conversation: (context, conversationId) => use(facade => facade.conversation(context, conversationId)),
       upload: (context, input) => use(facade => facade.upload(context, input)),

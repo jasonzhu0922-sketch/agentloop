@@ -56,7 +56,7 @@ function busy(value) {
   locked = value;
   element('send').disabled = value; element('message').disabled = value; element('model').disabled = value;
   element('cancel').disabled = !activeRun || cancelling; element('cancel').hidden = !activeRun; element('send').hidden = Boolean(activeRun);
-  element('file').disabled = value || !conversationId; element('upload-file').disabled = element('file').disabled;
+  element('file').disabled = value; element('upload-file').disabled = value;
   element('new-conversation').disabled = value;
   element('runtime-select').disabled = value;
   for (const checkbox of element('run-connectors').querySelectorAll('input')) checkbox.disabled = value;
@@ -197,7 +197,7 @@ element('cancel').onclick = async () => {
 };
 element('new-conversation').onclick = () => {
   if (locked) return;
-  generation++; conversationId = undefined; pending = undefined; selectedSources = [];
+  generation++; conversationId = crypto.randomUUID(); pending = undefined; selectedSources = [];
   sessionStorage.removeItem(PENDING_KEY);
   turns.clear(); orderedRunIds = []; selectedRunId = undefined; view.clear(); resetAttachments(); renderDetails(); resetComposerInput(element('message'));
   element('empty-state').hidden = false; element('conversation-title').textContent = '新对话'; element('message').value = ''; status('新对话 · 请选择模型后发送任务。'); busy(false); navigation(false);
@@ -205,11 +205,11 @@ element('new-conversation').onclick = () => {
 };
 element('runtime-select').onchange = async event => {
   if (locked) { event.target.value = runtimeId; return; }
-  runtimeId = event.target.value; generation++; conversationId = undefined; pending = undefined; selectedSources = []; turns.clear(); orderedRunIds = []; selectedRunId = undefined; view.clear(); resetAttachments(); renderDetails(); element('conversation-title').textContent = '新对话';
+  runtimeId = event.target.value; generation++; conversationId = crypto.randomUUID(); pending = undefined; selectedSources = []; turns.clear(); orderedRunIds = []; selectedRunId = undefined; view.clear(); resetAttachments(); renderDetails(); element('conversation-title').textContent = '新对话';
   busy(true); try { await refreshModels(); await conversations(); await loadConnectors(); status('已切换本机 Runtime，请选择模型后发送。'); } catch (error) { status('Runtime 切换失败，请重新读取。', true); } finally { busy(false); }
 };
 element('file').onchange = async event => {
-  const file = event.target.files[0]; if (!file || !conversationId) return;
+  const file = event.target.files[0]; if (!file) return;
   if (file.size > 1_048_576 || file.size === 0) { status('附件必须为 1 字节至 1 MiB。', true); return; }
   busy(true);
   try {
@@ -262,14 +262,14 @@ try {
   element('account-identity').textContent = session.user.email;
   await loadRuntimes(); await loadConnectors();
   const models = await refreshModels();
-  await conversations(); status(models.length ? '云端账号已登录，请选择本机模型后发送。' : '云端账号已登录，尚未配置本机模型。请在本机能力设置中添加 Provider 和模型。');
+  await conversations(); conversationId = crypto.randomUUID(); status(models.length ? '云端账号已登录，请选择本机模型后发送。' : '云端账号已登录，尚未配置本机模型。请在本机能力设置中添加 Provider 和模型。');
   const saved = sessionStorage.getItem(PENDING_KEY);
   if (saved) {
     const restored = JSON.parse(saved);
     if (typeof restored.requestId !== 'string' || typeof restored.payload?.input !== 'string' || !Array.isArray(restored.payload?.uploadedSourceIds)) throw new Error('待确认发送记录无效，请检查当前标签页的本机存储。');
     if (restored.runtimeId !== undefined && typeof restored.runtimeId !== 'string') throw new Error('待确认发送记录无效，请检查当前标签页的本机存储。');
     if (restored.runtimeId && restored.runtimeId !== runtimeId) { runtimeId = restored.runtimeId; await loadRuntimes(); await refreshModels(); await loadConnectors(); }
-    pending = restored; conversationId = pending.payload.conversationId; selectedSources = pending.payload.uploadedSourceIds;
+    pending = restored; conversationId = pending.payload.conversationId || crypto.randomUUID(); selectedSources = pending.payload.uploadedSourceIds;
     element('message').value = pending.payload.input; element('model').value = pending.payload.modelKey;
     if (conversationId) await transcript();
     autoResizeComposerInput(element('message')); view.submitting(pending.payload.input, true); element('empty-state').hidden = true;

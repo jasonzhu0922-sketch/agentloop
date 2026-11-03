@@ -209,6 +209,24 @@ test("HTTP Run retries, attachment bindings and event cursors survive applicatio
   assert.equal((await jsonCall(restoredCall, `/api/conversations/${first.conversationId}`)).runs.length, 2);
 });
 
+test("a new Desktop conversation accepts a local upload before its first Run", async t => {
+  const { app, root } = await fixture(t); const call = client(app.origin, await session(app.origin));
+  const conversationId = "draft-upload-conversation";
+  const { source } = await jsonCall(call, "/api/sources", {
+    conversationId, originalName: "before-first-run.txt", contentBase64: Buffer.from("uploaded before the first message").toString("base64"),
+  });
+  assert.equal(source.originalName, "before-first-run.txt");
+  assert.equal((await jsonCall(call, "/api/conversations")).conversations[0]?.id, conversationId);
+  const { run } = await jsonCall(call, "/api/runs", {
+    requestId: "draft-upload-run", input: "请读取附件", modelKey: "local:test", conversationId, uploadedSourceIds: [source.id],
+  });
+  await settled(call, run.id);
+  const db = new DatabaseSync(join(root, "runtime.db"));
+  try {
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM run_sources WHERE run_id = ? AND source_id = ?").get(run.id, source.id) as { count: number }).count, 1);
+  } finally { db.close(); }
+});
+
 test("repeated launch reuses the ready instance without initializing a second Runtime", async t => {
   const { root, app, options } = await fixture(t); let launches = 0;
   const noSecondRuntime: LocalModelProviderPort = { modelKeys() { throw new Error("second_runtime_opened"); }, create() { throw new Error("second_runtime_opened"); } };

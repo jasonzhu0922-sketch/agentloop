@@ -154,7 +154,9 @@ export class DesktopApi {
         const body = await readJson(request); fields(body, ["conversationId", "originalName", "contentBase64"]);
         const encoded = text(body, "contentBase64", 1_400_000); const content = Buffer.from(encoded, "base64");
         if (content.length > 1_048_576 || content.toString("base64") !== encoded) throw new HttpError(400, "source_content_invalid");
-        const source = await runtime.upload(context, { conversationId: text(body, "conversationId", 200), originalName: text(body, "originalName", 255), content });
+        const conversationId = text(body, "conversationId", 200); const originalName = text(body, "originalName", 255);
+        await runtime.ensureConversation(context, conversationId, `已上传文件：${originalName}`);
+        const source = await runtime.upload(context, { conversationId, originalName, content });
         json(response, 200, { source }); return;
       }
       const parts = url.pathname.split("/").slice(1).map(part => {

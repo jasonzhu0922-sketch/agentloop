@@ -2265,10 +2265,14 @@ async function refreshArtifacts(assignmentId, assistant, tenantId, userId) {
         }
         artifactFailure = undefined;
       } else {
-        artifactFailure = `本机 Runtime 产物查询失败（HTTP ${response.status}）`;
+        // A successful Router response with an empty list is a valid answer
+        // for ordinary conversation turns. The local request is only a
+        // best-effort recovery path for missing projections, so it cannot
+        // replace that confirmed empty result with an availability error.
+        if (!routerArtifactsLoaded) artifactFailure = `本机 Runtime 产物查询失败（HTTP ${response.status}）`;
       }
     } catch (error) {
-      artifactFailure = error instanceof Error ? error.message : "本机 Runtime 产物查询失败";
+      if (!routerArtifactsLoaded) artifactFailure = error instanceof Error ? error.message : "本机 Runtime 产物查询失败";
     }
   }
   if (currentArtifacts().length > 0) {

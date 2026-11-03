@@ -182,6 +182,28 @@ test("local artifact refresh preserves an explicit unavailable state instead of 
   assert.equal(rendered, 1);
 });
 
+test("an empty Router artifact projection remains empty when the local recovery lookup returns 404", async () => {
+  const source = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  let rendered = 0;
+  const context = vm.createContext({
+    api: "/api",
+    encodeURIComponent,
+    fetch: async () => new Response(JSON.stringify({ artifacts: [] }), { status: 200 }),
+    localAgentFetch: async () => new Response(JSON.stringify({ error: "runtime_not_found" }), { status: 404 }),
+    sessionState: { localSessionToken: "local-session" },
+    saveSessions: () => {},
+    render: () => { rendered += 1; },
+  });
+  const start = source.indexOf("async function refreshArtifacts(");
+  const end = source.indexOf("async function cancelActive(");
+  vm.runInContext(source.slice(start, end), context);
+  const assistant: Record<string, unknown> = { executionLocation: "local", localRuntimeId: "runtime-local", remoteRunId: "run-local", artifacts: [] };
+  await context.refreshArtifacts("assignment-local", assistant, "tenant", "owner");
+  assert.equal(assistant.artifactState, "empty");
+  assert.equal(assistant.artifactError, undefined);
+  assert.equal(rendered, 1);
+});
+
 test("historical local Assignments retain the Runtime identity needed for artifact recovery", () => {
   const [user, assistant] = conversationMessagesFromTurns([{
     clientMessageId: "message-local",
