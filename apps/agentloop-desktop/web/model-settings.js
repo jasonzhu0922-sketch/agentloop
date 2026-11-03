@@ -1,6 +1,6 @@
 // Presentation/transport only. Credential values remain in this transient
 // editor and the POST body; never browser storage, URLs, or rendered JSON.
-export function installModelSettings({ api, element, refreshModels, status }) {
+export function installModelSettings({ api, element, refreshModels, status, managed = false }) {
   const dialog = element('model-settings'); let snapshot; let providers = []; let selected = -1; let dirty = false; let loading = false;
   const message = (text, error = false) => { element('model-settings-status').textContent = text; element('model-settings-status').classList.toggle('error', error); };
   const errors = {
@@ -61,8 +61,10 @@ export function installModelSettings({ api, element, refreshModels, status }) {
     if (loading || dirty) { event?.preventDefault(); message(loading ? '正在保存或读取，请稍候。' : '有未保存的更改，请先保存或放弃更改后关闭。', true); return; }
     dialog.close();
   }
-  element('model-settings-open').onclick = open; element('model-settings-mobile').onclick = open;
-  element('model-settings-close').onclick = () => close(); dialog.addEventListener('cancel', close);
+  if (!managed) {
+    element('model-settings-open').onclick = open; element('model-settings-mobile').onclick = open;
+    element('model-settings-close').onclick = () => close(); dialog.addEventListener('cancel', close);
+  }
   dialog.addEventListener('close', () => { providers = []; selected = -1; snapshot = undefined; dirty = false; render(); });
   element('model-settings-discard').onclick = () => { if (!loading) void load(); };
   for (const id of ['provider-json', 'models-json', 'provider-api-key']) element(id).addEventListener('input', markDirty);
@@ -95,4 +97,5 @@ export function installModelSettings({ api, element, refreshModels, status }) {
     } catch (error) { message(saved ? '配置已保存，但模型目录刷新失败。请刷新页面，不要重复提交。' : errors[error.message] ?? '本机保存失败；未确认保存结果，请重新读取配置核对。', true); }
     finally { loading = false; render(); }
   };
+  return { load, canLeave() { if (loading || dirty) { message(loading ? '正在保存或读取，请稍候。' : '有未保存的模型更改，请先保存或放弃更改。', true); return false; } return true; } };
 }

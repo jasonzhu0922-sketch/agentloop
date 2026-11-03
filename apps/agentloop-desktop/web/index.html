@@ -11,11 +11,12 @@
   <div class="app-shell">
     <aside id="sidebar" class="sidebar" aria-label="会话导航">
       <div class="brand"><img class="logo logo-image" src="/assets/xuanwu-mascot-icon.png" alt="玄武"><div class="brand-text"><strong>AgentLoop</strong><small>Desktop · 本机智能助手</small></div></div>
+      <label class="desktop-runtime-choice">执行 Runtime<select id="runtime-select" aria-label="执行 Runtime" disabled></select></label>
       <button id="new-conversation" class="new-chat" type="button">＋ 新对话</button>
       <nav id="conversations" class="sessions" aria-label="本机对话"></nav>
       <div class="sidebar-foot">
         <section class="local-capability" aria-label="本机能力"><div class="local-capability-head"><strong>本机能力</strong><span class="local-agent-state"><i class="online"></i><span>本机运行</span></span><button id="model-settings-open" type="button" aria-haspopup="dialog">设置</button></div><p class="local-agent-hint">共享 Local Runtime · 独立数据目录</p><p class="local-agent-hint">对话和产物保存在本机。远程模型推理时，内容会发送给所选模型服务。</p></section>
-        <div class="identity-actions"><span class="identity">开发模式 · 非云端登录</span><button id="theme-toggle" class="icon-btn" type="button" title="切换主题" aria-label="切换主题">◐</button></div>
+        <div class="identity-actions"><span id="account-identity" class="identity">正在确认云端账号…</span><button id="logout" class="icon-btn" type="button" title="退出登录" aria-label="退出登录">退出</button><button id="theme-toggle" class="icon-btn" type="button" title="切换主题" aria-label="切换主题">◐</button></div>
       </div>
     </aside>
     <main class="main">
@@ -28,6 +29,7 @@
           </div>
           <form id="composer" class="composer">
             <p id="status" class="composer-status" role="status" aria-live="polite">正在连接本地服务…</p>
+            <div id="run-connectors" class="desktop-run-connectors" aria-label="本轮授权 Connector"></div>
             <div class="composer-box"><div id="attachments" class="source-row" aria-label="本次附件" hidden></div><label class="sr-only" for="message">消息</label><textarea id="message" class="composer-input" rows="2" placeholder="给 AgentLoop 一个任务……（⌘/Ctrl + Enter 发送，Enter 换行）" required></textarea>
               <div class="composer-tools"><div class="composer-bar"><input id="file" type="file" hidden disabled><button id="upload-file" class="dir-picker-btn" type="button" disabled title="首次发送后可添加附件（单个 ≤ 1 MiB）">▤ 上传文件</button><label class="chip">模型<select id="model" aria-label="执行模型" required><option value="">请选择模型</option></select></label><span class="composer-hint">⌘/Ctrl + Enter 发送</span><span class="composer-spacer"></span><button id="cancel" class="composer-action is-stop" type="button" aria-label="取消执行" title="取消执行" hidden disabled>■</button><button id="send" class="composer-action" type="submit" aria-label="发送" title="发送任务">↑</button></div></div>
             </div><p id="upload-hint" class="desktop-footnote">开发预览 · 首次发送后可添加附件（单个 ≤ 1 MiB）</p>
@@ -42,7 +44,9 @@
   </div>
   <dialog id="model-settings" class="desktop-settings" aria-labelledby="model-settings-title">
     <div class="desktop-settings-header"><div><strong id="model-settings-title">本机能力设置</strong><p>配置仅保存在这台设备上，不复用云端模型。</p></div><button id="model-settings-close" class="icon-btn" type="button" aria-label="关闭模型设置">×</button></div>
-    <div class="desktop-settings-layout"><nav class="desktop-settings-nav" aria-label="设置分类"><span class="active">模型配置</span></nav><section class="desktop-settings-content">
+    <div class="desktop-settings-layout"><nav class="desktop-settings-nav" aria-label="设置分类">
+      <button type="button" data-settings-tab="models" class="active">模型配置</button><button type="button" data-settings-tab="skills">Skills</button><button type="button" data-settings-tab="runtimes">Runtime</button><button type="button" data-settings-tab="connectors">Connector</button><button type="button" data-settings-tab="mcp">MCP</button>
+    </nav><section id="settings-models" class="desktop-settings-content" data-settings-page="models">
       <div class="settings-page-heading"><div><h2>模型配置</h2><p>使用 JSON 管理 Provider、模型和调用参数。新任务使用保存后的配置。</p></div><span class="settings-local-badge">仅本机保存</span></div>
       <p class="desktop-security-note">API Key 单独填写并加密保存，不写入配置 JSON。当前使用本机文件密钥，不是 OS Keychain；无法防护同用户恶意程序或拿到完整数据目录的攻击者。远程推理会向你指定的模型服务发送内容。支持 HTTP/HTTPS；HTTP 不加密传输 API Key 和推理内容，请优先使用 HTTPS，HTTP 仅用于可信网络。</p>
       <div class="settings-section-title"><strong>本机 Providers</strong><button id="provider-add" type="button">＋ 添加 Provider</button></div>
@@ -57,6 +61,11 @@
         <details class="desktop-model-help"><summary>配置字段说明</summary><p>Provider 必填：key（小写 ID）、displayName、baseUrl（HTTP 或 HTTPS；HTTP 为明文传输）。更换地址时必须重新填写 API Key，不会沿用旧地址的凭据。URL 不能包含账号、密码、查询参数或片段。</p><p>模型填写 JSON 数组，每项包含 key、displayName、providerModel。protocol 可选 responses 或 chat-completions；建议显式设置 contextWindowTokens、maxOutputTokens，并按服务能力设置 temperature、topP、reasoningEffort、thinkingMode、timeoutMs 等参数。模型 key 在本机全局唯一；不会自动添加模型或选择默认模型。</p><p>保存不会发起网络连接，也不证明模型可用。保存后需在对话中显式选择模型并实际执行任务。存在活动任务时禁止保存；其他标签页修改后须重新读取，不能覆盖。</p></details>
       </div>
       <div class="desktop-settings-save"><p id="model-settings-status" role="status" aria-live="polite"></p><div><button id="model-settings-discard" type="button">放弃更改并重新读取</button><button id="model-settings-save" class="primary" type="button" disabled>保存配置</button></div></div>
+    </section>
+    <section id="settings-capabilities" class="desktop-settings-content" hidden>
+      <div class="settings-page-heading"><div><h2 id="capability-title"></h2><p id="capability-description"></p></div><span class="settings-local-badge">仅本机保存</span></div>
+      <p id="capability-status" class="capability-status" role="status" aria-live="polite"></p>
+      <div id="capability-body"></div>
     </section></div>
   </dialog>
 </body>

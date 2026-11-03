@@ -1,12 +1,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { AppError } from "@zhujun/agentloop";
-import type { LocalRuntimeManager, ManagedLocalRuntime, LocalModelConfigurationInput } from "@zhujun/agentloop-local-runtime";
-import { assertLoopback, assertWriteOrigin, DevelopmentSessions, HttpError, securityHeaders } from "../security/loopback.ts";
+import type { LocalRuntimeManager, ManagedLocalRuntime, LocalModelConfigurationInput, LocalExecutionContext } from "@zhujun/agentloop-local-runtime";
+import { assertLoopback, assertWriteOrigin, AccountSessions, HttpError, securityHeaders } from "../security/loopback.ts";
+import type { CloudAuthPort } from "../auth/cloud-auth.ts";
 import { modelEndpoint } from "../security/model-endpoint.ts";
+import { LocalManagementError, LocalRuntimeConfigurationStoreError, LocalRuntimeSupervisorError, type ConnectorSettingInput } from "@zhujun/agentloop-local-runtime";
+import { configurationInput, mcpInput, record, skillImportInput } from "./settings-input.ts";
 
-export const DEVELOPMENT_OWNER = "desktop-development";
 export const DEFAULT_RUNTIME_ID = "desktop-default";
-const context = Object.freeze({ ownerUserId: DEVELOPMENT_OWNER });
 const MAX_BODY_BYTES = 1_500_000;
 
 export interface StaticAsset { content: Buffer; type: string }
@@ -25,13 +26,13 @@ function ids(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > 20 || value.some(id => typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,200}$/.test(id))) throw new HttpError(400, "source_ids_invalid");
   return value;
 }
-async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJson(request: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<Record<string, unknown>> {
   const body = await new Promise<Buffer>((resolve, reject) => {
     let size = 0; let rejected = false; const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => {
       if (rejected) return;
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) { rejected = true; chunks.length = 0; reject(new HttpError(413, "body_too_large")); }
+      if (size > maxBytes) { rejected = true; chunks.length = 0; reject(new HttpError(413, "body_too_large")); }
       else chunks.push(chunk);
     });
     request.on("end", () => { if (!rejected) resolve(Buffer.concat(chunks)); });
@@ -51,10 +52,13 @@ export class DesktopApi {
   stopping = false;
   activeRequests = 0;
   manager?: LocalRuntimeManager;
-  readonly #sessions = new DevelopmentSessions();
+  readonly #sessions = new AccountSessions();
+  readonly #cloud?: CloudAuthPort;
+  #loginInFlight = 0;
+  #loginAttempts: number[] = [];
   readonly instanceId: string;
   readonly #assets: ReadonlyMap<string, StaticAsset>;
-  constructor(instanceId: string, assets: ReadonlyMap<string, StaticAsset>) { this.instanceId = instanceId; this.#assets = assets; }
+  constructor(instanceId: string, assets: ReadonlyMap<string, StaticAsset>, cloud?: CloudAuthPort) { this.instanceId = instanceId; this.#assets = assets; this.#cloud = cloud; }
 
   handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     securityHeaders(response);
@@ -72,16 +76,48 @@ export class DesktopApi {
       }
       const write = request.method === "POST";
       if (write) assertWriteOrigin(request, this.origin);
-      if (request.method === "POST" && url.pathname === "/api/dev/session") {
-        fields(await readJson(request), []);
-        const session = this.#sessions.issue(request, response);
-        json(response, 200, { mode: "development", csrfToken: session.csrf, expiresAt: session.expiresAt }); return;
+      if (url.pathname === "/api/dev/session") throw new HttpError(404, "route_not_found");
+      if (request.method === "GET" && url.pathname === "/api/auth/config") {
+        json(response, 200, { configured: this.#cloud !== undefined, issuer: this.#cloud?.issuer }); return;
+      }
+      if (write && ["/api/auth/login", "/api/auth/register"].includes(url.pathname)) {
+        if (!this.#cloud) throw new HttpError(503, "cloud_auth_not_configured");
+        // Account switching is explicit logout + login, never a hidden mutation
+        // of an existing browser capability while requests may still be active.
+        let authenticated = false;
+        try { this.#sessions.require(request, false); authenticated = true; } catch (error) {
+          if (!(error instanceof HttpError) || error.status !== 401) throw error;
+        }
+        if (authenticated) throw new HttpError(409, "logout_before_account_switch");
+        const body = await readJson(request); fields(body, ["email", "password"]);
+        const email = text(body, "email", 254).trim(), password = text(body, "password", 256);
+        this.#loginAttempts = this.#loginAttempts.filter(time => Date.now() - time < 60_000);
+        if (this.#loginInFlight >= 2 || this.#loginAttempts.length >= 10) throw new HttpError(429, "cloud_auth_rate_limited");
+        this.#loginAttempts.push(Date.now()); this.#loginInFlight++;
+        try {
+          const cloud = await this.#cloud.authenticate(url.pathname.endsWith("register") ? "register" : "login", email, password);
+          const session = this.#sessions.issue(response, this.#cloud.issuer, cloud);
+          json(response, 200, this.sessionView(session)); return;
+        } finally { this.#loginInFlight--; }
       }
       const session = this.#sessions.require(request, write);
-      if (request.method === "GET" && url.pathname === "/api/session") {
-        json(response, 200, { mode: "development", csrfToken: session.csrf, expiresAt: session.expiresAt }); return;
+      if (!this.#cloud) throw new HttpError(503, "cloud_auth_not_configured");
+      if (write && url.pathname === "/api/auth/logout") {
+        fields(await readJson(request), []);
+        this.#sessions.revoke(session, response);
+        let cloudRevoked = true;
+        try { await this.#cloud.logout(session.cloudToken); } catch { cloudRevoked = false; }
+        json(response, 200, { loggedOut: true, cloudRevoked }); return;
       }
-      const runtime = this.manager.runtime(DEFAULT_RUNTIME_ID);
+      await this.#sessions.verify(session, this.#cloud, url.pathname === "/api/session");
+      if (request.method === "GET" && url.pathname === "/api/session") {
+        json(response, 200, this.sessionView(session)); return;
+      }
+      const context = Object.freeze({ ownerUserId: session.ownerUserId });
+      if (await this.managementRoute(request, response, url.pathname, context.ownerUserId)) return;
+      const runtimeId = url.searchParams.get("runtimeId") ?? DEFAULT_RUNTIME_ID;
+      if (!/^[a-zA-Z0-9_-]{1,200}$/.test(runtimeId)) throw new HttpError(400, "runtime_id_invalid");
+      const runtime = this.manager.runtime(runtimeId);
       if (request.method === "GET" && url.pathname === "/api/model-configuration") {
         json(response, 200, await this.manager.modelConfiguration()); return;
       }
@@ -102,11 +138,16 @@ export class DesktopApi {
       if (request.method === "GET" && url.pathname === "/api/conversations") { json(response, 200, { conversations: await runtime.conversations(context) }); return; }
       if (request.method === "POST" && url.pathname === "/api/runs") {
         const body = await readJson(request);
-        fields(body, ["requestId", "input", "modelKey", "conversationId", "uploadedSourceIds"]);
+        fields(body, ["requestId", "input", "modelKey", "conversationId", "uploadedSourceIds", "connectorConnectionIds"]);
+        const connections = body.connectorConnectionIds === undefined ? [] : ids(body.connectorConnectionIds);
+        if (connections.length) {
+          const permitted = new Set((await this.manager.connectors(runtimeId, context.ownerUserId)).filter(c => c.enabled && c.moduleAvailable).map(c => c.id));
+          if (connections.some(id => !permitted.has(id))) throw new HttpError(403, "connector_connection_not_authorized");
+        }
         const run = await runtime.startRun(context, { requestId: text(body, "requestId", 256), input: text(body, "input"), modelKey: text(body, "modelKey", 200),
           ...(body.conversationId === undefined ? {} : { conversationId: text(body, "conversationId", 200) }),
           uploadedSourceIds: body.uploadedSourceIds === undefined ? [] : ids(body.uploadedSourceIds),
-          connectorConnectionIds: [], allowDangerousTools: false });
+          connectorConnectionIds: connections, allowDangerousTools: false });
         json(response, 200, { run }); return;
       }
       if (request.method === "POST" && url.pathname === "/api/sources") {
@@ -126,10 +167,13 @@ export class DesktopApi {
       if (request.method === "GET" && parts.length === 3 && parts[0] === "api" && parts[1] === "sources") {
         json(response, 200, { source: await runtime.source(context, parts[2]!) }); return;
       }
-      await this.runRoute(request, response, runtime, parts, url);
+      await this.runRoute(request, response, runtime, parts, url, context);
     } catch (error) {
       // Never reflect provider exceptions, paths, URLs, prompts or credentials.
       if (error instanceof HttpError) json(response, error.status, { error: error.code });
+      else if (error instanceof LocalManagementError || error instanceof LocalRuntimeConfigurationStoreError || error instanceof LocalRuntimeSupervisorError) {
+        json(response, error.status, { error: /^[a-z][a-z0-9_]{1,100}$/.test(error.message) ? error.message : "settings_operation_failed" });
+      }
       else if (error instanceof AppError) {
         const safe = new Set(["request_id_payload_conflict", "admission_outcome_unknown", "admission_run_deleted", "runtime_capacity_exhausted", "local_model_unavailable", "model_configuration_stale", "model_configuration_read_only", "model_configuration_invalid", "runtime_active_runs_prevent_reconfiguration", "runtime_operation_in_progress"]);
         json(response, error.status, { error: safe.has(error.message) ? error.message : error.code });
@@ -137,7 +181,59 @@ export class DesktopApi {
     } finally { this.activeRequests--; }
   };
 
-  private async runRoute(request: IncomingMessage, response: ServerResponse, runtime: ManagedLocalRuntime, parts: string[], url: URL) {
+  private async managementRoute(request: IncomingMessage, response: ServerResponse, path: string, owner: string): Promise<boolean> {
+    const manager = this.manager!; const get = request.method === "GET", post = request.method === "POST";
+    if (path === "/api/runtimes") {
+      if (get) { json(response, 200, { runtimes: await manager.runtimes() }); return true; }
+      if (post) { const b = await readJson(request); fields(b, ["displayName"]); json(response, 200, { runtime: await manager.createRuntime(text(b, "displayName", 100)) }); return true; }
+    }
+    if (get && path === "/api/skills") { json(response, 200, { skills: await manager.skillPackages() }); return true; }
+    if (post && path === "/api/skills/import") { json(response, 200, { skills: await manager.importSkills(skillImportInput(await readJson(request, 46 * 1024 * 1024))) }); return true; }
+    const skill = /^\/api\/skills\/([a-zA-Z0-9_-]{1,200})\/metadata$/.exec(path);
+    if (skill) {
+      if (get) { json(response, 200, await manager.skillMetadata(skill[1]!)); return true; }
+      if (post) { const b = await readJson(request); fields(b, ["declaration"]); json(response, 200, await manager.updateSkillMetadata(skill[1]!, b.declaration)); return true; }
+    }
+    if (get && path === "/api/connectors/catalog") { json(response, 200, { connectors: await manager.connectorCatalog() }); return true; }
+    const match = /^\/api\/runtimes\/([a-zA-Z0-9_-]{1,200})\/(configuration|start|stop|drain|restart|rename|remove|connectors|mcp\/test)(?:\/([a-zA-Z0-9_-]{1,200})\/remove)?$/.exec(path);
+    if (!match) return false;
+    const id = match[1]!, action = match[2]!;
+    if (action === "configuration") {
+      if (get) { json(response, 200, await manager.runtimeSettings(id)); return true; }
+      if (post) { const b = await readJson(request); fields(b, ["configuration", "revision"]); await manager.configureRuntime(id, configurationInput(b.configuration), text(b, "revision", 64)); json(response, 200, await manager.runtimeSettings(id)); return true; }
+    }
+    if (action === "connectors") {
+      if (get && !match[3]) { json(response, 200, { connections: await manager.connectors(id, owner) }); return true; }
+      if (post) {
+        const b = await readJson(request);
+        if (match[3]) { fields(b, []); json(response, 200, await manager.removeConnector(id, owner, match[3])); }
+        else { fields(b, ["connector"]); const c = record(b.connector, ["id", "connectorKey", "displayName", "enabled", "scopes", "credentials"]); json(response, 200, await manager.configureConnector(id, owner, c as unknown as ConnectorSettingInput)); }
+        return true;
+      }
+    }
+    if (post) {
+      const b = await readJson(request);
+      if (action === "mcp/test") { fields(b, ["server"]); json(response, 200, await manager.testMcpServer(id, mcpInput(b.server))); return true; }
+      if (action === "rename") { fields(b, ["displayName"]); json(response, 200, { runtime: await manager.renameRuntime(id, text(b, "displayName", 100)) }); return true; }
+      fields(b, []);
+      switch (action) {
+        case "start": json(response, 200, { runtime: await manager.startRuntime(id) }); break;
+        case "stop": json(response, 200, { runtime: await manager.stopRuntime(id) }); break;
+        case "drain": json(response, 200, { runtime: await manager.drainRuntime(id) }); break;
+        case "restart": json(response, 200, { runtime: await manager.restartRuntime(id) }); break;
+        case "remove": json(response, 200, await manager.removeRuntime(id)); break;
+        default: return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  private sessionView(session: ReturnType<AccountSessions["require"]>) {
+    return { mode: "cloud", user: { id: session.principal.userId, email: session.principal.email }, tenant: { id: session.principal.tenantId },
+      accountId: session.ownerUserId, csrfToken: session.csrf, expiresAt: session.expiresAt };
+  }
+  private async runRoute(request: IncomingMessage, response: ServerResponse, runtime: ManagedLocalRuntime, parts: string[], url: URL, context: LocalExecutionContext) {
     if (parts[0] !== "api" || parts[1] !== "runs" || !parts[2]) throw new HttpError(404, "route_not_found");
     const id = parts[2];
     if (request.method === "GET" && parts.length === 3) { json(response, 200, { run: await runtime.getRun(context, id) }); return; }

@@ -40,6 +40,22 @@
 .composer-status { min-height:18px; margin:0 0 8px; color:var(--text-3); font-size:11px; overflow-wrap:anywhere; }
 .composer-status.error { color:var(--bad); }
 .desktop-footnote { margin:7px 0 0; color:var(--text-3); font-size:10px; text-align:center; }
+.desktop-runtime-choice { display:grid; gap:4px; margin:10px 14px; color:var(--text-3); font-size:10px; }
+.desktop-runtime-choice select { min-width:0; border:1px solid var(--border); border-radius:6px; padding:7px; background:var(--bg-2); color:var(--text); font-size:11px; }
+.desktop-run-connectors { display:flex; flex-wrap:wrap; align-items:center; gap:7px; margin:0 0 7px; font-size:11px; }
+.desktop-connector-title { color:var(--text-3); }
+.desktop-connector-choice { display:inline-flex; align-items:center; gap:4px; padding:4px 7px; border:1px solid var(--border); border-radius:999px; background:var(--bg-2); }
+.desktop-connector-choice input { margin:0; }
+.capability-status { min-height:18px; color:var(--text-2); font-size:11px; line-height:1.6; }
+.capability-status.error { color:var(--bad); }
+.capability-card { display:grid; gap:10px; padding:14px; border:1px solid var(--border); border-radius:10px; background:var(--bg); }
+.capability-card p { margin:0; color:var(--text-3); font-size:11px; line-height:1.6; }
+.capability-field { display:grid; gap:5px; color:var(--text-2); font-size:11px; }
+.capability-field input,.capability-field select { border:1px solid var(--border-2); border-radius:6px; padding:8px; background:var(--bg-2); color:var(--text); }
+.capability-actions { display:flex; flex-wrap:wrap; gap:7px; }
+.capability-editor { display:grid; gap:10px; }
+.desktop-settings-nav button { display:block; width:100%; margin-bottom:5px; border:0; background:none; color:var(--text-2); text-align:left; }
+.desktop-settings-nav button.active { background:var(--brand-soft); color:var(--brand); }
 button:disabled { opacity:.5; }
 button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid var(--brand); outline-offset:3px; }
 .artifact-workspace { display:flex; margin:14px 16px 14px 0; border:1px solid var(--border-2); border-radius:18px; box-shadow:0 12px 34px rgba(30,45,80,.07); }

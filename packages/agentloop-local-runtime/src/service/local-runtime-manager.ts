@@ -1,10 +1,13 @@
 import { mkdir, rm } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { createHash } from "node:crypto";
-import { AppDatabase, AppError } from "@zhujun/agentloop";
+import { AppDatabase, AppError, loadMcpToolsFromConfig } from "@zhujun/agentloop";
+import { importSkillFiles, readSkillZip, type SkillImportFile, LocalManagementError } from "../configuration/skill-import.ts";
+import { ConnectorSettings, type ConnectorSettingInput } from "../configuration/connector-settings.ts";
+import type { ConnectorModuleRegistration } from "../connectors/connector-module-loader.ts";
 import type { LocalConnectorConfigurationPort, LocalIdentityPort, LocalModelProviderPort, LocalRuntimeControl } from "../contracts/host.ts";
 import { LocalRuntimeSupervisorError } from "../contracts/host.ts";
-import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, type LocalRuntimeMemoryConfigurationInput, type LocalRuntimeSecretStore } from "../configuration/local-runtime-configuration-store.ts";
+import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, type LocalRuntimeMcpServerInput, type LocalRuntimeMemoryConfigurationInput, type LocalRuntimeSecretStore } from "../configuration/local-runtime-configuration-store.ts";
 import { LocalRunAdmissionService } from "./local-run-admission.ts";
 import { LocalRuntimeFactory } from "./local-runtime-factory.ts";
 import { RuntimeFacade, type LocalRuntime } from "./local-runtime.ts";
@@ -34,6 +37,9 @@ export interface LocalRuntimeManagerOptions {
   /** Required when another configuration owner shares the MCP vault. */
   readonly additionalSecretReferences?: () => Promise<readonly string[]>;
   readonly connectors?: LocalConnectorConfigurationPort;
+  /** Host-approved modules; an empty array enables editable local connection settings without loading modules. */
+  readonly connectorModules?: readonly ConnectorModuleRegistration[];
+  readonly connectorSecrets?: LocalRuntimeSecretStore;
   readonly bundledSkillDirectories?: readonly string[];
   readonly customSkillDirectories?: readonly string[];
   readonly memory?: LocalRuntimeMemoryConfigurationInput;
@@ -52,8 +58,17 @@ export interface LocalRuntimeManager {
   createRuntime(displayName: string, configuration?: LocalRuntimeConfigurationInput): Promise<LocalRuntimeSummary>;
   renameRuntime(runtimeId: string, displayName: string): Promise<LocalRuntimeSummary>;
   configuration(runtimeId: string): ReturnType<LocalRuntimeSupervisor["configuration"]>;
-  configureRuntime(runtimeId: string, input: LocalRuntimeConfigurationInput): ReturnType<LocalRuntimeSupervisor["updateConfiguration"]>;
+  configureRuntime(runtimeId: string, input: LocalRuntimeConfigurationInput, expectedRevision?: string): ReturnType<LocalRuntimeSupervisor["updateConfiguration"]>;
+  runtimeSettings(runtimeId: string): Promise<{ configuration: Awaited<ReturnType<LocalRuntimeSupervisor["configuration"]>>; revision: string }>;
   skillPackages(): ReturnType<LocalRuntimeConfigurationStore["listSkillPackages"]>;
+  importSkills(input: { files: readonly SkillImportFile[] } | { zip: Buffer }): ReturnType<LocalRuntimeConfigurationStore["listSkillPackages"]>;
+  skillMetadata(id: string): ReturnType<LocalRuntimeConfigurationStore["skillMetadata"]>;
+  updateSkillMetadata(id: string, declaration: unknown): ReturnType<LocalRuntimeConfigurationStore["updateSkillMetadata"]>;
+  testMcpServer(runtimeId: string, server: LocalRuntimeMcpServerInput): Promise<{ ok: boolean; toolCount: number }>;
+  connectorCatalog(): Promise<ReturnType<ConnectorSettings["catalog"]>>;
+  connectors(runtimeId: string, owner: string): ReturnType<ConnectorSettings["list"]>;
+  configureConnector(runtimeId: string, owner: string, input: ConnectorSettingInput): ReturnType<ConnectorSettings["save"]>;
+  removeConnector(runtimeId: string, owner: string, id: string): ReturnType<ConnectorSettings["remove"]>;
   startRuntime(runtimeId: string): Promise<LocalRuntimeSummary>;
   stopRuntime(runtimeId: string): Promise<LocalRuntimeSummary>;
   drainRuntime(runtimeId: string): Promise<LocalRuntimeSummary>;
@@ -72,12 +87,16 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
   await mkdir(options.dataDirectory, { recursive: true });
   const database = new AppDatabase(join(options.dataDirectory, "supervisor.db"));
   const modelConfigurations = options.modelSecrets === undefined ? undefined : new LocalModelConfigurationStore(database, options.modelSecrets);
-  const configurations = new LocalRuntimeConfigurationStore(database, options.secrets, options.customSkillDirectories ?? [], undefined, undefined, options.additionalSecretReferences);
+  if (options.connectors && options.connectorModules) { await database.close(); throw new TypeError("connector_configuration_authority_conflict"); }
+  const library = join(options.dataDirectory, "skill-library");
+  const configurations = new LocalRuntimeConfigurationStore(database, options.secrets, options.customSkillDirectories ?? [], library, undefined, options.additionalSecretReferences);
+  const connectors = options.connectorModules === undefined ? undefined : new ConnectorSettings(database,
+    options.connectorSecrets ?? new (await import("../persistence/encrypted-local-runtime-secret-store.ts")).EncryptedLocalRuntimeSecretStore(join(options.dataDirectory, "private", "connector-secrets")), options.connectorModules);
   const factory = new LocalRuntimeFactory({ databasePath: join(options.dataDirectory, "runtime.db"),
     runtimeDataRoot: join(options.dataDirectory, "runtimes"), skillPackageStoreRoot: join(options.dataDirectory, "skill-packages"),
     models: options.models, identity: options.identity,
     environment: options.bundledSkillDirectories === undefined ? {} : { AGENTLOOP_BUNDLED_SKILL_DIRECTORIES: options.bundledSkillDirectories.join(",") },
-  }, modelConfigurations, options.connectors);
+  }, modelConfigurations, connectors ?? options.connectors);
   const uploads = join(options.dataDirectory, "uploads");
   const supervisor = new LocalRuntimeSupervisor(database, (definition, configuration) => factory.create(definition, {
     ...configuration, integrationEnvironment: { ...configuration.integrationEnvironment, WEB_SEARCH_DISABLED: "1" },
@@ -87,13 +106,14 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
     await rm(factory.runtimeUploadRootFor(definition, uploads), { recursive: true, force: true });
   }, options.maxConcurrentRuns, configurations);
   try {
+    await connectors?.ready();
     await modelConfigurations?.ready();
     if (options.memory !== undefined) {
       await configurations.ready();
       await configurations.applyDeviceMemory(options.memory);
     }
     await supervisor.ready(options.defaultRuntimeId);
-    return new RuntimeManager(supervisor, configurations, modelConfigurations, options.models === undefined);
+    return new RuntimeManager(supervisor, configurations, modelConfigurations, options.models === undefined, library, connectors);
   } catch (error) { await supervisor.close(); throw error; }
 }
 
@@ -108,7 +128,8 @@ class RuntimeManager implements LocalRuntimeManager {
   #closing?: Promise<void>;
   readonly #supervisor: LocalRuntimeSupervisor;
   readonly #configurations: LocalRuntimeConfigurationStore;
-  constructor(supervisor: LocalRuntimeSupervisor, configurations: LocalRuntimeConfigurationStore, models?: LocalModelConfigurationStore, modelsEditable = false) {
+  constructor(supervisor: LocalRuntimeSupervisor, configurations: LocalRuntimeConfigurationStore, models?: LocalModelConfigurationStore, modelsEditable = false,
+    private library = "", private connectorSettings?: ConnectorSettings) {
     this.#supervisor = supervisor; this.#configurations = configurations;
     this.#models = models; this.#modelsEditable = modelsEditable && models !== undefined;
   }
@@ -176,8 +197,39 @@ class RuntimeManager implements LocalRuntimeManager {
   createRuntime(name: string, input?: LocalRuntimeConfigurationInput) { return this.guard(() => this.#supervisor.create(name, input)); }
   renameRuntime(id: string, name: string) { return this.guard(() => this.#supervisor.rename(id, name)); }
   configuration(id: string) { return this.guard(() => this.#supervisor.configuration(id)); }
-  configureRuntime(id: string, input: LocalRuntimeConfigurationInput) { return this.guard(() => this.#supervisor.updateConfiguration(id, input)); }
+  configureRuntime(id: string, input: LocalRuntimeConfigurationInput, expectedRevision?: string) { return this.guard(() => this.#supervisor.updateConfiguration(id, input, undefined, expectedRevision)); }
+  runtimeSettings(id: string) { return this.guard(async () => { const configuration = await this.#supervisor.configuration(id);
+    return { configuration, revision: createHash("sha256").update(JSON.stringify(configuration)).digest("hex") }; }); }
   skillPackages() { return this.guard(() => this.#configurations.listSkillPackages()); }
+  importSkills(input: { files: readonly SkillImportFile[] } | { zip: Buffer }) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
+    const installed = await importSkillFiles(this.library, "zip" in input ? readSkillZip(input.zip) : input.files);
+    const packages = [];
+    for (const pkg of installed) packages.push(await this.#configurations.registerUploadedPackage({ ...pkg, inspection: { ...pkg.inspection, metadataSource: pkg.inspection.declarationSource } }));
+    return packages;
+  })); }
+  skillMetadata(id: string) { return this.guard(() => this.#configurations.skillMetadata(id)); }
+  updateSkillMetadata(id: string, value: unknown) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(() => this.#configurations.updateSkillMetadata(id, value))); }
+  testMcpServer(id: string, server: LocalRuntimeMcpServerInput) { return this.guard(async () => {
+    await this.#supervisor.configuration(id);
+    const draft = await this.#configurations.previewMcpServer(id, server);
+    const result = await loadMcpToolsFromConfig({ servers: [{ ...draft.registration, timeoutMs: Math.min(draft.registration.timeoutMs ?? 5000, 10000) }] }, { environment: draft.environment });
+    return { ok: result.failedServers.length === 0, toolCount: result.tools.length };
+  }); }
+  private connectionStore() { if (!this.connectorSettings) throw new LocalManagementError(409, "connector_settings_unavailable"); return this.connectorSettings; }
+  connectorCatalog() { return this.guard(async () => this.connectionStore().catalog()); }
+  connectors(id: string, owner: string) { return this.guard(async () => { await this.#supervisor.configuration(id); return this.connectionStore().list(id, owner); }); }
+  configureConnector(id: string, owner: string, input: ConnectorSettingInput) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
+    const runtime = (await this.#supervisor.list()).find(r => r.id === id);
+    if (!runtime) throw new LocalManagementError(404, "runtime_not_found");
+    if (runtime.status !== "stopped") throw new LocalManagementError(409, "runtime_must_be_stopped_for_configuration");
+    return this.connectionStore().save(id, owner, input);
+  })); }
+  removeConnector(id: string, owner: string, connection: string) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
+    const runtime = (await this.#supervisor.list()).find(r => r.id === id);
+    if (!runtime) throw new LocalManagementError(404, "runtime_not_found");
+    if (runtime.status !== "stopped") throw new LocalManagementError(409, "runtime_must_be_stopped_for_configuration");
+    return this.connectionStore().remove(id, owner, connection);
+  })); }
   private lifecycle(id: string, action: "start" | "stop" | "drain" | "restart") {
     return this.guard(async () => { await this.refresh(); return this.#supervisor[action](id); });
   }
@@ -185,7 +237,12 @@ class RuntimeManager implements LocalRuntimeManager {
   stopRuntime(id: string) { return this.lifecycle(id, "stop"); }
   drainRuntime(id: string) { return this.lifecycle(id, "drain"); }
   restartRuntime(id: string) { return this.lifecycle(id, "restart"); }
-  removeRuntime(id: string) { return this.guard(async () => { await this.refresh(); return this.#supervisor.remove(id); }); }
+  removeRuntime(id: string) { return this.guard(async () => { await this.refresh();
+    const references = await this.connectorSettings?.references(id) ?? [];
+    const removed = await this.#supervisor.remove(id);
+    try { await this.connectorSettings?.cleanup(references); } catch { throw new LocalManagementError(500, "runtime_removed_credential_cleanup_failed"); }
+    return removed;
+  }); }
 
   runtime(id: string): ManagedLocalRuntime {
     const use = <T>(operation: (facade: RuntimeFacade) => Promise<T>) => this.guard(() =>

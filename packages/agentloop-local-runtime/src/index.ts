@@ -7,3 +7,8 @@ export type { LocalRuntimeConfiguration, LocalRuntimeConfigurationInput, LocalRu
 export type { LocalModelConfigurationInput, LocalModelProviderInput, LocalModelInput } from "./configuration/local-model-configuration-store.ts";
 export type { LocalModelSettings } from "./service/local-runtime-manager.ts";
 export { EncryptedLocalRuntimeSecretStore } from "./persistence/encrypted-local-runtime-secret-store.ts";
+export { LocalManagementError, type SkillImportFile } from "./configuration/skill-import.ts";
+export type { ConnectorSettingInput } from "./configuration/connector-settings.ts";
+export type { LocalRuntimeMcpServerInput, LocalSkillPackageSummary, LocalSkillMetadata } from "./configuration/local-runtime-configuration-store.ts";
+export { LocalRuntimeConfigurationStoreError } from "./configuration/local-runtime-configuration-store.ts";
+export { LocalRuntimeSupervisorError } from "./contracts/host.ts";

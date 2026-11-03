@@ -10,15 +10,19 @@ import { openBrowser } from "./platform/browser.ts";
 import { build } from "esbuild";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { CloudAuthPort } from "./auth/cloud-auth.ts";
+import type { ConnectorModuleRegistration } from "@zhujun/agentloop-local-runtime/connectors";
 
 export interface DesktopOptions {
   readonly mode: "development";
   readonly dataDirectory: string;
   readonly models?: LocalModelProviderPort;
+  readonly cloudAuth?: CloudAuthPort;
   readonly port?: number;
   readonly openBrowser?: boolean;
   readonly browserLauncher?: (origin: string) => Promise<void>;
   readonly bundledSkillDirectories?: readonly string[];
+  readonly connectorModules?: readonly ConnectorModuleRegistration[];
 }
 export type DesktopApplication = { existing: true; origin: string; browserOpened: boolean } | {
   existing: false; origin: string; browserOpened: boolean; close(): Promise<void>;
@@ -26,8 +30,13 @@ export type DesktopApplication = { existing: true; origin: string; browserOpened
 async function assets(): Promise<ReadonlyMap<string, StaticAsset>> {
   const entries = await Promise.all([
     ["/", "index.html", "text/html; charset=utf-8"],
+    ["/login", "login.html", "text/html; charset=utf-8"],
+    ["/register", "login.html", "text/html; charset=utf-8"],
+    ["/login.js", "login.js", "text/javascript; charset=utf-8"],
+    ["/login.css", "login.css", "text/css; charset=utf-8"],
     ["/app.js", "app.js", "text/javascript; charset=utf-8"],
     ["/model-settings.js", "model-settings.js", "text/javascript; charset=utf-8"],
+    ["/capability-settings.js", "capability-settings.js", "text/javascript; charset=utf-8"],
     ["/conversation.js", "conversation.js", "text/javascript; charset=utf-8"],
     ["/turn-projection.js", "turn-projection.js", "text/javascript; charset=utf-8"],
     ["/conversation.css", "conversation.css", "text/css; charset=utf-8"],
@@ -62,7 +71,7 @@ export async function startDesktop(options: DesktopOptions): Promise<DesktopAppl
     server.close(error => error ? reject(error) : resolve()); server.closeIdleConnections();
   });
   try {
-    api = new DesktopApi(lock.instanceId, await assets());
+    api = new DesktopApi(lock.instanceId, await assets(), options.cloudAuth);
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(options.port ?? 0, "127.0.0.1", () => { server.off("error", reject); resolve(); });
@@ -72,6 +81,8 @@ export async function startDesktop(options: DesktopOptions): Promise<DesktopAppl
     api.manager = await createLocalRuntimeManager({ dataDirectory: lock.dataDirectory, defaultRuntimeId: DEFAULT_RUNTIME_ID,
       models: options.models, bundledSkillDirectories: options.bundledSkillDirectories,
       modelSecrets: new EncryptedLocalRuntimeSecretStore(join(lock.dataDirectory, "private", "model-secrets")),
+      secrets: new EncryptedLocalRuntimeSecretStore(join(lock.dataDirectory, "private", "mcp-secrets")),
+      connectorModules: options.connectorModules ?? [],
       identity: { installationId: async () => lock.installationId } });
     await lock.publish(api.origin);
     const activeApi = api;

@@ -736,7 +736,7 @@ export class LocalRuntimeConfigurationStore {
       for (const server of input.mcpServers ?? []) {
         const existing = server.id === undefined ? undefined : existingById.get(server.id);
         if (server.id !== undefined && existing === undefined) throw new LocalRuntimeConfigurationStoreError(404, "mcp_server_not_found");
-        const auth = await this.storeAuthentication(server.auth, existing, createdSecretKeys);
+        const auth = await this.storeAuthentication(server.auth, this.credentialAuthority(server, existing), createdSecretKeys);
         storedServers.push({ ...server, auth });
       }
       await this.replaceStored(runtimeId, { skillPackageIds: input.skillPackageIds, mcpServers: storedServers });
@@ -749,6 +749,41 @@ export class LocalRuntimeConfigurationStore {
       .map((row) => row.secret_storage_key)
       .filter((key): key is string => key !== null && !retained.has(key));
     await Promise.all(obsolete.map((key) => this.secretStore.remove(key).catch(() => undefined)));
+  }
+
+  private credentialAuthority(server: LocalRuntimeMcpServerInput, existing?: McpServerRow): McpServerRow | undefined {
+    if (!existing || existing.url !== server.url || existing.auth_kind !== server.auth.kind) return undefined;
+    const config = JSON.parse(existing.auth_config_json) as Record<string, unknown>;
+    const auth = server.auth;
+    if ((auth.kind === "api_key_header" && config.headerName !== auth.headerName)
+      || (auth.kind === "basic" && config.username !== auth.username)
+      || (auth.kind === "query_parameter" && config.parameterName !== auth.parameterName)
+      || (auth.kind === "custom_headers" && auth.headerNames !== undefined && JSON.stringify(config.headerNames) !== JSON.stringify(auth.headerNames))) return undefined;
+    return existing;
+  }
+
+  /** Resolve a draft for a connection probe without writing credentials or configuration. */
+  async previewMcpServer(runtimeId: string, server: LocalRuntimeMcpServerInput) {
+    const existing = server.id === undefined ? undefined : (await this.mcpRows(runtimeId)).find(row => row.mcp_server_id === server.id);
+    if (server.id !== undefined && !existing) throw new LocalRuntimeConfigurationStoreError(404, "mcp_server_not_found");
+    const values = new Map<string, Readonly<Record<string, string>>>();
+    const transient: LocalRuntimeSecretStore = {
+      async write(value) { const key = `probe_${randomUUID()}`; values.set(key, value); return key; },
+      read: async key => values.get(key) ?? await this.secretStore.read(key),
+      async remove(key) { values.delete(key); }, async listKeys() { return [...values.keys()]; },
+    };
+    const temporary = new LocalRuntimeConfigurationStore(this.database, transient);
+    const auth = await temporary.storeAuthentication(server.auth, this.credentialAuthority(server, existing), []);
+    const stored = validateMcpServers([{ ...server, auth }])[0]!;
+    const environment: Record<string, string | undefined> = {};
+    const registration = await temporary.resolveMcpServer({
+      mcp_server_id: server.id ?? "probe", display_name: stored.displayName, source_key: stored.key, transport: "http", url: stored.url,
+      protocol_version: stored.protocolVersion ?? null, timeout_ms: stored.timeoutMs ?? 5000,
+      auth_kind: auth.kind, auth_config_json: JSON.stringify(nonSecretAuthConfig(auth)),
+      secret_storage_key: auth.kind === "none" ? null : auth.secretStorageKey ?? null,
+      tool_policy_json: JSON.stringify(stored),
+    }, environment);
+    return { registration, environment };
   }
 
   private async replaceStored(runtimeId: string, input: LocalRuntimeConfigurationStorageInput, allowMissingCredentials = false): Promise<void> {

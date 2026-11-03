@@ -538,3 +538,80 @@ Desktop 回归增至 18/18：新增统一 URL 策略及公共设置 API 的外�
 旧宿主首次全量遇到一次临时目录清理 `ENOTEMPTY`，独立复测 4/4 与完整复跑均通过；不以此修改业务实现或放宽验收。全量遗留失败与类型诊断仍需单独处理，不能称仓库全绿。测试使用确定性模型、合成凭据和临时本机服务，不代表真实网关、云账号或安装包已验收。
 
 当前依赖及构建产物已在主目录准备好，可执行 `npm run start:desktop -- --development`。全新检出应先安装依赖，并按共享包依赖顺序构建 Kernel、Memory、Skills、Connector SDK、Artifact Preview、Local Runtime 和 Desktop；源码所在目录与 Desktop 独立用户数据目录是不同边界，不应把旧 Local Agent 数据直接搬入 Desktop。
+
+## 17. Desktop 独立云端账号服务（2026-11-02）
+
+用户确认 Desktop 自身应有云端账号服务，包括开发态也使用真实注册/登录，而非固定开发身份。本节覆盖此前“开发身份/账号未接入”的阶段性状态；不是要求用户先部署 Multi Runtime Router，也不是把 `agentloop-app` 的本地登录当成云账号。
+
+### 17.1 服务边界
+
+```text
+Chrome → Desktop Loopback API → 公共 Local Runtime → 本机数据与执行
+                    │
+                    └→ 独立 Account Service → 账号与会话摘要
+Multi Runtime Router ────────┘（显式配置后共用同一权威）
+```
+
+- 新增 `packages/agentloop-identity`：提取原 Router 账号协议、scrypt 密码哈希、Token 摘要和身份表实现；不依赖 Router/Host 内部模块。
+- 新增 `apps/agentloop-account-service`：独立启动，只创建四张 `mr_identity_*` 表，提供 register/login/me/logout；不启动业务 Runtime、不接收对话、文件、模型配置或 Connector 凭据。
+- Router 保留原迁移入口，支持 `IDENTITY_SERVICE_URL` 使用独立账号服务。未配置仍保持既有身份库；不同数据库不会自动合并，已有用户迁移必须保留 ID、哈希与关系并明确切换权威。
+- Desktop 使用 `CloudAuthPort` 与真实 HTTP 客户端，`AGENTLOOP_DESKTOP_AUTH_BASE_URL` 配置账号基址。HTTP 仅允许 loopback，正式云服务必须 HTTPS；禁止 userinfo/query/fragment、重定向及不受限上游响应。
+
+### 17.2 认证与本机授权
+
+登录/注册页面对齐 Multi Runtime 风格，但调用 Desktop 同源 API，由宿主完成云认证。密码仅瞬时转发，不存本机；云端 Token 仅存在宿主进程内存，浏览器只得到 HttpOnly/SameSite=Strict 本机 Session 与 CSRF。未配置或云端失败时明确阻断，不创建开发身份；`/api/dev/session` 固定 404。Fake Auth 仅限测试注入。
+
+所有本机业务访问均从已验证的 issuer + tenantId + userId 派生 owner，不接受前端 owner；不同账号不能访问彼此的会话、Run、事件、源与产物。同账号重登恢复历史。旧 `desktop-development` 数据保留原样，不自动移交给首个注册者；模型配置和凭据仍是设备级共享资源，不能误称已实现 OS 用户隔离。
+
+本机 Session 最长四小时且不超过云端 Token 有效期；普通请求每 60 秒复验，`/api/session` 强制复验；远端拒绝撤销本机 Session，远端故障返回失败。退出先本机撤销再远端撤销，未确认远端结果时明确告警，不自动取消在途任务。重启需要重登。
+
+当前实现复用已有邮箱/密码认证契约，**没有 OAuth/PKCE 或 refresh endpoint**，不伪造刷新凭据。邮箱验证、密码找回、OS 安全存储、PKCE/refresh、生产级注册防滥用与高可用仍未完成。
+
+### 17.3 启动与验证
+
+开发联调先运行 `npm run start:accounts`（默认 loopback 8795），再以 `AGENTLOOP_DESKTOP_AUTH_BASE_URL=http://127.0.0.1:8795` 启动 Desktop。正式使用应部署我们运营的账号服务并配置 HTTPS 域名；本轮没有修改生产部署或把本机临时服务冒充云端上线。详见 [Account Service README](../apps/agentloop-account-service/README.md) 与 [Desktop README](../apps/agentloop-desktop/README.md)。
+
+| 检查 | 结果 |
+| --- | --- |
+| Desktop（含独立账号 HTTP、Kernel 与安全回归） | 30/30 |
+| 账号服务与共享客户端 | 4/4 |
+| Router HTTP → 独立账号服务 → 同账号业务授权与撤销 | 1/1 |
+| Identity、账号服务、Desktop 构建；Desktop 严格类型检查 | 通过 |
+| 旧 Multi Runtime 全量 | 397/410，原有 13 个失败无新增 |
+| 旧 Multi Runtime 类型检查 | 原有 13 条诊断，无新增 |
+
+集成测试证明账号持久化、哈希存储、跨 Desktop/Router 同一用户、Token 撤销、账号隔离、重启恢复、密码/Token 不落本机盘、云端故障与身份变更处理。浏览器在独立临时目录用合成账号通过注册、错误密码拒绝、登录、本机确定性模型 Run、退出、再次登录与历史恢复；这不是第三方真实模型、安装包或正式云域名验收。本轮不提交、推送、部署或迁移用户数据。
+## 18. Desktop 独立能力设置（2026-11-03）
+
+Desktop 的设置页按 Multi Runtime 的信息架构补齐模型、Skills、Runtime、Connector、MCP 五类能力，但实现全部位于公开 `agentloop-local-runtime` 与 Desktop 自己的 API/UI 中。Multi Runtime 仅提供视觉和交互参考，不作为运行时依赖，不复用其 Router、Store、Installer 或内部类。
+
+### 18.1 配置边界
+
+- Skill ZIP/目录导入由本机受限导入器完成：拒绝路径穿越、符号链接、ZIP 加密/ZIP64、CRC 错误、重复大小写路径和过度压缩；包按内容哈希安装到设备级库，原始内容不可变。Runtime 只保存包绑定和可编辑声明元数据。
+- Runtime 配置通过公共 Supervisor 管理，使用 revision 乐观并发；编辑、Skill 绑定、MCP 和 Connector 连接修改必须针对停止的 Runtime，生命周期操作不会强制中断活动 Run。默认 Runtime 保护删除。
+- MCP 配置和探测复用公共配置存储但不依赖 Desktop 私有格式。认证目标发生变化时不会保留旧密钥；探测使用临时内存凭据，不把草稿写入磁盘。服务 URL 只接受 HTTP/HTTPS，禁止 userinfo、查询参数和片段。
+- Connector 模块必须由宿主通过 `AGENTLOOP_DESKTOP_CONNECTOR_MODULES_JSON` 以绝对路径显式注册；网页不能安装模块或提交任意路径。连接行包含 owner、Scopes、启用状态和密钥引用，凭据进入独立加密 vault。对话 Run 只接受当前账号显式勾选的连接 ID，运行时 resolver 再次校验 owner。
+
+### 18.2 执行链路
+
+```text
+设置页 → Desktop Loopback API → LocalRuntimeManager/Supervisor
+                                  ├─ Skill library + Runtime binding
+                                  ├─ MCP config + encrypted secret vault
+                                  └─ Connector catalog + owner-scoped resolver
+对话页 → runtimeId + connectorConnectionIds → Local Runtime → Kernel RunService
+```
+
+保存成功只证明本机持久化和结构校验成功；Skill/MCP/Connector 是否进入执行上下文仍需启动或重启对应 Runtime，并通过真实 Run 验证。Connector 没有平台特定 OAuth 实现，模块协议由宿主模块负责。
+
+### 18.3 本批验证
+
+| 检查 | 结果 |
+| --- | --- |
+| Local Runtime 构建 | 通过 |
+| Desktop 构建与严格类型检查 | 通过 |
+| Desktop loopback HTTP 回归 | 30/30（需允许 localhost 监听） |
+| Local Runtime 回归 | 38/38 |
+| `git diff --check` | 通过 |
+
+测试覆盖现有账号/模型/对话安全边界，同时新增管理 API 的输入白名单、Runtime 版本检查、Connector owner 授权和 MCP URL 约束。尚未声称真实第三方 Connector OAuth、真实远程 MCP 服务或安装包签名验收完成。

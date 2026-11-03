@@ -4,6 +4,8 @@ import { OpenAICompatibleModel } from "@zhujun/agentloop";
 import type { LocalModelProviderPort } from "@zhujun/agentloop-local-runtime";
 import { startDesktop } from "./application.ts";
 import { modelEndpoint } from "./security/model-endpoint.ts";
+import { CloudAccountAuth } from "./auth/cloud-auth.ts";
+import { registrationsFromEnvironment } from "@zhujun/agentloop-local-runtime/connectors";
 
 export function defaultDataDirectory(platform = process.platform, environment = process.env): string {
   if (platform === "darwin") return join(homedir(), "Library", "Application Support", "AgentLoop Desktop Development");
@@ -35,9 +37,13 @@ async function main(): Promise<void> {
     if (args[index] === "--data-dir" && args[index + 1]) { directory = args[++index]; continue; }
     throw new Error("desktop_argument_invalid");
   }
-  const app = await startDesktop({ mode: "development", dataDirectory: directory ?? defaultDataDirectory(), models: configuredModels(), openBrowser });
+  const authUrl = process.env.AGENTLOOP_DESKTOP_AUTH_BASE_URL;
+  const app = await startDesktop({ mode: "development", dataDirectory: directory ?? defaultDataDirectory(), models: configuredModels(), openBrowser,
+    cloudAuth: authUrl ? new CloudAccountAuth(authUrl) : undefined,
+    connectorModules: registrationsFromEnvironment(process.env.AGENTLOOP_DESKTOP_CONNECTOR_MODULES_JSON ?? "") });
   console.log(`[AgentLoop Desktop / 开发模式] ${app.existing ? "已复用运行实例" : "本地服务就绪"}：${app.origin}/`);
   if (!app.browserOpened && openBrowser) console.log("浏览器未能自动打开，请手动访问以上本地地址。");
+  if (!authUrl) console.log("云端账号服务未配置：请设置 AGENTLOOP_DESKTOP_AUTH_BASE_URL 为独立 Account Service 基址后重启；开发模式也不跳过登录。");
   if (!app.existing) for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => {
     void app.close().catch(() => console.error("关闭被拒绝：仍有活动请求、Run 或未完成的资源回收。请等待或取消 Run 后重试。"));
   });

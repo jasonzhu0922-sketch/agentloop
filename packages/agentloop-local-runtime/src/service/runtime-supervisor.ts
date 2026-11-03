@@ -1,6 +1,6 @@
 import { LocalRuntimeSupervisorError } from "../contracts/host.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { AppDatabase } from "@zhujun/agentloop";
 import {
   LocalRuntimeConfigurationStore,
@@ -312,11 +312,14 @@ export class LocalRuntimeSupervisor {
     return this.configurations.configuration(runtimeId);
   }
 
-  async updateConfiguration(runtimeId: string, configuration: LocalRuntimeConfigurationInput, displayName?: string): Promise<LocalRuntimeConfiguration> {
+  async updateConfiguration(runtimeId: string, configuration: LocalRuntimeConfigurationInput, displayName?: string, expectedRevision?: string): Promise<LocalRuntimeConfiguration> {
     return this.withRuntimeMutation(runtimeId, async () => {
       const row = await this.row(runtimeId);
       if (row.status !== "stopped" || this.instances.has(runtimeId)) {
         throw new LocalRuntimeSupervisorError(409, "runtime_must_be_stopped_for_configuration");
+      }
+      if (expectedRevision !== undefined && expectedRevision !== createHash("sha256").update(JSON.stringify(await this.configurations.configuration(runtimeId))).digest("hex")) {
+        throw new LocalRuntimeSupervisorError(409, "runtime_configuration_stale");
       }
       const name = displayName?.trim();
       if (name !== undefined && (name.length < 1 || name.length > 100)) throw new LocalRuntimeSupervisorError(400, "runtime_display_name_invalid");

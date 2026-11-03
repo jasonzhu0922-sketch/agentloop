@@ -1,12 +1,12 @@
-import { installModelSettings } from './model-settings.js';
+import { installCapabilitySettings } from './capability-settings.js';
 import { createTurn, updateTurn, hasTerminalEvent } from './turn-projection.js';
 import { createConversationView } from './conversation.js';
 import { autoResizeComposerInput, resetComposerInput, shouldSubmitComposerOnKeydown } from './reference/ui/composer-input.js';
 const element = id => document.getElementById(id);
-let csrf; let conversationId; let activeRun; let pending; let selectedSources = [];
+let csrf; let conversationId; let activeRun; let pending; let selectedSources = []; let runtimeId;
 let generation = 0; let selectedRunId; let cancelling = false;
 let locked = true; const turns = new Map(); let orderedRunIds = [];
-const PENDING_KEY = 'agentloop-desktop-development-pending';
+let PENDING_KEY;
 const status = (message, error = false) => { element('status').textContent = message; element('status').className = `composer-status${error ? ' error' : ''}`; };
 const runState = value => ({ running: '执行中', completed: '已完成', cancelled: '已取消', failed: '执行失败' }[value] ?? value);
 function node(tag, className, text) {
@@ -15,6 +15,7 @@ function node(tag, className, text) {
   return result;
 }
 const view = createConversationView({ container: element('transcript'), scroll: element('conversation-scroll'), status,
+  artifactUrl: (runId, artifactId) => `/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/download?runtimeId=${encodeURIComponent(runtimeId || 'desktop-default')}`,
   onSelect(id) { selectedRunId = id; renderTurns(); renderDetails(); details(true); } });
 function renderTurns(forceBottom = false) {
   element('empty-state').hidden = orderedRunIds.length > 0 || Boolean(pending);
@@ -39,11 +40,16 @@ function emptyArtifacts() {
   container.replaceChildren(node('span', 'artifact-empty-icon', '▧'), node('strong', '', '暂无产物'), node('p', '', '任务生成的文件会在这里显示。普通回复不会作为文件产物。'));
 }
 async function api(path, body) {
+  const scoped = /^(\/api\/(?:models|conversations|runs|sources))(?:\/|$)/.test(path) && !path.includes('runtimeId=');
+  if (scoped) { const joiner = path.includes('?') ? '&' : '?'; path = `${path}${joiner}runtimeId=${encodeURIComponent(runtimeId || 'desktop-default')}`; }
   const response = await fetch(path, { method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin',
     headers: body === undefined ? {} : { 'Content-Type': 'application/json', 'X-Desktop-CSRF': csrf ?? '' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || '请求失败');
+  if (!response.ok) {
+    if (response.status === 401) { generation++; busy(true); location.replace('/login'); }
+    const error = new Error(data.error || '请求失败'); error.status = response.status; throw error;
+  }
   return data;
 }
 function busy(value) {
@@ -52,7 +58,25 @@ function busy(value) {
   element('cancel').disabled = !activeRun || cancelling; element('cancel').hidden = !activeRun; element('send').hidden = Boolean(activeRun);
   element('file').disabled = value || !conversationId; element('upload-file').disabled = element('file').disabled;
   element('new-conversation').disabled = value;
+  element('runtime-select').disabled = value;
+  for (const checkbox of element('run-connectors').querySelectorAll('input')) checkbox.disabled = value;
   for (const button of element('conversations').querySelectorAll('button')) button.disabled = value;
+}
+async function loadRuntimes() {
+  const { runtimes } = await api('/api/runtimes');
+  const select = element('runtime-select'); select.replaceChildren();
+  for (const runtime of runtimes) { const option = node('option', '', `${runtime.displayName} · ${runtime.status}`); option.value = runtime.id; select.append(option); }
+  select.value = runtimeId || runtimes[0]?.id || 'desktop-default'; runtimeId = select.value; select.disabled = false;
+  return runtimes;
+}
+async function loadConnectors() {
+  const container = element('run-connectors'); container.replaceChildren();
+  try {
+    const { connections } = await api(`/api/runtimes/${encodeURIComponent(runtimeId)}/connectors`);
+    if (!connections.length) return;
+    const title = node('span', 'desktop-connector-title', '本轮授权 Connector'); container.append(title);
+    for (const connection of connections.filter(c => c.enabled && c.moduleAvailable)) { const label = node('label', 'desktop-connector-choice'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = connection.id; checkbox.checked = false; checkbox.disabled = locked; label.append(checkbox, node('span', '', connection.displayName)); container.append(label); }
+  } catch { status('Connector 列表读取失败；本轮不会自动授权连接。', true); }
 }
 async function conversations() {
   const { conversations } = await api('/api/conversations'); element('conversations').replaceChildren();
@@ -90,7 +114,7 @@ function renderArtifacts(id, artifacts) {
   for (const item of artifacts) {
     const link = node('a', 'desktop-artifact'); const name = node('span', '', item.name);
     name.append(node('small', '', `${item.bytes} 字节 · ${item.role} · 下载`)); link.append(node('span', 'desktop-artifact-icon', '▤'), name);
-    link.href = `/api/runs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(item.id)}/download`; link.download = item.name;
+    link.href = `/api/runs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(item.id)}/download?runtimeId=${encodeURIComponent(runtimeId || 'desktop-default')}`; link.download = item.name;
     element('artifacts').append(link);
   }
 }
@@ -143,8 +167,9 @@ element('composer').onsubmit = async event => {
   if (locked) return;
   const input = element('message').value; const modelKey = element('model').value;
   if (!input.trim() || !modelKey) { status('请输入消息，并显式选择执行模型。', true); return; }
-  const payload = { input, modelKey, ...(conversationId ? { conversationId } : {}), uploadedSourceIds: [...selectedSources] };
-  if (!pending || JSON.stringify(pending.payload) !== JSON.stringify(payload)) pending = { requestId: crypto.randomUUID(), payload };
+  const connectorConnectionIds = [...element('run-connectors').querySelectorAll('input:checked')].map(input => input.value);
+  const payload = { input, modelKey, ...(conversationId ? { conversationId } : {}), uploadedSourceIds: [...selectedSources], connectorConnectionIds };
+  if (!pending || pending.runtimeId !== runtimeId || JSON.stringify(pending.payload) !== JSON.stringify(payload)) pending = { requestId: crypto.randomUUID(), runtimeId, payload };
   busy(true);
   view.submitting(input); element('empty-state').hidden = true;
   try {
@@ -178,6 +203,11 @@ element('new-conversation').onclick = () => {
   element('empty-state').hidden = false; element('conversation-title').textContent = '新对话'; element('message').value = ''; status('新对话 · 请选择模型后发送任务。'); busy(false); navigation(false);
   void conversations().catch(error => status(error.message, true));
 };
+element('runtime-select').onchange = async event => {
+  if (locked) { event.target.value = runtimeId; return; }
+  runtimeId = event.target.value; generation++; conversationId = undefined; pending = undefined; selectedSources = []; turns.clear(); orderedRunIds = []; selectedRunId = undefined; view.clear(); resetAttachments(); renderDetails(); element('conversation-title').textContent = '新对话';
+  busy(true); try { await refreshModels(); await conversations(); await loadConnectors(); status('已切换本机 Runtime，请选择模型后发送。'); } catch (error) { status('Runtime 切换失败，请重新读取。', true); } finally { busy(false); }
+};
 element('file').onchange = async event => {
   const file = event.target.files[0]; if (!file || !conversationId) return;
   if (file.size > 1_048_576 || file.size === 0) { status('附件必须为 1 字节至 1 MiB。', true); return; }
@@ -199,6 +229,18 @@ element('details-toggle').onclick = () => details(element('details').hidden);
 element('details-close').onclick = () => details(false);
 element('navigation-toggle').onclick = () => navigation(!element('sidebar').classList.contains('navigation-open'));
 element('theme-toggle').onclick = () => { document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; };
+element('logout').onclick = async () => {
+  const button = element('logout'); button.disabled = true;
+  try {
+    const result = await api('/api/auth/logout', {});
+    if (PENDING_KEY) sessionStorage.removeItem(PENDING_KEY);
+    generation++; busy(true);
+    // Full navigation clears private transcripts/settings from the document.
+    // The fixed flag reports unconfirmed cloud revocation without reflecting
+    // arbitrary query text, credentials or server exception messages.
+    location.replace(result.cloudRevoked ? '/login' : '/login?logout=local-only');
+  } catch (error) { status(`退出结果未确认：${error.message}`, true); button.disabled = false; }
+};
 element('message').onkeydown = event => {
   if (shouldSubmitComposerOnKeydown(event) && !locked) { event.preventDefault(); element('composer').requestSubmit(); }
 };
@@ -212,16 +254,21 @@ async function refreshModels() {
   element('model').value = models.includes(selection) ? selection : '';
   return models;
 }
-installModelSettings({ api, element, refreshModels, status });
+installCapabilitySettings({ api, element, refreshModels, status, currentRuntime: () => runtimeId, refreshCapabilities: async () => { await loadRuntimes(); await loadConnectors(); } });
 busy(true);
 try {
-  const session = await api('/api/dev/session', {}); csrf = session.csrfToken;
+  const session = await api('/api/session'); csrf = session.csrfToken;
+  PENDING_KEY = `agentloop-desktop-pending:${session.accountId}`;
+  element('account-identity').textContent = session.user.email;
+  await loadRuntimes(); await loadConnectors();
   const models = await refreshModels();
-  await conversations(); status(models.length ? '开发身份已建立，请选择模型后发送。' : '本机服务已就绪，尚未配置模型。请在本机能力设置中添加 Provider 和模型。');
+  await conversations(); status(models.length ? '云端账号已登录，请选择本机模型后发送。' : '云端账号已登录，尚未配置本机模型。请在本机能力设置中添加 Provider 和模型。');
   const saved = sessionStorage.getItem(PENDING_KEY);
   if (saved) {
     const restored = JSON.parse(saved);
     if (typeof restored.requestId !== 'string' || typeof restored.payload?.input !== 'string' || !Array.isArray(restored.payload?.uploadedSourceIds)) throw new Error('待确认发送记录无效，请检查当前标签页的本机存储。');
+    if (restored.runtimeId !== undefined && typeof restored.runtimeId !== 'string') throw new Error('待确认发送记录无效，请检查当前标签页的本机存储。');
+    if (restored.runtimeId && restored.runtimeId !== runtimeId) { runtimeId = restored.runtimeId; await loadRuntimes(); await refreshModels(); await loadConnectors(); }
     pending = restored; conversationId = pending.payload.conversationId; selectedSources = pending.payload.uploadedSourceIds;
     element('message').value = pending.payload.input; element('model').value = pending.payload.modelKey;
     if (conversationId) await transcript();
