@@ -33,6 +33,8 @@ services:
     environment:
       ACCOUNT_SERVICE_HOST: 0.0.0.0
       ACCOUNT_SERVICE_PORT: 8795
+      # Shared production readiness probe reads PORT for HTTP services.
+      PORT: 8795
       ACCOUNT_SERVICE_DATABASE_PATH: /var/lib/agentloop-account/accounts.db
     volumes:
       - ${ACCOUNT_SERVICE_DATA_PATH:-${DEPLOY_ROOT:-/opt/agentloop}/data/accounts}:/var/lib/agentloop-account
