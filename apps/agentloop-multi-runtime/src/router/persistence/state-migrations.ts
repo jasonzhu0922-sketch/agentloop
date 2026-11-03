@@ -104,7 +104,32 @@ const MIGRATIONS: readonly SchemaMigration[] = [{
       await database.exec("DROP TABLE IF EXISTS mr_identity_tenants");
     }
   },
+}, {
+  id: "router/0007_detach_postgres_device_identity_foreign_keys",
+  definition: "device-and-registration-tables-no-longer-reference-router-identity:v1",
+  apply: async (database) => {
+    if (database.dialect === "postgres") await detachPostgresDeviceIdentityForeignKeys(database);
+  },
 }];
+
+async function detachPostgresDeviceIdentityForeignKeys(database: SqlConnection): Promise<void> {
+  const constraints = await database.prepare(`
+    SELECT child.relname AS table_name, constraint_catalog.conname AS constraint_name
+    FROM pg_constraint AS constraint_catalog
+    JOIN pg_class AS child ON child.oid = constraint_catalog.conrelid
+    JOIN pg_class AS parent ON parent.oid = constraint_catalog.confrelid
+    WHERE constraint_catalog.contype = 'f'
+      AND child.relname IN ('mr_devices', 'mr_device_registration_tokens', 'mr_device_local_sessions')
+      AND parent.relname LIKE 'mr_identity_%'
+  `).all<{ table_name: string; constraint_name: string }>();
+  for (const constraint of constraints) {
+    await database.exec(`ALTER TABLE ${quoteIdentifier(constraint.table_name)} DROP CONSTRAINT IF EXISTS ${quoteIdentifier(constraint.constraint_name)}`);
+  }
+}
+
+function quoteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
 
 async function detachSqliteDeviceIdentityForeignKeys(database: SqlConnection): Promise<void> {
   const referencesIdentity = async (table: string): Promise<boolean> => {
