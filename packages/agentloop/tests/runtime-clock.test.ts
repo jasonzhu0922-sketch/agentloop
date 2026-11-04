@@ -10,6 +10,85 @@ import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
 import type { ModelInvocation } from "../src/runtime/contracts.ts";
+import { AppError } from "../src/shared/errors.ts";
+
+for (const fixture of [
+  ...["continue_prior", "correct_prior", "refine_prior", "challenge_prior"].map((relation) => ({ relation, priorStatus: "completed", invalidQuote: false })),
+  { relation: "continue_prior", priorStatus: "failed", invalidQuote: false },
+  { relation: "refine_prior", priorStatus: "completed", invalidQuote: true },
+]) {
+  const { relation, priorStatus, invalidQuote } = fixture;
+  test(`prior time provenance repairs binding (${relation}, prior=${priorStatus}, invalidQuote=${invalidQuote})`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentloop-prior-clock-repair-"));
+    const database = new AppDatabase(":memory:");
+    const priorInput = "我最近一周收到了哪些邮件？";
+    const followup = "根据邮件内容生成一份 html 格式的信息汇总";
+    let attempts = 0;
+    let reachedPlanner = false;
+    let priorRunId: string | undefined;
+    try {
+      const service = new RunService({ database, skills: new SkillService(database), workspaceRoot: root,
+        timeZone: "Asia/Shanghai", clock: () => Date.parse("2026-11-04T10:46:08Z"),
+        modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+          if (!request.runId.startsWith("conversation-turn:")) return { content: "已有邮件内容。", finishReason: "stop", toolCalls: [] };
+          attempts += 1;
+          const context = JSON.parse(request.runtimeContext!.content.split("\n")[1]);
+          const candidate = context.conversationWorkingSet.priorGoalCandidates.find((item: { input?: string; status?: string }) => item.input === priorInput && item.status === priorStatus);
+          assert.ok(candidate);
+          const repaired = request.systemPrompt.includes(`relation=${relation} requires targetGoalCandidateId`);
+          if (attempts > 1) {
+            assert.ok(repaired, "repair must identify the missing lineage, not reject a valid prior time quote");
+            if (attempts === 2) assert.doesNotMatch(request.systemPrompt, /Rejected expression/);
+          }
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `intent-${attempts}`, name: "resolve_conversation_turn", arguments: {
+            mode: "execute", relation, inputMode: "refresh_sources", effectiveGoal: followup,
+            ...(repaired ? { targetGoalCandidateId: candidate.candidateId } : {}),
+            taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "create_artifact", requiresExecution: true,
+              deliverables: [{ targetId: "mail-summary", purpose: followup, expectedArtifactCount: 1, action: "create", kind: "html", format: "html", surface: "workspace_artifact" }] },
+            evidenceStrategy: "source_grounded", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [],
+            memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
+            temporalScope: { expression: invalidQuote ? "上个月" : "最近一周", basis: "runtime_clock", startDayOffset: -6, endAtReferenceInstant: true },
+          } }] };
+        } }),
+        plannerFactory: () => ({ plan: async (task) => {
+          if (task.canonicalState.intent.userInput !== followup) return singleStepTestPlanner().plan(task);
+          const resolution = task.canonicalState.intent.turnResolution!;
+          assert.equal(resolution.targetRunId, priorRunId);
+          assert.equal(resolution.temporalScope?.expression, "最近一周");
+          assert.equal(resolution.temporalScope?.startInclusive, "2026-10-28T16:00:00.000Z");
+          assert.equal(resolution.temporalScope?.endExclusive, "2026-11-04T10:46:08.000Z");
+          assert.equal(resolution.taskIntent?.deliverables[0]?.kind, "html");
+          reachedPlanner = true;
+          throw new AppError("PLANNING_ERROR", "verified follow-up reached Planner", 422);
+        } }),
+        assessorFactory: () => approvingTestAssessor(),
+      });
+      // Durable history from the incident: one pre-plan failure, then a
+      // completed mail query. No live mailbox or provider is used by this test.
+      await service.ensureConversation("owner", "mail-conversation", priorInput);
+      for (const [id, status, time] of [["failed-mail", "failed", 1], ["completed-mail", "completed", 2]] as const) {
+        await database.prepare("INSERT INTO runs (id, owner_user_id, conversation_id, depth, status, input, created_at) VALUES (?, 'owner', 'mail-conversation', 0, ?, ?, ?)")
+          .run(id, status, priorInput, time);
+      }
+      await database.prepare("INSERT INTO plans (id, run_id, version, goal, selected_skill_ids_json, canonical_state_ref_json, status, created_at, updated_at) VALUES ('mail-plan', 'completed-mail', 1, ?, '[]', ?, 'completed', 2, 2)")
+        .run(priorInput, JSON.stringify({ stateId: "mail-state", runId: "completed-mail", intentId: "mail-intent", revision: 1 }));
+      // A different turn's time expression is visible but must not become
+      // provenance for the selected mail query.
+      await database.prepare("INSERT INTO runs (id, owner_user_id, conversation_id, depth, status, input, created_at) VALUES ('unrelated', 'owner', 'mail-conversation', 0, 'completed', '解释上个月这个时间范围', 3)").run();
+      priorRunId = priorStatus === "failed" ? "failed-mail" : "completed-mail";
+      await assert.rejects(() => service.executeConversation("owner", followup, { conversationId: "mail-conversation" }), (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        if (invalidQuote) {
+          assert.match(error.message, /canonical contract after 3 attempts/);
+          assert.match(String(error.details?.repairFeedback), /Rejected expression: "上个月"/);
+        } else assert.match(error.message, /verified follow-up reached Planner/);
+        return true;
+      });
+      assert.equal(attempts, invalidQuote ? 3 : 2);
+      assert.equal(reachedPlanner, !invalidQuote);
+    } finally { database.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
 
 test("relative calendar bounds use the Run's local date, not UTC or the model's guessed year", () => {
   const clock = createRuntimeClock(Date.parse("2026-10-31T16:15:00Z"), "Asia/Shanghai");
@@ -59,6 +138,11 @@ test("coverage is interval-based for arbitrary ranges and unions; text-only and 
   const midpoint = "2026-10-26T16:00:00Z";
   assert.equal(temporalEvidenceGap(scope, [receipt(scope.startInclusive, midpoint), receipt(midpoint, scope.endExclusive)]), undefined);
   assert.match(temporalEvidenceGap(scope, [receipt("2025-07-05T00:00:00Z", "2025-07-10T00:00:00Z")])!, /complete coverage/);
+  const shortScope = { ...scope, endExclusive: "2026-11-01T04:20:00.313Z" };
+  const gap = temporalEvidenceGap(shortScope, [receipt(scope.startInclusive, "2026-11-01T04:20:00.000Z")])!;
+  assert.match(gap, /"startInclusive":"2026-11-01T04:20:00.000Z","endExclusive":"2026-11-01T04:20:00.313Z"/);
+  const split = temporalEvidenceGap(scope, [receipt(scope.startInclusive, midpoint), receipt("2026-10-27T16:00:00Z", scope.endExclusive)])!;
+  assert.match(split, /2026-10-26T16:00:00.000Z.*2026-10-27T16:00:00.000Z/);
 });
 
 test("all model phases use one persisted clock across midnight; derived bounds remain separate from user constraints", async () => {

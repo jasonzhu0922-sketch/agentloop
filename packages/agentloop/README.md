@@ -60,6 +60,30 @@ const runs = new RunService({
 });
 ```
 
+## Conversation reconstruction
+
+`executeConversation` and `startConversation` resolve the latest request against
+durable conversation history before admitting a new Plan. Original Run inputs
+remain available even when a provider or planning failure prevented a Plan from
+being created. Historical Plans and published Results remain immutable.
+
+A prior-work binding rejection starts model-driven intent reconstruction within
+the existing three-call resolution budget. The model receives chronological
+requests, prior constraints, Plan step states, failure boundaries, and published
+Result/artifact candidates. It reconstructs the latest goal and output contract;
+the ordinary Planner then creates a new Plan with validated input bindings.
+Selecting a Result can supply its producer identity without a duplicate goal
+selector. Changing delivery preserves that Result's historical time scope, while
+an explicit source refresh uses the new Run clock. Execution reads full bound
+Results through `read_result`, rather than treating history summaries as complete.
+
+Reconstruction emits `conversation.turn.reconstruction_started`, followed by
+`reconstruction_completed` or `reconstruction_unresolved` under the same event
+prefix. An unresolved historical target becomes a tool-free clarification; it
+does not authorize arbitrary prior results or suppress unrelated schema errors.
+History and Plan projections disclose their bounded coverage. This mechanism
+does not imply that every historical Run is present in the current context.
+
 ## Build & test
 
 ```sh

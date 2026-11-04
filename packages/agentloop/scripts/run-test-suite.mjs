@@ -36,6 +36,7 @@ const suites = Object.freeze({
     "tests/context-compaction-persistence.test.ts",
     "tests/content-reference-flow.test.ts",
     "tests/conversation-workspace.test.ts",
+    "tests/conversation-reconstruction.test.ts",
     "tests/conversation-capability-catalog.test.ts",
     "tests/cross-run-runtime-result.test.ts",
     "tests/human-loop.test.ts",

@@ -67,6 +67,7 @@ export class RuntimeConversationWorkingSetQueryService {
   async build(conversationId: string): Promise<ConversationWorkingSet | undefined> {
     const allRuns = await this.input.runs(conversationId);
     if (allRuns.length === 0) return undefined;
+    const recentRuns = allRuns.slice(-RUN_LIMIT);
     const planCursors: Array<ConversationWorkingSet["planCursors"][number]> = [];
     const reusableArtifacts: ConversationReusableArtifact[] = [];
     const resultCards: RuntimeResultCard[] = [];
@@ -79,7 +80,7 @@ export class RuntimeConversationWorkingSetQueryService {
     const resolvedIntents: ConversationResolvedIntent[] = [];
     let activeGoal: ConversationWorkingSet["activeGoal"] | undefined;
 
-    for (const run of allRuns.slice(-RUN_LIMIT)) {
+    for (const run of recentRuns) {
       const events = await this.input.events(run.id);
       const resolution = this.input.turnResolution(events);
       if (resolution !== undefined) resolvedIntents.push({ runId: run.id, resolution });
@@ -170,6 +171,7 @@ export class RuntimeConversationWorkingSetQueryService {
     const resumeSuggestion = this.input.resumeSuggestion(activeGoal, planCursors, boundedArtifacts, failedBoundaries);
     return {
       schema: "conversation.workset/v1", conversationId, runCount: allRuns.length,
+      priorRuns: recentRuns.map((run) => ({ runId: run.id, input: run.input, status: run.status })),
       ...(activeGoal === undefined ? {} : { activeGoal }), planCursors,
       ...(resolvedIntents.length === 0 ? {} : { resolvedIntents }), resultCards: boundedResultCards,
       reusableArtifacts: boundedArtifacts, failedBoundaries,

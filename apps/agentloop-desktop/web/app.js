@@ -1,13 +1,15 @@
+import { createComposerPreferences } from './composer-preferences.js';
 import { createArtifactWorkspace } from './artifact-workspace.js';
 import { installCapabilitySettings } from './capability-settings.js';
-import { createTurn, updateTurn, hasTerminalEvent } from './turn-projection.js';
+import { createTurn, updateTurn } from './turn-projection.js';
+import { readRunUpdate } from './run-polling.js';
 import { createConversationView } from './conversation.js';
 import { autoResizeComposerInput, resetComposerInput, shouldSubmitComposerOnKeydown } from './reference/ui/composer-input.js';
 const element = id => document.getElementById(id);
 let csrf; let conversationId; let activeRun; let pending; let selectedSources = []; let runtimeId;
 let generation = 0; let selectedRunId; let cancelling = false;
 let locked = true; const turns = new Map(); let orderedRunIds = [];
-let PENDING_KEY;
+let PENDING_KEY; let preferences;
 const status = (message, error = false) => { element('status').textContent = message; element('status').className = `composer-status${error ? ' error' : ''}`; };
 const runState = value => ({ running: '执行中', completed: '已完成', cancelled: '已取消', failed: '执行失败' }[value] ?? value);
 function node(tag, className, text) {
@@ -17,6 +19,7 @@ function node(tag, className, text) {
 }
 const artifactWorkspace = createArtifactWorkspace({ element, api, onOpen: () => details(true) });
 const view = createConversationView({ container: element('transcript'), scroll: element('conversation-scroll'), status,
+  onHumanLoopResponse: respondHumanLoop,
   onArtifact(id, artifactId) { selectedRunId = id; renderTurns(); renderDetails(); artifactWorkspace.select(artifactId); },
   onSelect(id) { selectedRunId = id; renderTurns(); renderDetails(); details(true); } });
 function renderTurns(forceBottom = false) {
@@ -68,6 +71,14 @@ async function loadRuntimes() {
   select.value = runtimeId || runtimes[0]?.id || 'desktop-default'; runtimeId = select.value; select.disabled = false;
   return runtimes;
 }
+function restoreConnectors() {
+  const selected = new Set(preferences?.connectors(runtimeId, conversationId) || []);
+  for (const checkbox of element('run-connectors').querySelectorAll('input')) checkbox.checked = selected.has(checkbox.value);
+}
+element('run-connectors').addEventListener('change', () => {
+  preferences?.setConnectors(runtimeId, conversationId, [...element('run-connectors').querySelectorAll('input:checked')].map(input => input.value));
+});
+element('model').addEventListener('change', () => preferences?.setModel(element('model').value));
 async function loadConnectors() {
   const container = element('run-connectors'); container.replaceChildren();
   try {
@@ -78,18 +89,39 @@ async function loadConnectors() {
     if (!connections.length) return;
     const title = node('span', 'desktop-connector-title', '本轮授权 Connector'); container.append(title);
     for (const connection of connections.filter(c => c.enabled && c.moduleAvailable)) { const label = node('label', 'desktop-connector-choice'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = connection.id; checkbox.checked = false; checkbox.disabled = locked; label.append(checkbox, node('span', '', connection.displayName)); container.append(label); }
+    restoreConnectors();
   } catch { status('Connector 列表读取失败；本轮不会自动授权连接。', true); }
 }
 async function conversations() {
   const { conversations } = await api('/api/conversations'); element('conversations').replaceChildren();
   for (const item of conversations) {
+    const row = node('div', `session-wrap${item.id === conversationId ? ' active' : ''}`);
     const button = node('button', `session${item.id === conversationId ? ' active' : ''}`); button.type = 'button'; button.disabled = locked;
     const body = node('span', 'session-body'); body.append(node('span', 'session-title', item.title));
     button.append(node('span', 'session-dot'), body);
     if (item.id === conversationId) element('conversation-title').textContent = item.title;
     button.onclick = () => selectConversation(item.id).catch(error => status(error.message, true));
-    element('conversations').append(button);
+    const remove = node('button', 'session-delete', '×'); remove.type = 'button'; remove.disabled = locked;
+    remove.title = '删除会话'; remove.setAttribute('aria-label', `删除会话：${item.title}`);
+    remove.onclick = () => deleteConversation(item);
+    row.append(button, remove); element('conversations').append(row);
   }
+}
+async function deleteConversation(item) {
+  if (locked || !window.confirm(`确定删除会话「${item.title}」及其历史记录？此操作无法撤销。`)) return;
+  busy(true);
+  try {
+    await api(`/api/conversations/${encodeURIComponent(item.id)}/remove`, {});
+  } catch (error) {
+    status(error.status === 409 ? '该会话仍有任务执行中，请停止任务并等待结束后再删除。' : `删除会话失败：${error.message}`, true);
+    busy(false); return;
+  }
+  preferences?.removeConversation(runtimeId, item.id);
+  if (conversationId === item.id) resetConversation();
+  status('会话已删除。');
+  try { await conversations(); }
+  catch (error) { status(`会话已删除，但列表刷新失败：${error.message}`, true); }
+  finally { busy(false); }
 }
 async function transcript(token = generation) {
   if (!conversationId) return;
@@ -102,7 +134,8 @@ async function transcript(token = generation) {
     const [{ events }, { artifacts }] = await Promise.all([
       api(`/api/runs/${encodeURIComponent(run.id)}/events`), api(`/api/runs/${encodeURIComponent(run.id)}/artifacts`),
     ]);
-    updateTurn(turn, run, events); turn.artifacts = artifacts; return turn;
+    const humanLoop = run.status === 'running' ? await api(`/api/runs/${encodeURIComponent(run.id)}/human-loop/current`) : {};
+    return updateTurn(turn, run, events, artifacts, humanLoop);
   }));
   if (token !== generation) return;
   turns.clear(); for (const turn of hydrated) turns.set(turn.id, turn);
@@ -115,23 +148,12 @@ async function watch(id, token) {
   try {
     while (token === generation) {
       const turn = turns.get(id); if (!turn) break;
-      const { events } = await api(`/api/runs/${encodeURIComponent(id)}/events?afterSeq=${turn.lastSeq}`);
-      const { run } = await api(`/api/runs/${encodeURIComponent(id)}`);
+      const { run, events, artifacts, humanLoop } = await readRunUpdate(api, turn);
       if (token !== generation) return;
-      updateTurn(turn, run, events);
-      // The terminal commit can land between the two reads. Drain once more
-      // before ending the watcher so final Plan/tool events are never lost.
-      if (run.status !== 'running' && !hasTerminalEvent(turn)) {
-        const tail = await api(`/api/runs/${encodeURIComponent(id)}/events?afterSeq=${turn.lastSeq}`);
-        if (token !== generation) return;
-        updateTurn(turn, run, tail.events);
-      }
+      updateTurn(turn, run, events, artifacts, humanLoop);
       renderTurns(); if (selectedRunId === id) renderDetails();
-      status(`本机任务 · ${runState(run.status)}`);
+      status(`本机任务 · ${turn.humanLoop?.status === 'open' ? '等待你的输入，请在问题卡片中回答' : runState(run.status)}`);
       if (run.status !== 'running') {
-        const result = await api(`/api/runs/${encodeURIComponent(id)}/artifacts`);
-        if (token !== generation) return;
-        turn.artifacts = result.artifacts; renderTurns(); if (selectedRunId === id) renderDetails();
         await conversations(); break;
       }
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -139,11 +161,30 @@ async function watch(id, token) {
   } catch (error) { status(`连接中断：${error.message}。重新选择对话可从持久化记录恢复。`, true); }
   finally { if (token === generation) { activeRun = undefined; cancelling = false; busy(false); } }
 }
+async function respondHumanLoop(id, request, value) {
+  const token = generation, turn = turns.get(id), scope = runtimeId || 'desktop-default';
+  if (!turn || turn.status !== 'running' || turn.humanLoop?.id !== request.id || turn.humanLoop.revision !== request.revision) throw new Error('问题已变化，请等待同步后再回答');
+  try {
+    await api(`/api/runs/${encodeURIComponent(id)}/human-loop/${encodeURIComponent(request.id)}/respond?runtimeId=${encodeURIComponent(scope)}`, { value, expectedRevision: request.revision });
+  } catch (error) {
+    if (token === generation && error.status === 409) {
+      const current = await api(`/api/runs/${encodeURIComponent(id)}/human-loop/current?runtimeId=${encodeURIComponent(scope)}`).catch(() => undefined);
+      if (token === generation && current) { updateTurn(turn, turn.run, [], undefined, current); renderTurns(); }
+    }
+    throw error;
+  }
+  if (token !== generation) return;
+  status('回答已提交，正在继续原任务。');
+  // A disconnected watcher may have stopped while the user was filling in
+  // the form. Reconnect to the same Run instead of creating another one.
+  if (!activeRun) void watch(id, token);
+}
 async function selectConversation(id) {
   if (locked) return;
   busy(true); navigation(false);
   const token = ++generation; conversationId = id; pending = undefined; selectedSources = [];
   sessionStorage.removeItem(PENDING_KEY);
+  restoreConnectors();
   resetAttachments(); turns.clear(); orderedRunIds = []; selectedRunId = undefined; view.clear(); renderDetails();
   try {
     const runs = await transcript(token); if (token !== generation) return; await conversations();
@@ -187,12 +228,16 @@ element('cancel').onclick = async () => {
   try { await api(`/api/runs/${encodeURIComponent(activeRun)}/cancel`, {}); status('已请求取消；执行退出前，本地服务仍会保护资源。'); }
   catch (error) { cancelling = false; busy(Boolean(activeRun)); status(error.message, true); }
 };
-element('new-conversation').onclick = () => {
-  if (locked) return;
+function resetConversation() {
   generation++; conversationId = crypto.randomUUID(); pending = undefined; selectedSources = [];
   sessionStorage.removeItem(PENDING_KEY);
+  restoreConnectors();
   turns.clear(); orderedRunIds = []; selectedRunId = undefined; view.clear(); resetAttachments(); renderDetails(); resetComposerInput(element('message'));
-  element('empty-state').hidden = false; element('conversation-title').textContent = '新对话'; element('message').value = ''; status('新对话 · 请选择模型后发送任务。'); busy(false); navigation(false);
+  element('empty-state').hidden = false; element('conversation-title').textContent = '新对话'; element('message').value = ''; details(false); navigation(false);
+}
+element('new-conversation').onclick = () => {
+  if (locked) return;
+  resetConversation(); status(element('model').value ? '新对话 · 可直接发送任务。' : '新对话 · 请选择模型后发送任务。'); busy(false);
   void conversations().catch(error => status(error.message, true));
 };
 element('runtime-select').onchange = async event => {
@@ -224,6 +269,7 @@ element('theme-toggle').onclick = () => { document.documentElement.dataset.theme
 element('logout').onclick = async () => {
   const button = element('logout'); button.disabled = true;
   try {
+    if (!csrf) csrf = (await api('/api/auth/logout-token')).csrfToken;
     const result = await api('/api/auth/logout', {});
     if (PENDING_KEY) sessionStorage.removeItem(PENDING_KEY);
     generation++; busy(true);
@@ -240,7 +286,7 @@ element('message').oninput = () => autoResizeComposerInput(element('message'));
 for (const button of document.querySelectorAll('.suggestion')) button.onclick = () => { if (!locked) { element('message').value = button.textContent; autoResizeComposerInput(element('message')); element('message').focus(); } };
 document.addEventListener('keydown', event => { if (event.key === 'Escape') { details(false); navigation(false); } });
 async function refreshModels() {
-  const { models } = await api('/api/models'); const selection = element('model').value;
+  const { models } = await api('/api/models'); const selection = preferences?.model() || element('model').value;
   element('model').replaceChildren(node('option', '', '请选择模型')); element('model').firstChild.value = '';
   for (const model of models) { const option = node('option', '', model); option.value = model; element('model').append(option); }
   element('model').value = models.includes(selection) ? selection : '';
@@ -251,10 +297,12 @@ busy(true);
 try {
   const session = await api('/api/session'); csrf = session.csrfToken;
   PENDING_KEY = `agentloop-desktop-pending:${session.accountId}`;
+  preferences = createComposerPreferences(localStorage, session.accountId);
+  conversationId = crypto.randomUUID();
   element('account-identity').textContent = session.user.email;
   await loadRuntimes(); await loadConnectors();
   const models = await refreshModels();
-  await conversations(); conversationId = crypto.randomUUID(); status(models.length ? '云端账号已登录，请选择本机模型后发送。' : '云端账号已登录，尚未配置本机模型。请在本机能力设置中添加 Provider 和模型。');
+  await conversations(); status(models.length ? (element('model').value ? '云端账号已登录，可直接发送任务。' : '云端账号已登录，请选择本机模型后发送。') : '云端账号已登录，尚未配置本机模型。请在本机能力设置中添加 Provider 和模型。');
   const saved = sessionStorage.getItem(PENDING_KEY);
   if (saved) {
     const restored = JSON.parse(saved);
@@ -263,9 +311,15 @@ try {
     if (restored.runtimeId && restored.runtimeId !== runtimeId) { runtimeId = restored.runtimeId; await loadRuntimes(); await refreshModels(); await loadConnectors(); }
     pending = restored; conversationId = pending.payload.conversationId || crypto.randomUUID(); selectedSources = pending.payload.uploadedSourceIds;
     element('message').value = pending.payload.input; element('model').value = pending.payload.modelKey;
+    const pendingConnectors = new Set(pending.payload.connectorConnectionIds || []);
+    for (const checkbox of element('run-connectors').querySelectorAll('input')) checkbox.checked = pendingConnectors.has(checkbox.value);
     if (conversationId) await transcript();
     autoResizeComposerInput(element('message')); view.submitting(pending.payload.input, true); element('empty-state').hidden = true;
     status('已恢复一条未确认的发送。保持消息和模型不变，点击发送将复用原请求 ID。');
   }
   busy(false);
-} catch (error) { busy(true); status(`本地初始化失败：${error.message}`, true); }
+} catch (error) {
+  busy(true);
+  element('account-identity').textContent = '云端账号确认失败';
+  status(`账号或本地初始化失败：${error.message}。可退出后重新登录。`, true);
+}

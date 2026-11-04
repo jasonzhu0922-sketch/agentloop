@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
 const { createTurn, updateTurn, hasTerminalEvent, visibleToolCalls } = await import(new URL('../web/turn-projection.js', import.meta.url).href);
+const { readRunUpdate } = await import(new URL('../web/run-polling.js', import.meta.url).href);
 const { isNearBottom, nextScrollTop } = await import(new URL('../web/reference/ui/scroll-follow.js', import.meta.url).href);
 const { shouldSubmitComposerOnKeydown, composerInputHeight } = await import(new URL('../web/reference/ui/composer-input.js', import.meta.url).href);
 // Resolve the virtual /markdown.js asset to the exact same shared renderer as
@@ -57,13 +58,63 @@ test('tool calls retain arguments, real result/error and sequence without manufa
   const calls = visibleToolCalls(events, 'completed'); assert.equal(calls.length, 2); assert.equal(calls[0].arguments.command, 'echo'); assert.equal(calls[0].exitCode, 2); assert.equal(calls[1].status, 'failed');
 });
 
-test('terminal reconciliation clears stale waiting state and completed process artifacts remain folded', () => {
+test('terminal reconciliation clears stale waiting state and keeps every artifact visible', () => {
   const turn = createTurn(run()); updateTurn(turn, run(), [event(1, 'run.waiting_user', { request: { id: 'request', status: 'open' } })]);
   assert.match(renderAssistant(turn), /等待你的输入/);
   updateTurn(turn, run('completed', '完成')); assert.equal(turn.humanLoop, undefined);
   turn.artifacts = [{ id: 'final', name: 'final.txt', role: 'final', bytes: 1 }, { id: 'process', name: 'process.txt', role: 'process', bytes: 1 }];
-  assert.match(renderAssistant(turn), /final.txt/); assert.doesNotMatch(renderAssistant(turn), /process.txt/);
-  assert.match(renderAssistant(turn, { artifacts: true }), /process.txt/);
+  assert.match(renderAssistant(turn), /final.txt/); assert.match(renderAssistant(turn), /process.txt/);
+  assert.doesNotMatch(renderAssistant(turn), /data-toggle="artifacts"/);
+});
+
+test('polling exposes artifacts before completion, even without new events, and reconciles final delivery', async () => {
+  const turn = createTurn(run());
+  const file = { id: 'report', name: 'report.html', role: 'process', bytes: 100, sha256: 'draft' };
+  let artifacts: typeof file[] = []; let currentRun = run();
+  let events = [event(1, 'tool.completed', { toolName: 'computer_write_file', result: '{"path":"report.html"}' })];
+  const requests: string[] = [];
+  const api = async (path: string) => {
+    requests.push(path);
+    if (path.includes('/events?')) return { events: [...events] };
+    if (path.endsWith('/artifacts')) return { artifacts: artifacts.map(item => ({ ...item })) };
+    return { run: currentRun };
+  };
+  const poll = async () => {
+    const update = await readRunUpdate(api, turn);
+    updateTurn(turn, update.run, update.events, update.artifacts);
+  };
+  await poll(); assert.doesNotMatch(renderAssistant(turn), /data-artifact-id=/);
+  events = []; artifacts = [file]; await poll();
+  assert.equal(turn.status, 'running'); assert.equal(turn.lastSeq, 1);
+  assert.match(renderAssistant(turn), /data-artifact-id="report"/);
+  assert.match(renderAssistant(turn), /阶段产物/); assert.doesNotMatch(renderAssistant(turn), /最终产物/);
+  const revision = turn.revision; const previous = turn.artifacts;
+  await poll(); assert.equal(turn.revision, revision); assert.equal(turn.artifacts, previous);
+  artifacts = [{ ...file, bytes: 200, sha256: 'revised' }]; await poll();
+  assert.equal(turn.revision, revision + 1); assert.match(renderAssistant(turn), /200 字节/);
+  currentRun = run('completed'); events = [event(2, 'run.completed')];
+  artifacts = [{ ...file, role: 'final' }, { ...file, id: 'draft', name: 'draft.html' }]; await poll();
+  const html = renderAssistant(turn);
+  assert.match(html, /最终产物/); assert.match(html, /draft.html/);
+  assert.equal((html.match(/data-artifact-id="report"/g) || []).length, 1);
+  assert.equal(requests.filter(path => path.endsWith('/artifacts')).length, 5);
+});
+
+test('polling drains a racing terminal commit and does not mutate a turn before its scope is checked', async () => {
+  const turn = createTurn(run());
+  const snapshot = JSON.stringify(turn); const paths: string[] = [];
+  const update = await readRunUpdate(async (path: string) => {
+    paths.push(path);
+    if (path.endsWith('/events?afterSeq=0')) return { events: [event(1, 'tool.completed')] };
+    if (path.endsWith('/events?afterSeq=1')) return { events: [event(2, 'run.failed')] };
+    if (path.endsWith('/artifacts')) return { artifacts: [{ id: 'partial', name: 'partial.txt', role: 'process', bytes: 5 }] };
+    return { run: run('failed') };
+  }, turn);
+  assert.equal(JSON.stringify(turn), snapshot, 'a stale response can be discarded without touching the old conversation');
+  assert.equal(paths.length, 4);
+  updateTurn(turn, update.run, update.events, update.artifacts);
+  assert.ok(hasTerminalEvent(turn)); assert.equal(turn.lastSeq, 2);
+  assert.match(renderAssistant(turn), /partial.txt/); assert.doesNotMatch(renderAssistant(turn), /最终产物/);
 });
 
 test('templates escape untrusted labels, streaming HTML and Markdown while preserving rich final output', () => {

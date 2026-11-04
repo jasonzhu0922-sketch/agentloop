@@ -125,6 +125,12 @@ export class DesktopApi {
       }
       const session = this.#sessions.require(request, write);
       if (!this.#cloud) throw new HttpError(503, "cloud_auth_not_configured");
+      // A locally authenticated browser must be able to end its session even
+      // when cloud verification is unavailable. This token grants no access to
+      // account data and remains protected by the loopback origin boundary.
+      if (request.method === "GET" && url.pathname === "/api/auth/logout-token") {
+        json(response, 200, { csrfToken: session.csrf }); return;
+      }
       if (write && url.pathname === "/api/auth/logout") {
         fields(await readJson(request), []);
         this.#sessions.revoke(session, response);
@@ -203,6 +209,11 @@ export class DesktopApi {
       });
       if (request.method === "GET" && parts.length === 3 && parts[0] === "api" && parts[1] === "conversations") {
         json(response, 200, await runtime.conversation(context, parts[2]!)); return;
+      }
+      if (request.method === "POST" && parts.length === 4 && parts[0] === "api" && parts[1] === "conversations" && parts[3] === "remove") {
+        fields(await readJson(request), []);
+        await runtime.deleteConversation(context, parts[2]!);
+        json(response, 200, { removed: true }); return;
       }
       if (request.method === "GET" && parts.length === 3 && parts[0] === "api" && parts[1] === "sources") {
         json(response, 200, { source: await runtime.source(context, parts[2]!) }); return;
@@ -287,6 +298,15 @@ export class DesktopApi {
   private async runRoute(request: IncomingMessage, response: ServerResponse, runtime: ManagedLocalRuntime, parts: string[], url: URL, context: LocalExecutionContext) {
     if (parts[0] !== "api" || parts[1] !== "runs" || !parts[2]) throw new HttpError(404, "route_not_found");
     const id = parts[2];
+    if (request.method === "GET" && parts.length === 5 && parts[3] === "human-loop" && parts[4] === "current") {
+      json(response, 200, { request: await runtime.currentHumanLoop(context, id) }); return;
+    }
+    if (request.method === "POST" && parts.length === 6 && parts[3] === "human-loop" && parts[5] === "respond") {
+      const body = await readJson(request); fields(body, ["value", "expectedRevision"]);
+      if (!Number.isSafeInteger(body.expectedRevision) || (body.expectedRevision as number) < 1) throw new HttpError(400, "expected_revision_invalid");
+      if (!Object.hasOwn(body, "value")) throw new HttpError(400, "value_required");
+      json(response, 200, { response: await runtime.respondHumanLoop(context, id, parts[4]!, body.value, body.expectedRevision as number) }); return;
+    }
     if (request.method === "GET" && parts.length === 3) { json(response, 200, { run: await runtime.getRun(context, id) }); return; }
     if (request.method === "GET" && parts.length === 4 && parts[3] === "events") {
       const after = url.searchParams.get("afterSeq") ?? "0";

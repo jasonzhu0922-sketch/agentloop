@@ -69,6 +69,22 @@ test("assessment uses one strict explicit-state schema, including nullable failu
   } }).assess(input);
 });
 
+test("temporal gaps reach the model as facts for contextual judgment, not automatic rejection", async () => {
+  for (const satisfied of [true, false]) {
+    const input = { ...assessmentInput(), temporalEvidenceGap: "Unverified intervals: 313 milliseconds." };
+    const result = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
+      const context = JSON.parse(request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+      assert.equal(context.temporalEvidenceGap, input.temporalEvidenceGap);
+      assert.match(context.assessmentPolicy.temporalCoverage.judgment, /not an automatic failure/);
+      assert.match(context.assessmentPolicy.temporalCoverage.boundary, /Never treat uncovered time as proven empty/);
+      const response = submission(input);
+      response.toolCalls[0]!.arguments.criteria[0]!.satisfied = satisfied;
+      return response;
+    } }).assess(input);
+    assert.equal(result.approved, satisfied);
+  }
+});
+
 test("a JSON-encoded assessment is rejected with shape diagnostics and repaired as a root object", async () => {
   const input = assessmentInput();
   let calls = 0;

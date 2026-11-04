@@ -30,6 +30,7 @@ test("conversation Working Set is bounded to durable recent Runs and preserves r
 
   const workset = await queries.build("conversation");
   assert.equal(workset?.runCount, 9);
+  assert.deepEqual(workset?.priorRuns, runs.slice(1).map((run) => ({ runId: run.id, input: run.input, status: run.status })));
   assert.deepEqual(workset?.reusableArtifacts.map((artifact) => artifact.runId), ["run-8"]);
   assert.deepEqual(workset?.recommendedCapabilities.skillIds, ["skill-report"]);
   assert.deepEqual(workset?.recommendedCapabilities.capabilityIds, ["workspace_artifact_write"]);

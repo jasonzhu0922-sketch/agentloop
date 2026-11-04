@@ -4,25 +4,31 @@ import { executionActivities } from './reference/projections/execution-detail-pr
 import { isNearBottom, nextScrollTop } from './reference/ui/scroll-follow.js';
 import { hasSelectedTextWithin } from './reference/ui/message-selection.js';
 import { visibleToolCalls } from './turn-projection.js';
+import { renderHumanLoop, bindHumanLoop } from './human-loop.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const lines = value => escape(value).replace(/\n/g, '<br>');
 const clip = (value, max = 120) => { const text = String(value ?? '').replace(/\s+/g, ' ').trim(); return text.length > max ? `${text.slice(0, max)}…` : text; };
 const stepLabel = status => ({ completed: '已完成', running: '执行中', failed: '失败', cancelled: '已取消', pending: '待执行', queued: '待执行', rejected: '已拒绝', unfinished: '未确认完成', selected: '已选择', bound: '已绑定' }[status] || '待执行');
 const time = value => Number.isFinite(value) ? new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) : '';
+function formatDuration(seconds) {
+  if (seconds <= 60) return `${seconds.toFixed(1)} 秒`;
+  const tenths = Math.round(seconds * 10);
+  return `${Math.floor(tenths / 600)} 分 ${((tenths % 600) / 10).toFixed(1)} 秒`;
+}
 const copyIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="12" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>';
 function copyButton(kind, disabled = false) { return `<button type="button" class="message-copy" data-copy="${kind}" aria-label="复制${kind === 'user' ? '提问' : '回答'}"${disabled ? ' disabled' : ''}>${copyIcon}</button>`; }
 export function renderUser(run) {
   const sources = (run.sources || []).map(source => `<span class="source-chip msg-source-chip">▤ ${escape(source.originalName)}</span>`).join('');
   return `<article class="msg user"><div class="msg-body"><div class="msg-bubble"><div class="msg-role">你</div>${sources ? `<div class="msg-source-row" aria-label="本轮上传文件">${sources}</div>` : ''}<div class="msg-text">${escape(run.input)}</div><div class="message-footer"><div class="message-timing">提问于 ${escape(time(run.createdAt))}</div>${copyButton('user')}</div></div></div></article>`;
 }
-function renderArtifacts(turn, ui) {
+function renderArtifacts(turn) {
   if (!turn.artifacts.length) return '';
   const final = turn.artifacts.filter(item => item.role === 'final'); const other = turn.artifacts.filter(item => item.role !== 'final');
   const cards = items => `<div class="desktop-artifact-list">${items.map(item => `<button type="button" class="desktop-artifact" data-artifact-id="${escape(item.id)}"><span class="desktop-artifact-icon">▤</span><span>${escape(item.name)}<small>${escape(item.bytes)} 字节 · ${item.role === 'final' && turn.status === 'completed' ? '最终产物' : '阶段产物'} · 预览</small></span></button>`).join('')}</div>`;
   const head = (label, count) => `<div class="inline-artifacts-head"><span>${label}</span><small>${count} 个文件</small></div>`;
   const finalBlock = final.length ? head(turn.status === 'completed' ? '最终产物' : '已生成文件 · 尚非成功交付', final.length) + cards(final) : '';
-  const otherBlock = !other.length ? '' : turn.status === 'completed' ? `<button type="button" class="execution-trace-toggle" data-toggle="artifacts" aria-expanded="${Boolean(ui.artifacts)}">${ui.artifacts ? '收起其他产物' : `查看其他产物 ${other.length} 个`} ⌄</button>${ui.artifacts ? cards(other) : ''}` : head('阶段产物 · 尚非成功交付', other.length) + cards(other);
+  const otherBlock = other.length ? head('阶段产物 · 尚非成功交付', other.length) + cards(other) : '';
   return `<section class="inline-artifacts" aria-label="本轮产物">${finalBlock}${otherBlock}</section>`;
 }
 function toolRow(call, latest = false) {
@@ -42,9 +48,7 @@ export function renderAssistant(turn, ui = {}) {
   if (turn.status === 'failed') output = `<div class="failure-title">${escape(turn.error || presentation.emptyText)}</div>${turn.partialText ? `<div class="partial-result"><strong>执行总结 · 尚非成功交付</strong>${renderMarkdown(turn.partialText)}</div>` : ''}`;
   else if (turn.text) output = live ? lines(turn.text) : renderMarkdown(turn.text);
   else output = live ? `<div class="live-progress" role="status">${escape(turn.progress || '正在连接本机 Runtime')}</div>` : `<span class="terminal-empty">${escape((turn.status === 'completed' ? completedArtifactSummary(turn.artifacts) : '') || presentation.emptyText)}</span>`;
-  // Human Loop controls are not exposed by Desktop yet: do not pretend that a
-  // waiting Run is progressing, or manufacture an answer/confirmation button.
-  if (live && turn.humanLoop?.status === 'open') output += '<p class="desktop-action-needed">任务正在等待用户输入；Desktop 尚未接入此响应操作。</p>';
+  const humanLoop = live && turn.humanLoop?.status === 'open' ? renderHumanLoop(turn.humanLoop) : '';
   const calls = visibleToolCalls(turn.events, turn.status).map(call => !live && ['running', 'queued'].includes(call.status) ? { ...call, status: 'unfinished' } : call);
   const latest = calls.filter(call => call.status === 'running').at(-1) || calls.at(-1);
   const trace = latest ? `<section class="execution-trace" aria-label="本轮工具执行状态"><div class="execution-trace-head"><div class="execution-trace-latest">${toolRow(latest, true)}</div>${calls.length > 1 ? `<button class="execution-trace-toggle" data-toggle="trace" aria-expanded="${Boolean(ui.trace)}" aria-controls="${escape(traceId)}">${ui.trace ? '收起工具' : `查看工具 ${calls.length} 次`} ⌄</button>` : ''}</div>${ui.trace && calls.length > 1 ? `<div class="execution-trace-list" id="${escape(traceId)}">${[...calls].reverse().map(call => toolRow(call)).join('')}</div>` : ''}</section>` : '';
@@ -53,13 +57,13 @@ export function renderAssistant(turn, ui = {}) {
   const last = turn.events.at(-1);
   const eventIndicator = `<span class="live-event-indicator ${live ? 'active' : 'terminal'} ${escape(turn.status)}" data-event-seq="${last?.seq ?? 'pending'}"><i class="live-event-pulse" aria-hidden="true"></i><span class="live-event-number">${last ? `#${last.seq}` : '进行中'}</span><small>${escape(last?.type.replaceAll('.', ' ') || '正在连接 Runtime')}</small></span>`;
   const finished = turn.run.finishedAt; const elapsed = Number.isFinite(finished) ? Math.max(0, (finished - turn.run.createdAt) / 1000) : undefined;
-  const timing = finished ? `回答结束于 ${time(finished)} · 耗时 ${elapsed.toFixed(1)} 秒` : '';
-  return `<article class="msg assistant ${live ? 'live' : 'final'}${ui.selected ? ' selected' : ''}" data-assistant-message="${escape(turn.id)}" tabindex="0" role="button" aria-label="查看该轮执行详情" aria-pressed="${Boolean(ui.selected)}"><img class="msg-avatar logo-image" src="/assets/xuanwu-mascot-icon.png" alt="玄武"><div class="msg-body"><div class="live-card ${escape(presentation.cardClass)}"><div class="live-head"><span class="assistant-state ${escape(turn.status)}">${presentation.icon || (live ? '<span class="thinking"><i></i><i></i><i></i></span>' : '')}</span><span>AgentLoop · ${turn.humanLoop?.status === 'open' ? '等待你的输入' : escape(presentation.label)}</span><span class="execution-provenance"><span class="execution-provenance-chip location">本机</span><span class="execution-provenance-chip model">${escape(turn.run.modelKey)}</span></span>${planToggle}</div>${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${trace}${skillMarkup}${renderArtifacts(turn, ui)}<div class="message-footer event-feedback">${eventIndicator}${timing ? `<div class="message-timing">${escape(timing)}</div>` : ''}${copyButton('assistant', !(turn.text || turn.partialText))}</div></div></div></article>`;
+  const timing = finished ? `回答结束于 ${time(finished)} · 耗时 ${formatDuration(elapsed)}` : '';
+  return `<article class="msg assistant ${live ? 'live' : 'final'}${ui.selected ? ' selected' : ''}" data-assistant-message="${escape(turn.id)}" tabindex="0" role="button" aria-label="查看该轮执行详情" aria-pressed="${Boolean(ui.selected)}"><img class="msg-avatar logo-image" src="/assets/xuanwu-mascot-icon.png" alt="玄武"><div class="msg-body"><div class="live-card ${escape(presentation.cardClass)}"><div class="live-head"><span class="assistant-state ${escape(turn.status)}">${presentation.icon || (live ? '<span class="thinking"><i></i><i></i><i></i></span>' : '')}</span><span>AgentLoop · ${turn.humanLoop?.status === 'open' ? '等待你的输入' : escape(presentation.label)}</span><span class="execution-provenance"><span class="execution-provenance-chip location">本机</span><span class="execution-provenance-chip model">${escape(turn.run.modelKey)}</span></span>${planToggle}</div>${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${humanLoop}${trace}${skillMarkup}${renderArtifacts(turn)}<div class="message-footer event-feedback">${eventIndicator}${timing ? `<div class="message-timing">${escape(timing)}</div>` : ''}${copyButton('assistant', !(turn.text || turn.partialText))}</div></div></div></article>`;
 }
 
 // Keyed turn nodes preserve old replies and browser selection. Only an altered
 // assistant card is replaced, and each scroll surface follows independently.
-export function createConversationView({ container, scroll, onSelect, onArtifact, status }) {
+export function createConversationView({ container, scroll, onSelect, onArtifact, onHumanLoopResponse, status }) {
   const mounted = new Map(); let currentTurns = []; let selected; let pending;
   function render(turns = currentTurns, selectedId = selected, forceBottom = false) {
     currentTurns = turns; selected = selectedId;
@@ -72,7 +76,7 @@ export function createConversationView({ container, scroll, onSelect, onArtifact
         const wrapper = document.createElement('div'); wrapper.className = 'desktop-turn'; container.insertBefore(wrapper, pending || null);
         state = { wrapper, ui: {}, signature: '' }; mounted.set(turn.id, state);
       }
-      const uiKey = `${turn.id === selectedId}|${state.ui.plan}|${state.ui.trace}|${state.ui.reasoning}|${state.ui.artifacts}`;
+      const uiKey = `${turn.id === selectedId}|${state.ui.plan}|${state.ui.trace}|${state.ui.reasoning}`;
       // Like Multi Runtime's live-card hot path, historical Markdown is not
       // reparsed merely because a different Run received another event.
       if (state.lastTurn === turn && state.revision === turn.revision && state.artifacts === turn.artifacts && state.uiKey === uiKey) continue;
@@ -94,15 +98,25 @@ export function createConversationView({ container, scroll, onSelect, onArtifact
       });
       const focused = old?.contains(document.activeElement) ? document.activeElement?.dataset?.toggle : undefined;
       const template = document.createElement('template'); template.innerHTML = markup;
+      // Polling, plan toggles and artifact updates must not erase a draft or
+      // reset a submitting form. Preserve its DOM only for the same revision.
+      const previousForm = old?.querySelector('form[data-human-loop]');
+      const nextForm = template.content.querySelector('form[data-human-loop]');
+      const sameRequest = previousForm && nextForm && previousForm.dataset.humanLoop === nextForm.dataset.humanLoop && previousForm.dataset.requestRevision === nextForm.dataset.requestRevision;
+      const activeInput = sameRequest && previousForm.contains(document.activeElement) ? document.activeElement : undefined;
+      if (sameRequest) nextForm.replaceWith(previousForm);
       if (old) old.replaceWith(template.content); else state.wrapper.append(template.content);
       state.signature = markup;
       const card = state.wrapper.querySelector('.msg.assistant');
+      const form = card.querySelector('form[data-human-loop]');
+      if (form && !sameRequest) bindHumanLoop(form, turn.humanLoop, (request, value) => onHumanLoopResponse(turn.id, request, value));
+      activeInput?.focus({ preventScroll: true });
       for (const metric of metrics) { const target = card.querySelector(metric.selector); if (target) target.scrollTop = nextScrollTop(target, metric.follow, metric.top); }
       for (const button of card.querySelectorAll('[data-toggle]')) button.onclick = () => { state.ui[button.dataset.toggle] = !state.ui[button.dataset.toggle]; render(); };
       for (const button of card.querySelectorAll('[data-artifact-id]')) button.onclick = () => onArtifact(turn.id, button.dataset.artifactId);
       const reasoning = card.querySelector('.live-reasoning'); if (reasoning) reasoning.ontoggle = () => { state.ui.reasoning = reasoning.open; };
       card.querySelector('[data-copy="assistant"]').onclick = event => copy(turn.text || turn.partialText, event.currentTarget);
-      card.onclick = event => { if (event.target.closest('button,a,summary,details') || hasSelectedTextWithin(window.getSelection(), card)) return; onSelect(turn.id); };
+      card.onclick = event => { if (event.target.closest('button,a,summary,details,form,input,textarea,label') || hasSelectedTextWithin(window.getSelection(), card)) return; onSelect(turn.id); };
       card.onkeydown = event => { if (event.target !== card || !['Enter', ' '].includes(event.key)) return; event.preventDefault(); onSelect(turn.id); };
       if (focused) card.querySelector(`[data-toggle="${focused}"]`)?.focus({ preventScroll: true });
     }

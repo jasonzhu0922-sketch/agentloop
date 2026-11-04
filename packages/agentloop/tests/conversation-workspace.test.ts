@@ -18,6 +18,39 @@ test("uploaded-source wording is not mistaken for a prior reusable Result", () =
   assert.equal(referencesPriorConversationResult("把上一轮的分析结果生成一份 PPTX"), true);
 });
 
+test("stable general knowledge can be delivered as a tool-free conversation reply", async () => {
+  const database = new AppDatabase(":memory:");
+  const question = "浙江省会是哪里？";
+  const planner = new RecordingVisibleDirectoryPlanner();
+  try {
+    const runs = new RunService({ database, skills: new SkillService(database),
+      plannerFactory: () => planner, assessorFactory: () => approvingTestAssessor(),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, async complete(request) {
+        if (request.runId.startsWith("conversation-turn:")) {
+          assert.match(request.systemPrompt, /stable general knowledge/i);
+          assert.match(request.systemPrompt, /explicit requests for sources, verification, or current information/i);
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "intent", name: "resolve_conversation_turn", arguments: {
+            mode: "reply", relation: "new_goal", inputMode: "none", effectiveGoal: question,
+            taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "answer", requiresExecution: false,
+              deliverables: [{ targetId: "answer", purpose: question, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
+            evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [],
+            memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
+          } }] };
+        }
+        assert.equal(request.tools.length, 0);
+        return { content: "浙江省的省会是杭州。", finishReason: "stop", toolCalls: [] };
+      } }),
+    });
+    const run = await runs.executeConversation("owner", question);
+    assert.equal(run.status, "completed");
+    assert.match(run.output ?? "", /杭州/);
+    assert.deepEqual(planner.responseOnlyFlags, [true]);
+    const events = await runs.events("owner", run.id);
+    assert.equal(events.find((event) => event.type === "conversation.turn.resolved")?.data.mode, "reply");
+    assert.equal(events.some((event) => event.type === "tool.completed"), false);
+  } finally { await database.close(); }
+});
+
 test("Computer Tool writes are isolated by conversation and reused by follow-up runs", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-conversation-workspace-"));
   const database = new AppDatabase(":memory:");
@@ -514,8 +547,13 @@ test("an artifact edit can continue a failed goal while retaining the earlier ar
     selectedArtifactPath = "unissued-workbook.xlsx";
     await assert.rejects(() => runs.executeConversation(owner.user.id, objective, {
       allowDangerousTools: true, conversationId: producer.conversationId,
-    }), /canonical contract after 3 attempts/);
-    assert.equal(capturedTasks.length, 3, "an unissued artifact must never reach Planner");
+    }), /stop after captured artifact binding/);
+    assert.equal(capturedTasks.length, 4, "an unresolved artifact becomes a tool-free clarification");
+    const clarification = capturedTasks[3]!;
+    assert.equal(clarification.canonicalState.intent.turnResolution?.mode, "clarify");
+    assert.equal(clarification.canonicalState.intent.turnResolution?.targetArtifact, undefined);
+    assert.equal(clarification.canonicalState.intent.turnResolution?.targetRunId, undefined);
+    assert.deepEqual(clarification.availableToolNames, []);
     assert.equal(resolverCalls, 6, "invalid bindings retain the bounded three-attempt limit");
   } finally {
     await database.close();

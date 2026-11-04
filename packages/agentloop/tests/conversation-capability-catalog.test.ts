@@ -50,6 +50,63 @@ function contextPayload(content: string) {
   return JSON.parse(content.slice(start + 1, end));
 }
 
+test("a clarification is reviewed with the complete Skill catalog before skipping planning", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-clarify-review-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    await skills.create("owner", { name: "archive-search", description: "Search private catalog metadata", instructions: "PRIVATE SKILL BODY" });
+    let calls = 0;
+    const goal = "查找内部目录中与采购合同有关的接口";
+    const runs = new RunService({ database, skills, workspaceRoot: root,
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        assert.ok(request.runId.startsWith("conversation-turn:"));
+        calls += 1;
+        const context = contextPayload(request.runtimeContext!.content);
+        assert.ok(context.availableSkills.some((skill: { name: string; description: string }) =>
+          skill.name === "archive-search" && skill.description === "Search private catalog metadata"));
+        assert.doesNotMatch(request.runtimeContext!.content, /PRIVATE SKILL BODY/);
+        if (calls === 1) return resolution("clarify", "需要先提供目录地址");
+        assert.match(request.systemPrompt, /Review the proposed clarification/);
+        return resolution("execute", goal);
+      } }),
+      plannerFactory: () => ({ plan: async (task) => {
+        assert.equal(task.responseOnly, undefined);
+        assert.equal(task.canonicalState.intent.turnResolution?.mode, "execute");
+        assert.deepEqual(task.canonicalState.intent.turnResolution?.userConstraints, []);
+        throw new AppError("PLANNING_ERROR", "clarify_review_reached_planner", 422);
+      } }),
+    });
+    await assert.rejects(runs.executeConversation("owner", goal), /clarify_review_reached_planner/);
+    assert.equal(calls, 2);
+    const events = await database.prepare("SELECT type FROM run_events").all() as Array<{ type: string }>;
+    assert.ok(events.some((event) => event.type === "conversation.turn.clarification_review_started"));
+  } finally { database.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a materially ambiguous request can remain a tool-free clarification after review", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-clarify-ambiguous-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    await skills.create("owner", { name: "archive-search", description: "Search an archive", instructions: "Search the archive." });
+    let calls = 0;
+    const runs = new RunService({ database, skills, workspaceRoot: root, assessorFactory: () => approvingTestAssessor(),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        if (request.runId.startsWith("conversation-turn:")) { calls += 1; return resolution("clarify", "Which archive and topic?"); }
+        assert.deepEqual(request.tools, []);
+        return { content: "请说明要查询哪个目录和主题。", finishReason: "stop", toolCalls: [] };
+      } }),
+    });
+    const run = await runs.executeConversation("owner", "查找一些东西");
+    assert.equal(run.status, "completed");
+    assert.equal(calls, 2);
+    const events = await runs.events("owner", run.id);
+    assert.equal(events.find((event) => event.type === "conversation.turn.resolved")?.data.mode, "clarify");
+    assert.equal(events.some((event) => event.type === "tool.dispatched"), false);
+  } finally { database.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("intent resolution sees the authorized Run capability catalog before deciding mode, and Planner reuses it", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-intent-catalog-"));
   const database = new AppDatabase(":memory:");

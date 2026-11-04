@@ -38,10 +38,13 @@ export interface LocalRuntime {
   startRun(context: LocalExecutionContext, input: LocalRunInput): ReturnType<RunService["startConversation"]>;
   getRun(context: LocalExecutionContext, runId: string): ReturnType<RunService["get"]>;
   cancelRun(context: LocalExecutionContext, runId: string): ReturnType<RunService["cancel"]>;
+  currentHumanLoop(context: LocalExecutionContext, runId: string): ReturnType<RunService["currentHumanLoop"]>;
+  respondHumanLoop(context: LocalExecutionContext, runId: string, requestId: string, value: unknown, expectedRevision: number): ReturnType<RunService["respondHumanLoop"]>;
   events(context: LocalExecutionContext, runId: string, afterSeq?: number): ReturnType<RunService["events"]>;
   ensureConversation(context: LocalExecutionContext, conversationId: string, input: string): Promise<void>;
   conversations(context: LocalExecutionContext): Promise<Awaited<ReturnType<RunService["getConversation"]>>["conversation"][]>;
   conversation(context: LocalExecutionContext, conversationId: string): ReturnType<RunService["getConversation"]>;
+  deleteConversation(context: LocalExecutionContext, conversationId: string): Promise<void>;
   upload(context: LocalExecutionContext, input: Parameters<RunService["uploadSource"]>[1]): ReturnType<RunService["uploadSource"]>;
   source(context: LocalExecutionContext, sourceId: string): ReturnType<RunService["source"]>;
   artifacts(context: LocalExecutionContext, runId: string): ReturnType<RunService["processArtifacts"]>;
@@ -101,6 +104,10 @@ export class RuntimeFacade implements LocalRuntime {
     return this.#use(runtime => runtime.runs.get(this.#owner(context), runId));
   }
   cancelRun(context: LocalExecutionContext, runId: string) { return this.#use(runtime => runtime.runs.cancel(this.#owner(context), runId)); }
+  currentHumanLoop(context: LocalExecutionContext, runId: string) { return this.#use(runtime => runtime.runs.currentHumanLoop(this.#owner(context), runId)); }
+  respondHumanLoop(context: LocalExecutionContext, runId: string, requestId: string, value: unknown, expectedRevision: number) {
+    return this.#use(runtime => runtime.runs.respondHumanLoop(this.#owner(context), runId, requestId, value, expectedRevision));
+  }
   async events(context: LocalExecutionContext, runId: string, afterSeq = 0) {
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new TypeError("event_sequence_invalid");
     return this.#use(async runtime => (await runtime.runs.events(this.#owner(context), runId)).filter(event => event.seq > afterSeq));
@@ -110,6 +117,7 @@ export class RuntimeFacade implements LocalRuntime {
   }
   conversations(context: LocalExecutionContext): ReturnType<LocalRuntime["conversations"]> { return this.#use(runtime => runtime.runs.listConversations(this.#owner(context))); }
   conversation(context: LocalExecutionContext, conversationId: string): ReturnType<LocalRuntime["conversation"]> { return this.#use(runtime => runtime.runs.getConversation(this.#owner(context), conversationId)); }
+  deleteConversation(context: LocalExecutionContext, conversationId: string): Promise<void> { return this.#use(runtime => runtime.runs.deleteConversation(this.#owner(context), conversationId)); }
   upload(context: LocalExecutionContext, input: Parameters<RunService["uploadSource"]>[1]) { return this.#use(runtime => runtime.runs.uploadSource(this.#owner(context), input)); }
   source(context: LocalExecutionContext, sourceId: string) { return this.#use(runtime => runtime.runs.source(this.#owner(context), sourceId)); }
   artifacts(context: LocalExecutionContext, runId: string) { return this.#use(runtime => runtime.runs.processArtifacts(this.#owner(context), runId)); }

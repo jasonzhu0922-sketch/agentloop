@@ -5,8 +5,8 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
   const models = installModelSettings({ api, element, refreshModels, status, managed: true });
   const dialog = element('model-settings'), body = element('capability-body');
   let tab = 'general', target, runtimeDetail, runtimeDetailMode = 'view', dirty = false, working = false, snapshot, runtimeList = [], packages = [], mcpCatalog = [];
-  const labels = { general: ['常规', '管理当前账号的本机存储与 Memory 配置。'], skills: ['Skill 管理', '上传和维护本机 Skill 包；安装后可在各个 Runtime 配置中分别选择。'], mcp: ['MCP 配置', '配置当前账号的 MCP Server；Runtime 只选择要启用的条目。'], runtimes: ['子 Runtime 管理', '新增、停止、重启、删除和查看各个本机 Runtime；每个 Runtime 独立选择扩展 Skill 与 MCP。'], connectors: ['Connector 配置', '个人 Connector 只保存在 Desktop；配置凭据不会上传到云端。'] };
-  const errors = { account_storage_outside_scope: '存储位置必须位于当前账号的存储目录内，不能指向其他账号或外部目录。', runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', mcp_server_key_duplicate: '同一 Runtime 不能同时选择 key 相同的 MCP 条目。', mcp_server_referenced_by_runtime: '该 MCP 已被一个或多个 Runtime 选择，不能删除。请先在对应 Runtime 中解除勾选。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。' };
+  const labels = { general: ['常规', '管理当前账号的本机存储与 Memory 配置。'], skills: ['Skill 管理', '上传和维护本机 Skill 包；安装后可在各个 Runtime 配置中分别选择。'], mcp: ['MCP 配置', '配置当前账号的 MCP Server，供所有本机 Runtime 使用。'], runtimes: ['子 Runtime 管理', '新增、停止、重启、删除和查看各个本机 Runtime；每个 Runtime 独立选择扩展 Skill，共享当前账号的 MCP。'], connectors: ['Connector 配置', '个人 Connector 只保存在 Desktop；配置凭据不会上传到云端。'] };
+  const errors = { account_storage_outside_scope: '存储位置必须位于当前账号的存储目录内，不能指向其他账号或外部目录。', runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_json_invalid: 'JSON 格式无效，请检查引号、括号和逗号。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', mcp_server_key_duplicate: '当前账号的 MCP key 不能重复。', mcp_server_referenced_by_runtime: '该 MCP 已被一个或多个 Runtime 选择，不能删除。请先在对应 Runtime 中解除勾选。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。' };
   const connectorBindings = {
     '126-mail': {
       title: '绑定 126 邮箱', displayName: '我的 126 邮箱', scopes: ['email:search', 'email:read'],
@@ -41,7 +41,8 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
   async function changed() { await refreshCapabilities(); }
   async function load() {
     reset(); message('正在读取本机配置…');
-    [runtimeList, packages, mcpCatalog] = await Promise.all([api('/api/runtimes').then(r => r.runtimes), api('/api/skills').then(r => r.skills), api('/api/mcp').then(r => r.servers)]);
+    if (tab === 'mcp') mcpCatalog = (await api('/api/mcp')).servers;
+    else [runtimeList, packages, mcpCatalog] = await Promise.all([api('/api/runtimes').then(r => r.runtimes), api('/api/skills').then(r => r.skills), api('/api/mcp').then(r => r.servers)]);
     if (!runtimeList.some(r => r.id === target)) target = currentRuntime() || runtimeList[0]?.id;
     if (tab === 'general') {
       await renderGeneral();
@@ -50,13 +51,6 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
         target = runtimeDetail;
         snapshot = await api(`/api/runtimes/${target}/configuration`);
       } else runtimeDetail = undefined;
-    } else if (!['skills', 'connectors'].includes(tab)) {
-      const picker = el('select'); picker.dataset.runtimePicker = 'true'; picker.setAttribute('aria-label', '设置目标 Runtime');
-      for (const r of runtimeList) { const option = el('option', `${r.displayName} · ${r.status}`); option.value = r.id; picker.append(option); }
-      picker.value = target;
-      picker.onchange = () => { if (!canLeave()) { picker.value = target; return; } target = picker.value; void perform(load); };
-      body.append(field('目标 Runtime', picker));
-      snapshot = await api(`/api/runtimes/${target}/configuration`);
     }
     if (tab === 'skills') await renderSkills();
     else if (tab === 'mcp') renderDeviceMcp();
@@ -152,7 +146,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
   }
   function renderRuntimes() {
     const heading = el('section', undefined, 'runtime-manager-heading');
-    const copy = el('div'); copy.append(el('strong', '子 Runtime 管理'), el('p', '每个 Runtime 具有独立会话、扩展 Skill 与 MCP 配置。'));
+    const copy = el('div'); copy.append(el('strong', '子 Runtime 管理'), el('p', '每个 Runtime 具有独立会话和扩展 Skill，共享当前账号的 MCP 配置。'));
     const add = button('＋ 新增', () => createPanel(false)); add.classList.add('runtime-create'); heading.append(copy, add); body.append(heading);
     const list = el('div', undefined, 'runtime-manager-list'); body.append(list);
     for (const runtime of runtimeList) {
@@ -169,7 +163,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     function createPanel(open) {
       const existing = body.querySelector('.runtime-create-panel'); if (existing) { existing.hidden = !open; return; }
       const panel = el('section', undefined, 'capability-card runtime-create-panel'); const name = input(''); name.maxLength = 100;
-      panel.append(el('strong', '新建 Runtime'), el('p', '新 Runtime 共享设备模型、Skill 库和 Connector，但拥有独立会话、Skill 绑定及 MCP 配置。'), field('名称', name));
+      panel.append(el('strong', '新建 Runtime'), el('p', '新 Runtime 共享模型、Skill 库、MCP 和 Connector，但拥有独立会话及 Skill 绑定。'), field('名称', name));
       const actions = el('div', undefined, 'capability-actions'); actions.append(button('取消', () => panel.remove()), button('创建', async () => {
         const result = await api('/api/runtimes', { displayName: name.value }); runtimeDetail = result.runtime.id; target = result.runtime.id; dirty = false; await load(); await changed();
       })); actions.lastElementChild.classList.add('primary'); panel.append(actions); body.append(panel); name.focus();
@@ -201,7 +195,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     const runtime = runtimeList.find(item => item.id === runtimeDetail); if (!runtime || !snapshot) { runtimeDetail = undefined; void load(); return; }
     const configuring = runtimeDetailMode === 'configure';
     const modal = el('section', undefined, 'runtime-detail-modal'); const panel = el('div', undefined, 'runtime-detail-panel'); modal.append(panel); body.append(modal);
-    const heading = el('header', undefined, 'runtime-detail-modal-head'); const title = el('div'); title.append(el('strong', configuring ? `配置 ${runtime.displayName}` : runtime.displayName), el('p', configuring ? '此 Runtime 已停止。可单独选择扩展 Skill 与 MCP Server。' : `${runtime.isDefault ? '默认 · ' : ''}${runtime.status} · ${runtime.extensionSkillCount} 个扩展 Skill · ${runtime.mcpServerCount} 个 MCP`));
+    const heading = el('header', undefined, 'runtime-detail-modal-head'); const title = el('div'); title.append(el('strong', configuring ? `配置 ${runtime.displayName}` : runtime.displayName), el('p', configuring ? '此 Runtime 已停止。可选择扩展 Skill；MCP 由当前账号共享。' : `${runtime.isDefault ? '默认 · ' : ''}${runtime.status} · ${runtime.extensionSkillCount} 个扩展 Skill · ${runtime.mcpServerCount} 个 MCP`));
     const close = button('×', () => { runtimeDetail = undefined; target = undefined; dirty = false; return load(); }); close.classList.add('runtime-detail-close'); close.setAttribute('aria-label', '关闭 Runtime 详情'); heading.append(title, close); panel.append(heading);
     if (!configuring) { renderRuntimeReadOnly(panel, runtime); return; }
     const tabs = runtimeCapabilityTabs(panel, 'Runtime 扩展配置');
@@ -213,10 +207,10 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
       const option = el('label', undefined, 'runtime-skill-option'); const copy = el('span'); copy.append(el('strong', pkg.displayName || pkg.skillName), el('small', pkg.description || '暂无描述。'));
       option.append(checkbox, copy); skillList.append(option); choices.push([pkg, checkbox]);
     }
-    const mcp = renderRuntimeMcpBindings(tabs.mcp);
+    renderSharedMcp(tabs.mcp);
     const actions = el('footer', undefined, 'runtime-config-actions');
     actions.append(button('取消', () => { runtimeDetail = undefined; target = undefined; dirty = false; return load(); }), button('保存', async () => {
-      const configuration = draft(); configuration.skillPackageIds = choices.filter(([, control]) => control.checked).map(([pkg]) => pkg.packageId); configuration.mcpServerIds = mcp.read();
+      const configuration = draft(); configuration.skillPackageIds = choices.filter(([, control]) => control.checked).map(([pkg]) => pkg.packageId);
       await api(`/api/runtimes/${target}/configuration`, { configuration, revision: snapshot.revision });
       runtimeDetail = undefined; target = undefined; dirty = false; await changed(); await load(); message('Runtime 配置已保存。');
     })); actions.lastElementChild.classList.add('primary'); panel.append(actions);
@@ -229,11 +223,11 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     if (!selectedSkills.length) skills.append(el('p', '未选择扩展 Skill。'));
     else for (const pkg of selectedSkills) skills.append(el('div', `${pkg.displayName || pkg.skillName} · 已启用`, 'runtime-detail-choice'));
     const servers = snapshot.configuration.mcpServers;
-    const mcp = cardInto(tabs.mcp, '已配置的 MCP Servers', '仅列出此 Runtime 使用的 MCP；凭据不会回显。');
+    const mcp = cardInto(tabs.mcp, '已配置的 MCP Servers', '当前账号共享的 MCP；凭据不会回显。');
     if (!servers.length) mcp.append(el('p', '未配置 MCP Server。'));
     else for (const server of servers) mcp.append(el('div', `${server.displayName} · ${server.key}${server.auth?.credentialConfigured ? ' · 凭据已配置' : ''}`, 'runtime-detail-choice'));
     if (runtime.status === 'stopped') {
-      const actions = el('div', undefined, 'capability-actions runtime-detail-actions'); actions.append(button('配置扩展 Skill 与 MCP', () => openRuntimeDetail(runtime, 'configure'))); actions.lastElementChild.classList.add('primary'); panel.append(actions);
+      const actions = el('div', undefined, 'capability-actions runtime-detail-actions'); actions.append(button('配置扩展 Skill', () => openRuntimeDetail(runtime, 'configure'))); actions.lastElementChild.classList.add('primary'); panel.append(actions);
     }
   }
   function runtimeCapabilityTabs(panel, label) {
@@ -250,42 +244,97 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     }
     tablist.append(skillsTab, mcpTab); panel.append(tablist, skills, mcp); activate('skills'); return { skills, mcp };
   }
-  function renderRuntimeMcpBindings(container) {
-    const selected = new Set(snapshot.configuration.mcpServerIds);
-    const card = cardInto(container, '可用 MCP Servers', '选择此 Runtime 要使用的 Desktop MCP 条目。这里不保存地址或凭据；请到“ MCP 配置 ”维护设备条目。');
-    const list = el('div', undefined, 'runtime-skill-options'); card.append(list);
-    if (!mcpCatalog.length) list.append(el('p', '尚无 Desktop MCP 条目。请先在 MCP 配置页添加。'));
-    for (const server of mcpCatalog) {
-      const checkbox = input('', 'checkbox'); checkbox.checked = selected.has(server.id);
-      const option = el('label', undefined, 'runtime-skill-option'); const copy = el('span'); copy.append(el('strong', server.displayName), el('small', `${server.key}${server.auth?.credentialConfigured ? ' · 凭据已配置' : ' · 无凭据或凭据未配置'}`)); option.append(checkbox, copy); list.append(option);
-      checkbox.onchange = () => { checkbox.checked ? selected.add(server.id) : selected.delete(server.id); dirty = true; };
+  function renderSharedMcp(container) {
+    const section = cardInto(container, '共享 MCP Servers', '当前账号的所有本机 Runtime 使用相同的 MCP；请在 MCP 配置中维护。');
+    if (!mcpCatalog.length) section.append(el('p', '尚无 MCP 条目。'));
+    for (const server of mcpCatalog) section.append(el('div', `${server.displayName} · ${server.key}`, 'runtime-detail-choice'));
+  }
+  // Some chat and document editors replace JSON delimiter quotes with curly
+  // quotes. Normalize delimiters only; preserve curly quotes inside strings.
+  function parseMcpJson(text) {
+    let normalized = '', quote = '', escaped = false;
+    for (const char of text) {
+      if (escaped) { normalized += char; escaped = false; continue; }
+      if (quote && char === '\\') { normalized += char; escaped = true; continue; }
+      if (!quote && (char === '"' || char === '“')) { quote = char; normalized += '"'; continue; }
+      if ((quote === '"' && char === '"') || (quote === '“' && char === '”')) { quote = ''; normalized += '"'; continue; }
+      normalized += char;
     }
-    return { read: () => [...selected] };
+    return JSON.parse(normalized);
   }
   function renderDeviceMcp() {
-    const card = card('Desktop MCP Servers', '这台 Desktop 的统一 MCP JSON 配置。所有 Runtime 都可以选择已有条目；删除已被 Runtime 引用的条目会被拒绝。凭据不会回显。');
-    const choices = el('div', undefined, 'capability-actions'), editor = el('div', undefined, 'capability-editor'); card.append(choices, editor);
-    let selected = -1, configEditor, authKind, authMeta, secret;
-    function flush() {
-      if (selected < 0) return;
-      const config = JSON.parse(configEditor.value), meta = JSON.parse(authMeta.value || '{}');
-      if (Object.keys(config).some(k => ['auth', 'credentialConfigured', 'secretStorageKey'].includes(k))) throw new Error('认证请使用独立字段');
-      const auth = { ...meta, kind: authKind.value };
-      if (secret.value) { if (auth.kind === 'bearer') auth.token = secret.value; else if (auth.kind === 'basic') auth.password = secret.value; else if (auth.kind === 'custom_headers') auth.headers = JSON.parse(secret.value); else if (auth.kind !== 'none') auth.value = secret.value; }
-      mcpCatalog[selected] = { ...config, auth };
+    const header = el('section', undefined, 'mcp-list-heading');
+    const copy = el('div'); copy.append(el('strong', 'MCP Servers'), el('p', '统一管理当前账号的 MCP 服务，供所有本机 Runtime 使用。'));
+    const add = button('＋ 新增 MCP', () => openEditor()); add.classList.add('mcp-add');
+    header.append(copy, add); body.append(header);
+    const list = el('div', undefined, 'mcp-server-list'); body.append(list);
+    if (!mcpCatalog.length) {
+      const empty = el('div', undefined, 'mcp-empty'); empty.append(el('strong', '还没有 MCP 服务'), el('p', '添加服务后，可以在这里管理配置和探测连接。')); list.append(empty);
     }
-    function renderEditor() {
-      choices.replaceChildren(); editor.replaceChildren();
-      mcpCatalog.forEach((server, index) => { const b = button(server.displayName, () => { flush(); selected = index; renderEditor(); }); b.classList.toggle('selected', index === selected); choices.append(b); });
-      if (selected < 0) { editor.append(el('p', '选择一个服务进行编辑，或添加一个服务。')); return; }
-      const { auth, ...config } = mcpCatalog[selected]; configEditor = jsonEditor(config, 12); authKind = el('select');
-      for (const kind of ['none', 'bearer', 'api_key_header', 'basic', 'query_parameter', 'custom_headers']) { const o = el('option', kind); o.value = kind; authKind.append(o); } authKind.value = auth.kind;
-      const { kind, credentialConfigured, ...publicAuth } = auth; authMeta = jsonEditor(publicAuth, 3); secret = input('', 'password'); secret.placeholder = '留空保留已保存凭据；更换认证目标需重填'; secret.autocomplete = 'new-password';
-      authKind.onchange = () => { authMeta.value = JSON.stringify(({ api_key_header: { headerName: 'X-API-Key' }, basic: { username: '' }, query_parameter: { parameterName: 'api_key' }, custom_headers: { headerNames: [] } })[authKind.value] ?? {}, null, 2); secret.value = ''; };
-      editor.append(field('服务配置 JSON（不含认证）', configEditor), field('认证方式', authKind), field('认证元数据（headerName / username / parameterName / headerNames）', authMeta), field('凭据（Custom Headers 填 JSON 对象）', secret));
-      editor.append(button('保存当前 MCP', async () => { flush(); await api('/api/mcp', { server: mcpCatalog[selected] }); dirty = false; await load(); message('Desktop MCP 已保存；所有 Runtime 可选择该条目。'); }), button('探测当前服务', async () => { flush(); const result = await api('/api/mcp/test', { server: mcpCatalog[selected] }); message(result.ok ? `连接成功，发现 ${result.toolCount} 个可用工具；尚未保存。` : '探测失败，未保存。请检查服务、认证和协议。', !result.ok); }), button('删除此 MCP', async () => { const id = mcpCatalog[selected].id; if (!id) { mcpCatalog.splice(selected, 1); selected = -1; renderEditor(); return; } await api(`/api/mcp/${id}/remove`, {}); dirty = false; await load(); message('Desktop MCP 已删除。'); }, true));
+    function withoutStatus(server) {
+      const { credentialConfigured, ...auth } = server.auth;
+      return { ...server, auth };
     }
-    card.append(button('＋ 添加 MCP', () => { mcpCatalog.push({ displayName: '新 MCP', key: `mcp-${Date.now()}`, transport: 'http', url: 'http://127.0.0.1:8000/mcp', auth: { kind: 'none' }, timeoutMs: 5000 }); selected = mcpCatalog.length - 1; renderEditor(); })); selected = mcpCatalog.length ? 0 : -1; renderEditor();
+    function allowAction() {
+      if (!dirty) return true;
+      message('有未保存更改，请先保存或取消编辑。', true); return false;
+    }
+    for (const server of mcpCatalog) {
+      const row = el('section', undefined, 'mcp-server-row');
+      const info = el('div', undefined, 'mcp-server-info');
+      const title = el('div', undefined, 'mcp-server-title'); title.append(el('strong', server.displayName), el('span', server.auth?.credentialConfigured ? '凭据已保存' : server.auth?.kind === 'none' ? '无需凭据' : '凭据未配置', 'mcp-auth-badge'));
+      let probeTimer;
+      const probeStatus = el('div', undefined, 'mcp-probe-status'); probeStatus.hidden = true; probeStatus.setAttribute('role', 'status'); probeStatus.setAttribute('aria-live', 'polite');
+      info.append(title, el('div', server.key, 'mcp-server-key'), el('div', server.url, 'mcp-server-url'), probeStatus);
+      const actions = el('div', undefined, 'capability-actions mcp-server-actions');
+      const probe = button('探测', async () => {
+        if (!allowAction()) return;
+        clearTimeout(probeTimer);
+        message(''); probeStatus.hidden = false; probeStatus.className = 'mcp-probe-status pending';
+        probeStatus.textContent = '正在探测连接…'; probe.textContent = '探测中…';
+        try {
+          const result = await api('/api/mcp/test', { server: withoutStatus(server) });
+          probeStatus.className = `mcp-probe-status ${result.ok ? 'success' : 'failure'}`;
+          probeStatus.textContent = result.ok ? `连接成功 · 发现 ${result.toolCount} 个可用工具` : '连接失败，请检查服务地址、认证和协议。';
+        } catch (error) {
+          probeStatus.className = 'mcp-probe-status failure';
+          probeStatus.textContent = errors[error?.message] ? `探测失败：${errors[error.message]}` : '探测未完成，请检查服务连接后重试。';
+        } finally {
+          probe.textContent = '探测';
+          probeTimer = setTimeout(() => { probeStatus.hidden = true; }, 10_000);
+        }
+      });
+      const edit = button('编辑', () => { if (allowAction()) openEditor(server); });
+      const remove = button('删除', async () => {
+        if (!allowAction() || !confirm(`删除“${server.displayName}”及其本机凭据？`)) return;
+        await api(`/api/mcp/${server.id}/remove`, {}); dirty = false; await load(); await changed(); message('MCP 已删除。');
+      }, true);
+      for (const [control, action] of [[probe, '探测'], [edit, '编辑'], [remove, '删除']]) control.setAttribute('aria-label', `${action} ${server.displayName}`);
+      actions.append(probe, edit, remove); row.append(info, actions); list.append(row);
+    }
+    let editor;
+    function openEditor(existing) {
+      if (!allowAction()) return;
+      editor?.remove(); editor = el('section', undefined, 'capability-card mcp-editor'); body.append(editor);
+      const heading = el('div', undefined, 'mcp-editor-heading'); const headingCopy = el('div');
+      headingCopy.append(el('strong', existing ? `编辑 ${existing.displayName}` : '新增 MCP'), el('p', '粘贴完整的 MCP JSON 配置，凭据填写在 auth 中。')); heading.append(headingCopy); editor.append(heading);
+      const { id, ...config } = existing ?? { displayName: '新 MCP', key: `mcp-${Date.now()}`, transport: 'http', url: 'http://127.0.0.1:8000/mcp', auth: { kind: 'none' }, timeoutMs: 5000 };
+      const json = jsonEditor(config, 14); json.setAttribute('aria-label', 'MCP 配置 JSON');
+      editor.append(field('MCP 配置 JSON', json), el('p', '保存后凭据不会回显。编辑时省略凭据可保留原值；更换地址或认证目标时需重新填写。', 'mcp-editor-note'));
+      function draft() {
+        let value;
+        try { value = parseMcpJson(json.value); } catch { throw new Error('mcp_json_invalid'); }
+        if (!value || typeof value !== 'object' || Array.isArray(value) || !value.auth || typeof value.auth !== 'object' || Array.isArray(value.auth)) throw new Error('mcp_json_invalid');
+        const { credentialConfigured, ...auth } = value.auth;
+        const { id: ignoredId, ...fields } = value;
+        return { ...fields, auth, ...(id ? { id } : {}) };
+      }
+      const actions = el('div', undefined, 'capability-actions mcp-editor-actions');
+      const cancel = button('取消', () => { dirty = false; editor.remove(); editor = undefined; message('已取消编辑。'); });
+      const save = button('保存 MCP', async () => { await api('/api/mcp', { server: draft() }); dirty = false; await load(); await changed(); message('MCP 已保存，所有本机 Runtime 已同步。'); }); save.classList.add('primary');
+      actions.append(cancel, save); editor.append(actions);
+      json.focus();
+    }
   }
   async function renderConnectors() {
     const [{ connectors }, { connections }] = await Promise.all([api('/api/connectors/catalog'), api('/api/connectors')]);

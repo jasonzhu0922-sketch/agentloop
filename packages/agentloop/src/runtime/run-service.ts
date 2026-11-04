@@ -41,6 +41,7 @@ import type {
 } from "../planning/contracts.ts";
 import { parseRuntimeResultRef, runtimeResultBindingsForConversationTurn } from "./runtime-result.ts";
 import { ContextCompactionStore } from "./context-compaction-store.ts";
+import { clarifyUnresolvedConversationHistory, CONVERSATION_RECONSTRUCTION_PROMPT, conversationReconstructionContext } from "./conversation-intent-reconstruction.ts";
 import type {
   PlanAdmissionObservation,
   PlanningExtension,
@@ -760,7 +761,7 @@ export class RunService {
   }
 
   async currentHumanLoop(actorUserId: string, runId: string): Promise<HumanLoopRequest | undefined> {
-    await this.get(actorUserId, runId);
+    if ((await this.get(actorUserId, runId)).status !== "running") return undefined;
     return this.humanLoops.current(runId);
   }
 
@@ -770,7 +771,7 @@ export class RunService {
   }
 
   async respondHumanLoop(actorUserId: string, runId: string, requestId: string, value: unknown, expectedRevision: unknown): Promise<HumanLoopResponse> {
-    await this.get(actorUserId, runId);
+    if ((await this.get(actorUserId, runId)).status !== "running") throw new AppError("CONFLICT", "Run is no longer accepting Human-in-the-Loop responses", 409);
     const revision = optionalPositiveInteger(expectedRevision, "expectedRevision", 1, Number.MAX_SAFE_INTEGER);
     if (revision === undefined) throw new AppError("BAD_REQUEST", "expectedRevision is required", 400);
     const request = await this.humanLoops.current(runId);
@@ -1792,12 +1793,10 @@ export class RunService {
       // actionless, abandoned Run to a Runtime Host's reconciliation pass.
       const actionScope: { planId?: string; stepId?: string } = {};
       const model = new ActionTrackedModel(rawModel, this.actions, runId, () => actionScope, runtimeClock);
-      const shouldRefreshSkillsBeforeIntent = latestTurnMayReferenceSkill(input)
-        && this.skills.skillDirectories.length > 0;
-      if (shouldRefreshSkillsBeforeIntent) {
+      if (this.skills.skillDirectories.length > 0) {
         await this.skills.refreshSkillDirectory();
       }
-      let privateSkills = await this.skills.resolveForConversation(actorUserId);
+      const privateSkills = await this.skills.resolveForConversation(actorUserId);
       let priorPreferences: InteractionMemoryProjection["preferences"];
       if (conversationEntry && this.memory !== undefined) {
         try {
@@ -1935,10 +1934,6 @@ export class RunService {
           type: "memory.explicit_commit_outcome",
           data: currentTurnMemoryCommit as unknown as Readonly<Record<string, unknown>>,
         });
-      }
-      if (!responseOnly && !shouldRefreshSkillsBeforeIntent && this.skills.skillDirectories.length > 0) {
-        await this.skills.refreshSkillDirectory();
-        privateSkills = await this.skills.resolveForConversation(actorUserId);
       }
       // A reply-only turn does not require Skills, but it must not erase the
       // Runtime's authorized capability catalog. The catalog stays inert in
@@ -3096,33 +3091,20 @@ export class RunService {
           };
           const temporalScopeGap = temporalEvidenceGap(canonicalState.intent.turnResolution?.temporalScope, evidence.toolCalls.map((call) => call.result));
           if (temporalScopeGap !== undefined) {
-            const failedBoundary: FailedBoundary = {
-              stepId: activeStep.id,
-              missingEvidenceKinds: ["source_summary", "source_urls", "explicit_caveats"],
-              violatedSkillRequirements: [],
-              reusableEvidenceRefs: evidence.toolCalls.map((toolCall) => toolCall.toolCallId),
-              suggestedRepairShape: "repair_leaf",
-            };
             await input.emit({
-              type: "candidate.temporal_scope_rejected",
+              type: "candidate.temporal_scope_gap_observed",
               data: {
                 planId: plan.id,
                 stepId: activeStep.id,
                 attempt: assessmentAttempt,
                 temporalScope: canonicalState.intent.turnResolution?.temporalScope,
                 feedback: temporalScopeGap,
-                failedBoundary,
               },
             });
-            await input.emit({
-              type: "assessment.failed_boundary",
-              data: { planId: plan.id, stepId: activeStep.id, attempt: assessmentAttempt, failedBoundary },
-            });
-            return { approved: false, feedback: temporalScopeGap, failedBoundary };
           }
           const holisticSourceContractMismatch = sourceContractNeedsHolisticAssessment(activeStep, evidence);
           const assessmentProfile = selectAssessmentProfile(activeStep, evidence, holisticSourceContractMismatch);
-          const useProfiledRuleAssessor = input.defaultAssessmentPolicyEnabled
+          const useProfiledRuleAssessor = temporalScopeGap === undefined && input.defaultAssessmentPolicyEnabled
             && isProfiledRuleAssessmentProfile(assessmentProfile);
           const assessor = useProfiledRuleAssessor
             ? new ProfiledRuleStepAssessor(assessmentProfile)
@@ -3141,6 +3123,7 @@ export class RunService {
             activatedSkills: activatedStepSkills,
             evidence,
             modelEvidence,
+            ...(temporalScopeGap === undefined ? {} : { temporalEvidenceGap: temporalScopeGap }),
             ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
             ...(input.runtimeCapabilityInventory === undefined ? {} : { runtimeCapabilityInventory: input.runtimeCapabilityInventory }),
             decisionLedger,
@@ -3200,6 +3183,7 @@ export class RunService {
             skills: activatedStepSkills,
             evidence,
             modelEvidence,
+            ...(temporalScopeGap === undefined ? {} : { temporalEvidenceGap: temporalScopeGap }),
             ...(input.confirmedResponseMemory?.facts === undefined ? {} : {
               confirmedResponseMemory: {
                 memoryRevisionIds: input.confirmedResponseMemory.memoryRevisionIds,
@@ -6748,6 +6732,7 @@ function stepAssessmentSignature(input: {
   activatedSkills: readonly PrivateSkill[];
   evidence: StepEvidence;
   modelEvidence: StepEvidence;
+  temporalEvidenceGap?: string;
   runtimeCapabilitySnapshot?: RuntimeCapabilitySnapshot;
   runtimeCapabilityInventory?: {
     readonly requestedScope: import("./capability-snapshot.ts").RuntimeCapabilitySnapshotScope;
@@ -6764,6 +6749,7 @@ function stepAssessmentSignature(input: {
       .sort((left, right) => left.id.localeCompare(right.id, "en")),
     evidence: assessmentEvidenceSignature(input.evidence),
     modelEvidence: assessmentEvidenceSignature(input.modelEvidence),
+    ...(input.temporalEvidenceGap === undefined ? {} : { temporalEvidenceGap: input.temporalEvidenceGap }),
     ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
     ...(input.runtimeCapabilityInventory === undefined ? {} : { runtimeCapabilityInventory: input.runtimeCapabilityInventory }),
     decisionLedger: input.decisionLedger.map((commit) => ({
@@ -7951,16 +7937,28 @@ async function resolveConversationTurn(
   };
   let semanticFeedback: string | undefined;
   let nonExecutableArtifactResolution: ConversationTurnResolution | undefined;
+  let clarificationReviewed = false;
+  let reconstructing = false;
+  let lastFailureWasBinding = false;
+  const beginReconstruction = async (attempt: number) => {
+    if (reconstructing || attempt === CONVERSATION_TURN_RESOLUTION_ATTEMPTS) return;
+    reconstructing = true;
+    // Re-derive intent from durable evidence rather than anchoring the model
+    // to a malformed proposal. Further reconstruction repairs retain context.
+    repairMessages.length = 0;
+    await emit({ type: "conversation.turn.reconstruction_started", data: { resolverAttempt: attempt,
+      reason: "prior_work_binding", priorRunCount: context.conversationWorkingSet?.runCount ?? 0 } });
+  };
   for (let attempt = 1; attempt <= CONVERSATION_TURN_RESOLUTION_ATTEMPTS; attempt += 1) {
     const resolverTool = conversationTurnTool(context);
     const response = await model.completeWithRequestTelemetry({
       runId: `conversation-turn:${randomUUID()}`,
-      systemPrompt: conversationTurnResolverPrompt(repairFeedback),
+      systemPrompt: [conversationTurnResolverPrompt(repairFeedback), ...(reconstructing ? [CONVERSATION_RECONSTRUCTION_PROMPT] : [])].join("\n"),
       phase: "planning",
       runtimeContext: {
         id: runtimeContextId,
         phase: "planning",
-        content: formatConversationTurnContext(context, input),
+        content: formatConversationTurnContext(context, input, reconstructing),
       },
       messages: [
         ...(conversationHistory ?? []),
@@ -7971,17 +7969,25 @@ async function resolveConversationTurn(
       toolChoice: { name: resolverTool.name },
     }, emit, {
       phase: "planning",
-      purpose: "conversation_turn_resolver",
+      purpose: reconstructing ? "conversation_history_reconstruction" : "conversation_turn_resolver",
       resolverAttempt: attempt,
     }, signal);
     const parsed = parseConversationTurnResolution(response, context, input);
+    lastFailureWasBinding = !parsed.valid && parsed.bindingFailure === true;
+    if (!parsed.valid) {
+      semanticFeedback = undefined;
+      nonExecutableArtifactResolution = undefined;
+    }
     if (parsed.valid) {
       const resolution = parsed.resolution;
       const artifactBound = bindUnambiguousPriorArtifact(resolution, input, context.conversationWorkingSet);
-      const relationBound = bindPriorArtifactMutationRelation(artifactBound, input);
+      const relationBound = bindPriorTaskRefinementRelation(artifactBound, input, context.conversationWorkingSet);
       const inherited = inheritContinuedConversationIntent(relationBound, context.conversationWorkingSet);
       const inheritedBinding = inheritPriorWorkProductBinding(inherited, context.conversationWorkingSet);
-      const resultBound = bindUnambiguousPriorResult(inheritedBinding, input, context.conversationWorkingSet);
+      const resultBound = inheritBoundResultTemporalScope(
+        bindUnambiguousPriorResult(inheritedBinding, input, context.conversationWorkingSet),
+        context.conversationWorkingSet,
+      );
       const nonExecutableArtifactFeedback = conversationTurnNonExecutableArtifactFeedback(resultBound);
       if (nonExecutableArtifactFeedback !== undefined) {
         nonExecutableArtifactResolution = resultBound;
@@ -8000,7 +8006,7 @@ async function resolveConversationTurn(
       }
       semanticFeedback = conversationTurnSemanticFeedback(resultBound, input, context.conversationWorkingSet);
       if (semanticFeedback === undefined) {
-        return applyConversationTurnDirectReplyFloor(
+        const finalResolution = applyConversationTurnDirectReplyFloor(
           applyConversationTurnExplicitSkillExecutionFloor(
             applyConversationTurnArtifactExecutionFloor(
               normalizeConversationTurnEvidenceBinding(resultBound),
@@ -8011,6 +8017,18 @@ async function resolveConversationTurn(
           ),
           input,
         );
+        if (finalResolution.mode === "clarify" && !clarificationReviewed && (context.availableSkills?.length ?? 0) > 0
+          && attempt < CONVERSATION_TURN_RESOLUTION_ATTEMPTS) {
+          clarificationReviewed = true;
+          retainRepairFeedback("Review the proposed clarification against the complete authorized Skill metadata and the user's actual request. Clarify only if a decision or essential target information is genuinely missing; an absent uploaded file, directory, URL, or credential alone does not establish that no available capability can acquire evidence. If the goal is actionable, return execute and preserve the user's goal without treating inferred missing resources as user constraints. Do not select a Skill here. If a material ambiguity remains, retain clarify and identify it.", response);
+          await emit({ type: "conversation.turn.clarification_review_started", data: { resolverAttempt: attempt } });
+          continue;
+        }
+        if (reconstructing) await emit({ type: "conversation.turn.reconstruction_completed", data: {
+          resolverAttempt: attempt, mode: finalResolution.mode, relation: finalResolution.relation,
+          ...(finalResolution.targetRunId === undefined ? {} : { targetRunId: finalResolution.targetRunId }),
+        } });
+        return finalResolution;
       }
       retainRepairFeedback(semanticFeedback, response);
       await emit({
@@ -8022,6 +8040,8 @@ async function resolveConversationTurn(
           ...conversationTurnResolutionAttemptSummary(response),
         },
       });
+      lastFailureWasBinding = resultBound.mode === "execute" && referencesPriorConversationResult(input) && resultBound.targetResult === undefined;
+      if (lastFailureWasBinding) await beginReconstruction(attempt);
       continue;
     }
     retainRepairFeedback(parsed.feedback, response);
@@ -8030,10 +8050,18 @@ async function resolveConversationTurn(
       data: {
         resolverAttempt: attempt,
         category: "shape_contract",
+        ...(parsed.bindingFailure ? { boundary: "prior_work_binding" } : {}),
         feedback: repairFeedback,
         ...conversationTurnResolutionAttemptSummary(response),
       },
     });
+    if (lastFailureWasBinding) await beginReconstruction(attempt);
+  }
+  if (lastFailureWasBinding) {
+    await emit({ type: "conversation.turn.reconstruction_unresolved", data: {
+      resolverAttempts: CONVERSATION_TURN_RESOLUTION_ATTEMPTS, reconstructionAttempted: reconstructing,
+    } });
+    return clarifyUnresolvedConversationHistory();
   }
   if (nonExecutableArtifactResolution !== undefined) {
     return clarifyAfterNonExecutableArtifactResolution(nonExecutableArtifactResolution);
@@ -8225,26 +8253,44 @@ function bindUnambiguousPriorArtifact(
 }
 
 /**
- * A new transformation of an accepted prior artifact is a refinement edge,
+ * A changed terminal output or transformation of a prior artifact is a refinement edge,
  * not a resumption of the prior operation. Keeping it as continue_prior would
  * replace the new effective goal with the old goal before canonical intent is
  * frozen.
  */
-function bindPriorArtifactMutationRelation(
+function bindPriorTaskRefinementRelation(
   resolution: ConversationTurnResolution,
   input: string,
+  workset: ConversationWorkingSet | undefined,
 ): ConversationTurnResolution {
+  const priorIntent = workset?.resolvedIntents?.find((item) => item.runId === resolution.targetRunId)?.resolution.taskIntent;
+  const outputShape = (intent: ConversationTaskIntent) => JSON.stringify(intent.deliverables.map((item) => ({
+    action: item.action, kind: item.kind, format: item.format, surface: item.surface, count: item.expectedArtifactCount,
+  })));
+  const changedOutput = priorIntent !== undefined && outputShape(priorIntent) !== outputShape(resolution.taskIntent);
   if (
     resolution.mode !== "execute"
     || resolution.relation !== "continue_prior"
-    || resolution.targetArtifact === undefined
-    || (!conversationTaskMutatesArtifact(resolution.taskIntent) && !requestsPriorArtifactChange(input))
+    || (!changedOutput && (resolution.targetArtifact === undefined
+      || (!conversationTaskMutatesArtifact(resolution.taskIntent) && !requestsPriorArtifactChange(input))))
   ) return resolution;
   return {
     ...resolution,
     relation: "refine_prior",
     source: "model_guarded",
   };
+}
+
+/** Changing delivery does not turn a historical observation into a fresh one. */
+function inheritBoundResultTemporalScope(
+  resolution: ConversationTurnResolution,
+  workset: ConversationWorkingSet | undefined,
+): ConversationTurnResolution {
+  if (resolution.inputMode !== "prior_result" || resolution.targetResult === undefined) return resolution;
+  const producer = workset?.resultCards?.find((card) => card.result.resultId === resolution.targetResult?.resultId)?.producer.runId;
+  const scope = workset?.resolvedIntents?.find((item) => item.runId === producer)?.resolution.temporalScope;
+  if (scope === undefined || JSON.stringify(scope) === JSON.stringify(resolution.temporalScope)) return resolution;
+  return { ...resolution, temporalScope: scope, source: "model_guarded" };
 }
 
 /** The validated semantic frame owns artifact edits, including elliptical turns. */
@@ -8302,6 +8348,7 @@ function conversationTurnSemanticFeedback(
   input: string,
   workset: ConversationWorkingSet | undefined,
 ): string | undefined {
+  if (resolution.mode !== "execute") return undefined;
   if (referencesPriorConversationResult(input) && resolution.targetResult === undefined) {
     const candidates = workset?.resultCards ?? [];
     if (candidates.length === 0) {
@@ -8531,11 +8578,6 @@ function explicitlyReferencedAvailableSkill(
   return skills.find((skill) => exactSkillMention(signal, skill));
 }
 
-function latestTurnMayReferenceSkill(input: string): boolean {
-  return /(?:\bskill\b|技能|能力|用\s*[a-z0-9]+(?:-[a-z0-9]+)+|使用\s*[a-z0-9]+(?:-[a-z0-9]+)+|按\s*[a-z0-9]+(?:-[a-z0-9]+)+|@[a-z0-9]+(?:-[a-z0-9]+)+)/iu
-    .test(input);
-}
-
 function isDirectConversationReply(input: string): boolean {
   const intent = classifyTaskIntent({ objective: input });
   if (intent.sourceNeed !== "none" || requiresExternalState(input)) return false;
@@ -8585,7 +8627,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "Preserve the exact requested facts, roles, measures, scope and time in effectiveGoal and every deliverable purpose. Available Skills or source fields describe acquisition options, not permission to narrow the user goal to a provider's scope or replace a requested concept with a related field. A source-specific qualification may be added only when the user requested it or established conversation context requires it.",
       "Evidence demand is channel-neutral. Do not add public-web, external-source-only, official-site, or database-only restrictions to effectiveGoal unless the user or established context requires them. A requested output format changes delivery, not the domain analysis or data source; capability and workflow selection belong to Planner.",
       "Resolve effectiveGoal, evidenceStrategy, and sourceBinding as one decision. Do not make evidence strategy independent from the task input you selected.",
-      "Use evidenceStrategy=none when the requested work can use supplied values, transcript facts or creative content without acquiring outside facts. Comparison, calculation, generation and result assessment do not by themselves require source research; describe the actual missing fact before selecting a source-acquisition strategy.",
+      "Use evidenceStrategy=none when the requested work can use supplied values, transcript facts, stable general knowledge, or creative content without acquiring outside facts. Comparison, calculation, generation and result assessment do not by themselves require source research; describe the actual missing fact before selecting a source-acquisition strategy.",
       "Also return taskIntent as a semantic frame: operation, requiresExecution, and every terminal output family the user requested with stable targetId, user-visible purpose, exact expectedArtifactCount, action, semantic kind, optional concrete format, and delivery surface. targetId/purpose are the immutable identity and acceptance intent of each output family, never a filename. expectedArtifactCount is required, must be a positive integer, and must preserve an explicit requested cardinality; use 1 only when exactly one output is requested. Derive these fields from the full transcript and prior work context, not from isolated action words.",
       "taskIntent.deliverables is an acceptance contract, not an implementation plan. Never promote a helper script, temporary file, manifest, intermediate representation, source summary, or verification output into deliverables merely because execution may create or use it. Include code plus a rendered artifact only when the user explicitly requests both as terminal outputs.",
       "taskIntent.requiresExecution must agree with mode=execute. Preserve every explicitly requested terminal output instead of choosing one because it appears first.",
@@ -8594,10 +8636,10 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "When a visible directory is the primary data input, set sourceBinding.mode=primary_data, select only its opaque IDs from visibleDirectories, and set evidenceStrategy=bound_visible_sources. A primary-data binding can never use evidenceStrategy=none.",
       "When multiple visible directories could plausibly satisfy the goal and the transcript does not distinguish one, return clarify rather than guessing. Do not bind a directory merely because it is available.",
       "For lookup, uploaded, or other non-directory evidence, keep sourceBinding.mode=none and choose the matching non-bound evidenceStrategy.",
-      "Return reply only when the effective goal can be satisfied solely from the existing transcript and supplied metadata.",
+      "Return reply when the effective goal can be satisfied from the existing transcript, supplied metadata, or the model's reliable general knowledge without external state or tool use. Stable common-knowledge questions can be answered directly; do not require a source merely because the answer is a factual statement. If unsure, do not guess: choose an appropriate acquisition strategy or acknowledge uncertainty.",
       "runtimeCapabilityInventories are frozen capability knowledge with explicit scopes. For a capability-inventory question, choose reply when the requested scope is supplied: run_authorized for current/selected/authorized services; runtime_configured for system-wide, configured, installed, connected, or MCP-service directory questions; platform_catalog only for product-supported/installable questions. Never use a run_authorized inventory to claim that a service is absent from the Runtime configuration. If the requested broader scope is not supplied, a reply may state only that this Runtime did not provide that catalog metadata; do not invent a directory Tool or assert absence.",
       "Return execute when faithful completion requires external state acquisition or capability use, even when the user only rejects, questions, or refines a prior answer.",
-      "A request for specific externally verifiable facts that are not grounded in the transcript needs lookup_lite or source_grounded evidence even when the user did not explicitly say search or browse.",
+      "Choose lookup_lite or source_grounded for facts that require fresh, private, task-specific, disputed, or otherwise verifiable external evidence to answer the user's actual request. Respect explicit requests for sources, verification, or current information; mere factuality does not require retrieval.",
       "When the user disputes an unsupported prior factual answer, bind to that prior Run, use correct_prior or challenge_prior, and require source_grounded evidence.",
       "Use strict_user_source only when the user explicitly requires official, authoritative, or exact-source verification.",
       "Use clarify when the semantic target or requested external side effect is materially ambiguous. This resolution never grants permission for destructive or external side effects.",
@@ -8605,7 +8647,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "A user may describe the needed capability without naming a provider or tool. Preserve that functional need and return execute when it requires capability use; Planner selects the matching authorized capability. Catalog availability is not by itself a request to use a tool, and must not narrow or replace the user's semantic goal.",
       "Candidate selectors are closed-world Runtime handles, not values you may construct. Use only selector fields and enum values exposed by the current tool schema; never infer an ID from its pattern.",
       "For relation=new_goal, omit targetGoalCandidateId, targetArtifact, and resultCandidateId. targetArtifact always means an existing reusable prior artifact, never the output path of a new artifact.",
-      "targetGoalCandidateId must be one of priorGoalCandidates and is required for every relation except new_goal. Never reconstruct or emit a Run ID.",
+      "For a prior relation, select targetGoalCandidateId from priorGoalCandidates. When inputMode=prior_result and resultCandidateId is selected, Runtime can derive the goal from that Result's producer if targetGoalCandidateId is omitted; include a separate targetGoalCandidateId when continuing a different failed goal. Never reconstruct or emit a Run ID.",
       "When changing a prior delivered file, use the matching opaque goal candidate for lineage and select its concrete artifact path. Do not select an artifact for a request that only reuses prior facts or delivery text.",
       "Set inputMode=prior_result when a follow-up consumes prior accepted delivery text, and select only its opaque resultCandidateId from reusableResultCandidates. Never reconstruct or emit a Run ID, hash, or character count for a result.",
       "Set inputMode=prior_artifact only when changing a concrete delivered file. Set inputMode=refresh_sources only when the latest user asks to refresh, reanalyze, or verify source facts. Otherwise use inputMode=none.",
@@ -8635,8 +8677,9 @@ function parseConversationTurnResolution(
   response: ModelResponse,
   context: ConversationIntentExternalContext,
   input: string,
-): { valid: true; resolution: ConversationTurnResolution } | { valid: false; feedback: string } {
+): { valid: true; resolution: ConversationTurnResolution } | { valid: false; feedback: string; bindingFailure?: boolean } {
   const reject = (feedback: string) => ({ valid: false as const, feedback });
+  const rejectBinding = (feedback: string) => ({ ...reject(feedback), bindingFailure: true });
   const workset = context.conversationWorkingSet;
   const calls = response.toolCalls.filter((call) => call.name === CONVERSATION_TURN_TOOL_NAME);
   if (response.toolCalls.length !== 1 || calls.length !== 1) {
@@ -8678,17 +8721,21 @@ function parseConversationTurnResolution(
     : { runId: candidateArtifact.runId, path: candidateArtifact.path };
   const guardedPriorArtifact = targetArtifact !== undefined && mode === "execute"
     && (conversationTaskMutatesArtifact(taskIntent) || requestsPriorArtifactChange(input));
-  // A failed goal may consume a reusable file produced by an earlier Run.
-  // Preserve the selected goal lineage independently of that input's provenance.
-  const targetRunId = candidateTargetRunId ?? (guardedPriorArtifact ? targetArtifact.runId : undefined);
-  const normalizedInputMode = guardedPriorArtifact ? "prior_artifact" : inputMode;
-  const normalizedRelation = guardedPriorArtifact && relation === "new_goal" ? "refine_prior" : relation;
   const resultCandidateId = typeof argumentsRecord.resultCandidateId === "string"
     ? argumentsRecord.resultCandidateId.trim()
     : undefined;
   const targetResult = resultCandidateId === undefined
     ? undefined
     : conversationResultForCandidateId(workset, resultCandidateId);
+  const resultProducer = mode === "execute" && inputMode === "prior_result" && targetResult !== undefined
+    ? workset?.resultCards?.find((card) => card.result.resultId === targetResult.resultId)?.producer.runId
+    : undefined;
+  // A selected published Result already identifies its producer. Do not ask
+  // the model to duplicate that identity, but preserve a separately selected
+  // failed goal when its input belongs to an earlier Run.
+  const targetRunId = candidateTargetRunId ?? (guardedPriorArtifact ? targetArtifact.runId : resultProducer);
+  const normalizedInputMode = guardedPriorArtifact ? "prior_artifact" : inputMode;
+  const normalizedRelation = (guardedPriorArtifact || resultProducer !== undefined) && relation === "new_goal" ? "refine_prior" : relation;
   const userConstraints = Array.isArray(argumentsRecord.userConstraints)
     && argumentsRecord.userConstraints.length <= 8
     && argumentsRecord.userConstraints.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= 240)
@@ -8721,20 +8768,29 @@ function parseConversationTurnResolution(
     && !taskIntent.requiresExecution
     && (normalizedInputMode !== "none" || targetArtifact !== undefined || targetResult !== undefined)
   ) return reject("A reply or clarification must use inputMode=none and omit targetArtifact and resultCandidateId; consuming prior artifacts or results requires mode=execute.");
-  if (argumentsRecord.targetArtifact !== undefined && targetArtifact === undefined) return reject("targetArtifact.path must select one unambiguous Runtime-issued reusable prior artifact path, never a new output path.");
-  if (targetGoalCandidateId !== undefined && candidateTargetRunId === undefined && targetArtifact === undefined) return reject("targetGoalCandidateId must be one of the Runtime-issued candidates in priorGoalCandidates. Never invent a candidate ID.");
-  if (resultCandidateId !== undefined && targetResult === undefined) return reject("resultCandidateId must select a Runtime-issued reusableResultCandidates entry. Never invent a candidate ID.");
-  if (normalizedInputMode === "prior_result" && targetResult === undefined) return reject("inputMode=prior_result requires resultCandidateId from reusableResultCandidates.");
-  if (normalizedInputMode !== "prior_result" && resultCandidateId !== undefined) return reject("resultCandidateId requires inputMode=prior_result; otherwise omit it.");
-  if (normalizedInputMode === "prior_artifact" && targetArtifact === undefined) return reject("inputMode=prior_artifact requires targetArtifact.path from Runtime-issued reusable prior artifacts.");
-  if (normalizedInputMode !== "prior_artifact" && targetArtifact !== undefined) return reject("targetArtifact requires inputMode=prior_artifact; otherwise omit it.");
   if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000) return reject("effectiveGoal must be a non-empty string no longer than 2000 characters.");
   if (userConstraints === undefined) return reject("userConstraints must be an array of at most 8 non-empty strings, each no longer than 240 characters; use [] when no additional constraint applies.");
   if (memoryAction !== "none" && memoryAction !== "commit") return reject("memoryAction must be none or commit and is required for every turn.");
   if (memoryIntents === undefined) return reject("memoryIntents must be an array of at most 4 structured preference/fact proposals; use [] when none applies.");
   if (memoryAction === "none" && memoryIntents.length !== 0) return reject("memoryAction=none requires memoryIntents=[].");
   if (memoryAction === "commit" && memoryIntents.length === 0) return reject("memoryAction=commit requires at least one structured memoryIntents candidate.");
-  const priorInput = targetRunId === undefined ? undefined : workset?.planCursors.find((cursor) => cursor.runId === targetRunId)?.input;
+  if (argumentsRecord.targetArtifact !== undefined && targetArtifact === undefined) return rejectBinding("targetArtifact.path must select one unambiguous Runtime-issued reusable prior artifact path, never a new output path.");
+  if (targetGoalCandidateId !== undefined && candidateTargetRunId === undefined && targetArtifact === undefined) return rejectBinding("targetGoalCandidateId must be one of the Runtime-issued candidates in priorGoalCandidates. Never invent a candidate ID.");
+  if (resultCandidateId !== undefined && targetResult === undefined) return rejectBinding("resultCandidateId must select a Runtime-issued reusableResultCandidates entry. Never invent a candidate ID.");
+  if (normalizedInputMode === "prior_result" && targetResult === undefined) return rejectBinding("inputMode=prior_result requires resultCandidateId from reusableResultCandidates.");
+  if (normalizedInputMode !== "prior_result" && resultCandidateId !== undefined) return rejectBinding("resultCandidateId requires inputMode=prior_result; otherwise omit it.");
+  if (normalizedInputMode === "prior_artifact" && targetArtifact === undefined) return rejectBinding("inputMode=prior_artifact requires targetArtifact.path from Runtime-issued reusable prior artifacts.");
+  if (normalizedInputMode !== "prior_artifact" && targetArtifact !== undefined) return rejectBinding("targetArtifact requires inputMode=prior_artifact; otherwise omit it.");
+  // Grounding depends on the selected prior Run. Diagnose a missing lineage
+  // before validating its time quotes, otherwise repair repeatedly rejects
+  // genuine prior wording without telling the model to select its source.
+  const priorRunIds = conversationTurnTargetRunIds(workset);
+  if (normalizedRelation === "new_goal") {
+    if (targetRunId !== undefined && !priorRunIds.has(targetRunId)) return rejectBinding("targetGoalCandidateId must identify a prior goal in this conversation.");
+  } else if (targetRunId === undefined || !priorRunIds.has(targetRunId)) {
+    return rejectBinding(`relation=${normalizedRelation} requires targetGoalCandidateId selected from priorGoalCandidates; use relation=new_goal when no prior candidate applies.`);
+  }
+  const priorInput = targetRunId === undefined ? undefined : conversationTurnPriorInput(workset, targetRunId);
   const temporalUserInputs = [input, ...(priorInput === undefined ? [] : [priorInput])];
   const groundedFields = [{ field: "effectiveGoal", value: effectiveGoal },
     ...userConstraints.map((value, index) => ({ field: `userConstraints[${index}]`, value })),
@@ -8759,12 +8815,6 @@ function parseConversationTurnResolution(
   }
   if (mode !== "execute" && (evidenceDemand !== "none" || sourceBinding.mode !== "none")) return reject("mode=reply or clarify requires evidenceStrategy=none and sourceBinding.mode=none. Acquiring evidence requires mode=execute.");
 
-  const priorRunIds = conversationTurnTargetRunIds(workset);
-  if (normalizedRelation === "new_goal") {
-    if (targetRunId !== undefined && !priorRunIds.has(targetRunId)) return reject("targetGoalCandidateId must identify a prior goal in this conversation.");
-  } else if (targetRunId === undefined || !priorRunIds.has(targetRunId)) {
-    return reject(`relation=${normalizedRelation} requires targetGoalCandidateId selected from priorGoalCandidates; use relation=new_goal when no prior candidate applies.`);
-  }
   if (targetArtifact !== undefined) {
     if (normalizedRelation === "new_goal") return reject("relation=new_goal cannot select targetArtifact; a prior artifact transformation requires prior goal lineage.");
     const isReusable = workset?.reusableArtifacts.some((artifact) =>
@@ -8790,7 +8840,7 @@ function parseConversationTurnResolution(
     memoryIntents,
     ...(temporalScope === undefined ? {} : { temporalScope }),
     requiredCapabilityReferences,
-    source: guardedPriorArtifact ? "model_guarded" : "model",
+    source: guardedPriorArtifact || (candidateTargetRunId === undefined && resultProducer !== undefined) ? "model_guarded" : "model",
   } };
 }
 
@@ -9119,7 +9169,13 @@ function conversationTurnTargetRunIds(workset: ConversationWorkingSet | undefine
     ...(workset.resolvedIntents ?? []).map((item) => item.runId),
     ...workset.failedBoundaries.map((boundary) => boundary.runId),
     ...(workset.activeGoal === undefined ? [] : [workset.activeGoal.runId]),
+    ...(workset.priorRuns ?? []).map((run) => run.runId),
   ]);
+}
+
+function conversationTurnPriorInput(workset: ConversationWorkingSet | undefined, runId: string): string | undefined {
+  return workset?.priorRuns?.find((run) => run.runId === runId)?.input
+    ?? workset?.planCursors.find((cursor) => cursor.runId === runId)?.input;
 }
 
 function optionalRecord(value: unknown): Record<string, unknown> {
@@ -9138,12 +9194,13 @@ interface ConversationIntentExternalContext {
   readonly priorPreferences?: InteractionMemoryProjection["preferences"];
 }
 
-function formatConversationTurnContext(context: ConversationIntentExternalContext, input: string): string {
+function formatConversationTurnContext(context: ConversationIntentExternalContext, input: string, reconstructing = false): string {
   const workset = context.conversationWorkingSet;
   const goalRunIds = [...conversationTurnTargetRunIds(workset)];
   const goalCandidateIdByRunId = new Map(goalRunIds.map((runId, index) => [runId, `goal_candidate_${index + 1}`]));
   const payload = {
     schema: "agentloop.conversationTurnContext/v1",
+    ...(reconstructing ? { historyReconstruction: conversationReconstructionContext(workset, goalCandidateIdByRunId) } : {}),
     ...(context.priorPreferences === undefined ? {} : { priorPreferences: context.priorPreferences }),
     ...(context.runtimeClock === undefined ? {} : { runtimeClock: context.runtimeClock }),
     externalContextPolicy: {
@@ -9166,14 +9223,13 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
       chunkCount: source.chunkCount,
       truncated: source.truncated,
     })),
-    // Intent resolution recognizes explicit capability names; source scope,
-    // workflow templates and catalog examples belong to the Planner. Exposing
-    // them here lets an available source redefine the question before planning.
+    // Metadata informs whether evidence can be acquired; it does not select
+    // a Skill, grant execution, or redefine the user's goal.
     availableSkills: (context.availableSkills ?? [])
-      .filter((skill) => exactSkillMention(input.toLowerCase(), skill))
       .map((skill) => ({
       id: skill.id,
       name: skill.name,
+      description: skill.description,
     })),
     availableTools: (context.availableTools ?? []).map((tool) => ({
       name: tool.name,
@@ -9188,16 +9244,18 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
     })),
     conversationWorkingSet: {
       priorGoalCandidates: goalRunIds.map((runId, index) => {
+        const priorRun = workset?.priorRuns?.find((item) => item.runId === runId);
+        const priorInput = conversationTurnPriorInput(workset, runId);
         const cursor = workset?.planCursors.find((item) => item.runId === runId);
         const intent = workset?.resolvedIntents?.find((item) => item.runId === runId)?.resolution;
         const failure = workset?.failedBoundaries.find((item) => item.runId === runId);
         return {
           candidateId: `goal_candidate_${index + 1}`,
-          ...(cursor?.input === undefined ? {} : { input: cursor.input }),
+          ...(priorInput === undefined ? {} : { input: priorInput }),
           goal: cursor?.goal ?? intent?.effectiveGoal ?? (
             workset?.activeGoal?.runId === runId ? workset.activeGoal.goal : undefined
-          ),
-          status: cursor?.status ?? (
+          ) ?? priorInput,
+          status: priorRun?.status ?? cursor?.status ?? (
             workset?.activeGoal?.runId === runId
               ? workset.activeGoal.status
               : failure === undefined ? undefined : "failed"
@@ -9238,6 +9296,7 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
       })),
       reusableResultCandidates: (workset?.resultCards ?? []).map((item, index) => ({
         candidateId: `result_candidate_${index + 1}`,
+        goalCandidateId: goalCandidateIdByRunId.get(item.producer.runId),
         goal: item.goal,
         summary: item.summary,
         summaryTruncated: item.summaryTruncated,

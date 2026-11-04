@@ -111,6 +111,7 @@ export class DesktopAccountManagers {
       secrets: new EncryptedLocalRuntimeSecretStore(join(root, "private", "mcp-secrets")),
       connectorSecrets: new EncryptedLocalRuntimeSecretStore(join(root, "private", "connector-secrets")),
       computerCommandSandbox: { mode: "required", readOnlyRoots },
+      sharedMcpCatalog: true,
     });
     try { await authorizeStorage(await manager.deviceStorageConfiguration()); }
     catch (error) { await manager.close(); throw error; }

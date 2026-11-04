@@ -102,6 +102,26 @@ test("Desktop uses the standalone cloud service for registration, login, revocat
   await scan(dataDirectory);
 });
 
+test("a cloud outage does not prevent an authenticated browser from logging out locally", async t => {
+  const root = await mkdtemp(join(tmpdir(), "desktop-outage-")); const skills = join(root, "skills"); await mkdir(skills);
+  const cloud = fixtureAuth();
+  const app = await startDesktop({ mode: "development", dataDirectory: join(root, "data"), models: modelPort(), cloudAuth: cloud, openBrowser: false, bundledSkillDirectories: [skills] });
+  t.after(async () => { if (!app.existing) await app.close(); await rm(root, { recursive: true, force: true }); });
+  const origin = app.origin;
+  const login = await fetch(origin + "/api/auth/login", { method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ email: "test@example.test", password: "fixture-password" }) });
+  assert.equal(login.status, 200);
+  const cookie = login.headers.get("set-cookie")!.split(";")[0]!;
+  cloud.current = async () => { throw new HttpError(503, "cloud_auth_unavailable"); };
+  cloud.logout = async () => { throw new HttpError(503, "cloud_auth_unavailable"); };
+  assert.equal((await fetch(origin + "/api/session", { headers: { Cookie: cookie } })).status, 503);
+  assert.equal((await fetch(origin + "/api/auth/logout-token")).status, 401);
+  const recovery = await fetch(origin + "/api/auth/logout-token", { headers: { Cookie: cookie } });
+  const { csrfToken } = await recovery.json();
+  const logout = await fetch(origin + "/api/auth/logout", { method: "POST", headers: { Origin: origin, Cookie: cookie, "Content-Type": "application/json", "X-Desktop-CSRF": csrfToken }, body: "{}" });
+  assert.deepEqual(await logout.json(), { loggedOut: true, cloudRevoked: false });
+  assert.equal((await fetch(origin + "/api/auth/logout-token", { headers: { Cookie: cookie } })).status, 401);
+});
+
 test("missing or unavailable cloud authentication never falls back to a development identity", async t => {
   const root = await mkdtemp(join(tmpdir(), "desktop-no-auth-")); const skills = join(root, "skills"); await mkdir(skills);
   const app = await startDesktop({ mode: "development", dataDirectory: join(root, "data"), models: modelPort(), openBrowser: false, bundledSkillDirectories: [skills] });

@@ -549,3 +549,24 @@
 
 .msg.assistant[data-assistant-message]:focus-visible .live-card,
 .msg.assistant.selected .live-card { border-color: color-mix(in srgb, var(--brand) 55%, var(--border)); box-shadow: 0 0 0 2px var(--brand-soft); }
+
+.human-loop { margin: 18px 0; padding: 18px; border: 1px solid var(--brand); border-radius: 14px; background: var(--bg); color: var(--text); }
+.human-loop header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+.human-loop header > span { color: var(--brand); font-size: 12px; }
+.human-loop p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.human-loop details { margin: 10px 0; font-size: 13px; color: var(--text-2); }
+.human-loop summary { cursor: pointer; }
+.human-loop fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.human-loop-options, .human-loop-fields { display: grid; gap: 10px; margin: 12px 0; }
+.human-loop-options label { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; cursor: pointer; }
+.human-loop-options label:has(input:checked) { border-color: var(--brand); background: var(--brand-soft); }
+.human-loop-options input { margin-top: 4px; accent-color: var(--brand); }
+.human-loop-options span, .human-loop-fields label, .human-loop-reason { display: grid; gap: 5px; min-width: 0; overflow-wrap: anywhere; }
+.human-loop small, .human-loop-hint { color: var(--text-2); font-size: 13px; }
+.human-loop-fields input, .human-loop textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--bg-2); color: var(--text); font: inherit; }
+.human-loop textarea { resize: vertical; }
+.human-loop :is(input,textarea,button):focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.human-loop-submit { margin-top: 14px; padding: 10px 16px; border: 0; border-radius: 9px; background: var(--brand); color: white; cursor: pointer; font: inherit; }
+.human-loop fieldset:disabled { opacity: .65; }
+.human-loop-feedback { margin-bottom: 0; font-size: 13px; }
+.human-loop-feedback:empty { display: none; }

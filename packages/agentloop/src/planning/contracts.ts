@@ -301,6 +301,12 @@ export interface ConversationWorkingSet {
   readonly schema: "conversation.workset/v1";
   readonly conversationId: string;
   readonly runCount: number;
+  /** Original user requests survive even when a Run never produced a Plan. */
+  readonly priorRuns?: readonly {
+    readonly runId: string;
+    readonly input: string;
+    readonly status: "running" | "completed" | "failed" | "cancelled";
+  }[];
   readonly activeGoal?: ConversationActiveGoal;
   readonly planCursors: readonly ConversationPlanCursor[];
   /** Canonical turn intents persisted by prior Runs, keyed by their owning Run. */
@@ -688,6 +694,8 @@ export interface StepAssessmentInput {
   /** Authoritative persistence outcome for a durable-memory request in this turn. */
   readonly currentTurnMemoryCommit?: CurrentTurnMemoryCommitState;
   readonly contextSummary?: string;
+  /** Runtime-observed coverage gap; its significance is judged against the user's goal. */
+  readonly temporalEvidenceGap?: string;
   readonly assessmentProfile?: AssessmentProfileId;
   /** Server-verified Runtime Result evidence bundles. Tool labels remain advisory. */
   readonly runtimeEvidenceBundles?: AssessmentEvidenceBundles;

@@ -5,8 +5,13 @@ import { projectAssistantEvent } from './reference/projections/assistant-event-p
 export function createTurn(run) {
   return { id: run.id, run, revision: 0, text: '', reasoning: '', plan: [], events: [], artifacts: [], lastSeq: 0, status: run.status };
 }
-export function updateTurn(turn, run, incoming = []) {
+export function updateTurn(turn, run, incoming = [], artifacts, humanLoop) {
   let changed = ['status', 'output', 'finishedAt', 'errorCode', 'modelKey'].some(key => turn.run[key] !== run[key]);
+  // Keep stable cards/previews on unchanged polls, but also render artifact-only
+  // changes (including an updated file or a process-to-final transition).
+  if (artifacts !== undefined && JSON.stringify(turn.artifacts) !== JSON.stringify(artifacts)) {
+    turn.artifacts = artifacts; changed = true;
+  }
   for (const event of [...incoming].sort((a, b) => a.seq - b.seq)) {
     if (!Number.isSafeInteger(event.seq) || event.seq <= turn.lastSeq) continue;
     changed = true;
@@ -15,6 +20,10 @@ export function updateTurn(turn, run, incoming = []) {
     if (event.data?.responseVisibility !== 'internal') projectAssistantEvent(turn, event);
   }
   turn.run = run; turn.status = run.status;
+  // Current persisted request is authoritative over a replayed waiting event.
+  if (humanLoop !== undefined && JSON.stringify(turn.humanLoop) !== JSON.stringify(humanLoop.request)) {
+    turn.humanLoop = humanLoop.request; changed = true;
+  }
   if (run.status !== 'running') {
     turn.reasoning = ''; turn.progress = undefined; turn.humanLoop = undefined; turn.recovery = undefined;
     if (run.status === 'failed') { turn.partialText = run.output || turn.partialText; turn.text = ''; }

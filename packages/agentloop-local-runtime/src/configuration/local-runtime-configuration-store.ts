@@ -253,6 +253,7 @@ export class LocalRuntimeConfigurationStore {
     uploadedPackageRoot?: string,
     modelConfigurations?: LocalModelConfigurationStore,
     additionalSecretReferences: () => Promise<readonly string[]> = async () => [],
+    private readonly sharedMcpCatalog = false,
   ) {
     this.database = database;
     this.secretStore = secretStore;
@@ -837,6 +838,10 @@ export class LocalRuntimeConfigurationStore {
     try {
       const auth = await this.storeAuthentication(server.auth, this.credentialAuthority(server, existing), createdSecretKeys);
       const stored = validateMcpServers([{ ...server, auth }])[0]!;
+      if (this.sharedMcpCatalog) {
+        const others = (await this.deviceMcpRows()).filter(row => row.mcp_server_id !== server.id);
+        if (others.some(row => row.source_key === stored.key.trim())) throw new LocalRuntimeConfigurationStoreError(409, "mcp_server_key_duplicate");
+      }
       const id = await this.upsertDeviceMcpServer(stored, Date.now());
       return toPublicMcpServer((await this.deviceMcpRow(id))!);
     } catch (error) {
@@ -853,7 +858,8 @@ export class LocalRuntimeConfigurationStore {
       JOIN local_runtime_instances i ON i.runtime_id = b.runtime_id
       WHERE b.mcp_server_id = ? ORDER BY i.display_name LIMIT 20
     `).all(id) as Array<{ runtime_id: string; display_name: string }>;
-    if (references.length) throw new LocalRuntimeConfigurationStoreError(409, "mcp_server_referenced_by_runtime");
+    if (references.length && !this.sharedMcpCatalog) throw new LocalRuntimeConfigurationStoreError(409, "mcp_server_referenced_by_runtime");
+    if (this.sharedMcpCatalog) await this.database.prepare("DELETE FROM local_runtime_mcp_bindings WHERE mcp_server_id = ?").run(id);
     await this.database.prepare("DELETE FROM local_device_mcp_servers WHERE mcp_server_id = ?").run(id);
     await this.removeOrphanedSecrets();
   }
@@ -1280,6 +1286,7 @@ export class LocalRuntimeConfigurationStore {
   }
 
   private async mcpRows(runtimeId: string): Promise<McpServerRow[]> {
+    if (this.sharedMcpCatalog) return this.deviceMcpRows();
     return await this.database.prepare(`
       SELECT s.mcp_server_id, s.display_name, s.source_key, s.transport, s.url, s.protocol_version,
              timeout_ms, auth_kind, auth_config_json, secret_storage_key, tool_policy_json

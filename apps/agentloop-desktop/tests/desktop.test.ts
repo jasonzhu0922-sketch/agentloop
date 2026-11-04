@@ -18,6 +18,7 @@ import { builtinConnectorModules } from "../src/connectors/builtin-connector-mod
 import { fixtureAuth, TEST_OWNER } from "./fixtures/auth.ts";
 import { modelEndpoint } from "../src/security/model-endpoint.ts";
 import { greetingModel, modelPort } from "../../../packages/agentloop-local-runtime/tests/fixtures/models.ts";
+import { humanLoopModel, selectionRequirement } from "./fixtures/human-loop-model.ts";
 import { fixtureProvider } from "../../../packages/agentloop-local-runtime/tests/fixtures/http-model.ts";
 
 type OwnedApplication = Extract<DesktopApplication, { existing: false }>;
@@ -62,21 +63,40 @@ test("Desktop Connector API exposes its host-approved built-ins", async t => {
   assert.equal((await call(`/api/runtimes/${DEFAULT_RUNTIME_ID}/connectors`)).status, 404, "Connector accounts are not Runtime settings");
 });
 
-test("Desktop MCP catalog is device-wide and prevents deleting a Runtime-selected item", async t => {
-  const { app } = await fixture(t);
+test("Desktop MCP catalog applies to every account Runtime and survives restart", async t => {
+  const mcp = createServer((req, res) => {
+    let data = ""; req.on("data", chunk => { data += chunk; }); req.on("end", () => {
+      const message = JSON.parse(data);
+      if (message.method === "notifications/initialized") { res.writeHead(202); res.end(); return; }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: message.method === "tools/list" ? { tools: [] } : { protocolVersion: "2025-06-18" } }));
+    });
+  });
+  await new Promise<void>(resolve => mcp.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>(resolve => mcp.close(() => resolve())));
+  const address = mcp.address(); assert.ok(address && typeof address !== "string");
+  const { app, reopen } = await fixture(t);
   const call = client(app.origin, await session(app.origin));
+  const { runtime } = await jsonCall(call, "/api/runtimes", { displayName: "Second Runtime" });
   const { server } = await jsonCall(call, "/api/mcp", { server: {
-    displayName: "Shared MCP", key: "shared-mcp", transport: "http", url: "https://mcp.example.test/shared", auth: { kind: "none" },
+    displayName: "Shared MCP", key: "shared-mcp", transport: "http", url: `http://127.0.0.1:${address.port}/mcp`, auth: { kind: "query_parameter", parameterName: "key", value: "synthetic-mcp-secret" },
   } });
-  const { runtime } = await jsonCall(call, "/api/runtimes", { displayName: "MCP selection" });
-  await jsonCall(call, `/api/runtimes/${runtime.id}/stop`, {});
-  const settings = await jsonCall(call, `/api/runtimes/${runtime.id}/configuration`);
-  await jsonCall(call, `/api/runtimes/${runtime.id}/configuration`, { configuration: { skillPackageIds: [], mcpServerIds: [server.id] }, revision: settings.revision });
-  const selected = await jsonCall(call, `/api/runtimes/${runtime.id}/configuration`);
-  assert.deepEqual(selected.configuration.mcpServerIds, [server.id]);
-  assert.equal((await call(`/api/mcp/${server.id}/remove`, {})).status, 409);
-  await jsonCall(call, `/api/runtimes/${runtime.id}/configuration`, { configuration: { skillPackageIds: [], mcpServerIds: [] }, revision: selected.revision });
-  assert.deepEqual(await jsonCall(call, `/api/mcp/${server.id}/remove`, {}), { removed: true });
+  assert.equal(server.auth.credentialConfigured, true);
+  assert.equal(JSON.stringify(server).includes("synthetic-mcp-secret"), false);
+  const { credentialConfigured, ...auth } = server.auth;
+  const { server: updated } = await jsonCall(call, "/api/mcp", { server: { ...server, displayName: "Updated MCP", auth } });
+  assert.equal(updated.id, server.id); assert.equal(updated.auth.credentialConfigured, true);
+  assert.equal((await call("/api/mcp", { server: { ...server, url: `http://127.0.0.1:${address.port}/other`, auth } })).status, 400);
+  for (const id of [DEFAULT_RUNTIME_ID, runtime.id]) {
+    const settings = await jsonCall(call, `/api/runtimes/${id}/configuration`);
+    assert.deepEqual(settings.configuration.mcpServerIds, [server.id]);
+  }
+  const { runtime: later } = await jsonCall(call, "/api/runtimes", { displayName: "Later Runtime" });
+  assert.deepEqual((await jsonCall(call, `/api/runtimes/${later.id}/configuration`)).configuration.mcpServerIds, [server.id]);
+  const restored = await reopen(); const after = client(restored.origin, await session(restored.origin));
+  assert.deepEqual((await jsonCall(after, `/api/runtimes/${runtime.id}/configuration`)).configuration.mcpServerIds, [server.id]);
+  assert.deepEqual(await jsonCall(after, `/api/mcp/${server.id}/remove`, {}), { removed: true });
+  assert.deepEqual((await jsonCall(after, `/api/runtimes/${later.id}/configuration`)).configuration.mcpServerIds, []);
 });
 
 test("legacy Runtime-scoped Connector accounts migrate to the device-wide catalog", async t => {
@@ -227,7 +247,7 @@ test("Desktop serves its own Multi Runtime presentation without importing the cl
   assert.match(page, /account-identity/);
   for (const className of ["agent-settings-card", "agent-settings-layout", "agent-settings-nav", "agent-settings-content"]) assert.ok(page.includes(className), `settings shell missing ${className}`);
   for (const label of ["常规", "模型配置", "Skill 管理", "MCP 配置", "Runtime 管理", "Connector 配置", "完成"]) assert.ok(page.includes(label), `settings navigation missing ${label}`);
-  for (const path of ["/app.js", "/artifact-workspace.js", "/model-settings.js", "/conversation.js", "/turn-projection.js", "/conversation.css", "/markdown.js", "/markdown.css", "/reference/ui/scroll-follow.js", "/reference/ui/composer-input.js", "/reference/ui/message-selection.js", "/reference/presentation/assistant-message-presentation.js", "/reference/projections/assistant-event-projection.js", "/reference/projections/execution-detail-projection.js", "/styles.css", "/multi-runtime.css", "/assets/xuanwu-mascot-icon.png"]) {
+  for (const path of ["/app.js", "/composer-preferences.js", "/artifact-workspace.js", "/model-settings.js", "/conversation.js", "/turn-projection.js", "/run-polling.js", "/conversation.css", "/markdown.js", "/markdown.css", "/reference/ui/scroll-follow.js", "/reference/ui/composer-input.js", "/reference/ui/message-selection.js", "/reference/presentation/assistant-message-presentation.js", "/reference/projections/assistant-event-projection.js", "/reference/projections/execution-detail-projection.js", "/styles.css", "/multi-runtime.css", "/assets/xuanwu-mascot-icon.png"]) {
     const response = await fetch(`${app.origin}${path}`); assert.equal(response.status, 200);
     assert.equal(response.headers.get("access-control-allow-origin"), null);
     assert.match(response.headers.get("content-security-policy")!, /default-src 'none'/);
@@ -243,7 +263,7 @@ test("Desktop serves its own Multi Runtime presentation without importing the cl
   assert.match(settingsScript, /客户端授权码/);
   assert.match(settingsScript, /runtime-manager-card/);
   assert.match(settingsScript, /runtime-detail-modal/);
-  assert.match(settingsScript, /配置扩展 Skill 与 MCP/);
+  assert.match(settingsScript, /配置扩展 Skill/);
   assert.match(settingsScript, /\['configure', '配置'\]/);
   assert.match(settingsScript, /runtimeCapabilityTabs/);
   assert.match(settingsScript, /MCP Servers/);
@@ -253,7 +273,7 @@ test("Desktop serves its own Multi Runtime presentation without importing the cl
   assert.match(settingsScript, /function runtimeActionMenu/);
   assert.match(page, /data-settings-tab="mcp"/);
   assert.match(settingsScript, /renderDeviceMcp/);
-  assert.match(settingsScript, /renderRuntimeMcpBindings/);
+  assert.match(settingsScript, /renderSharedMcp/);
   assert.match(settingsScript, /api\('\/api\/connectors'\)/);
   assert.doesNotMatch(settingsScript, /runtimes\/\$\{target\}\/connectors/);
   assert.match(script, /const \{ connections \} = await api\('\/api\/connectors'\)/);
@@ -364,6 +384,48 @@ test("HTTP Run retries, attachment bindings and event cursors survive applicatio
   assert.deepEqual((await jsonCall(restoredCall, `/api/runs/${first.id}/events`)).events, events);
   assert.equal((await jsonCall(restoredCall, `/api/sources/${source.id}`)).source.originalName, "notes.txt");
   assert.equal((await jsonCall(restoredCall, `/api/conversations/${first.conversationId}`)).runs.length, 2);
+});
+
+test("Desktop conversation deletion is authenticated, scoped and durable, including retry tombstones", async t => {
+  const { app, reopen } = await fixture(t);
+  const auth = await session(app.origin); const call = client(app.origin, auth);
+  const input = { requestId: "delete-history", input: "你好", modelKey: "local:test" };
+  const { run } = await jsonCall(call, "/api/runs", input); await settled(call, run.id);
+  const { source } = await jsonCall(call, "/api/sources", { conversationId: run.conversationId, originalName: "notes.txt", contentBase64: Buffer.from("test source").toString("base64") });
+  const path = `/api/conversations/${run.conversationId}/remove`;
+  assert.equal((await fetch(`${app.origin}${path}`, { method: "POST", headers: { Origin: app.origin, "Content-Type": "application/json" } })).status, 401);
+  assert.equal((await fetch(`${app.origin}${path}`, { method: "POST", headers: { Origin: app.origin, Cookie: auth.cookie, "Content-Type": "application/json" } })).status, 403);
+  assert.equal((await fetch(`${app.origin}${path}`, { method: "POST", headers: { Origin: "https://evil.example.test", Cookie: auth.cookie, "X-Desktop-CSRF": auth.csrf } })).status, 403);
+  assert.equal((await call(path, { ownerUserId: "someone-else" })).status, 400);
+  const { runtime } = await jsonCall(call, "/api/runtimes", { displayName: "Other Runtime" });
+  assert.equal((await call(`${path}?runtimeId=${runtime.id}`, {})).status, 404);
+  assert.equal((await jsonCall(call, `/api/conversations/${run.conversationId}`)).runs.length, 1);
+  await jsonCall(call, "/api/sources", { conversationId: "keep-draft", originalName: "keep.txt", contentBase64: Buffer.from("keep").toString("base64") });
+  assert.deepEqual(await jsonCall(call, path, {}), { removed: true });
+  assert.equal((await call(`/api/runs/${run.id}`)).status, 404);
+  assert.equal((await call(`/api/sources/${source.id}`)).status, 404);
+  assert.deepEqual((await jsonCall(call, "/api/conversations")).conversations.map((item: { id: string }) => item.id), ["keep-draft"]);
+  assert.equal((await call(path, {})).status, 404);
+  const restored = await reopen(); const after = client(restored.origin, await session(restored.origin));
+  assert.equal((await after(`/api/conversations/${run.conversationId}`)).status, 404);
+  const retry = await after("/api/runs", input); assert.equal(retry.status, 410);
+  assert.equal((await retry.json()).error, "admission_run_deleted");
+  await jsonCall(after, "/api/conversations/keep-draft/remove", {});
+  assert.deepEqual((await jsonCall(after, "/api/conversations")).conversations, []);
+});
+
+test("Desktop rejects deleting an active conversation and retains its history", async t => {
+  let release!: () => void; const blocked = new Promise<void>(resolve => { release = resolve; });
+  let enter!: () => void; const entered = new Promise<void>(resolve => { enter = resolve; }); const base = greetingModel();
+  const { app } = await fixture(t, modelPort({ ...base, async complete(input, signal) { enter(); await blocked; return base.complete(input, signal); } }));
+  const call = client(app.origin, await session(app.origin));
+  const { run } = await jsonCall(call, "/api/runs", { requestId: "delete-active", input: "你好", modelKey: "local:test" }); await entered;
+  try {
+    assert.equal((await call(`/api/conversations/${run.conversationId}/remove`, {})).status, 409);
+    assert.equal((await jsonCall(call, `/api/conversations/${run.conversationId}`)).runs[0].id, run.id);
+  } finally { release(); }
+  await settled(call, run.id);
+  await jsonCall(call, `/api/conversations/${run.conversationId}/remove`, {});
 });
 
 test("a new Desktop conversation accepts a local upload before its first Run", async t => {
@@ -528,4 +590,69 @@ test("Runtime initialization failure releases the listener and lock without repl
   await assert.rejects(access(join(root, ".desktop-instance.lock")), { code: "ENOENT" });
   await assert.rejects(fetch(app.origin, { signal: AbortSignal.timeout(500) }));
   assert.equal(await readFile(path, "utf8"), "explicit_corrupt_database_fixture");
+});
+
+
+test("Desktop Human Loop validates, persists and resumes the same real Run through its authenticated API", async t => {
+  let resumedContext = '';
+  const { app, root } = await fixture(t, modelPort(humanLoopModel(selectionRequirement, context => { resumedContext = context; })));
+  const auth = await session(app.origin), call = client(app.origin, auth);
+  const { run } = await jsonCall(call, '/api/runs', { requestId: 'hil', input: '请让我选择后继续回答', modelKey: 'local:test' });
+  const currentPath = `/api/runs/${run.id}/human-loop/current`;
+  let request;
+  for (let attempt = 0; attempt < 200; attempt++) {
+    request = (await jsonCall(call, currentPath)).request;
+    if (request) break;
+    await setTimeout(10);
+  }
+  assert.ok(request, JSON.stringify(await jsonCall(call, `/api/runs/${run.id}`)));
+  assert.deepEqual(request.responseSchema, selectionRequirement.responseSchema);
+  const path = `/api/runs/${run.id}/human-loop/${request.id}/respond`;
+  const answer = { expectedRevision: request.revision, value: ['summary'] };
+  assert.equal((await fetch(`${app.origin}${currentPath}`)).status, 401);
+  assert.equal((await fetch(`${app.origin}${path}`, { method: 'POST', headers: { Origin: app.origin, Cookie: auth.cookie, 'Content-Type': 'application/json' }, body: JSON.stringify(answer) })).status, 403);
+  assert.equal((await call(`${currentPath}?runtimeId=missing`)).status, 409);
+  assert.equal((await call(path, { ...answer, ownerUserId: 'another-user' })).status, 400);
+  assert.equal((await call(path, { value: ['summary'] })).status, 400);
+  assert.equal((await call(path, { ...answer, value: ['unknown'] })).status, 400);
+  assert.equal((await call(path, { ...answer, expectedRevision: 100 })).status, 409);
+  const { runtime } = await jsonCall(call, '/api/runtimes', { displayName: 'Isolated runtime' });
+  assert.equal((await call(`${path}?runtimeId=${runtime.id}`, answer)).status, 404);
+  // Re-login/reload can discover the durable open question without old events.
+  const reconnected = client(app.origin, await session(app.origin));
+  assert.equal((await jsonCall(reconnected, currentPath)).request.id, request.id);
+  const responses = await Promise.all([reconnected(path, answer), call(path, answer)]);
+  assert.deepEqual(responses.map(response => response.status).sort(), [200, 409]);
+  const completed = await settled(call, run.id);
+  assert.equal(completed.id, run.id); assert.equal(completed.status, 'completed');
+  assert.match(completed.output, /已收到用户回答/);
+  assert.match(resumedContext, /summary/);
+  assert.equal((await jsonCall(call, currentPath)).request, undefined);
+  const { events } = await jsonCall(call, `/api/runs/${run.id}/events`);
+  assert.equal(events.filter((event: { type: string }) => event.type === 'human_loop.answered').length, 1);
+  assert.equal(events.some((event: { type: string }) => event.type === 'human_loop.resume_failed'), false);
+  assert.equal((await jsonCall(call, `/api/conversations/${run.conversationId}`)).runs.length, 1);
+  const database = new DatabaseSync(join(accountDataDirectory(root, TEST_OWNER), 'runtime.db'), { readOnly: true });
+  try {
+    const saved = database.prepare('SELECT actor_user_id, response_json FROM human_loop_responses WHERE run_id = ?').all(run.id) as Array<{ actor_user_id: string; response_json: string }>;
+    assert.equal(saved.length, 1); assert.equal(saved[0]!.actor_user_id, TEST_OWNER); assert.deepEqual(JSON.parse(saved[0]!.response_json), ['summary']);
+  } finally { database.close(); }
+});
+
+test("a cancelled Desktop Run cannot accept an old Human Loop answer", async t => {
+  const { app } = await fixture(t, modelPort(humanLoopModel()));
+  const call = client(app.origin, await session(app.origin));
+  const { run } = await jsonCall(call, '/api/runs', { requestId: 'cancel-hil', input: '等待用户选择', modelKey: 'local:test' });
+  const path = `/api/runs/${run.id}/human-loop`;
+  let request;
+  for (let attempt = 0; attempt < 200; attempt++) {
+    request = (await jsonCall(call, `${path}/current`)).request;
+    if (request) break;
+    await setTimeout(10);
+  }
+  assert.ok(request);
+  await jsonCall(call, `/api/runs/${run.id}/cancel`, {});
+  assert.equal((await jsonCall(call, `${path}/current`)).request, undefined);
+  assert.equal((await call(`${path}/${request.id}/respond`, { expectedRevision: request.revision, value: ['summary'] })).status, 409);
+  assert.equal((await jsonCall(call, `/api/runs/${run.id}`)).run.status, 'cancelled');
 });

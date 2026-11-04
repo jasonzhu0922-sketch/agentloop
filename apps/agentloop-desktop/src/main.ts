@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join, isAbsolute } from "node:path";
-import { OpenAICompatibleModel } from "@zhujun/agentloop";
+import { colorizeTerminalLogLabel, colorizeTerminalLogLine, OpenAICompatibleModel, type TerminalLogColorOptions } from "@zhujun/agentloop";
 import type { LocalModelProviderPort } from "@zhujun/agentloop-local-runtime";
 import { startDesktop } from "./application.ts";
 import { modelEndpoint } from "./security/model-endpoint.ts";
@@ -11,6 +11,11 @@ import { developmentToolEnvironment } from "./platform/development-tools.ts";
 
 /** Development command port; Account Service uses 8795 by default. */
 export const DESKTOP_DEVELOPMENT_PORT = 8796;
+
+export function formatDesktopTerminalLog(entry: string, timestamp: string, options: TerminalLogColorOptions): string {
+  const label = colorizeTerminalLogLabel("[AgentLoop Desktop]", "AgentLoop Desktop", options);
+  return `${label} ${timestamp} ${colorizeTerminalLogLine(entry, options)}`;
+}
 
 export function defaultDataDirectory(platform = process.platform, environment = process.env): string {
   if (platform === "darwin") return join(homedir(), "Library", "Application Support", "AgentLoop Desktop Development");
@@ -46,7 +51,9 @@ export function desktopLaunchOptions(args: readonly string[]): { dataDirectory?:
 async function main(): Promise<void> {
   const { dataDirectory, openBrowser } = desktopLaunchOptions(process.argv.slice(2));
   const authUrl = process.env.AGENTLOOP_DESKTOP_AUTH_BASE_URL;
-  const log = (entry: string) => console.log(`[AgentLoop Desktop] ${new Date().toISOString()} ${entry}`);
+  const log = (entry: string) => console.log(formatDesktopTerminalLog(entry, new Date().toISOString(), {
+    colorMode: process.env.AGENTLOOP_LOG_COLOR, isTTY: process.stdout.isTTY, noColor: process.env.NO_COLOR,
+  }));
   const app = await startDesktop({ mode: "development", dataDirectory: dataDirectory ?? defaultDataDirectory(), models: configuredModels(), openBrowser, port: DESKTOP_DEVELOPMENT_PORT, log,
     computerCommandEnvironment: await developmentToolEnvironment(),
     cloudAuth: authUrl ? new CloudAccountAuth(authUrl) : undefined,

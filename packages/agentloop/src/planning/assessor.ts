@@ -208,6 +208,7 @@ export class ModelStepAssessor implements StepAssessor {
             "Assess every supplied Skill exactly once. Copy its exact id into skillId, including prefixes; never substitute its name or a Skill mentioned only in evidence.",
             "Skill entries are QA observations, not completion gates; use not_assessed when QA is not rerun.",
             "Never approve a requested factual answer that lacks the support required by the original user goal.",
+            "For ordinary stable general-knowledge questions, reliable model knowledge can support a direct answer when the user did not require sources or verification. Do not demand external evidence solely because the answer is factual. Assess uncertainty and the actual goal: current, private, disputed, source-specific, or consequential facts may require additional evidence, and unsupported precision must not be invented.",
             "For a user-facing delivery target, approve only when the candidate directly fulfills that target's stated purpose. Source records, field tables, excerpts, and citations establish support but do not substitute for the requested answer, explanation, conclusion, or other user-facing result.",
             "Preserve the user's exact requested fields, distinctions, scope, and freshness. A related field or differently titled role is not equivalent without readable source support. A retrieval timestamp alone does not establish the effective date or current validity of a fact. Do not repair missing facts yourself in assessment feedback.",
             "Use the original user goal when checking whether the delivered facts match the request. A resolver/Plan paraphrase or provider scope cannot authorize substituting another field or narrowing the requested result. A caveat that a requested fact is unverified records a remaining gap; it does not prove that fact or satisfy a blocking criterion requiring it.",
@@ -1264,11 +1265,18 @@ function assessmentView(input: StepAssessmentInput): Record<string, unknown> {
       runtimeCapabilityInventory: input.runtimeCapabilityInventory,
     }),
     ...(input.contextSummary === undefined ? {} : { contextSummary: input.contextSummary }),
+    ...(input.temporalEvidenceGap === undefined ? {} : { temporalEvidenceGap: input.temporalEvidenceGap }),
   };
 }
 
 function assessmentPolicy(input: StepAssessmentInput): Record<string, unknown> | undefined {
   const policy: Record<string, unknown> = {};
+  if (input.temporalEvidenceGap !== undefined) {
+    policy.temporalCoverage = {
+      judgment: "The Runtime reports an unverified time coverage gap, not an automatic failure. Judge its materiality against the user's actual goal, requested precision, evidence, and candidate. A useful bounded answer can be deliverable when it accurately describes the supported scope and makes any consequential limitation clear. Do not require exhaustive proof when the user does not need it.",
+      boundary: "Never treat uncovered time as proven empty or a partial count as an exact complete total. If the candidate overstates coverage or omits a consequential limitation, request a precise wording revision; if the gap materially prevents the requested answer, identify the missing evidence and appropriate repair. Do not prescribe a fixed duration tolerance.",
+    };
+  }
   if (input.step.role === "fact_acquisition") {
     policy.stageSemantics = {
       primaryResult:

@@ -36,6 +36,8 @@ export interface LocalRuntimeManagerOptions {
   readonly secrets?: LocalRuntimeSecretStore;
   /** Required when another configuration owner shares the MCP vault. */
   readonly additionalSecretReferences?: () => Promise<readonly string[]>;
+  /** Use the account catalog for every Runtime (Desktop). */
+  readonly sharedMcpCatalog?: boolean;
   readonly connectors?: LocalConnectorConfigurationPort;
   /** Host-approved modules; an empty array enables editable local connection settings without loading modules. */
   readonly connectorModules?: readonly ConnectorModuleRegistration[];
@@ -108,7 +110,7 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
   // Device-level Memory chooses from the same persisted local-model catalog
   // that Runtime startup resolves. Keep that catalog at this boundary so an
   // unavailable model is rejected before the Memory flag becomes durable.
-  const configurations = new LocalRuntimeConfigurationStore(database, options.secrets, options.customSkillDirectories ?? [], library, modelConfigurations, options.additionalSecretReferences);
+  const configurations = new LocalRuntimeConfigurationStore(database, options.secrets, options.customSkillDirectories ?? [], library, modelConfigurations, options.additionalSecretReferences, options.sharedMcpCatalog);
   const storage = { value: { workspaceRoot: options.workspaceRoot ?? join(options.dataDirectory, "workspace"), uploadStorageRoot: options.uploadStorageRoot ?? join(options.dataDirectory, "uploads") } };
   const connectors = options.connectorModules === undefined ? undefined : new ConnectorSettings(database,
     options.connectorSecrets ?? new (await import("../persistence/encrypted-local-runtime-secret-store.ts")).EncryptedLocalRuntimeSecretStore(join(options.dataDirectory, "private", "connector-secrets")), options.connectorModules);
@@ -321,10 +323,13 @@ class RuntimeManager implements LocalRuntimeManager {
       startRun: (context, input) => use(facade => facade.startRun(context, input)),
       getRun: (context, runId) => use(facade => facade.getRun(context, runId)),
       cancelRun: (context, runId) => use(facade => facade.cancelRun(context, runId)),
+      currentHumanLoop: (context, runId) => use(facade => facade.currentHumanLoop(context, runId)),
+      respondHumanLoop: (context, runId, requestId, value, expectedRevision) => use(facade => facade.respondHumanLoop(context, runId, requestId, value, expectedRevision)),
       events: (context, runId, afterSeq) => use(facade => facade.events(context, runId, afterSeq)),
       ensureConversation: (context, conversationId, input) => use(facade => facade.ensureConversation(context, conversationId, input)),
       conversations: context => use(facade => facade.conversations(context)),
       conversation: (context, conversationId) => use(facade => facade.conversation(context, conversationId)),
+      deleteConversation: (context, conversationId) => use(facade => facade.deleteConversation(context, conversationId)),
       upload: (context, input) => use(facade => facade.upload(context, input)),
       source: (context, sourceId) => use(facade => facade.source(context, sourceId)),
       artifacts: (context, runId) => use(facade => facade.artifacts(context, runId)),

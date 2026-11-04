@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
 import { join, parse } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
@@ -56,12 +57,23 @@ function configuration(key: string) {
 }
 
 test("account configuration, vaults and Runtime management stay isolated across switching and restart", async t => {
+  const mcp = createServer((req, res) => {
+    let data = ""; req.on("data", chunk => { data += chunk; }); req.on("end", () => {
+      const message = JSON.parse(data);
+      if (message.method === "notifications/initialized") { res.writeHead(202); res.end(); return; }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: message.method === "tools/list" ? { tools: [] } : { protocolVersion: "2025-06-18" } }));
+    });
+  });
+  await new Promise<void>(resolve => mcp.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>(resolve => mcp.close(() => resolve())));
+  const address = mcp.address(); assert.ok(address && typeof address !== "string");
   const f = await start(t);
   await f.login(aliceEmail);
   const initial = await f.json("/api/model-configuration");
   await f.json("/api/model-configuration", { configuration: configuration("alice"), revision: initial.revision });
   const { runtime } = await f.json("/api/runtimes", { displayName: "Alice Runtime" });
-  const { server } = await f.json("/api/mcp", { server: { displayName: "Alice MCP", key: "alice-service", transport: "http", url: "https://mcp.example.test/alice", auth: { kind: "bearer", token: "synthetic-alice-mcp-key" } } });
+  const { server } = await f.json("/api/mcp", { server: { displayName: "Alice MCP", key: "alice-service", transport: "http", url: `http://127.0.0.1:${address.port}/alice`, auth: { kind: "bearer", token: "synthetic-alice-mcp-key" } } });
   const imported = await f.json("/api/skills/import", { files: [{ path: "private-skill/SKILL.md", contentBase64: Buffer.from("---\nname: private-skill\ndescription: Alice private skill\n---\n# Private\nUse Alice's template.\n").toString("base64") }] });
   assert.equal(imported.skills.length, 1);
   const { connector } = await f.json("/api/connectors", { connector: { connectorKey: "126-mail", displayName: "Alice mail", enabled: false, scopes: [], credentials: { TOKEN: "synthetic-alice-mail-key" } } });

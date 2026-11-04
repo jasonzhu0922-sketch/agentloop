@@ -29,10 +29,17 @@ export function temporalEvidenceGap(scope: ResolvedTemporalScope | undefined, re
     return Number.isFinite(start) && Number.isFinite(end) && start < end ? [{ start, end }] : [];
   }).sort((a, b) => a.start - b.start);
   let coveredUntil = requiredStart;
+  const gaps: { startInclusive: string; endExclusive: string }[] = [];
   for (const interval of intervals) {
-    if (interval.start > coveredUntil) break;
+    if (interval.end <= coveredUntil) continue;
+    if (interval.start > coveredUntil) {
+      gaps.push({ startInclusive: new Date(coveredUntil).toISOString(), endExclusive: new Date(Math.min(interval.start, requiredEnd)).toISOString() });
+      if (interval.start >= requiredEnd) { coveredUntil = requiredEnd; break; }
+    }
     coveredUntil = Math.max(coveredUntil, interval.end);
-    if (coveredUntil >= requiredEnd) return undefined;
+    if (coveredUntil >= requiredEnd) break;
   }
-  return `Declared source receipts do not establish complete coverage of ${scope.startInclusive} <= timestamp < ${scope.endExclusive} in ${scope.timeZone}. Acquire scope-matched complete evidence, or state the unverified boundary without asserting exhaustive totals or zero records. Literal date keyword searches and truncated pages do not establish this range.`;
+  if (coveredUntil < requiredEnd) gaps.push({ startInclusive: new Date(coveredUntil).toISOString(), endExclusive: new Date(requiredEnd).toISOString() });
+  if (gaps.length === 0) return undefined;
+  return `Declared source receipts do not establish complete coverage of ${scope.startInclusive} <= timestamp < ${scope.endExclusive} in ${scope.timeZone}. Unverified intervals: ${JSON.stringify(gaps)}. Literal date keyword searches and truncated pages do not establish this range.`;
 }

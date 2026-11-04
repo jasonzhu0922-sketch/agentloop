@@ -667,3 +667,17 @@ async function waitForRunCompletion(runs: RunService, userId: string, runId: str
   }
   throw new Error("Timed out waiting for Run completion");
 }
+
+test("a required rejection reason is validated before the Human Loop answer is committed", async () => {
+  const database = new AppDatabase(':memory:');
+  try {
+    await new RunRepository(database).insertRun({ id: 'run-reason', ownerUserId: 'owner', allowDangerousTools: false, input: 'confirm', createdAt: Date.now() });
+    const loops = new HumanLoopRepository(database);
+    const request = await loops.create({ runId: 'run-reason', origin: 'tool', kind: 'confirmation', title: 'Confirm', prompt: 'Continue?', rationale: 'Need a decision', evidenceRefs: [], responseSchema: { type: 'confirm', acceptLabel: 'Yes', rejectLabel: 'No', requireReasonOnReject: true }, resume: { mode: 'continue_step' } });
+    const input = { requestId: request.id, runId: request.runId, actorUserId: 'owner', expectedRevision: request.revision };
+    await assert.rejects(loops.respond({ ...input, value: { accepted: false } }), /reason is required/);
+    assert.equal((await loops.current(request.runId))?.revision, 1);
+    await loops.respond({ ...input, value: { accepted: false, reason: 'Please stop' } });
+    assert.equal(await loops.current(request.runId), undefined);
+  } finally { database.close(); }
+});
