@@ -922,6 +922,16 @@ test("Multi Runtime TiDB DDL is owned by Router and Host persistence, not the Ag
 });
 
 test("local launcher gives Router and Runtime Hosts the same shared workspace mount", async () => {
+  const rootPackage = JSON.parse(await readFile(new URL("../../../package.json", import.meta.url), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  for (const scriptName of ["start:multi-runtime", "start:multi-runtime:build"]) {
+    assert.match(
+      rootPackage.scripts[scriptName] ?? "",
+      /npm run restart:accounts/,
+      `${scriptName} must wait for the local account service before launching a Router that defaults to it`,
+    );
+  }
   const source = await readFile(new URL("../scripts/start-local.mjs", import.meta.url), "utf8");
   assert.ok(
     source.indexOf("let closing = false;") < source.indexOf('children.push(start("router"'),

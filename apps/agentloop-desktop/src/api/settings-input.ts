@@ -1,4 +1,4 @@
-import type { LocalRuntimeConfigurationInput, LocalRuntimeMcpServerInput, SkillImportFile } from "@zhujun/agentloop-local-runtime";
+import type { LocalRuntimeConfigurationInput, LocalRuntimeMcpServerInput, LocalRuntimeMemoryConfigurationInput, LocalRuntimeDeviceStorageInput, SkillImportFile } from "@zhujun/agentloop-local-runtime";
 import { HttpError } from "../security/loopback.ts";
 
 export function record(value: unknown, allowed: readonly string[]): Record<string, unknown> {
@@ -48,6 +48,18 @@ export function configurationInput(value: unknown): LocalRuntimeConfigurationInp
   for (const id of c.skillPackageIds) string(id);
   if (!Array.isArray(c.mcpServers) || c.mcpServers.length > 30) throw new HttpError(400, "settings_input_invalid");
   return { skillPackageIds: c.skillPackageIds as string[], mcpServers: c.mcpServers.map(mcpInput) };
+}
+export function memoryInput(value: unknown): LocalRuntimeMemoryConfigurationInput {
+  const memory = record(value, ["enabled", "settlementModelKey"]);
+  if (typeof memory.enabled !== "boolean") throw new HttpError(400, "memory_configuration_invalid");
+  if (memory.settlementModelKey !== undefined) string(memory.settlementModelKey);
+  if (!memory.enabled && memory.settlementModelKey !== undefined) throw new HttpError(400, "memory_model_requires_memory_enabled");
+  return memory as LocalRuntimeMemoryConfigurationInput;
+}
+export function storageInput(value: unknown): LocalRuntimeDeviceStorageInput {
+  const storage = record(value, ["workspaceRoot", "uploadStorageRoot"]);
+  string(storage.workspaceRoot, 4096); string(storage.uploadStorageRoot, 4096);
+  return { workspaceRoot: storage.workspaceRoot as string, uploadStorageRoot: storage.uploadStorageRoot as string };
 }
 function base64(value: unknown, max: number): Buffer {
   if (typeof value !== "string" || value.length > Math.ceil(max / 3) * 4 || value.length % 4 !== 0) throw new HttpError(400, "skill_content_invalid");

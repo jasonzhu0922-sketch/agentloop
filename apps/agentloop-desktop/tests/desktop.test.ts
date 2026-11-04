@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
 import { createServer, request } from "node:http";
-import { mkdtemp, mkdir, readFile, writeFile, rm, access } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, access, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
@@ -9,13 +9,102 @@ import { setTimeout } from "node:timers/promises";
 import test from "node:test";
 import { RuntimeWorkspaceService } from "@zhujun/agentloop";
 import type { LocalModelProviderPort } from "@zhujun/agentloop-local-runtime";
+import { loadConnectorModules } from "@zhujun/agentloop-local-runtime/connectors";
 import { startDesktop, type DesktopApplication } from "../src/application.ts";
+import { DEFAULT_RUNTIME_ID } from "../src/api/desktop-api.ts";
+import { DESKTOP_DEVELOPMENT_PORT, desktopLaunchOptions } from "../src/main.ts";
+import { builtinConnectorModules } from "../src/connectors/builtin-connector-modules.ts";
 import { fixtureAuth, TEST_OWNER } from "./fixtures/auth.ts";
 import { modelEndpoint } from "../src/security/model-endpoint.ts";
 import { greetingModel, modelPort } from "../../../packages/agentloop-local-runtime/tests/fixtures/models.ts";
 import { fixtureProvider } from "../../../packages/agentloop-local-runtime/tests/fixtures/http-model.ts";
 
 type OwnedApplication = Extract<DesktopApplication, { existing: false }>;
+
+test("Desktop command uses one documented fixed port and rejects malformed launch arguments", () => {
+  assert.equal(DESKTOP_DEVELOPMENT_PORT, 8796);
+  assert.deepEqual(desktopLaunchOptions(["--development"]), { openBrowser: true });
+  assert.deepEqual(desktopLaunchOptions(["--development", "--no-open", "--data-dir", "/tmp/desktop"]), { openBrowser: false, dataDirectory: "/tmp/desktop" });
+  for (const args of [[], ["--development", "--data-dir"], ["--development", "--port", "0"]]) assert.throws(() => desktopLaunchOptions(args), /desktop_/);
+});
+
+test("root development scripts pin the Account Service and Desktop topology", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../../../package.json", import.meta.url), "utf8")) as { scripts: Record<string, string> };
+  assert.equal(manifest.scripts["start:accounts"], "node apps/agentloop-account-service/scripts/local-service-manager.mjs --foreground");
+  assert.equal(manifest.scripts["restart:accounts"], "node apps/agentloop-account-service/scripts/local-service-manager.mjs --background");
+  assert.equal(manifest.scripts["start:desktop"], "npm run restart:accounts && AGENTLOOP_DESKTOP_AUTH_BASE_URL=http://127.0.0.1:8795 npm run start --workspace agentloop-desktop -- --development");
+});
+
+test("Desktop host approves the built-in Connector modules", () => {
+  assert.deepEqual(builtinConnectorModules().map(({ exportName }) => exportName), [
+    "feishuConnector", "createConfigured126MailConnector", "createConfiguredWpsConnector",
+  ]);
+  for (const registration of builtinConnectorModules()) assert.match(registration.modulePath, /^\//);
+});
+
+test("Desktop built-in Connector registrations load their real modules", async () => {
+  const modules = await loadConnectorModules({ registrations: builtinConnectorModules() });
+  assert.deepEqual(modules.map(module => module.definition.manifest.key), ["feishu", "126-mail", "kingsoft-wps"]);
+});
+
+test("Desktop Connector API exposes its host-approved built-ins", async t => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-desktop-connectors-")); const skills = join(root, "skills"); await mkdir(skills);
+  const app = await startDesktop({ mode: "development", dataDirectory: join(root, "desktop-data"), models: modelPort(), cloudAuth: fixtureAuth(), bundledSkillDirectories: [skills], connectorModules: builtinConnectorModules(), openBrowser: false });
+  assert.equal(app.existing, false); t.after(async () => { if (!app.existing) await app.close(); await rm(root, { recursive: true, force: true }); });
+  const call = client(app.origin, await session(app.origin));
+  const { connectors } = await jsonCall(call, "/api/connectors/catalog");
+  assert.deepEqual(connectors.map((connector: { key: string }) => connector.key), ["feishu", "126-mail", "kingsoft-wps"]);
+  const { connector } = await jsonCall(call, "/api/connectors", { connector: { connectorKey: "126-mail", displayName: "我的 126 邮箱", enabled: false, scopes: [] } });
+  assert.equal(connector.connectorKey, "126-mail");
+  const { connections } = await jsonCall(call, "/api/connectors");
+  assert.deepEqual(connections.map((connection: { id: string }) => connection.id), [connector.id]);
+  assert.equal((await call(`/api/runtimes/${DEFAULT_RUNTIME_ID}/connectors`)).status, 404, "Connector accounts are not Runtime settings");
+});
+
+test("legacy Runtime-scoped Connector accounts migrate to the device-wide catalog", async t => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-desktop-connector-migration-")); const skills = join(root, "skills"); await mkdir(skills);
+  const database = new DatabaseSync(join(root, "supervisor.db"));
+  database.exec(`CREATE TABLE desktop_connector_settings (
+    id TEXT PRIMARY KEY, runtime_id TEXT NOT NULL, owner_id TEXT NOT NULL, connector_key TEXT NOT NULL, display_name TEXT NOT NULL,
+    enabled INTEGER NOT NULL, scopes TEXT NOT NULL, secret_ref TEXT, updated_at INTEGER NOT NULL
+  )`);
+  database.prepare("INSERT INTO desktop_connector_settings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run("connection_legacy", "old-runtime", TEST_OWNER, "126-mail", "已有 126 邮箱", 0, "[]", null, Date.now()); database.close();
+  await writeFile(join(root, ".desktop-data.json"), JSON.stringify({ schema: "agentloop.desktop.data/v1", mode: "development", installationId: "00000000-0000-4000-8000-000000000001" }));
+  const app = await startDesktop({ mode: "development", dataDirectory: root, models: modelPort(), cloudAuth: fixtureAuth(), bundledSkillDirectories: [skills], connectorModules: builtinConnectorModules(), openBrowser: false });
+  assert.equal(app.existing, false); t.after(async () => { if (!app.existing) await app.close(); await rm(root, { recursive: true, force: true }); });
+  const { connections } = await jsonCall(client(app.origin, await session(app.origin)), "/api/connectors");
+  assert.deepEqual(connections.map((connection: { id: string }) => connection.id), ["connection_legacy"]);
+  const verified = new DatabaseSync(join(root, "supervisor.db"), { readOnly: true });
+  const columns = verified.prepare("PRAGMA table_info(desktop_connector_settings)").all() as Array<{ name: string }>;
+  verified.close();
+  assert.equal(columns.some(column => column.name === "runtime_id"), false);
+});
+
+test("Desktop terminal logging summarizes operations without exposing submitted content", async t => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-desktop-log-")); const skills = join(root, "skills"); await mkdir(skills);
+  const entries: string[] = [];
+  const app = await startDesktop({ mode: "development", dataDirectory: join(root, "desktop-data"), models: modelPort(), cloudAuth: fixtureAuth(), bundledSkillDirectories: [skills], openBrowser: false, log: entry => entries.push(entry) });
+  assert.equal(app.existing, false); t.after(async () => { if (!app.existing) await app.close(); await rm(root, { recursive: true, force: true }); });
+  const call = client(app.origin, await session(app.origin));
+  const privateInput = "terminal logs must never expose this task";
+  const { run } = await jsonCall(call, "/api/runs", { requestId: "terminal-log-run", input: privateInput, modelKey: "local:test" });
+  await settled(call, run.id);
+  assert.ok(entries.some(entry => /^POST \/api\/runs → 200 \(\d+ms\)$/.test(entry)));
+  assert.equal(entries.some(entry => entry.includes(privateInput) || entry.includes(run.id) || entry.includes("fixture-password-only")), false);
+});
+
+test("Desktop general settings persist custom local storage and reload an idle Runtime", async t => {
+  const { root, app, reopen } = await fixture(t);
+  assert.equal((await fetch(`${app.origin}/api/device-storage`)).status, 401);
+  const call = client(app.origin, await session(app.origin));
+  const { storage } = await jsonCall(call, "/api/device-storage");
+  const canonicalRoot = await realpath(root);
+  assert.deepEqual(storage, { workspaceRoot: join(canonicalRoot, "workspace"), uploadStorageRoot: join(canonicalRoot, "uploads") });
+  const custom = { workspaceRoot: join(canonicalRoot, "custom-workspace"), uploadStorageRoot: join(canonicalRoot, "custom-uploads") };
+  assert.deepEqual((await jsonCall(call, "/api/device-storage", custom)).storage, custom);
+  const restarted = await reopen();
+  assert.deepEqual((await jsonCall(client(restarted.origin, await session(restarted.origin)), "/api/device-storage")).storage, custom);
+});
 async function fixture(t: test.TestContext, models: LocalModelProviderPort | null = modelPort()) {
   const root = await mkdtemp(join(tmpdir(), "agentloop-desktop-test-"));
   const skills = join(root, "skills"); await mkdir(skills);
@@ -94,7 +183,7 @@ test("Desktop serves its own Multi Runtime presentation without importing the cl
   for (const className of ["app-shell", "sidebar", "conversation-scroll", "composer-box", "artifact-workspace"]) assert.ok(page.includes(className));
   assert.match(page, /account-identity/);
   for (const className of ["agent-settings-card", "agent-settings-layout", "agent-settings-nav", "agent-settings-content"]) assert.ok(page.includes(className), `settings shell missing ${className}`);
-  for (const label of ["模型配置", "Skill 管理", "Runtime 管理", "Connector 配置", "MCP 配置"]) assert.ok(page.includes(label), `settings navigation missing ${label}`);
+  for (const label of ["常规", "模型配置", "Skill 管理", "Runtime 管理", "Connector 配置", "完成"]) assert.ok(page.includes(label), `settings navigation missing ${label}`);
   for (const path of ["/app.js", "/model-settings.js", "/conversation.js", "/turn-projection.js", "/conversation.css", "/markdown.js", "/markdown.css", "/reference/ui/scroll-follow.js", "/reference/ui/composer-input.js", "/reference/ui/message-selection.js", "/reference/presentation/assistant-message-presentation.js", "/reference/projections/assistant-event-projection.js", "/reference/projections/execution-detail-projection.js", "/styles.css", "/multi-runtime.css", "/assets/xuanwu-mascot-icon.png"]) {
     const response = await fetch(`${app.origin}${path}`); assert.equal(response.status, 200);
     assert.equal(response.headers.get("access-control-allow-origin"), null);
@@ -105,6 +194,16 @@ test("Desktop serves its own Multi Runtime presentation without importing the cl
   const script = await (await fetch(`${app.origin}/app.js`)).text();
   assert.doesNotMatch(script, /innerHTML|insertAdjacentHTML|runtime-config|\/router\/|https?:\/\//);
   assert.match(script, /textContent/);
+  const settingsScript = await (await fetch(`${app.origin}/capability-settings.js`)).text();
+  assert.match(settingsScript, /Memory 偏好与隐私沉淀/);
+  assert.match(settingsScript, /绑定 126 邮箱/);
+  assert.match(settingsScript, /客户端授权码/);
+  assert.match(settingsScript, /runtime-manager-card/);
+  assert.match(settingsScript, /专属扩展 Skills/);
+  assert.match(settingsScript, /function runtimeActionMenu/);
+  assert.doesNotMatch(page, /data-settings-tab="mcp"/);
+  assert.match(settingsScript, /api\('\/api\/connectors'\)/);
+  assert.doesNotMatch(settingsScript, /runtimes\/\$\{target\}\/connectors/);
   // Only copied presentation bytes are exposed; other App and filesystem paths stay private.
   for (const path of ["/runtime-config.js", "/client/app.js", "/styles/runtime-overrides.css", "/assets/unknown.png"]) assert.equal((await fetch(`${app.origin}${path}`)).status, 401);
 });
@@ -115,6 +214,8 @@ test("local model settings require Session/CSRF and a saved configuration drives
   assert.equal((await fetch(`${origin}/api/model-configuration`)).status, 401);
   const auth = await session(origin); const call = client(origin, auth);
   const initial = await jsonCall(call, "/api/model-configuration"); assert.equal(initial.editable, true);
+  assert.deepEqual((await jsonCall(call, "/api/memory-configuration")).memory, { enabled: false });
+  assert.equal((await call("/api/memory-configuration", { enabled: true, settlementModelKey: "local:missing" })).status, 409, "Memory must not accept a model absent from the local catalog");
   const credential = "desktop-http-fixture-not-a-real-key";
   const input = { revision: initial.revision, configuration: { reuseCloudModels: false, providers: [{ key: "fixture", displayName: "本机测试服务", baseUrl: provider.baseUrl, apiKey: credential,
     models: [{ key: "fixture", displayName: "Fixture", providerModel: "test-upstream", protocol: "responses", contextWindowTokens: 128000, maxOutputTokens: 8192, maxAttempts: 1 }] }] } };
@@ -123,6 +224,8 @@ test("local model settings require Session/CSRF and a saved configuration drives
   assert.equal(JSON.stringify(stored).includes(credential), false); assert.equal(stored.configuration.providers[0].credentialConfigured, true);
   assert.equal(provider.calls.length, 0, "saving is not a provider connectivity test");
   assert.deepEqual((await jsonCall(call, "/api/models")).models, ["local:fixture"]);
+  assert.deepEqual((await jsonCall(call, "/api/memory-configuration", { enabled: true, settlementModelKey: "local:fixture" })).memory, { enabled: true, settlementModelKey: "local:fixture" });
+  assert.deepEqual((await jsonCall(call, "/api/memory-configuration", { enabled: false })).memory, { enabled: false });
   const { run } = await jsonCall(call, "/api/runs", { requestId: "saved-config", input: "你好", modelKey: "local:fixture" });
   assert.equal((await settled(call, run.id)).status, "completed"); assert.equal(provider.calls[0]?.authorization, `Bearer ${credential}`);
   assert.equal((await call("/api/model-configuration", input)).status, 409);
@@ -265,6 +368,17 @@ test("unknown instance locks are retained and never treated as safe to reclaim",
   await assert.rejects(startDesktop({ mode: "development", dataDirectory: root, models: modelPort(), openBrowser: false }), /desktop_instance_unavailable/);
   assert.equal(await readFile(lock, "utf8"), "invalid metadata");
   await assert.rejects(access(join(root, "runtime.db")), { code: "ENOENT" });
+});
+
+test("a published lock with a proven-dead owner is preserved then safely recovered", async t => {
+  const { root, app, options } = await fixture(t); await app.close();
+  const lock = join(root, ".desktop-instance.lock");
+  await writeFile(lock, JSON.stringify({ version: 1, instanceId: "dead-instance", pid: 999_999_999, origin: "http://127.0.0.1:1" }), { mode: 0o600 });
+  const recovered = await startDesktop({ ...options, dataDirectory: root, openBrowser: false });
+  assert.equal(recovered.existing, false);
+  const entries = await readdir(root);
+  assert.ok(entries.some(entry => entry.startsWith(".desktop-instance.lock.recovered-")));
+  if (!recovered.existing) await recovered.close();
 });
 
 test("port binding failure releases only its own lock and does not initialize a Runtime", async t => {

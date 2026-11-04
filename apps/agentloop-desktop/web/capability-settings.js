@@ -4,9 +4,19 @@ import { installModelSettings } from './model-settings.js';
 export function installCapabilitySettings({ api, element, refreshModels, status, currentRuntime, refreshCapabilities }) {
   const models = installModelSettings({ api, element, refreshModels, status, managed: true });
   const dialog = element('model-settings'), body = element('capability-body');
-  let tab = 'models', target, dirty = false, working = false, snapshot, runtimeList = [], packages = [];
-  const labels = { skills: ['Skill 管理', '上传和维护本机 Skill 包；安装后可在各个 Runtime 配置中分别选择。'], runtimes: ['Runtime 管理', '在此新增、停止、重启、删除和进入本机 Runtime 的细节配置。'], connectors: ['Connector 配置', '本机模块由启动配置加载；连接和凭据按账号隔离。修改前先停止 Runtime。'], mcp: ['MCP 配置', '每个 Runtime 独立配置 HTTP MCP。修改前先停止 Runtime，保存后启动加载。'] };
+  let tab = 'general', target, runtimeDetail, dirty = false, working = false, snapshot, runtimeList = [], packages = [];
+  const labels = { general: ['常规', '管理本机 Agent 与设备级 Memory 配置。'], skills: ['Skill 管理', '上传和维护本机 Skill 包；安装后可在各个 Runtime 配置中分别选择。'], runtimes: ['子 Runtime 管理', '新增、停止、重启、删除和查看各个本机 Runtime；每个 Runtime 独立选择扩展 Skill 与 MCP。'], connectors: ['Connector 配置', '个人 Connector 只保存在 Desktop；配置凭据不会上传到云端。'] };
   const errors = { runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。' };
+  const connectorBindings = {
+    '126-mail': {
+      title: '绑定 126 邮箱', displayName: '我的 126 邮箱', scopes: ['email:search', 'email:read'],
+      description: '126 暂未提供可供第三方应用使用的扫码 OAuth 授权流程。请在网页版邮箱设置中开启 IMAP，并生成客户端授权码；该授权码仅保存在这台设备的加密 Secret Store 中。',
+      fields: [
+        { key: 'email', label: '126 邮箱账号', type: 'email', autocomplete: 'username', placeholder: 'name@126.com' },
+        { key: 'authorizationCode', label: '客户端授权码', type: 'password', autocomplete: 'new-password', placeholder: '粘贴授权码，不是网页登录密码' },
+      ],
+    },
+  };
   const message = (text, error = false) => { const e = element('capability-status'); e.textContent = text; e.classList.toggle('error', error); };
   function el(tag, text, className) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (className) e.className = className; return e; }
   function button(text, fn, danger = false) { const e = el('button', text, danger ? 'danger' : ''); e.type = 'button'; e.onclick = () => void perform(fn); return e; }
@@ -32,7 +42,14 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     reset(); message('正在读取本机配置…');
     [runtimeList, packages] = await Promise.all([api('/api/runtimes').then(r => r.runtimes), api('/api/skills').then(r => r.skills)]);
     if (!runtimeList.some(r => r.id === target)) target = currentRuntime() || runtimeList[0]?.id;
-    if (tab !== 'skills') {
+    if (tab === 'general') {
+      await renderGeneral();
+    } else if (tab === 'runtimes') {
+      if (runtimeDetail !== undefined && runtimeList.some(runtime => runtime.id === runtimeDetail)) {
+        target = runtimeDetail;
+        snapshot = await api(`/api/runtimes/${target}/configuration`);
+      } else runtimeDetail = undefined;
+    } else if (!['skills', 'connectors'].includes(tab)) {
       const picker = el('select'); picker.dataset.runtimePicker = 'true'; picker.setAttribute('aria-label', '设置目标 Runtime');
       for (const r of runtimeList) { const option = el('option', `${r.displayName} · ${r.status}`); option.value = r.id; picker.append(option); }
       picker.value = target;
@@ -42,15 +59,64 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     }
     if (tab === 'skills') await renderSkills();
     else if (tab === 'runtimes') renderRuntimes();
-    else if (tab === 'mcp') renderMcp();
     else if (tab === 'connectors') await renderConnectors();
-    body.append(button('放弃更改并重新读取', load)); dirty = false; message('配置已读取。凭据不会回显；导入和保存不代表真实执行已验收。');
+    if (tab !== 'general' && !(tab === 'runtimes' && runtimeDetail === undefined)) body.append(button('放弃更改并重新读取', load));
+    dirty = false; message(tab === 'general' ? '设备级配置已读取。' : '配置已读取。凭据不会回显；导入和保存不代表真实执行已验收。');
+  }
+  function detail(rows) {
+    const list = el('dl', undefined, 'capability-details');
+    for (const [term, value] of rows) { const definition = el('dd'); if (value instanceof Node) definition.append(value); else definition.textContent = value; list.append(el('dt', term), definition); }
+    return list;
+  }
+  async function renderGeneral() {
+    const [memoryResult, modelResult, storageResult] = await Promise.all([api('/api/memory-configuration'), api('/api/model-configuration'), api('/api/device-storage')]);
+    const workspace = input(storageResult.storage.workspaceRoot); workspace.className = 'general-storage-input'; workspace.setAttribute('aria-label', '共享工作目录');
+    const uploads = input(storageResult.storage.uploadStorageRoot); uploads.className = 'general-storage-input'; uploads.setAttribute('aria-label', '上传源文件目录');
+    body.append(detail([
+      ['Agent', 'Desktop · 开发模式'],
+      ['服务端', window.location.origin],
+      ['共享工作目录', workspace],
+      ['上传源文件目录', uploads],
+      ['Skill 模式', 'Runtime 启动时统一加载'],
+    ]), el('p', '保存目录后会在没有活动任务时重载本机 Runtime。原位置的数据不会自动迁移或删除；请输入绝对路径。', 'general-storage-note'));
+    const storageActions = el('div', undefined, 'capability-actions general-storage-actions');
+    storageActions.append(button('放弃更改', async () => { dirty = false; await load(); }), button('保存目录配置', async () => {
+      await api('/api/device-storage', { workspaceRoot: workspace.value, uploadStorageRoot: uploads.value });
+      dirty = false; await load(); message('目录配置已保存，本机 Runtime 已重载。');
+    })); storageActions.lastElementChild.classList.add('primary'); body.append(storageActions);
+    const memory = memoryResult.memory;
+    const options = modelResult.configuration.providers.flatMap(provider => provider.models.map(model => ({ key: `local:${model.key}`, label: `${model.displayName || model.key} · ${provider.displayName || provider.key}` })));
+    const section = el('section', undefined, 'capability-card local-memory-section'); body.append(section);
+    const state = el('span', memory.enabled ? '已启用' : '已关闭', `memory-state${memory.enabled ? ' enabled' : ''}`);
+    const heading = el('div', undefined, 'settings-section-title'); heading.append(el('strong', 'Memory 偏好与隐私沉淀'), state); section.append(heading);
+    const enabled = input('', 'checkbox'); enabled.checked = memory.enabled === true;
+    const model = el('select'); model.setAttribute('aria-label', 'Memory 沉淀模型');
+    const placeholder = el('option', options.length ? '请选择沉淀模型' : '暂无本机模型'); placeholder.value = ''; model.append(placeholder);
+    for (const option of options) { const choice = el('option', option.label); choice.value = option.key; model.append(choice); }
+    if (memory.settlementModelKey && !options.some(option => option.key === memory.settlementModelKey)) { const unavailable = el('option', `${memory.settlementModelKey}（当前不可用）`); unavailable.value = memory.settlementModelKey; model.append(unavailable); }
+    model.value = memory.settlementModelKey ?? '';
+    const updateControls = () => { enabled.disabled = !options.length && !enabled.checked; model.disabled = !enabled.checked || !options.length; };
+    updateControls();
+    enabled.onchange = () => { if (enabled.checked && !options.length) { enabled.checked = false; message('当前没有本机模型，无法开启 Memory。请先到“模型配置”添加模型。', true); } markDirty(); updateControls(); };
+    model.onchange = markDirty;
+    const toggle = el('label', undefined, 'local-memory-toggle'); const toggleCopy = el('span'); toggleCopy.append(el('strong', '启用 Memory'), el('small', '启用后，本机 Runtime 会按当前用户范围沉淀可复用的偏好与经验。')); toggle.append(enabled, toggleCopy);
+    const modelField = el('label', undefined, 'local-memory-model-field'); modelField.append(el('span', '沉淀模型'), model);
+    section.append(toggle, modelField, el('p', options.length ? '仅显示本机模型；云端模型不会用于本机 Memory 沉淀。' : '当前没有本机模型，无法开启 Memory。请先到“模型配置”添加模型。'));
+    const actions = el('div', undefined, 'capability-actions local-memory-actions');
+    actions.append(button('放弃更改', async () => { dirty = false; await load(); }), button('保存 Memory 配置', async () => {
+      const settlementModelKey = model.value.trim();
+      if (enabled.checked && !settlementModelKey) throw new Error('开启 Memory 前请选择沉淀模型。');
+      if (enabled.checked && !options.some(option => option.key === settlementModelKey)) throw new Error('所选沉淀模型不可用，请重新选择本机模型。');
+      await api('/api/memory-configuration', enabled.checked ? { enabled: true, settlementModelKey } : { enabled: false });
+      dirty = false; await load(); message('Memory 配置已保存，将用于后续新任务。');
+    }));
+    actions.lastElementChild.classList.add('primary');
+    section.append(actions);
   }
   function stopped() { return runtimeList.find(r => r.id === target)?.status === 'stopped'; }
   function draft() { return { skillPackageIds: snapshot.configuration.skills.map(s => s.packageId), mcpServers: snapshot.configuration.mcpServers.map(s => ({ ...s, auth: Object.fromEntries(Object.entries(s.auth).filter(([k]) => k !== 'credentialConfigured')) })) }; }
   async function save(configuration) { snapshot = await api(`/api/runtimes/${target}/configuration`, { configuration, revision: snapshot.revision }); dirty = false; await load(); await changed(); message('配置已保存。请启动此 Runtime 后执行任务验证。'); }
   async function renderSkills() {
-    const upload = card('导入 Skill', '支持 ZIP 或目录，单文件 ≤ 8 MiB，总解压大小 ≤ 32 MiB，最多 1000 个文件。只接受普通文件，不执行导入脚本。');
     const zip = input('', 'file'); zip.accept = '.zip'; zip.setAttribute('aria-label', '选择 Skill ZIP');
     const directory = input('', 'file'); directory.multiple = true; directory.setAttribute('webkitdirectory', ''); directory.setAttribute('aria-label', '选择 Skill 目录');
     async function encode(file) { const bytes = new Uint8Array(await file.arrayBuffer()); let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode(...bytes.subarray(i, i + 8192)); return btoa(s); }
@@ -60,39 +126,86 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
       const payload = isZip ? { zipBase64: await encode(files[0]) } : { files: await Promise.all(files.map(async f => ({ path: f.webkitRelativePath || f.name, contentBase64: await encode(f) }))) };
       await api('/api/skills/import', payload); zip.value = ''; directory.value = ''; dirty = false; await load(); message('Skill 已导入设备库。请在 Runtime 页勾选并保存后启动。');
     }
-    upload.append(field('ZIP 文件', zip), button('导入 ZIP', () => importFiles([...zip.files], true)), field('本机目录', directory), button('导入目录', () => importFiles([...directory.files], false)));
-    if (!packages.length) card('暂无扩展 Skill', '可以导入 Skill 包；不会自动启用或上传到账号服务。');
+    zip.onchange = () => void perform(() => importFiles([...zip.files], true));
+    directory.onchange = () => void perform(() => importFiles([...directory.files], false));
+    const heading = el('section', undefined, 'skill-library-heading'); const copy = el('div'); copy.append(el('strong', '本机 Skill 包'), el('p', '内核 Skills 默认加载；此处管理 Custom / 上传 Skill。支持 ZIP 或目录，导入内容只保存在本机设备库。'));
+    // Opening a file chooser must happen before any import work disables the
+    // hidden input. The import itself remains serialized by perform() above.
+    const pickerButton = (title, picker) => { const control = el('button', title); control.type = 'button'; control.onclick = () => picker.click(); return control; };
+    const actions = el('div', undefined, 'capability-actions'); actions.append(pickerButton('上传 ZIP', zip), pickerButton('上传目录', directory)); heading.append(copy, actions);
+    const pickers = el('div', undefined, 'skill-upload-inputs'); pickers.append(zip, directory); body.append(heading, pickers);
+    if (!packages.length) card('暂无本机 Skill 包', '可以上传 ZIP 或目录；导入后不会自动启用、不会上传到账号服务。请在 Runtime 管理中选择并绑定。');
     for (const p of packages) {
-      const c = card(p.displayName || p.skillName, `${p.description} · ${p.validationStatus}${p.metadataNeedsReview ? ' · 元数据待检查' : ''}`);
-      c.append(button('查看 / 编辑声明', async () => {
+      const c = card(p.displayName || p.skillName, p.description || '暂无描述。'); c.classList.add('skill-package-card');
+      const state = el('small', `${p.validationStatus === 'valid' ? (p.metadataNeedsReview ? '待维护元数据' : '元数据已确认') : 'Skill 包校验未通过'}`, `skill-package-state${p.validationStatus === 'valid' && !p.metadataNeedsReview ? ' confirmed' : ''}`);
+      const actions = el('div', undefined, 'capability-actions skill-package-actions'); actions.append(button('维护元数据', async () => {
         if (dirty) throw new Error('请先保存或放弃更改');
         const meta = await api(`/api/skills/${p.packageId}/metadata`); const editor = jsonEditor(meta.declaration, 16);
-        c.replaceChildren(el('strong', p.displayName), el('p', '编辑设备库中的声明元数据，不改写原始 Skill 内容；保存后需重启使用此包的 Runtime。'), editor);
+        c.replaceChildren(el('strong', p.displayName || p.skillName), el('p', '编辑设备库中的声明元数据，不改写原始 Skill 内容；保存后需重启使用此包的 Runtime。'), editor);
         editor.disabled = !meta.editable;
         c.append(button('保存声明', async () => { await api(`/api/skills/${p.packageId}/metadata`, { declaration: JSON.parse(editor.value) }); dirty = false; await load(); message('声明已保存，请重启使用此 Skill 的 Runtime。'); }));
-      }));
+      })); c.append(state, actions);
     }
   }
   function renderRuntimes() {
-    const r = runtimeList.find(r => r.id === target); const c = card(r.displayName, `${r.isDefault ? '默认 · ' : ''}${r.status} · 活动任务 ${r.activeRunCount}${r.pendingAction ? ` · 等待 ${r.pendingAction}` : ''}`);
-    const name = input(r.displayName); name.maxLength = 100;
-    c.append(field('显示名称', name), button('重命名', async () => { await api(`/api/runtimes/${target}/rename`, { displayName: name.value }); dirty = false; await load(); await changed(); }));
-    const actions = el('div', undefined, 'capability-actions');
-    for (const [action, title] of [['start', '启动'], ['stop', '停止'], ['drain', '排空'], ['restart', '重启']]) actions.append(button(title, async () => {
-      if (dirty) throw new Error('请先保存或放弃更改');
-      await api(`/api/runtimes/${target}/${action}`, {}); await load(); await changed(); message('生命周期操作已提交；有活动任务时会先排空，不强制中断。');
-    }));
-    if (!r.isDefault) actions.append(button('删除此 Runtime', async () => {
-      if (dirty || !confirm('删除此 Runtime 及其本机对话、附件、产物和配置？设备共享 Skill 库和模型不受影响。')) return;
-      await api(`/api/runtimes/${target}/remove`, {}); target = undefined; await load(); await changed(); message('Runtime 及其专属数据已删除；此操作不能由设置页恢复。');
-    }, true));
-    c.append(actions);
-    const skills = card('启用扩展 Skills', '停止 Runtime 后编辑。取消勾选仅解除绑定，不删除设备库文件。');
+    if (runtimeDetail !== undefined) { renderRuntimeDetail(); return; }
+    const heading = el('section', undefined, 'runtime-manager-heading');
+    const copy = el('div'); copy.append(el('strong', '子 Runtime 管理'), el('p', '每个 Runtime 具有独立会话、扩展 Skill 与 MCP 配置。'));
+    const add = button('＋ 新增', () => createPanel(false)); add.classList.add('runtime-create'); heading.append(copy, add); body.append(heading);
+    const list = el('div', undefined, 'runtime-manager-list'); body.append(list);
+    for (const runtime of runtimeList) {
+      const item = el('section', undefined, `runtime-manager-card${runtime.id === currentRuntime() ? ' selected' : ''}`);
+      const main = el('div', undefined, 'runtime-manager-main'); const title = el('div', undefined, 'runtime-manager-title'); title.append(el('strong', runtime.displayName));
+      if (runtime.isDefault) title.append(el('span', '默认', 'runtime-tag default'));
+      title.append(el('span', runtime.status === 'ready' ? '就绪' : runtime.status === 'stopped' ? '已停止' : runtime.status, `runtime-tag ${runtime.status}`));
+      const activity = runtime.activeRunCount ? `当前 ${runtime.activeRunCount} 个活动任务` : '当前无活动任务';
+      main.append(title, el('p', activity), el('small', `${runtime.extensionSkillCount} 个扩展 Skill · ${runtime.mcpServerCount} 个 MCP`));
+      const actions = runtimeActionMenu(runtime);
+      actions.prepend(button('查看', () => { runtimeDetail = runtime.id; target = runtime.id; return load(); }));
+      item.append(main, actions); list.append(item);
+    }
+    function createPanel(open) {
+      const existing = body.querySelector('.runtime-create-panel'); if (existing) { existing.hidden = !open; return; }
+      const panel = el('section', undefined, 'capability-card runtime-create-panel'); const name = input(''); name.maxLength = 100;
+      panel.append(el('strong', '新建 Runtime'), el('p', '新 Runtime 共享设备模型、Skill 库和 Connector，但拥有独立会话、Skill 绑定及 MCP 配置。'), field('名称', name));
+      const actions = el('div', undefined, 'capability-actions'); actions.append(button('取消', () => panel.remove()), button('创建', async () => {
+        const result = await api('/api/runtimes', { displayName: name.value }); runtimeDetail = result.runtime.id; target = result.runtime.id; dirty = false; await load(); await changed();
+      })); actions.lastElementChild.classList.add('primary'); panel.append(actions); body.append(panel); name.focus();
+    }
+  }
+  async function lifecycle(runtime, action) {
+    if (dirty) throw new Error('请先保存或放弃更改');
+    await api(`/api/runtimes/${runtime.id}/${action}`, {}); await load(); await changed(); message('生命周期操作已提交；有活动任务时会先排空，不强制中断。');
+  }
+  async function removeRuntime(runtime) {
+    if (dirty || !confirm(`删除“${runtime.displayName}”及其本机对话、附件、产物和配置？设备共享 Skill 库、模型和 Connector 不受影响。`)) return;
+    await api(`/api/runtimes/${runtime.id}/remove`, {}); runtimeDetail = undefined; target = undefined; await load(); await changed(); message('Runtime 及其专属数据已删除；此操作不能由设置页恢复。');
+  }
+  function runtimeActionMenu(runtime) {
+    const actions = el('div', undefined, 'runtime-manager-actions');
+    const menu = el('div', undefined, 'runtime-action-menu'); menu.hidden = true;
+    const more = button('•••', () => { menu.hidden = !menu.hidden; }); more.classList.add('runtime-more'); more.setAttribute('aria-label', `操作 ${runtime.displayName}`);
+    const operations = runtime.status === 'stopped'
+      ? [['start', '启动']]
+      : runtime.status === 'ready'
+        ? [['stop', '停止'], ['drain', '排空'], ['restart', '重启']]
+        : [['stop', '停止']];
+    for (const [action, titleText] of operations) menu.append(button(titleText, () => lifecycle(runtime, action)));
+    if (!runtime.isDefault) menu.append(button('删除 Runtime', () => removeRuntime(runtime), true));
+    actions.append(more, menu); return actions;
+  }
+  function renderRuntimeDetail() {
+    const runtime = runtimeList.find(item => item.id === runtimeDetail); if (!runtime || !snapshot) { runtimeDetail = undefined; void load(); return; }
+    const heading = el('section', undefined, 'runtime-detail-heading'); const back = button('‹ Runtime 管理', () => { runtimeDetail = undefined; target = undefined; dirty = false; return load(); }); back.classList.add('runtime-back');
+    const title = el('div'); title.append(el('strong', runtime.displayName), el('small', `${runtime.isDefault ? '默认 · ' : ''}${runtime.status} · ${runtime.extensionSkillCount} 个扩展 Skill · ${runtime.mcpServerCount} 个 MCP`)); heading.append(back, title); body.append(heading);
+    const overview = card('Runtime 基本信息'); const name = input(runtime.displayName); name.maxLength = 100;
+    overview.append(field('显示名称', name), button('重命名', async () => { await api(`/api/runtimes/${target}/rename`, { displayName: name.value }); dirty = false; await load(); await changed(); }));
+    const lifecycleActions = runtimeActionMenu(runtime); lifecycleActions.classList.add('runtime-detail-actions'); overview.append(lifecycleActions);
+    const skills = card('专属扩展 Skills', '只影响此 Runtime。停止 Runtime 后可调整；取消勾选仅解除绑定，不删除设备库文件。');
     const choices = [];
-    for (const p of packages) { const checkbox = input('', 'checkbox'); checkbox.checked = snapshot.configuration.skills.some(s => s.packageId === p.packageId); checkbox.disabled = !stopped() || p.validationStatus !== 'valid'; choices.push([p, checkbox]); skills.append(field(p.displayName, checkbox)); }
-    const saveButton = button('保存 Skill 绑定', async () => { const config = draft(); config.skillPackageIds = choices.filter(([, e]) => e.checked).map(([p]) => p.packageId); await save(config); }); saveButton.disabled = !stopped(); skills.append(saveButton);
-    const create = card('新建 Runtime', '独立会话与执行环境；共享设备模型和 Skill 库。'); const newName = input(''); newName.maxLength = 100;
-    create.append(field('名称', newName), button('创建并启动', async () => { const result = await api('/api/runtimes', { displayName: newName.value }); target = result.runtime.id; dirty = false; await load(); await changed(); }));
+    for (const pkg of packages) { const checkbox = input('', 'checkbox'); checkbox.checked = snapshot.configuration.skills.some(skill => skill.packageId === pkg.packageId); checkbox.disabled = !stopped() || pkg.validationStatus !== 'valid'; choices.push([pkg, checkbox]); skills.append(field(pkg.displayName || pkg.skillName, checkbox)); }
+    const saveButton = button('保存 Skill 绑定', async () => { const config = draft(); config.skillPackageIds = choices.filter(([, control]) => control.checked).map(([pkg]) => pkg.packageId); await save(config); }); saveButton.disabled = !stopped(); skills.append(saveButton);
+    renderMcp();
   }
   function renderMcp() {
     let servers = draft().mcpServers;
@@ -132,43 +245,96 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     const saveButton = button('保存 MCP 配置', async () => { flush(); const config = draft(); config.mcpServers = servers; await save(config); }); saveButton.disabled = !stopped(); list.append(saveButton);
   }
   async function renderConnectors() {
-    const [{ connectors }, { connections }] = await Promise.all([api('/api/connectors/catalog'), api(`/api/runtimes/${target}/connectors`)]);
-    card('设备模块与账号连接', '只有启动时显式批准的本机模块可配置。凭据加密保存在本机，不回显、不发送给账号服务。保存后启动 Runtime；在对话区勾选本轮授权的连接。');
-    if (!connectors.length) card('尚无已加载的 Connector 模块', '请通过 AGENTLOOP_DESKTOP_CONNECTOR_MODULES_JSON 配置本机模块后重启 Desktop。网页不能安装或指定代码路径。');
-    for (const c of connections) {
-      const section = card(c.displayName, `${c.connectorKey} · ${c.enabled ? '已启用' : '已停用'} · ${c.credentialConfigured ? '凭据已保存' : '无凭据'}${!c.moduleAvailable ? ' · 模块不可用' : ''}`);
-      section.append(button('编辑连接', () => edit(c)), button('删除连接', async () => { if (!confirm('删除此账号的连接及本机凭据？')) return; await api(`/api/runtimes/${target}/connectors/${c.id}/remove`, {}); dirty = false; await load(); await changed(); }, true));
+    const [{ connectors }, { connections }] = await Promise.all([api('/api/connectors/catalog'), api('/api/connectors')]);
+    const availableHead = el('section', undefined, 'connector-section-heading'); availableHead.append(el('strong', '可添加的 Connectors'), el('p', 'Connector 会供这台 Desktop 上的全部 Runtime 使用；凭据仅加密保存在本机，不会上传到云端。')); body.append(availableHead);
+    if (!connectors.length) { const empty = el('div', '尚无已加载的 Connector 模块', 'connector-empty'); empty.append(el('small', '请通过 AGENTLOOP_DESKTOP_CONNECTOR_MODULES_JSON 配置本机模块后重启 Desktop。网页不能安装或指定代码路径。')); body.append(empty); }
+    const catalog = el('div', undefined, 'connector-catalog'); body.append(catalog);
+    const capabilityNames = capabilities => capabilities.map(capability => typeof capability === 'string' ? capability : capability.displayName || capability.key || '已声明能力').join(' · ');
+    for (const connector of connectors) {
+      const item = el('section', undefined, 'connector-catalog-card'); const head = el('div', undefined, 'connector-card-head'); head.append(el('strong', connector.displayName));
+      const add = button('＋', () => edit(undefined, connector.key)); add.classList.add('connector-add'); add.title = `添加 ${connector.displayName}`; add.setAttribute('aria-label', `添加 ${connector.displayName}`); head.append(add);
+      item.append(head, el('p', connector.description || '由本机 Connector 模块提供。'), el('small', capabilityNames(connector.capabilities) || '能力由本机模块声明。')); catalog.append(item);
     }
-    const editor = card('连接编辑器');
-    function edit(existing) {
+    const addedHead = el('section', undefined, 'connector-section-heading'); addedHead.append(el('strong', '已添加的 Connectors'), el('p', '账号连接对全部 Runtime 生效；保存后会在没有活动任务时重载运行中的 Runtime。')); body.append(addedHead);
+    if (!connections.length) body.append(el('div', '尚未配置本机 Connector', 'connector-empty'));
+    for (const c of connections) {
+      const section = el('section', undefined, 'connector-existing-card'); const head = el('div', undefined, 'connector-card-head'); head.append(el('strong', c.displayName));
+      const actions = el('div', undefined, 'capability-actions'); const editButton = button('编辑', () => edit(c)); const removeButton = button('删除', async () => { if (!confirm('删除此账号的连接及本机凭据？')) return; await api(`/api/connectors/${c.id}/remove`, {}); dirty = false; await load(); await changed(); }, true); actions.append(editButton, removeButton); head.append(actions);
+      section.append(head, el('p', `${c.connectorKey} · ${c.enabled ? '已启用' : '已停用'} · ${c.credentialConfigured ? '凭据已保存' : '无凭据'}${!c.moduleAvailable ? ' · 模块不可用' : ''}`)); body.append(section);
+    }
+    let editor;
+    function edit(existing, connectorKey) {
       if (dirty) throw new Error('请先保存或放弃更改');
+      if (!editor) { editor = el('section', undefined, 'capability-card connector-editor'); body.append(editor); }
+      const key = existing?.connectorKey ?? connectorKey ?? connectors[0]?.key ?? '';
+      const binding = connectorBindings[key];
+      if (binding) { renderBinding(existing, key, binding); return; }
+      renderGenericEditor(existing, key);
+    }
+    function renderBinding(existing, connectorKey, binding) {
+      editor.classList.add('connector-binding'); editor.replaceChildren();
+      const title = existing ? `编辑 ${existing.displayName}` : binding.title;
+      const heading = el('div', undefined, 'connector-binding-head'); const copy = el('div'); copy.append(el('strong', title), el('p', binding.description));
+      const close = button('×', () => { editor.replaceChildren(); editor.classList.remove('connector-binding'); }); close.classList.add('connector-binding-close'); close.setAttribute('aria-label', '关闭绑定面板'); heading.append(copy, close);
+      const fields = el('div', undefined, 'connector-binding-fields'); const values = new Map();
+      for (const definition of binding.fields) {
+        const control = input('', definition.type); control.placeholder = definition.placeholder; control.autocomplete = definition.autocomplete;
+        const label = field(definition.label, control); label.classList.add('connector-binding-field'); fields.append(label); values.set(definition.key, control);
+      }
+      const actions = el('div', undefined, 'capability-actions connector-binding-actions');
+      actions.append(button('取消', () => { editor.replaceChildren(); editor.classList.remove('connector-binding'); }), button(existing ? '保存连接' : '绑定并保存', async () => {
+        const credentials = {};
+        let supplied = 0;
+        for (const definition of binding.fields) {
+          const value = values.get(definition.key).value.trim();
+          if (!value) {
+            if (existing) continue;
+            throw new Error(`请填写${definition.label}。`);
+          }
+          supplied++;
+          credentials[definition.key] = value;
+        }
+        if (existing && supplied > 0 && supplied !== binding.fields.length) throw new Error('如需更换凭据，请完整填写全部字段。');
+        if (existing && !Object.keys(credentials).length) {
+          await saveConnector({ id: existing.id, connectorKey, displayName: existing.displayName, enabled: existing.enabled, scopes: existing.scopes });
+          return;
+        }
+        await saveConnector({ ...(existing ? { id: existing.id } : {}), connectorKey, displayName: existing?.displayName ?? binding.displayName, enabled: existing?.enabled ?? true, scopes: existing?.scopes ?? binding.scopes, credentials });
+      })); actions.lastElementChild.classList.add('primary');
+      editor.append(heading, fields, actions);
+      values.get(binding.fields[0]?.key)?.focus();
+    }
+    function renderGenericEditor(existing, connectorKey) {
+      editor.classList.remove('connector-binding');
       editor.replaceChildren(el('strong', existing ? '编辑连接' : '新建连接'));
-      const module = el('select'); for (const c of connectors) { const o = el('option', c.displayName); o.value = c.key; module.append(o); } if (existing) module.value = existing.connectorKey;
-      module.disabled = Boolean(existing) || !stopped();
+      const module = el('select'); for (const c of connectors) { const o = el('option', c.displayName); o.value = c.key; module.append(o); } module.value = connectorKey;
+      module.disabled = Boolean(existing || connectorKey);
       const name = input(existing?.displayName ?? ''), scopes = jsonEditor(existing?.scopes ?? [], 3), enabled = input('', 'checkbox'); enabled.checked = existing?.enabled ?? true;
       const credentials = input('', 'password'); credentials.autocomplete = 'new-password'; credentials.placeholder = 'JSON 对象，如 {"accessToken":"…"}；留空保留，{} 清除';
       editor.append(field('Connector 模块', module), field('显示名称', name), field('启用连接', enabled), field('Scopes（JSON 数组）', scopes), field('凭据（仅本次提交，留空保留）', credentials));
       const saveButton = button('保存连接', async () => {
         const connector = { ...(existing ? { id: existing.id } : {}), connectorKey: module.value, displayName: name.value, enabled: enabled.checked, scopes: JSON.parse(scopes.value), ...(credentials.value ? { credentials: JSON.parse(credentials.value) } : {}) };
-        const result = await api(`/api/runtimes/${target}/connectors`, { connector }); credentials.value = ''; dirty = false; await load(); await changed(); message(result.credentialCleanupPending ? '连接已保存，旧凭据清理未完成。' : '连接已保存；请启动 Runtime 后在对话中勾选授权。');
-      }); saveButton.disabled = !stopped() || !connectors.length; editor.append(saveButton);
-      for (const e of [name, scopes, enabled, credentials]) e.disabled = !stopped();
+        await saveConnector(connector); credentials.value = '';
+      }); saveButton.disabled = !connectors.length; editor.append(saveButton);
     }
-    edit();
+    async function saveConnector(connector) {
+      const result = await api('/api/connectors', { connector }); dirty = false; await load(); await changed(); message(result.credentialCleanupPending ? '连接已保存，旧凭据清理未完成。' : '连接已保存，全部 Runtime 已同步；请在对话中勾选本轮授权。');
+    }
   }
   async function show(next) {
     if (!canLeave()) return;
     tab = next; element('settings-models').hidden = tab !== 'models'; element('settings-capabilities').hidden = tab === 'models';
     for (const b of document.querySelectorAll('[data-settings-tab]')) { b.classList.toggle('active', b.dataset.settingsTab === tab); b.setAttribute('aria-pressed', String(b.dataset.settingsTab === tab)); }
     if (tab === 'models') await models.load();
-    else { element('capability-title').textContent = labels[tab][0]; element('capability-description').textContent = labels[tab][1]; await load(); }
+    else { element('capability-title').textContent = labels[tab][0]; element('capability-description').textContent = labels[tab][1]; element('capability-scope').textContent = ['skills', 'connectors'].includes(tab) ? '跨 Runtime 共享' : '仅本机保存'; await load(); }
   }
   for (const b of document.querySelectorAll('[data-settings-tab]')) b.onclick = () => void perform(() => show(b.dataset.settingsTab));
   // show() checks canLeave before perform sets working.
   for (const b of document.querySelectorAll('[data-settings-tab]')) b.onclick = () => { if (canLeave()) { const next = b.dataset.settingsTab; void show(next).catch(() => message('设置读取失败。', true)); } };
-  async function open() { if (dialog.open) return; target = currentRuntime(); tab = 'models'; dirty = false; dialog.showModal(); await show('models'); }
+  async function open() { if (dialog.open) return; target = currentRuntime(); tab = 'general'; dirty = false; dialog.showModal(); await show('general'); }
   element('model-settings-open').onclick = () => void open(); element('model-settings-mobile').onclick = () => void open();
   const close = event => { if (!canLeave()) { event?.preventDefault(); return; } dialog.close(); };
   element('model-settings-close').onclick = () => close(); dialog.addEventListener('cancel', close);
+  element('model-settings-done').onclick = () => close();
   dialog.addEventListener('close', () => { reset(); target = undefined; });
 }

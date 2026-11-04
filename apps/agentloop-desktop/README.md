@@ -9,13 +9,12 @@ Desktop 是标准 `@zhujun/agentloop-local-runtime` 的独立宿主，不依赖 
 ```sh
 cd /Users/zhujun/coding/agentloop
 npm run build:desktop
-export AGENTLOOP_DESKTOP_AUTH_BASE_URL=http://127.0.0.1:8795
-npm run start:desktop -- --development
+npm run start:desktop
 ```
 
-首次检出需先安装依赖并构建共享包（可执行根目录 `npm run build`）；账号包单独构建为 `npm run build:identity`。本机联调先在另一终端运行 `npm run start:accounts`，无需启动 Router。账号服务默认持久化在 `apps/agentloop-account-service/data/accounts.db`。正式客户端应使用我们部署的 HTTPS 账号服务域名，上述 loopback 仅用于本机联调，不是已经上线的云服务。没有配置账号地址时仍可打开登录页，但不能进入业务工作区。
+首次检出需先安装依赖并构建共享包（可执行根目录 `npm run build`）；账号包单独构建为 `npm run build:identity`。本机联调无需手动启动账号服务：`npm run start:desktop` 会先安全重启管理器登记的 Account Service 并等待 `127.0.0.1:8795` 健康就绪，再启动 Desktop。根目录启动脚本将 Desktop 自动指向该地址；无需手工设置环境变量。账号服务默认持久化在 `apps/agentloop-account-service/data/accounts.db`。正式客户端应使用我们部署的 HTTPS 账号服务域名，上述 loopback 仅用于本机联调，不是已经上线的云服务。
 
-只监听 `127.0.0.1`，默认选择空闲端口并打开系统默认浏览器（建议 Chrome/Edge；失败时输出地址，服务保持可用）。可用 `--no-open` 禁用自动打开，`--data-dir /absolute/path/to/new-directory` 指定独立目录。重复启动相同目录只打开已有实例，不再次创建 Runtime。指定 Chrome 而非默认浏览器的启动策略尚未实现。
+只监听固定地址 `http://127.0.0.1:8796`，并在启动命令所在终端持续输出安全的运行摘要（配置保存、Run 提交、取消和失败请求；不记录提示词、凭据、查询参数、响应内容或资源 ID）。使用 `Ctrl+C` 关闭服务；若端口被占用，启动会明确失败，不会静默改用随机端口。可用 `--no-open` 禁用自动打开，`--data-dir /absolute/path/to/new-directory` 指定独立目录：`npm run start:desktop -- --no-open --data-dir /absolute/path/to/new-directory`。重复启动相同目录只打开已有实例，不再次创建 Runtime。指定 Chrome 而非默认浏览器的启动策略尚未实现。
 
 默认数据目录：
 
@@ -82,20 +81,21 @@ Desktop 模型基础地址支持 HTTP 或 HTTPS，包括域名和局域网地址
 
 ## 本机能力设置
 
-“本机能力 → 设置”由 Desktop 自己提供模型、Skills、Runtime、Connector、MCP 五个页面。Multi Runtime 只作为交互和展示参考，Desktop 不导入它的 Router、Store、Installer 或内部类。
+“本机能力 → 设置”由 Desktop 自己提供常规（含设备级 Memory）、模型、Skills、Connector、Runtime、MCP 页面。Multi Runtime 只作为交互和展示参考，Desktop 不导入它的 Router、Store、Installer 或内部类。
 
 - **Skills**：上传 ZIP 或目录到设备级 Skill 库。导入器独立校验 ZIP 路径、CRC、压缩比、文件类型和大小；导入后不会自动启用，也不会上传账号服务。Runtime 页勾选 Skill 绑定，停止 Runtime 后保存，重新启动后才进入执行上下文。声明元数据可编辑，原始 Skill 文件保持不可变。
 - **Runtime**：创建、重命名、停止、启动、排空、重启和删除独立 Runtime。Runtime 配置有版本号，过期页面不能覆盖新配置；活动 Run 或未退出的执行会阻止修改和关闭。默认 Runtime 不可删除。
 - **MCP**：按 Runtime 配置 HTTP MCP 服务和工具策略，可使用无认证、Bearer、API Key Header、Basic、Query Parameter、Custom Headers。凭据只进独立本机密钥库；服务地址变更不会沿用旧凭据。探测只在内存中完成，不保存草稿。服务地址禁止 userinfo、查询参数和片段。
-- **Connector**：模块只能由 Desktop 启动时的宿主环境显式批准，网页不能提交任意代码路径。设置页管理当前账号的连接、Scopes、启用状态和加密凭据；连接按账号隔离。对话中必须逐项勾选本轮授权的连接，不能自动授予设备上的全部连接。
+- **Connector**：Desktop 启动时由宿主批准并加载内置的飞书、126 邮箱和金山文档模块；网页不能提交任意代码路径。设置页管理当前账号的设备级连接、Scopes、启用状态和加密凭据；连接按账号隔离，并由全部 Runtime 共享。对话中必须逐项勾选本轮授权的连接，不能自动授予设备上的全部连接。
+- **常规 / Memory**：设备级开关和沉淀模型仅接受本机模型目录；保存会在无活动任务时重新加载运行实例，失败则恢复原配置。不会显示无法由运行时持久化的占位控件。
 
-Connector 模块通过 `AGENTLOOP_DESKTOP_CONNECTOR_MODULES_JSON` 注册：
+Desktop 的内置 Connector 由启动宿主决定：开发模式解析工作区源码，安装包应在 Desktop 旁携带对应的 `connectors/*.mjs` bundle。可以通过 `AGENTLOOP_DESKTOP_CONNECTOR_MODULES_JSON` 再注册额外的宿主批准模块：
 
 ```sh
 export AGENTLOOP_DESKTOP_CONNECTOR_MODULES_JSON='[{"modulePath":"/absolute/path/to/connector.mjs"}]'
 ```
 
-模块必须实现公开 `@zhujun/agentloop-connector-sdk` 协议。Desktop 不将具体 Connector 包静态写入依赖列表，也不声称已经提供 Feishu/WPS 等平台 OAuth；平台模块自行实现其连接协议。
+模块必须实现公开 `@zhujun/agentloop-connector-sdk` 协议。Desktop 不接受网页提供的模块路径，也不声称已经完成 Feishu/WPS 等平台 OAuth；平台模块自行实现其连接协议。
 
 ## 安全与生命周期
 

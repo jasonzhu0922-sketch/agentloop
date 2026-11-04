@@ -173,7 +173,7 @@ npm start
 
 ## 快速启动：agentloop-multi-runtime（多 Runtime）
 
-要求 Node.js 26 或更高版本，且根目录已执行过 `npm install`。本地启动器会启动一个 Router、一个 Web 和两个 Runtime Host；Provider 密钥仅传给 Runtime Host，不会传给 Router 或 Web。Local Runtime Agent 是独立的设备进程，不会被云端拓扑隐式启动。
+要求 Node.js 26 或更高版本，且根目录已执行过 `npm install`。本地启动器会先重启并等待本机 Account Service 的健康检查，然后启动一个 Router、一个 Web 和两个 Runtime Host；Provider 密钥仅传给 Runtime Host，不会传给 Router 或 Web。Local Runtime Agent 是独立的设备进程，不会被云端拓扑隐式启动。
 
 1. 创建多 Runtime 自有的 Provider 配置和本地密钥文件：
 

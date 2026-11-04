@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { open, readFile, realpath, mkdir, lstat, unlink, readdir, writeFile } from "node:fs/promises";
+import { open, readFile, realpath, mkdir, lstat, unlink, readdir, rename, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 
@@ -18,8 +18,15 @@ export function loopbackOrigin(value: unknown): string {
   if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password || url.pathname !== "/" || url.search || url.hash || value !== url.origin) throw new Error("desktop_instance_metadata_invalid");
   return url.origin;
 }
-/** Exclusive creation precedes all DB access. Never steal an unknown/stale lock:
- * PID reuse, partial metadata and an unresponsive host are not proof of safety.
+/** A PID that cannot be signalled is intentionally treated as unknown: only
+ * ESRCH proves that the process which created a lock no longer exists. */
+function processIsAbsent(pid: number): boolean {
+  try { process.kill(pid, 0); return false; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+}
+/** Exclusive creation precedes all DB access. Unknown locks are never stolen:
+ * only an unreachable published origin paired with a conclusively dead PID is
+ * recovered, and that evidence is retained beside the new lock.
  */
 export async function claimInstance(dataDirectory: string): Promise<InstanceClaim> {
   if (!isAbsolute(dataDirectory)) throw new Error("desktop_data_directory_must_be_absolute");
@@ -38,15 +45,23 @@ export async function claimInstance(dataDirectory: string): Promise<InstanceClai
         if (metadata.version !== 1 || typeof metadata.instanceId !== "string" || !Number.isSafeInteger(metadata.pid)) throw new Error("invalid_lock");
         if (metadata.origin !== undefined) {
           const origin = loopbackOrigin(metadata.origin);
-          const response = await fetch(`${origin}/__desktop/instance`, { signal: AbortSignal.timeout(500), redirect: "error" });
-          const identity = await response.json() as { instanceId: string; ready: boolean };
-          if (response.ok && identity.ready && identity.instanceId === metadata.instanceId) return { existing: true, origin };
-          throw new Error("desktop_instance_unavailable");
+          try {
+            const response = await fetch(`${origin}/__desktop/instance`, { signal: AbortSignal.timeout(500), redirect: "error" });
+            const identity = await response.json() as { instanceId: string; ready: boolean };
+            if (response.ok && identity.ready && identity.instanceId === metadata.instanceId) return { existing: true, origin };
+          } catch { /* A dead PID below is required before recovery. */ }
+          if (processIsAbsent(metadata.pid)) {
+            try {
+              await rename(path, `${path}.recovered-${new Date().toISOString().replace(/[:.]/g, "-")}`);
+              file = await open(path, "wx", 0o600);
+              break;
+            } catch { /* A concurrent creator or an unknown filesystem state is not recoverable. */ }
+          }
         }
       } catch { /* Startup publication may be partial; bounded retry, no takeover. */ }
       await setTimeout(50);
     }
-    throw new Error("desktop_instance_unavailable");
+    if (!file) throw new Error("desktop_instance_unavailable");
   }
   const stat = await file.stat();
   const metadata: InstanceMetadata = { version: 1, instanceId: randomUUID(), pid: process.pid };

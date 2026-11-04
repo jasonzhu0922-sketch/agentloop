@@ -7,7 +7,7 @@ import { ConnectorSettings, type ConnectorSettingInput } from "../configuration/
 import type { ConnectorModuleRegistration } from "../connectors/connector-module-loader.ts";
 import type { LocalConnectorConfigurationPort, LocalIdentityPort, LocalModelProviderPort, LocalRuntimeControl } from "../contracts/host.ts";
 import { LocalRuntimeSupervisorError } from "../contracts/host.ts";
-import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, type LocalRuntimeMcpServerInput, type LocalRuntimeMemoryConfigurationInput, type LocalRuntimeSecretStore } from "../configuration/local-runtime-configuration-store.ts";
+import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, type LocalRuntimeMcpServerInput, type LocalRuntimeMemoryConfigurationInput, type LocalRuntimeSecretStore, type ResolvedLocalMemoryConfiguration, type LocalRuntimeDeviceStorageInput, type ResolvedLocalRuntimeDeviceStorage } from "../configuration/local-runtime-configuration-store.ts";
 import { LocalRunAdmissionService } from "./local-run-admission.ts";
 import { LocalRuntimeFactory } from "./local-runtime-factory.ts";
 import { RuntimeFacade, type LocalRuntime } from "./local-runtime.ts";
@@ -43,6 +43,8 @@ export interface LocalRuntimeManagerOptions {
   readonly bundledSkillDirectories?: readonly string[];
   readonly customSkillDirectories?: readonly string[];
   readonly memory?: LocalRuntimeMemoryConfigurationInput;
+  readonly workspaceRoot?: string;
+  readonly uploadStorageRoot?: string;
   readonly maxConcurrentRuns?: number;
 }
 
@@ -54,6 +56,10 @@ export type ManagedLocalRuntime = Omit<LocalRuntime, "close" | "definition" | "m
 export interface LocalRuntimeManager {
   modelConfiguration(): Promise<LocalModelSettings>;
   configureModels(input: LocalModelConfigurationInput, expectedRevision: string): Promise<LocalModelSettings>;
+  deviceMemoryConfiguration(): Promise<ResolvedLocalMemoryConfiguration>;
+  configureDeviceMemory(input: LocalRuntimeMemoryConfigurationInput): Promise<ResolvedLocalMemoryConfiguration>;
+  deviceStorageConfiguration(): Promise<ResolvedLocalRuntimeDeviceStorage>;
+  configureDeviceStorage(input: LocalRuntimeDeviceStorageInput): Promise<ResolvedLocalRuntimeDeviceStorage>;
   runtimes(): Promise<readonly LocalRuntimeSummary[]>;
   createRuntime(displayName: string, configuration?: LocalRuntimeConfigurationInput): Promise<LocalRuntimeSummary>;
   renameRuntime(runtimeId: string, displayName: string): Promise<LocalRuntimeSummary>;
@@ -66,9 +72,9 @@ export interface LocalRuntimeManager {
   updateSkillMetadata(id: string, declaration: unknown): ReturnType<LocalRuntimeConfigurationStore["updateSkillMetadata"]>;
   testMcpServer(runtimeId: string, server: LocalRuntimeMcpServerInput): Promise<{ ok: boolean; toolCount: number }>;
   connectorCatalog(): Promise<ReturnType<ConnectorSettings["catalog"]>>;
-  connectors(runtimeId: string, owner: string): ReturnType<ConnectorSettings["list"]>;
-  configureConnector(runtimeId: string, owner: string, input: ConnectorSettingInput): ReturnType<ConnectorSettings["save"]>;
-  removeConnector(runtimeId: string, owner: string, id: string): ReturnType<ConnectorSettings["remove"]>;
+  connectors(owner: string): ReturnType<ConnectorSettings["list"]>;
+  configureConnector(owner: string, input: ConnectorSettingInput): ReturnType<ConnectorSettings["save"]>;
+  removeConnector(owner: string, id: string): ReturnType<ConnectorSettings["remove"]>;
   startRuntime(runtimeId: string): Promise<LocalRuntimeSummary>;
   stopRuntime(runtimeId: string): Promise<LocalRuntimeSummary>;
   drainRuntime(runtimeId: string): Promise<LocalRuntimeSummary>;
@@ -89,7 +95,11 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
   const modelConfigurations = options.modelSecrets === undefined ? undefined : new LocalModelConfigurationStore(database, options.modelSecrets);
   if (options.connectors && options.connectorModules) { await database.close(); throw new TypeError("connector_configuration_authority_conflict"); }
   const library = join(options.dataDirectory, "skill-library");
-  const configurations = new LocalRuntimeConfigurationStore(database, options.secrets, options.customSkillDirectories ?? [], library, undefined, options.additionalSecretReferences);
+  // Device-level Memory chooses from the same persisted local-model catalog
+  // that Runtime startup resolves. Keep that catalog at this boundary so an
+  // unavailable model is rejected before the Memory flag becomes durable.
+  const configurations = new LocalRuntimeConfigurationStore(database, options.secrets, options.customSkillDirectories ?? [], library, modelConfigurations, options.additionalSecretReferences);
+  const storage = { value: { workspaceRoot: options.workspaceRoot ?? join(options.dataDirectory, "workspace"), uploadStorageRoot: options.uploadStorageRoot ?? join(options.dataDirectory, "uploads") } };
   const connectors = options.connectorModules === undefined ? undefined : new ConnectorSettings(database,
     options.connectorSecrets ?? new (await import("../persistence/encrypted-local-runtime-secret-store.ts")).EncryptedLocalRuntimeSecretStore(join(options.dataDirectory, "private", "connector-secrets")), options.connectorModules);
   const factory = new LocalRuntimeFactory({ databasePath: join(options.dataDirectory, "runtime.db"),
@@ -97,23 +107,24 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
     models: options.models, identity: options.identity,
     environment: options.bundledSkillDirectories === undefined ? {} : { AGENTLOOP_BUNDLED_SKILL_DIRECTORIES: options.bundledSkillDirectories.join(",") },
   }, modelConfigurations, connectors ?? options.connectors);
-  const uploads = join(options.dataDirectory, "uploads");
   const supervisor = new LocalRuntimeSupervisor(database, (definition, configuration) => factory.create(definition, {
     ...configuration, integrationEnvironment: { ...configuration.integrationEnvironment, WEB_SEARCH_DISABLED: "1" },
-  }, join(options.dataDirectory, "workspace"), uploads), async definition => {
+  }, storage.value.workspaceRoot, storage.value.uploadStorageRoot), async definition => {
     const runtimeRoot = factory.runtimeRootFor(definition);
     if (runtimeRoot !== undefined) await rm(runtimeRoot, { recursive: true, force: true });
-    await rm(factory.runtimeUploadRootFor(definition, uploads), { recursive: true, force: true });
+    await rm(factory.runtimeUploadRootFor(definition, storage.value.uploadStorageRoot), { recursive: true, force: true });
   }, options.maxConcurrentRuns, configurations);
   try {
     await connectors?.ready();
     await modelConfigurations?.ready();
+    await configurations.ready();
+    storage.value = await configurations.deviceStorageConfiguration(storage.value);
     if (options.memory !== undefined) {
       await configurations.ready();
       await configurations.applyDeviceMemory(options.memory);
     }
     await supervisor.ready(options.defaultRuntimeId);
-    return new RuntimeManager(supervisor, configurations, modelConfigurations, options.models === undefined, library, connectors);
+    return new RuntimeManager(supervisor, configurations, modelConfigurations, options.models === undefined, library, connectors, storage);
   } catch (error) { await supervisor.close(); throw error; }
 }
 
@@ -129,7 +140,7 @@ class RuntimeManager implements LocalRuntimeManager {
   readonly #supervisor: LocalRuntimeSupervisor;
   readonly #configurations: LocalRuntimeConfigurationStore;
   constructor(supervisor: LocalRuntimeSupervisor, configurations: LocalRuntimeConfigurationStore, models?: LocalModelConfigurationStore, modelsEditable = false,
-    private library = "", private connectorSettings?: ConnectorSettings) {
+    private library = "", private connectorSettings?: ConnectorSettings, private storage?: { value: ResolvedLocalRuntimeDeviceStorage }) {
     this.#supervisor = supervisor; this.#configurations = configurations;
     this.#models = models; this.#modelsEditable = modelsEditable && models !== undefined;
   }
@@ -165,6 +176,39 @@ class RuntimeManager implements LocalRuntimeManager {
       this.#modelUpdate = update.catch(() => undefined);
       return update;
     });
+  }
+
+  deviceMemoryConfiguration() { return this.guard(() => this.#configurations.deviceMemoryConfiguration()); }
+  configureDeviceMemory(input: LocalRuntimeMemoryConfigurationInput) {
+    return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
+      const previous = await this.#configurations.deviceMemoryConfiguration();
+      await this.#configurations.applyDeviceMemory(input);
+      try {
+        await this.#supervisor.reloadRunningInstances();
+      } catch (error) {
+        await this.#configurations.restoreDeviceMemory(previous);
+        await this.#supervisor.reloadRunningInstances().catch(() => undefined);
+        throw error;
+      }
+      return await this.#configurations.deviceMemoryConfiguration();
+    }));
+  }
+  deviceStorageConfiguration() { return this.guard(async () => {
+    if (!this.storage) throw new AppError("CONFLICT", "device_storage_unavailable", 409);
+    return this.storage.value;
+  }); }
+  configureDeviceStorage(input: LocalRuntimeDeviceStorageInput) {
+    return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
+      if (!this.storage) throw new AppError("CONFLICT", "device_storage_unavailable", 409);
+      const previous = this.storage.value, next = await this.#configurations.applyDeviceStorage(input);
+      this.storage.value = next;
+      try { await this.#supervisor.reloadRunningInstances(); }
+      catch (error) {
+        this.storage.value = previous; await this.#configurations.restoreDeviceStorage(previous);
+        await this.#supervisor.reloadRunningInstances().catch(() => undefined); throw error;
+      }
+      return next;
+    }));
   }
 
   private guard<T>(operation: () => Promise<T>): Promise<T> {
@@ -217,18 +261,16 @@ class RuntimeManager implements LocalRuntimeManager {
   }); }
   private connectionStore() { if (!this.connectorSettings) throw new LocalManagementError(409, "connector_settings_unavailable"); return this.connectorSettings; }
   connectorCatalog() { return this.guard(async () => this.connectionStore().catalog()); }
-  connectors(id: string, owner: string) { return this.guard(async () => { await this.#supervisor.configuration(id); return this.connectionStore().list(id, owner); }); }
-  configureConnector(id: string, owner: string, input: ConnectorSettingInput) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
-    const runtime = (await this.#supervisor.list()).find(r => r.id === id);
-    if (!runtime) throw new LocalManagementError(404, "runtime_not_found");
-    if (runtime.status !== "stopped") throw new LocalManagementError(409, "runtime_must_be_stopped_for_configuration");
-    return this.connectionStore().save(id, owner, input);
+  connectors(owner: string) { return this.guard(async () => this.connectionStore().list(owner)); }
+  configureConnector(owner: string, input: ConnectorSettingInput) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
+    const result = await this.connectionStore().save(owner, input);
+    await this.#supervisor.reloadRunningInstances();
+    return result;
   })); }
-  removeConnector(id: string, owner: string, connection: string) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
-    const runtime = (await this.#supervisor.list()).find(r => r.id === id);
-    if (!runtime) throw new LocalManagementError(404, "runtime_not_found");
-    if (runtime.status !== "stopped") throw new LocalManagementError(409, "runtime_must_be_stopped_for_configuration");
-    return this.connectionStore().remove(id, owner, connection);
+  removeConnector(owner: string, connection: string) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
+    const result = await this.connectionStore().remove(owner, connection);
+    await this.#supervisor.reloadRunningInstances();
+    return result;
   })); }
   private lifecycle(id: string, action: "start" | "stop" | "drain" | "restart") {
     return this.guard(async () => { await this.refresh(); return this.#supervisor[action](id); });
@@ -237,12 +279,7 @@ class RuntimeManager implements LocalRuntimeManager {
   stopRuntime(id: string) { return this.lifecycle(id, "stop"); }
   drainRuntime(id: string) { return this.lifecycle(id, "drain"); }
   restartRuntime(id: string) { return this.lifecycle(id, "restart"); }
-  removeRuntime(id: string) { return this.guard(async () => { await this.refresh();
-    const references = await this.connectorSettings?.references(id) ?? [];
-    const removed = await this.#supervisor.remove(id);
-    try { await this.connectorSettings?.cleanup(references); } catch { throw new LocalManagementError(500, "runtime_removed_credential_cleanup_failed"); }
-    return removed;
-  }); }
+  removeRuntime(id: string) { return this.guard(async () => { await this.refresh(); return this.#supervisor.remove(id); }); }
 
   runtime(id: string): ManagedLocalRuntime {
     const use = <T>(operation: (facade: RuntimeFacade) => Promise<T>) => this.guard(() =>

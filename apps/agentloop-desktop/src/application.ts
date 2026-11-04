@@ -23,6 +23,8 @@ export interface DesktopOptions {
   readonly browserLauncher?: (origin: string) => Promise<void>;
   readonly bundledSkillDirectories?: readonly string[];
   readonly connectorModules?: readonly ConnectorModuleRegistration[];
+  /** Optional development-only operational summary sink; request bodies are never logged. */
+  readonly log?: (entry: string) => void;
 }
 export type DesktopApplication = { existing: true; origin: string; browserOpened: boolean } | {
   existing: false; origin: string; browserOpened: boolean; close(): Promise<void>;
@@ -71,7 +73,7 @@ export async function startDesktop(options: DesktopOptions): Promise<DesktopAppl
     server.close(error => error ? reject(error) : resolve()); server.closeIdleConnections();
   });
   try {
-    api = new DesktopApi(lock.instanceId, await assets(), options.cloudAuth);
+    api = new DesktopApi(lock.instanceId, await assets(), options.cloudAuth, options.log);
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(options.port ?? 0, "127.0.0.1", () => { server.off("error", reject); resolve(); });

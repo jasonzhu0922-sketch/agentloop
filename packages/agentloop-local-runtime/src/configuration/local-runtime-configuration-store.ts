@@ -1,7 +1,7 @@
 import type { ResolvedLocalRuntimeConfiguration } from "../contracts/host.ts";
 export type { ResolvedLocalRuntimeConfiguration } from "../contracts/host.ts";
 import { createHash, randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import type { LocalModelConfigurationStore } from "./local-model-configuration-store.ts";
 import {
   discoverSkillDirectory,
@@ -167,6 +167,14 @@ export interface ResolvedLocalMemoryConfiguration {
   readonly enabled: boolean;
   readonly settlementModelKey?: string;
 }
+export interface LocalRuntimeDeviceStorageInput {
+  readonly workspaceRoot: string;
+  readonly uploadStorageRoot: string;
+}
+export interface ResolvedLocalRuntimeDeviceStorage {
+  readonly workspaceRoot: string;
+  readonly uploadStorageRoot: string;
+}
 
 export interface LegacyLocalRuntimeConfigurationMigration {
   readonly mcpConfiguration?: McpServersConfig;
@@ -213,6 +221,15 @@ const EMPTY_SECRET_STORE: LocalRuntimeSecretStore = {
   async remove() {},
   async listKeys() { return []; },
 };
+
+function normalizeDeviceStorage(input: LocalRuntimeDeviceStorageInput): ResolvedLocalRuntimeDeviceStorage {
+  if (!input || typeof input.workspaceRoot !== "string" || typeof input.uploadStorageRoot !== "string") throw new LocalRuntimeConfigurationStoreError(400, "device_storage_invalid");
+  const workspaceRoot = input.workspaceRoot.trim(), uploadStorageRoot = input.uploadStorageRoot.trim();
+  if (!isAbsolute(workspaceRoot) || !isAbsolute(uploadStorageRoot)) throw new LocalRuntimeConfigurationStoreError(400, "device_storage_paths_must_be_absolute");
+  const workspace = resolve(workspaceRoot), uploads = resolve(uploadStorageRoot);
+  if (workspace === uploads) throw new LocalRuntimeConfigurationStoreError(400, "device_storage_paths_must_differ");
+  return { workspaceRoot: workspace, uploadStorageRoot: uploads };
+}
 
 /** Supervisor-owned authority for per-Runtime optional Skills and MCP servers. */
 export class LocalRuntimeConfigurationStore {
@@ -282,6 +299,12 @@ export class LocalRuntimeConfigurationStore {
         updated_at INTEGER NOT NULL,
         memory_enabled INTEGER NOT NULL DEFAULT 0,
         settlement_model_key TEXT
+      );
+      CREATE TABLE IF NOT EXISTS local_device_storage_configuration (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        updated_at INTEGER NOT NULL,
+        workspace_root TEXT NOT NULL,
+        upload_storage_root TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS local_runtime_skill_bindings (
         runtime_id TEXT NOT NULL REFERENCES local_runtime_instances(runtime_id) ON DELETE CASCADE,
@@ -1019,6 +1042,20 @@ export class LocalRuntimeConfigurationStore {
 
   async deviceMemoryConfiguration(): Promise<ResolvedLocalMemoryConfiguration> {
     return await this.deviceMemory();
+  }
+
+  async deviceStorageConfiguration(defaults: LocalRuntimeDeviceStorageInput): Promise<ResolvedLocalRuntimeDeviceStorage> {
+    const row = await this.database.prepare(`SELECT workspace_root, upload_storage_root FROM local_device_storage_configuration WHERE singleton = 1`).get() as { workspace_root: string; upload_storage_root: string } | undefined;
+    if (row !== undefined) return normalizeDeviceStorage({ workspaceRoot: row.workspace_root, uploadStorageRoot: row.upload_storage_root });
+    const storage = normalizeDeviceStorage(defaults); await this.restoreDeviceStorage(storage); return storage;
+  }
+  async applyDeviceStorage(input: LocalRuntimeDeviceStorageInput): Promise<ResolvedLocalRuntimeDeviceStorage> {
+    const storage = normalizeDeviceStorage(input); await this.restoreDeviceStorage(storage); return storage;
+  }
+  async restoreDeviceStorage(storage: ResolvedLocalRuntimeDeviceStorage): Promise<void> {
+    await this.database.prepare(`INSERT INTO local_device_storage_configuration(singleton, updated_at, workspace_root, upload_storage_root)
+      VALUES (1, ?, ?, ?) ON CONFLICT(singleton) DO UPDATE SET updated_at = excluded.updated_at,
+      workspace_root = excluded.workspace_root, upload_storage_root = excluded.upload_storage_root`).run(Date.now(), storage.workspaceRoot, storage.uploadStorageRoot);
   }
 
   async applyDeviceMemory(input: LocalRuntimeMemoryConfigurationInput): Promise<void> {

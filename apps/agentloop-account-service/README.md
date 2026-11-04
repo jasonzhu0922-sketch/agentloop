@@ -13,7 +13,7 @@ cd /Users/zhujun/coding/agentloop
 npm run start:accounts
 ```
 
-默认只监听 `127.0.0.1:8795`，数据库默认在此 workspace 的 `data/accounts.db`。启动不会载入 Multi Runtime 业务数据库或初始化 Kernel 业务表。可在此目录使用被 git 忽略的 `.env`（参考 `.env.example`），或注入环境变量：
+默认只监听 `127.0.0.1:8795`，数据库默认在此 workspace 的 `data/accounts.db`。根目录 `npm run start:accounts` 由本机管理器以前台方式启动；`npm run start:desktop` 会先安全重启该管理器登记的实例、等待 `/healthz` 就绪，再启动 Desktop。后台重启日志写入 `apps/agentloop-account-service/data/local-account-service.log`。启动不会载入 Multi Runtime 业务数据库或初始化 Kernel 业务表。可在此目录使用被 git 忽略的 `.env`（参考 `.env.example`），或注入环境变量：
 
 | 变量 | 默认 | 用途 |
 | --- | --- | --- |
@@ -21,11 +21,10 @@ npm run start:accounts
 | `ACCOUNT_SERVICE_PORT` | `8795` | 端口 |
 | `ACCOUNT_SERVICE_DATABASE_PATH` | `data/accounts.db` | SQLite 持久化文件；生产必须使用独立绝对路径与受限目录 |
 
-另一个终端启动 Desktop：
+另一个终端启动 Desktop（根目录脚本已固定指向 `127.0.0.1:8795`）：
 
 ```sh
-export AGENTLOOP_DESKTOP_AUTH_BASE_URL=http://127.0.0.1:8795
-npm run start:desktop -- --development
+npm run start:desktop
 ```
 
 ## API 与凭据

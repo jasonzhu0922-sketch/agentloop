@@ -5,10 +5,19 @@ import { assertLoopback, assertWriteOrigin, AccountSessions, HttpError, security
 import type { CloudAuthPort } from "../auth/cloud-auth.ts";
 import { modelEndpoint } from "../security/model-endpoint.ts";
 import { LocalManagementError, LocalRuntimeConfigurationStoreError, LocalRuntimeSupervisorError, type ConnectorSettingInput } from "@zhujun/agentloop-local-runtime";
-import { configurationInput, mcpInput, record, skillImportInput } from "./settings-input.ts";
+import { configurationInput, mcpInput, memoryInput, storageInput, record, skillImportInput } from "./settings-input.ts";
 
 export const DEFAULT_RUNTIME_ID = "desktop-default";
 const MAX_BODY_BYTES = 1_500_000;
+
+function operationRoute(request: IncomingMessage, origin: string): string | undefined {
+  let pathname: string;
+  try { pathname = new URL(request.url ?? "/", origin || "http://127.0.0.1").pathname; }
+  catch { return undefined; }
+  if (!pathname.startsWith("/api/")) return undefined;
+  const [, api, resource] = pathname.split("/");
+  return `/${api}/${resource ?? "unknown"}`;
+}
 
 export interface StaticAsset { content: Buffer; type: string }
 function json(response: ServerResponse, status: number, body: unknown): void {
@@ -58,9 +67,20 @@ export class DesktopApi {
   #loginAttempts: number[] = [];
   readonly instanceId: string;
   readonly #assets: ReadonlyMap<string, StaticAsset>;
-  constructor(instanceId: string, assets: ReadonlyMap<string, StaticAsset>, cloud?: CloudAuthPort) { this.instanceId = instanceId; this.#assets = assets; this.#cloud = cloud; }
+  readonly #log?: (entry: string) => void;
+  constructor(instanceId: string, assets: ReadonlyMap<string, StaticAsset>, cloud?: CloudAuthPort, log?: (entry: string) => void) {
+    this.instanceId = instanceId; this.#assets = assets; this.#cloud = cloud; this.#log = log;
+  }
 
   handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
+    const startedAt = Date.now(), route = operationRoute(request, this.origin);
+    response.once("finish", () => {
+      // Keep terminal output operationally useful without writing prompts,
+      // credentials, query strings, generated IDs, or response bodies.
+      if (route !== undefined && (request.method !== "GET" || response.statusCode >= 400)) {
+        this.#log?.(`${request.method} ${route} → ${response.statusCode} (${Date.now() - startedAt}ms)`);
+      }
+    });
     securityHeaders(response);
     this.activeRequests++;
     try {
@@ -118,6 +138,13 @@ export class DesktopApi {
       const runtimeId = url.searchParams.get("runtimeId") ?? DEFAULT_RUNTIME_ID;
       if (!/^[a-zA-Z0-9_-]{1,200}$/.test(runtimeId)) throw new HttpError(400, "runtime_id_invalid");
       const runtime = this.manager.runtime(runtimeId);
+      if (request.method === "GET" && url.pathname === "/api/device-storage") {
+        json(response, 200, { storage: await this.manager.deviceStorageConfiguration() }); return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/device-storage") {
+        const body = await readJson(request); fields(body, ["workspaceRoot", "uploadStorageRoot"]);
+        json(response, 200, { storage: await this.manager.configureDeviceStorage(storageInput(body)) }); return;
+      }
       if (request.method === "GET" && url.pathname === "/api/model-configuration") {
         json(response, 200, await this.manager.modelConfiguration()); return;
       }
@@ -134,6 +161,13 @@ export class DesktopApi {
         catch (error) { if (error instanceof TypeError) throw new HttpError(400, "model_configuration_invalid"); throw error; }
         return;
       }
+      if (request.method === "GET" && url.pathname === "/api/memory-configuration") {
+        json(response, 200, { memory: await this.manager.deviceMemoryConfiguration() }); return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/memory-configuration") {
+        const body = await readJson(request); fields(body, ["enabled", "settlementModelKey"]);
+        json(response, 200, { memory: await this.manager.configureDeviceMemory(memoryInput(body)) }); return;
+      }
       if (request.method === "GET" && url.pathname === "/api/models") { json(response, 200, { models: await runtime.models() }); return; }
       if (request.method === "GET" && url.pathname === "/api/conversations") { json(response, 200, { conversations: await runtime.conversations(context) }); return; }
       if (request.method === "POST" && url.pathname === "/api/runs") {
@@ -141,7 +175,7 @@ export class DesktopApi {
         fields(body, ["requestId", "input", "modelKey", "conversationId", "uploadedSourceIds", "connectorConnectionIds"]);
         const connections = body.connectorConnectionIds === undefined ? [] : ids(body.connectorConnectionIds);
         if (connections.length) {
-          const permitted = new Set((await this.manager.connectors(runtimeId, context.ownerUserId)).filter(c => c.enabled && c.moduleAvailable).map(c => c.id));
+          const permitted = new Set((await this.manager.connectors(context.ownerUserId)).filter(c => c.enabled && c.moduleAvailable).map(c => c.id));
           if (connections.some(id => !permitted.has(id))) throw new HttpError(403, "connector_connection_not_authorized");
         }
         const run = await runtime.startRun(context, { requestId: text(body, "requestId", 256), input: text(body, "input"), modelKey: text(body, "modelKey", 200),
@@ -197,21 +231,18 @@ export class DesktopApi {
       if (post) { const b = await readJson(request); fields(b, ["declaration"]); json(response, 200, await manager.updateSkillMetadata(skill[1]!, b.declaration)); return true; }
     }
     if (get && path === "/api/connectors/catalog") { json(response, 200, { connectors: await manager.connectorCatalog() }); return true; }
-    const match = /^\/api\/runtimes\/([a-zA-Z0-9_-]{1,200})\/(configuration|start|stop|drain|restart|rename|remove|connectors|mcp\/test)(?:\/([a-zA-Z0-9_-]{1,200})\/remove)?$/.exec(path);
+    if (path === "/api/connectors") {
+      if (get) { json(response, 200, { connections: await manager.connectors(owner) }); return true; }
+      if (post) { const b = await readJson(request); fields(b, ["connector"]); const c = record(b.connector, ["id", "connectorKey", "displayName", "enabled", "scopes", "credentials"]); json(response, 200, await manager.configureConnector(owner, c as unknown as ConnectorSettingInput)); return true; }
+    }
+    const connectorRemoval = /^\/api\/connectors\/([a-zA-Z0-9_-]{1,200})\/remove$/.exec(path);
+    if (connectorRemoval && post) { const b = await readJson(request); fields(b, []); json(response, 200, await manager.removeConnector(owner, connectorRemoval[1]!)); return true; }
+    const match = /^\/api\/runtimes\/([a-zA-Z0-9_-]{1,200})\/(configuration|start|stop|drain|restart|rename|remove|mcp\/test)$/.exec(path);
     if (!match) return false;
     const id = match[1]!, action = match[2]!;
     if (action === "configuration") {
       if (get) { json(response, 200, await manager.runtimeSettings(id)); return true; }
       if (post) { const b = await readJson(request); fields(b, ["configuration", "revision"]); await manager.configureRuntime(id, configurationInput(b.configuration), text(b, "revision", 64)); json(response, 200, await manager.runtimeSettings(id)); return true; }
-    }
-    if (action === "connectors") {
-      if (get && !match[3]) { json(response, 200, { connections: await manager.connectors(id, owner) }); return true; }
-      if (post) {
-        const b = await readJson(request);
-        if (match[3]) { fields(b, []); json(response, 200, await manager.removeConnector(id, owner, match[3])); }
-        else { fields(b, ["connector"]); const c = record(b.connector, ["id", "connectorKey", "displayName", "enabled", "scopes", "credentials"]); json(response, 200, await manager.configureConnector(id, owner, c as unknown as ConnectorSettingInput)); }
-        return true;
-      }
     }
     if (post) {
       const b = await readJson(request);

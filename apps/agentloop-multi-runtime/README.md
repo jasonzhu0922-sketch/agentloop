@@ -116,7 +116,7 @@ npm run test:full --workspace agentloop-multi-runtime  # extended Web and integr
 
 前置条件：根目录已执行 `npm install`；先复制 `config/llm-providers.example.json` 为 `config/llm-providers.json` 并按部署环境修改。两个 Runtime Host 都读取这份多 Runtime 自有的 Provider 配置。从本目录启动下列四个进程。示例中的两个共享令牌只适用于本地开发，生产应使用工作负载身份或 mTLS，并为每个环境独立配置密钥。
 
-也可以从仓库根目录用一个命令启动 Router、Web 和指定数量的 Runtime Host。默认启动 2 个 Host。启动器默认读取 `apps/agentloop-multi-runtime/.env` 中 Provider 配置引用的环境变量（例如 `OPENAI_API_KEY`）；也可以用 `LLM_PROVIDER_ENV_FILE` 指定其他环境文件。Provider 密钥只注入 Runtime Host，不会注入 Router 或 Web：
+也可以从仓库根目录用一个命令启动 Router、Web 和指定数量的 Runtime Host。默认启动 2 个 Host。该命令会先重启本机 Account Service 并等待其 `127.0.0.1:8795/healthz` 就绪，确保 Router 的默认身份服务依赖可用。启动器默认读取 `apps/agentloop-multi-runtime/.env` 中 Provider 配置引用的环境变量（例如 `OPENAI_API_KEY`）；也可以用 `LLM_PROVIDER_ENV_FILE` 指定其他环境文件。Provider 密钥只注入 Runtime Host，不会注入 Router 或 Web：
 
 ```bash
 npm run start:multi-runtime
