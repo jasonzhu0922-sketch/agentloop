@@ -6,7 +6,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
   const dialog = element('model-settings'), body = element('capability-body');
   let tab = 'general', target, runtimeDetail, runtimeDetailMode = 'view', dirty = false, working = false, snapshot, runtimeList = [], packages = [], mcpCatalog = [];
   const labels = { general: ['常规', '管理当前账号的本机存储与 Memory 配置。'], skills: ['Skill 管理', '上传和维护本机 Skill 包；安装后可在各个 Runtime 配置中分别选择。'], mcp: ['MCP 配置', '配置当前账号的 MCP Server，供所有本机 Runtime 使用。'], runtimes: ['子 Runtime 管理', '新增、停止、重启、删除和查看各个本机 Runtime；每个 Runtime 独立选择扩展 Skill，共享当前账号的 MCP。'], connectors: ['Connector 配置', '个人 Connector 只保存在 Desktop；配置凭据不会上传到云端。'] };
-  const errors = { account_storage_outside_scope: '存储位置必须位于当前账号的存储目录内，不能指向其他账号或外部目录。', runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_json_invalid: 'JSON 格式无效，请检查引号、括号和逗号。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', mcp_server_key_duplicate: '当前账号的 MCP key 不能重复。', mcp_server_referenced_by_runtime: '该 MCP 已被一个或多个 Runtime 选择，不能删除。请先在对应 Runtime 中解除勾选。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。' };
+  const errors = { account_storage_outside_scope: '此目录不适用于当前账号，请选择其他目录。', runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_json_invalid: 'JSON 格式无效，请检查引号、括号和逗号。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', mcp_server_key_duplicate: '当前账号的 MCP key 不能重复。', mcp_server_referenced_by_runtime: '该 MCP 已被一个或多个 Runtime 选择，不能删除。请先在对应 Runtime 中解除勾选。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。' };
   const connectorBindings = {
     '126-mail': {
       title: '绑定 126 邮箱', displayName: '我的 126 邮箱', scopes: ['email:search', 'email:read'],
@@ -69,13 +69,22 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     const [memoryResult, modelResult, storageResult] = await Promise.all([api('/api/memory-configuration'), api('/api/model-configuration'), api('/api/device-storage')]);
     const workspace = input(storageResult.storage.workspaceRoot); workspace.className = 'general-storage-input'; workspace.setAttribute('aria-label', '当前账号工作目录');
     const uploads = input(storageResult.storage.uploadStorageRoot); uploads.className = 'general-storage-input'; uploads.setAttribute('aria-label', '上传源文件目录');
+    function directoryControl(control, kind, label) {
+      control.readOnly = true;
+      const row = el('div', undefined, 'general-storage-row');
+      const edit = button('编辑', async () => {
+        const result = await api('/api/device-storage/pick', { kind });
+        if (result.path && result.path !== control.value) { control.value = result.path; markDirty(); message('已选择目录，请保存目录配置。'); }
+      });
+      edit.setAttribute('aria-label', `编辑${label}`); row.append(control, edit); return row;
+    }
     body.append(detail([
       ['Agent', 'Desktop · 开发模式'],
       ['服务端', window.location.origin],
-      ['当前账号工作目录', workspace],
-      ['上传源文件目录', uploads],
+      ['当前账号工作目录', directoryControl(workspace, 'workspace', '当前账号工作目录')],
+      ['上传源文件目录', directoryControl(uploads, 'uploads', '上传源文件目录')],
       ['Skill 模式', 'Runtime 启动时统一加载'],
-    ]), el('p', '保存目录后会在没有活动任务时重载本机 Runtime。原位置的数据不会自动迁移或删除；请输入当前账号存储目录内的绝对路径。', 'general-storage-note'));
+    ]), el('p', '选择的目录下会为当前账号创建独立存储目录。保存后将在没有活动任务时重载本机 Runtime；原位置的数据不会自动迁移或删除。', 'general-storage-note'));
     const storageActions = el('div', undefined, 'capability-actions general-storage-actions');
     storageActions.append(button('放弃更改', async () => { dirty = false; await load(); }), button('保存目录配置', async () => {
       await api('/api/device-storage', { workspaceRoot: workspace.value, uploadStorageRoot: uploads.value });

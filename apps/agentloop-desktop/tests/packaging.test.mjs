@@ -5,6 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { packageOptions, copyRuntimeDependencies } from '../scripts/package-support.mjs';
 
+test('macOS tray starts Node with system trust and preserves a configured CA bundle', async () => {
+  const tray = await readFile(new URL('../distribution/macos/DesktopTray.swift', import.meta.url), 'utf8');
+  assert.match(tray, /environment\["NODE_EXTRA_CA_CERTS"\] \?\? ""\)\.isEmpty/);
+  assert.match(tray, /isReadableFile\(atPath: "\/etc\/ssl\/cert\.pem"\)/);
+  assert.match(tray, /environment\["NODE_EXTRA_CA_CERTS"\] = "\/etc\/ssl\/cert\.pem"/);
+  assert.match(tray, /child\.arguments = \["--use-system-ca",/);
+});
+
 test('local and production packages keep endpoints and identities distinct', () => {
   const local = packageOptions(['--platform', 'mac', '--channel', 'local'], 'darwin', 'arm64');
   assert.equal(local.target, 'pkg');

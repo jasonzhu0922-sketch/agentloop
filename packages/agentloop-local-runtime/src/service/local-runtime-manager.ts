@@ -1,7 +1,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { createHash } from "node:crypto";
-import { AppDatabase, AppError, loadMcpToolsFromConfig } from "@zhujun/agentloop";
+import { AppDatabase, AppError, loadMcpToolsFromConfig, type WebToolsOptions } from "@zhujun/agentloop";
 import { importSkillFiles, readSkillZip, type SkillImportFile, LocalManagementError } from "../configuration/skill-import.ts";
 import { ConnectorSettings, type ConnectorSettingInput } from "../configuration/connector-settings.ts";
 import type { ConnectorModuleRegistration } from "../connectors/connector-module-loader.ts";
@@ -52,6 +52,10 @@ export interface LocalRuntimeManagerOptions {
   readonly computerCommandEnvironment?: Readonly<Record<string, string>>;
   readonly runEventLogSink?: LocalRuntimeHostOptions["runEventLogSink"];
   readonly computerCommandSandbox?: LocalRuntimeHostOptions["computerCommandSandbox"];
+  /** Trusted host opt-in; credentials are never exposed through configuration APIs. */
+  readonly webSearch?: WebToolsOptions;
+  readonly planningMaxTurns?: number;
+  readonly stepMaxTurns?: number;
   readonly authorizeStorage?: (input: LocalRuntimeDeviceStorageInput) => Promise<void>;
 }
 
@@ -119,10 +123,12 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
     models: options.models, identity: options.identity,
     computerCommandEnvironment: options.computerCommandEnvironment, runEventLogSink: options.runEventLogSink,
     computerCommandSandbox: options.computerCommandSandbox,
+    webToolsOptions: options.webSearch,
+    planningMaxTurns: options.planningMaxTurns, stepMaxTurns: options.stepMaxTurns,
     environment: options.bundledSkillDirectories === undefined ? {} : { AGENTLOOP_BUNDLED_SKILL_DIRECTORIES: options.bundledSkillDirectories.join(",") },
   }, modelConfigurations, connectors ?? options.connectors);
   const supervisor = new LocalRuntimeSupervisor(database, (definition, configuration) => factory.create(definition, {
-    ...configuration, integrationEnvironment: { ...configuration.integrationEnvironment, WEB_SEARCH_DISABLED: "1" },
+    ...configuration, integrationEnvironment: { ...configuration.integrationEnvironment, WEB_SEARCH_DISABLED: options.webSearch === undefined ? "1" : "0" },
   }, storage.value.workspaceRoot, storage.value.uploadStorageRoot), async definition => {
     const runtimeRoot = factory.runtimeRootFor(definition);
     if (runtimeRoot !== undefined) await rm(runtimeRoot, { recursive: true, force: true });

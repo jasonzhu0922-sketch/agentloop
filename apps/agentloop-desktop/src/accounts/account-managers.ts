@@ -1,6 +1,7 @@
 import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
+import { parseEnv } from "node:util";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { AppError } from "@zhujun/agentloop";
 import { createLocalRuntimeManager, EncryptedLocalRuntimeSecretStore, type LocalRuntimeManager, type LocalRuntimeManagerOptions } from "@zhujun/agentloop-local-runtime";
@@ -23,8 +24,32 @@ async function directory(path: string): Promise<void> {
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("desktop_account_directory_invalid");
 }
 
+export async function desktopRuntimeEnvironment(dataDirectory: string): Promise<Pick<LocalRuntimeManagerOptions, "webSearch" | "planningMaxTurns" | "stepMaxTurns">> {
+  let content: string;
+  try { content = await readFile(join(dataDirectory, ".env"), "utf8"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return {}; throw error; }
+  const env = parseEnv(content);
+  const limit = (name: string, max: number): number | undefined => {
+    const value = env[name];
+    if (value === undefined || value === "") return undefined;
+    if (!/^[0-9]+$/.test(value) || Number(value) < 1 || Number(value) > max) throw new Error(`desktop_${name.toLowerCase()}_invalid`);
+    return Number(value);
+  };
+  const planningMaxTurns = limit("PLANNING_MAX_TURNS", 64), stepMaxTurns = limit("STEP_MAX_TURNS", 256);
+  let webSearch: LocalRuntimeManagerOptions["webSearch"];
+  if (env.WEB_SEARCH_DISABLED === "0") {
+    const provider = env.WEB_SEARCH_PROVIDER;
+    if (provider !== undefined && provider !== "bocha" && provider !== "baidu" && provider !== "bing") throw new Error("desktop_web_search_provider_invalid");
+    webSearch = { ...(provider === undefined ? {} : { searchProvider: provider }),
+      ...(env.WEB_SEARCH_ENDPOINT ? { searchEndpoint: env.WEB_SEARCH_ENDPOINT } : {}),
+      ...(env.WEB_SEARCH_API_KEY ? { searchApiKey: env.WEB_SEARCH_API_KEY } : {}) };
+  }
+  return { ...(webSearch === undefined ? {} : { webSearch }), ...(planningMaxTurns === undefined ? {} : { planningMaxTurns }), ...(stepMaxTurns === undefined ? {} : { stepMaxTurns }) };
+}
+
 type Options = Pick<LocalRuntimeManagerOptions, "models" | "identity" | "bundledSkillDirectories" | "connectorModules" | "computerCommandEnvironment" | "runEventLogSink"> & {
   readonly dataDirectory: string;
+  readonly runtimeEnvironmentDirectory?: string;
   readonly defaultRuntimeId: string;
 };
 
@@ -34,6 +59,7 @@ type Options = Pick<LocalRuntimeManagerOptions, "models" | "identity" | "bundled
 export class DesktopAccountManagers {
   private readonly managers = new Map<string, Promise<LocalRuntimeManager>>();
   private readonly migrations = new Map<string, AccountMigration>();
+  private readonly grantWrites = new Map<string, Promise<void>>();
   private closed = false;
   private readonly options: Options;
   constructor(options: Options) { this.options = options; }
@@ -60,6 +86,33 @@ export class DesktopAccountManagers {
   }
   migration(owner: string): AccountMigration | undefined { return this.migrations.get(owner); }
 
+  async grantSelectedStorage(owner: string, selected: string, kind: "workspace" | "uploads"): Promise<string> {
+    const account = accountDataDirectory(this.options.dataDirectory, owner);
+    const base = await realpath(selected);
+    const data = await realpath(this.options.dataDirectory);
+    const components = base.split(sep);
+    if (!(await lstat(base)).isDirectory() || dirname(base) === base || inside(data, base) || components.includes(".agentloop-desktop") || components.some((part, i) => part === "accounts" && /^cloud_[a-f0-9]{64}$/.test(components[i + 1] ?? ""))) {
+      throw new AppError("FORBIDDEN", "account_storage_outside_scope", 403);
+    }
+    const shared = join(base, ".agentloop-desktop"), owned = join(shared, owner), target = join(owned, kind);
+    for (const path of [shared, owned, target]) await directory(path);
+    if (await realpath(target) !== target) throw new AppError("FORBIDDEN", "account_storage_outside_scope", 403);
+    const grantsPath = join(account, "storage-grants.json");
+    const write = (this.grantWrites.get(owner) ?? Promise.resolve()).catch(() => {}).then(async () => {
+      let grants: string[] = [];
+      try { const value: unknown = JSON.parse(await readFile(grantsPath, "utf8")); if (!Array.isArray(value) || value.some(p => typeof p !== "string")) throw new Error(); grants = value; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      if (!grants.includes(target)) {
+        const temporary = `${grantsPath}.${randomUUID()}.tmp`;
+        await writeFile(temporary, JSON.stringify([...grants, target]), { mode: 0o600, flag: "wx" });
+        try { await rename(temporary, grantsPath); } finally { await rm(temporary, { force: true }); }
+      }
+    });
+    this.grantWrites.set(owner, write);
+    try { await write; } finally { if (this.grantWrites.get(owner) === write) this.grantWrites.delete(owner); }
+    return target;
+  }
+
   private async open(owner: string): Promise<LocalRuntimeManager> {
     const root = accountDataDirectory(this.options.dataDirectory, owner);
     if (!await exists(root)) {
@@ -81,11 +134,15 @@ export class DesktopAccountManagers {
     await directory(join(root, "storage"));
     const boundary = await realpath(join(root, "storage"));
     const authorizeStorage = async (input: { workspaceRoot: string; uploadStorageRoot: string }) => {
+      let grants: string[] = [];
+      try { const value: unknown = JSON.parse(await readFile(join(root, "storage-grants.json"), "utf8")); if (!Array.isArray(value) || value.some(p => typeof p !== "string")) throw new Error(); grants = value; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       for (const value of [input.workspaceRoot, input.uploadStorageRoot]) {
-        if (!isAbsolute(value) || !inside(boundary, resolve(value))) throw new AppError("FORBIDDEN", "account_storage_outside_scope", 403);
+        if (!isAbsolute(value) || (!inside(boundary, resolve(value)) && !grants.includes(resolve(value)))) throw new AppError("FORBIDDEN", "account_storage_outside_scope", 403);
         let path = resolve(value), suffix: string[] = [];
         while (!await exists(path)) { suffix.unshift(path.slice(dirname(path).length + 1)); path = dirname(path); }
-        if (!inside(boundary, resolve(await realpath(path), ...suffix))) throw new AppError("FORBIDDEN", "account_storage_outside_scope", 403);
+        const canonical = resolve(await realpath(path), ...suffix);
+        if (!inside(boundary, canonical) && !(grants.includes(resolve(value)) && canonical === resolve(value))) throw new AppError("FORBIDDEN", "account_storage_outside_scope", 403);
       }
     };
     const env = this.options.computerCommandEnvironment;
@@ -106,6 +163,7 @@ export class DesktopAccountManagers {
       readOnlyRoots.push(canonical);
     }
     const manager = await createLocalRuntimeManager({ ...this.options, dataDirectory: root,
+      ...await desktopRuntimeEnvironment(this.options.runtimeEnvironmentDirectory ?? this.options.dataDirectory),
       workspaceRoot: join(boundary, "workspace"), uploadStorageRoot: join(boundary, "uploads"), authorizeStorage,
       modelSecrets: new EncryptedLocalRuntimeSecretStore(join(root, "private", "model-secrets")),
       secrets: new EncryptedLocalRuntimeSecretStore(join(root, "private", "mcp-secrets")),

@@ -58,6 +58,26 @@ async function controlFixture(t: test.TestContext, legacyLedger = false) {
   return { root, control };
 }
 
+test("managed runtimes pass trusted search opt-in to the factory and default to disabled", async t => {
+  const original = LocalRuntimeFactory.prototype.create;
+  const calls: Array<{ disabled: string | undefined; options: unknown; planning: number | undefined; step: number | undefined }> = [];
+  t.mock.method(LocalRuntimeFactory.prototype, "create", function (...args: Parameters<typeof original>) {
+    calls.push({ disabled: args[1].integrationEnvironment.WEB_SEARCH_DISABLED, options: this.input.webToolsOptions, planning: this.input.planningMaxTurns, step: this.input.stepMaxTurns });
+    return original.apply(this, args);
+  });
+  const root = await mkdtemp(join(tmpdir(), "managed-search-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const skills = join(root, "skills"); await mkdir(skills);
+  const options = { dataDirectory: root, defaultRuntimeId: "default", models: modelPort(), bundledSkillDirectories: [skills] };
+  const disabled = await createLocalRuntimeManager(options); await disabled.close();
+  const search = { searchProvider: "bocha" as const, searchEndpoint: "https://search.example/v1", searchApiKey: "test-key" };
+  const enabled = await createLocalRuntimeManager({ ...options, webSearch: search, planningMaxTurns: 8, stepMaxTurns: 64 }); await enabled.close();
+  assert.equal(calls[0]?.disabled, "1");
+  assert.equal(calls[1]?.disabled, "0");
+  assert.deepEqual(calls[1]?.options, search);
+  assert.equal(calls[1]?.planning, 8); assert.equal(calls[1]?.step, 64);
+});
+
 test("managed business views survive lifecycle changes and database reopen without exposing controls", async (t) => {
   t.mock.method(globalThis, "fetch", async () => { throw new Error("unexpected_network"); });
   const { manager, reopen } = await fixture(t);

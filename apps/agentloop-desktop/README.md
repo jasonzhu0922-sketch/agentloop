@@ -27,6 +27,10 @@ npm run start:desktop
 默认数据目录：
 
 - macOS：`~/Library/Application Support/AgentLoop Desktop Development`
+
+联网搜索默认关闭。开发版从 `apps/agentloop-desktop/.env` 读取配置；打包版从 Desktop 数据目录读取 `.env`。需要启用时，创建仅当前用户可读的文件，设置 `WEB_SEARCH_DISABLED=0`、`WEB_SEARCH_PROVIDER=bocha`、`WEB_SEARCH_ENDPOINT` 和 `WEB_SEARCH_API_KEY`；重启 Desktop 后生效。该设备级配置由本机账号共享，凭据不会通过设置接口返回，也不要提交到代码仓库。
+
+同一文件可设置 `PLANNING_MAX_TURNS`（1–64，规划模型轮次）和 `STEP_MAX_TURNS`（1–256，每个执行步骤的模型轮次）。配置在重启 Desktop 后生效。
 - Windows：`%LOCALAPPDATA%/AgentLoop Desktop Development`
 - Linux 开发环境：`$XDG_DATA_HOME/agentloop-desktop-development`，未设置时使用 `~/.local/share`；不是本期安装包目标。
 

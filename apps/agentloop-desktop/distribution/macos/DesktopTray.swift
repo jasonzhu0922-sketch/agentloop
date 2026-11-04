@@ -65,9 +65,13 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
       let child = Process(), stdin = Pipe(), stdout = Pipe()
       var environment = ProcessInfo.processInfo.environment
       environment.removeValue(forKey: "NODE_OPTIONS"); environment.removeValue(forKey: "NODE_PATH")
+      // Match the Local Agent's macOS trust configuration while respecting a managed CA bundle.
+      if (environment["NODE_EXTRA_CA_CERTS"] ?? "").isEmpty && FileManager.default.isReadableFile(atPath: "/etc/ssl/cert.pem") {
+        environment["NODE_EXTRA_CA_CERTS"] = "/etc/ssl/cert.pem"
+      }
       environment["AGENTLOOP_DESKTOP_DATA_DIR"] = dataRoot.appendingPathComponent("runtime-data").path
       child.executableURL = resources.appendingPathComponent("runtime/bin/node")
-      child.arguments = [resources.appendingPathComponent("backend.mjs").path]
+      child.arguments = ["--use-system-ca", resources.appendingPathComponent("backend.mjs").path]
       child.currentDirectoryURL = resources; child.environment = environment
       child.standardInput = stdin; child.standardOutput = stdout; child.standardError = log
       buffer = Data(); origin = nil; quitting = false

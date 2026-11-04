@@ -8,6 +8,7 @@ import { LocalManagementError, LocalRuntimeConfigurationStoreError, LocalRuntime
 import { configurationInput, mcpInput, memoryInput, storageInput, record, skillImportInput } from "./settings-input.ts";
 import { DesktopAccountManagers } from "../accounts/account-managers.ts";
 import { localAccountId } from "../auth/cloud-auth.ts";
+import { pickNativeDirectory } from "../platform/directory-picker.ts";
 
 export const DEFAULT_RUNTIME_ID = "desktop-default";
 const MAX_BODY_BYTES = 1_500_000;
@@ -70,8 +71,10 @@ export class DesktopApi {
   readonly instanceId: string;
   readonly #assets: ReadonlyMap<string, StaticAsset>;
   readonly #log?: (entry: string) => void;
-  constructor(instanceId: string, assets: ReadonlyMap<string, StaticAsset>, cloud?: CloudAuthPort, log?: (entry: string) => void) {
+  private readonly pickDirectory: typeof pickNativeDirectory;
+  constructor(instanceId: string, assets: ReadonlyMap<string, StaticAsset>, cloud?: CloudAuthPort, log?: (entry: string) => void, pickDirectory = pickNativeDirectory) {
     this.instanceId = instanceId; this.#assets = assets; this.#cloud = cloud; this.#log = log;
+    this.pickDirectory = pickDirectory;
   }
 
   handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
@@ -154,6 +157,16 @@ export class DesktopApi {
       if (request.method === "POST" && url.pathname === "/api/device-storage") {
         const body = await readJson(request); fields(body, ["workspaceRoot", "uploadStorageRoot"]);
         json(response, 200, { storage: await manager.configureDeviceStorage(storageInput(body)) }); return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/device-storage/pick") {
+        const body = await readJson(request); fields(body, ["kind"]);
+        if (body.kind !== "workspace" && body.kind !== "uploads") throw new HttpError(400, "device_storage_kind_invalid");
+        const selected = await this.pickDirectory();
+        const current = this.#sessions.require(request, true);
+        if (current !== session) throw new HttpError(401, "session_invalid");
+        await this.#sessions.verify(session, this.#cloud, false);
+        const path = selected ? await this.accounts.grantSelectedStorage(context.ownerUserId, selected, body.kind) : undefined;
+        json(response, 200, { path: path ?? null }); return;
       }
       if (request.method === "GET" && url.pathname === "/api/model-configuration") {
         json(response, 200, await manager.modelConfiguration()); return;

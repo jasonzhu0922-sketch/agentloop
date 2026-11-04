@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DEFAULT_MAX_PLANNING_TURNS, MAX_SUPPORTED_PLANNING_TURNS, ModelPlanner } from "../src/planning/planner.ts";
 import { admitPlan } from "../src/planning/admission.ts";
+import { enforceAdmittedAssessment } from "../src/planning/assessor.ts";
 import type { TaskSpec } from "../src/planning/contracts.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
@@ -856,6 +857,34 @@ test("Recovery Planner retries a duplicate-criterion proposal with parser feedba
   assert.equal(calls, 2);
 });
 
+test("Recovery Planner retries a blocking execution method before submitting a revision", async () => {
+  const fixture = webpageSummaryPlanningFixture();
+  let calls = 0;
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 40_000, maxOutputTokens: 4_096 },
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 2) assert.match(request.systemPrompt, /cannot become a blocking user obligation/);
+      return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `recovery-${calls}`, name: "submit_recovery_decision",
+        arguments: calls === 1 ? {
+          actionId: "recovery-action", expectedActionRevision: 1, decision: "revise_plan", rationale: "Repair.", evidenceRefs: [],
+          planRevision: { goal: fixture.task.canonicalState.intent.userInput, shape: "recovery_patch", selectedSkillIds: [], steps: [{
+            id: "repair", objective: "Repair.", dependencies: [], skillIds: [], requiredCapabilities: [], targetIds: [],
+            successCriteria: [{ id: "recheck", description: "Recheck sources.", source: "planner", blocking: true,
+              basis: { kind: "execution_method", intentId: fixture.task.canonicalState.intent.id, targetIds: [], rationale: "A search method." } }],
+          }] },
+        } : { actionId: "recovery-action", expectedActionRevision: 1, decision: "fail", rationale: "No continuation.", evidenceRefs: [] },
+      }] };
+    },
+  };
+  const input: RecoveryPlannerInput = { runId: fixture.task.runId, userInput: fixture.task.canonicalState.intent.userInput,
+    action: { id: "recovery-action", runId: fixture.task.runId, kind: "recovery_review", state: "recovery_required",
+      attempt: 1, maxAttempts: 3, replayPolicy: "safe", fence: 1, revision: 1, metadata: {}, effectState: "not_started", createdAt: 1, updatedAt: 1 },
+    canonicalState: fixture.task.canonicalState, events: [], userResponses: [] };
+  assert.equal((await new ModelRecoveryPlanner(model).decide(input)).decision, "fail");
+  assert.equal(calls, 2);
+});
+
 test("Recovery Planner requires a complete plan revision for revise_plan", async () => {
   const fixture = webpageSummaryPlanningFixture();
   let calls = 0;
@@ -966,6 +995,8 @@ test("Planner repairs independent basis and target-ownership violations without 
   });
   const acquisition = admitted.steps.find((step) => step.id === "fetch-page")!;
   const delivery = admitted.steps.find((step) => step.id === "deliver-summary")!;
+  assert.equal(acquisition.successCriteria.find((criterion) => criterion.id === "required_fact:webpage-content")?.blocking, false);
+  assert.equal(delivery.successCriteria.find((criterion) => criterion.id === "required_fact:webpage-content")?.blocking, true);
   assert.deepEqual(acquisition.executionBinding.targetIds, []);
   assert.deepEqual(delivery.executionBinding.targetIds, ["webpage-summary"]);
   const acquisitionCore = acquisition.successCriteria.find((criterion) => criterion.id === "fetch-page-core-result");
@@ -976,6 +1007,24 @@ test("Planner repairs independent basis and target-ownership violations without 
     assert.deepEqual(step.requiredFacts[0]?.basis?.targetIds, ["webpage-summary"]);
     assert.equal(step.requiredFacts[0]?.basis?.requirement, fixture.task.canonicalState.intent.userInput);
     assert.deepEqual(step.requiredFacts[0]?.evidenceKinds, ["source_summary"]);
+  }
+});
+
+test("bounded acquisition preserves an unverified fact as a gap without approving an incomplete final answer", async () => {
+  const fixture = webpageSummaryPlanningFixture();
+  const proposal = await new ModelPlanner({ limits: { contextWindowTokens: 40_000, maxOutputTokens: 4_096 },
+    complete: async () => fixture.response() }).plan(fixture.task);
+  const plan = admitPlan({ ...fixture.task, proposal, availableToolNames: new Set(fixture.task.availableToolNames) });
+  for (const [id, expected] of [["fetch-page", true], ["deliver-summary", false]] as const) {
+    const step = plan.steps.find((item) => item.id === id)!;
+    const criteria = step.successCriteria.map((criterion) => ({ criterionId: criterion.id,
+      satisfied: criterion.id !== "required_fact:webpage-content", rationale: "Page content remains unavailable.", evidenceRefs: [] }));
+    const assessment = enforceAdmittedAssessment({ runId: fixture.task.runId, planId: plan.id, canonicalState: fixture.task.canonicalState,
+      step, skills: [], attempt: 1, evidence: { candidateOutput: "Source was unavailable; the content is unverified.", modelSteps: 1, toolCalls: [] } },
+    { id: `assessment-${id}`, planId: plan.id, stepId: id, attempt: 1, approved: false, criteria,
+      skills: [], evidenceDigest: "", feedback: "The source remains unavailable.", createdAt: 1 });
+    assert.equal(assessment.approved, expected);
+    assert.equal(assessment.criteria.find((item) => item.criterionId === "required_fact:webpage-content")?.satisfied, false);
   }
 });
 

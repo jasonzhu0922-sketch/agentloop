@@ -25,13 +25,13 @@ function cloudAuth(): CloudAuthPort {
     return { token, principal: user, expiresAt: Date.now() + 3_600_000 };
   }, async current(token) { return tokens.get(token)!; }, async logout(token) { tokens.delete(token); } };
 }
-async function start(t: test.TestContext, root?: string, models?: LocalModelProviderPort) {
+async function start(t: test.TestContext, root?: string, models?: LocalModelProviderPort, directoryPicker?: () => Promise<string | undefined>) {
   root ??= await mkdtemp(join(tmpdir(), "desktop-account-isolation-"));
   const claim = await claimInstance(root, "development");
   if (claim.existing) throw new Error("unexpected_instance"); await claim.lock.release();
   const skills = join(root, "bundled"); await mkdir(skills, { recursive: true });
   const options = { mode: "development" as const, dataDirectory: root, openBrowser: false,
-    cloudAuth: cloudAuth(), models, bundledSkillDirectories: [skills], connectorModules: builtinConnectorModules() };
+    cloudAuth: cloudAuth(), models, bundledSkillDirectories: [skills], connectorModules: builtinConnectorModules(), directoryPicker };
   let app: DesktopApplication = await startDesktop(options);
   t.after(async () => { if (!app.existing) await app.close(); await rm(root!, { recursive: true, force: true }); });
   let auth: { cookie: string; csrf: string } | undefined;
@@ -51,6 +51,34 @@ async function start(t: test.TestContext, root?: string, models?: LocalModelProv
     if (!app.existing) await app.close(); app = await startDesktop(options); auth = undefined;
   } };
 }
+
+test("native storage selection remains account scoped and survives restart", async t => {
+  const parent = await mkdtemp(join(tmpdir(), "desktop-selected-storage-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  let selected: string | undefined = parent;
+  const f = await start(t, undefined, undefined, async () => selected);
+  await f.login(aliceEmail);
+  const original = (await f.json("/api/device-storage")).storage;
+  selected = undefined;
+  assert.equal((await f.json("/api/device-storage/pick", { kind: "workspace" })).path, null);
+  selected = parent;
+  const alice = (await f.json("/api/device-storage/pick", { kind: "workspace" })).path;
+  assert.equal(alice, join(await realpath(parent), ".agentloop-desktop", owner(aliceEmail), "workspace"));
+  await f.json("/api/device-storage", { ...original, workspaceRoot: alice });
+  await f.login(bobEmail);
+  const bobOriginal = (await f.json("/api/device-storage")).storage;
+  assert.equal((await f.call("/api/device-storage", { ...bobOriginal, workspaceRoot: alice })).status, 403);
+  selected = alice;
+  assert.equal((await f.call("/api/device-storage/pick", { kind: "workspace" })).status, 403);
+  selected = parent;
+  const bob = (await f.json("/api/device-storage/pick", { kind: "workspace" })).path;
+  assert.notEqual(alice, bob);
+  await f.json("/api/device-storage", { ...bobOriginal, workspaceRoot: bob });
+  await f.reopen(); await f.login(aliceEmail);
+  assert.equal((await f.json("/api/device-storage")).storage.workspaceRoot, alice);
+  await f.login(bobEmail);
+  assert.equal((await f.json("/api/device-storage")).storage.workspaceRoot, bob);
+});
 function configuration(key: string) {
   return { reuseCloudModels: false, providers: [{ key, displayName: key, baseUrl: "https://models.example.test/v1", apiKey: `synthetic-${key}-key`,
     models: [{ key, displayName: key, providerModel: key, protocol: "responses", contextWindowTokens: 128000, maxOutputTokens: 8192 }] }] };

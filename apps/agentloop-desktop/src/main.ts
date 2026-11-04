@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { join, isAbsolute } from "node:path";
+import { fileURLToPath } from "node:url";
 import { colorizeTerminalLogLabel, colorizeTerminalLogLine, OpenAICompatibleModel, type TerminalLogColorOptions } from "@zhujun/agentloop";
 import type { LocalModelProviderPort } from "@zhujun/agentloop-local-runtime";
 import { startDesktop } from "./application.ts";
@@ -11,6 +12,7 @@ import { developmentToolEnvironment } from "./platform/development-tools.ts";
 
 /** Development command port; Account Service uses 8795 by default. */
 export const DESKTOP_DEVELOPMENT_PORT = 8796;
+export const DESKTOP_DEVELOPMENT_ENV_DIRECTORY = fileURLToPath(new URL("..", import.meta.url));
 
 export function formatDesktopTerminalLog(entry: string, timestamp: string, options: TerminalLogColorOptions): string {
   const label = colorizeTerminalLogLabel("[AgentLoop Desktop]", "AgentLoop Desktop", options);
@@ -54,7 +56,7 @@ async function main(): Promise<void> {
   const log = (entry: string) => console.log(formatDesktopTerminalLog(entry, new Date().toISOString(), {
     colorMode: process.env.AGENTLOOP_LOG_COLOR, isTTY: process.stdout.isTTY, noColor: process.env.NO_COLOR,
   }));
-  const app = await startDesktop({ mode: "development", dataDirectory: dataDirectory ?? defaultDataDirectory(), models: configuredModels(), openBrowser, port: DESKTOP_DEVELOPMENT_PORT, log,
+  const app = await startDesktop({ mode: "development", dataDirectory: dataDirectory ?? defaultDataDirectory(), runtimeEnvironmentDirectory: DESKTOP_DEVELOPMENT_ENV_DIRECTORY, models: configuredModels(), openBrowser, port: DESKTOP_DEVELOPMENT_PORT, log,
     computerCommandEnvironment: await developmentToolEnvironment(),
     cloudAuth: authUrl ? new CloudAccountAuth(authUrl) : undefined,
     // Built-ins are selected by the Desktop host, never by the browser. The

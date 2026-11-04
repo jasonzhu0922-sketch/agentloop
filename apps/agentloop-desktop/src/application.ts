@@ -17,11 +17,13 @@ export interface DesktopOptions {
   /** Required for packaged hosts; all renderer assets are prepared at build time. */
   readonly webDirectory?: string;
   readonly dataDirectory: string;
+  readonly runtimeEnvironmentDirectory?: string;
   readonly models?: LocalModelProviderPort;
   readonly cloudAuth?: CloudAuthPort;
   readonly port?: number;
   readonly openBrowser?: boolean;
   readonly browserLauncher?: (origin: string) => Promise<void>;
+  readonly directoryPicker?: () => Promise<string | undefined>;
   readonly bundledSkillDirectories?: readonly string[];
   /** Non-secret tool paths and settings supplied by the native host. */
   readonly computerCommandEnvironment?: Readonly<Record<string, string>>;
@@ -85,7 +87,7 @@ export async function startDesktop(options: DesktopOptions): Promise<DesktopAppl
     server.close(error => error ? reject(error) : resolve()); server.closeIdleConnections();
   });
   try {
-    api = new DesktopApi(lock.instanceId, await assets(options.webDirectory), options.cloudAuth, options.log);
+    api = new DesktopApi(lock.instanceId, await assets(options.webDirectory), options.cloudAuth, options.log, options.directoryPicker);
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(options.port ?? 0, "127.0.0.1", () => { server.off("error", reject); resolve(); });
@@ -93,6 +95,7 @@ export async function startDesktop(options: DesktopOptions): Promise<DesktopAppl
     const address = server.address(); if (!address || typeof address === "string") throw new Error("desktop_bind_failed");
     api.origin = new URL(`http://127.0.0.1:${address.port}`).origin;
     const accounts = new DesktopAccountManagers({ dataDirectory: lock.dataDirectory, defaultRuntimeId: DEFAULT_RUNTIME_ID,
+      runtimeEnvironmentDirectory: options.runtimeEnvironmentDirectory,
       models: options.models, bundledSkillDirectories: options.bundledSkillDirectories,
       runEventLogSink: options.log === undefined ? undefined : (_runtime, line) => options.log!(line),
       connectorModules: options.connectorModules ?? [],

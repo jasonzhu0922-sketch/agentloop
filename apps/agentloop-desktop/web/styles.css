@@ -255,6 +255,9 @@ button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid va
 .capability-details dd { min-width:0; margin:0; color:var(--text-2); overflow-wrap:anywhere; }
 .general-storage-note { margin:0; color:var(--text-3); font-size:11px; line-height:1.5; }
 .capability-details .general-storage-input { width:100%; min-height:35px; padding:7px 9px; border:1px solid var(--border-2); border-radius:5px; background:var(--bg); color:var(--text-2); font:inherit; font-size:11px; }
+.general-storage-row { display:flex; gap:8px; align-items:center; min-width:0; }
+.general-storage-row .general-storage-input { min-width:0; flex:1; }
+.general-storage-row button { flex:none; }
 .general-storage-actions { justify-content:flex-end; margin-top:-4px; padding-bottom:4px; border-bottom:1px solid var(--border); }
 .desktop-settings-content.agent-settings-content .general-storage-actions .primary { border-color:var(--brand); background:var(--brand); color:#fff; }
 .desktop-settings-content.agent-settings-content .local-memory-section { gap:12px; margin-top:2px; padding:15px; background:var(--bg-2); }

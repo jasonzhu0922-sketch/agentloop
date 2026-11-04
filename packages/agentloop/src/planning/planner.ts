@@ -344,6 +344,7 @@ export class ModelPlanner implements Planner {
         "When a conversation TaskProfile has shape single_leaf, submit exactly one deliver leaf that owns every conversation target. Gather source evidence inside that leaf; do not create a fact_acquisition-to-deliver pair merely to rewrite the same findings.",
         "Plan source work by coverage of each requested fact, not by the first available Tool or Skill. Before selecting capabilities, identify what must be answered and compare it with each source's declared scope and freshness. For multi-fact web research, decompose the goal into claim units such as identity, relationship, date/status, and disputed-claim correction; each unit must have exact entities/aliases and a complete query direction, never a placeholder like 'keywords' or a single token. For lookups, identification, explanations and comparisons alike, bind complementary acquisition when the provider does not establish a requested fact; include that acquisition and the final synthesis in the leaf objective. Do not replace a missing requested fact with a related provider field or a caveat. Keep complementary acquisition in the same conversation deliver leaf, and omit redundant sources when one source covers the request.",
         "In requiredFacts, enumerate the concrete factual answers explicitly required by the user, with their exact concepts, scope and time, before selecting source capabilities. These are answer obligations, not acquisition actions or receipt labels. Use [] when no concrete source-backed facts are requested. Artifact edit instructions and requested output properties are covered by requested_goal acceptance, not new source-backed facts. Every requiredFacts item must include all four fields: id, description, evidenceKinds (a non-empty array of allowed evidence kinds), and basis. A source with narrower scope can provide leads, but cannot redefine a required fact. Choose capabilities that can obtain every required fact; do not plan to satisfy an answer obligation merely by reporting that the first provider lacks its field.",
+        "For an open-ended analysis, distinguish the requested analysis from possible research leads. Do not promote inferred background fields, examples, complete inventories, dates, legal identity or corroboration into explicitly requested facts merely because they might enrich the answer. Base a bounded conclusion on relevant available materials; pursue further sources only for a material gap, contradiction, source constraint, freshness, or an explicit verification request.",
         "Every requiredFact must carry basis metadata referencing canonicalRunState.intent.id, related canonical targetIds, and a rationale. requirement is Runtime-owned: do not submit it; Runtime binds the complete canonicalRunState.intent.userInput after parsing. Resolver userConstraints, Plan paraphrases, and Skill instructions cannot provide provenance.",
         "Use user_requirement for explicitly requested answers; necessary_condition must explain why the requested result would be invalid without it. Research references, implementation preferences, Skill workflow steps, and receipt labels are execution methods, not new factual answer obligations. They must not expand the user's acceptance conditions.",
         REQUIRED_FACT_TARGET_GUIDANCE,
@@ -1971,12 +1972,15 @@ function normalizeResultSuccessCriteria(
       source: "planner" as const,
     }];
   for (const fact of step.requiredFacts ?? []) {
+    const acquisitionOnly = step.role === "fact_acquisition" && (step.targetIds ?? []).length === 0;
     successCriteria.push({
       id: `required_fact:${fact.id}`,
-      description: `Establish and deliver this requested fact using observations appropriate to the requirement: ${fact.description}. A related field, a missing provider field, or a caveat that it remains unverified does not satisfy this fact.`,
+      description: acquisitionOnly
+        ? `Record whether available observations establish this fact and preserve its sources and any unresolved gap for downstream assessment: ${fact.description}. Do not represent an unverified fact as established.`
+        : `Establish and deliver this requested fact using observations appropriate to the requirement: ${fact.description}. A related field, a missing provider field, or a caveat that it remains unverified does not satisfy this fact.`,
       source: "planner" as const,
       verification: "model_judged" as const,
-      blocking: true,
+      blocking: !acquisitionOnly,
       basis: fact.basis,
     });
   }
