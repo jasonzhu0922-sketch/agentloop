@@ -133,6 +133,9 @@ export interface LocalRuntimeMcpServerInput {
 
 export interface LocalRuntimeConfigurationInput {
   readonly skillPackageIds?: readonly string[];
+  /** Device MCP catalog item ids selected by this Runtime. */
+  readonly mcpServerIds?: readonly string[];
+  /** @deprecated Compatibility input for older embedded hosts. New callers configure the device catalog separately. */
   readonly mcpServers?: readonly LocalRuntimeMcpServerInput[];
 }
 
@@ -144,6 +147,7 @@ export interface LocalRuntimeMemoryConfigurationInput {
 
 interface LocalRuntimeConfigurationStorageInput {
   readonly skillPackageIds?: readonly string[];
+  readonly mcpServerIds?: readonly string[];
   readonly mcpServers?: readonly LocalRuntimeMcpServerWrite[];
 }
 
@@ -151,6 +155,7 @@ export interface LocalRuntimeConfiguration {
   readonly runtimeId: string;
   readonly skills: readonly LocalSkillPackageSummary[];
   readonly mcpServers: readonly LocalRuntimeMcpServerConfiguration[];
+  readonly mcpServerIds: readonly string[];
   readonly memory?: ResolvedLocalMemoryConfiguration;
   readonly updatedAt: number;
 }
@@ -231,7 +236,7 @@ function normalizeDeviceStorage(input: LocalRuntimeDeviceStorageInput): Resolved
   return { workspaceRoot: workspace, uploadStorageRoot: uploads };
 }
 
-/** Supervisor-owned authority for per-Runtime optional Skills and MCP servers. */
+/** Supervisor-owned authority for per-Runtime Skills and device-catalog MCP bindings. */
 export class LocalRuntimeConfigurationStore {
   private readonly packageRoots = new Map<string, string>();
   private readonly database: AppDatabase;
@@ -312,9 +317,8 @@ export class LocalRuntimeConfigurationStore {
         created_at INTEGER NOT NULL,
         PRIMARY KEY(runtime_id, package_id)
       );
-      CREATE TABLE IF NOT EXISTS local_runtime_mcp_servers (
+      CREATE TABLE IF NOT EXISTS local_device_mcp_servers (
         mcp_server_id TEXT PRIMARY KEY,
-        runtime_id TEXT NOT NULL REFERENCES local_runtime_instances(runtime_id) ON DELETE CASCADE,
         display_name TEXT NOT NULL,
         source_key TEXT NOT NULL,
         transport TEXT NOT NULL CHECK(transport = 'http'),
@@ -326,12 +330,24 @@ export class LocalRuntimeConfigurationStore {
         secret_storage_key TEXT,
         tool_policy_json TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        UNIQUE(runtime_id, source_key)
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS local_device_mcp_server_source_key_idx
+        ON local_device_mcp_servers(source_key);
+      CREATE TABLE IF NOT EXISTS local_runtime_mcp_bindings (
+        runtime_id TEXT NOT NULL REFERENCES local_runtime_instances(runtime_id) ON DELETE CASCADE,
+        mcp_server_id TEXT NOT NULL REFERENCES local_device_mcp_servers(mcp_server_id),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(runtime_id, mcp_server_id)
       );
     `);
+    // An old development build briefly made source_key unique. It is only a
+    // display/tool namespace, not a device-catalog identity.
+    await this.database.exec("DROP INDEX IF EXISTS local_device_mcp_server_source_key_idx");
+    await this.database.exec("CREATE INDEX IF NOT EXISTS local_device_mcp_server_source_key_idx ON local_device_mcp_servers(source_key)");
     await this.migrateMemoryConfigurationColumns();
     await this.migrateMcpServerTableForQueryAuthentication();
+    await this.migrateRuntimeMcpServersToDeviceCatalog();
     await this.removeOrphanedSecrets();
     await this.synchronizeCustomDirectories(this.customSkillDirectories);
     await this.restoreUploadedPackages();
@@ -358,7 +374,7 @@ export class LocalRuntimeConfigurationStore {
 
   private async removeOrphanedSecrets(): Promise<void> {
     const referencedRows = await this.database.prepare(`
-      SELECT DISTINCT secret_storage_key FROM local_runtime_mcp_servers WHERE secret_storage_key IS NOT NULL
+      SELECT DISTINCT secret_storage_key FROM local_device_mcp_servers WHERE secret_storage_key IS NOT NULL
     `).all() as Array<{ secret_storage_key: string }>;
     // This vault may be shared with other device-owned configuration stores.
     // Only the composition root knows all owners. Resolve every owner's live
@@ -405,6 +421,40 @@ export class LocalRuntimeConfigurationStore {
       FROM local_runtime_mcp_servers_before_query_auth;
       DROP TABLE local_runtime_mcp_servers_before_query_auth;
     `);
+  }
+
+  /**
+   * The legacy table coupled server definitions and Runtime ownership. Copy
+   * every row before retiring it: an id is now a device catalog item and its
+   * former owner gets a binding. We deliberately do not merge equal keys,
+   * because equal names do not prove equal credentials or policies.
+   */
+  private async migrateRuntimeMcpServersToDeviceCatalog(): Promise<void> {
+    const legacy = await this.database.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'local_runtime_mcp_servers'
+    `).get() as { name: string } | undefined;
+    if (legacy === undefined) return;
+    await this.database.transaction(async () => {
+      const rows = await this.database.prepare(`
+        SELECT mcp_server_id, runtime_id, display_name, source_key, transport, url, protocol_version,
+               timeout_ms, auth_kind, auth_config_json, secret_storage_key, tool_policy_json, created_at, updated_at
+        FROM local_runtime_mcp_servers
+      `).all() as Array<McpServerRow & { runtime_id: string; created_at: number; updated_at: number }>;
+      for (const row of rows) {
+        await this.database.prepare(`
+          INSERT OR IGNORE INTO local_device_mcp_servers(
+            mcp_server_id, display_name, source_key, transport, url, protocol_version, timeout_ms,
+            auth_kind, auth_config_json, secret_storage_key, tool_policy_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(row.mcp_server_id, row.display_name, row.source_key, row.transport, row.url, row.protocol_version,
+          row.timeout_ms, row.auth_kind, row.auth_config_json, row.secret_storage_key, row.tool_policy_json,
+          row.created_at, row.updated_at);
+        await this.database.prepare(`
+          INSERT OR IGNORE INTO local_runtime_mcp_bindings(runtime_id, mcp_server_id, created_at) VALUES (?, ?, ?)
+        `).run(row.runtime_id, row.mcp_server_id, row.created_at);
+      }
+      await this.database.exec("DROP TABLE local_runtime_mcp_servers");
+    });
   }
 
   async synchronizeCustomDirectories(directories: readonly string[]): Promise<readonly LocalSkillPackageSummary[]> {
@@ -751,6 +801,13 @@ export class LocalRuntimeConfigurationStore {
   }
 
   async apply(runtimeId: string, input: LocalRuntimeConfigurationInput): Promise<void> {
+    if (input.mcpServerIds !== undefined) {
+      if (input.mcpServers !== undefined) throw new LocalRuntimeConfigurationStoreError(400, "mcp_configuration_ambiguous");
+      await this.replaceStored(runtimeId, { skillPackageIds: input.skillPackageIds, mcpServerIds: input.mcpServerIds });
+      return;
+    }
+    // Compatibility path for older local hosts. Definitions are still stored
+    // once in the device catalog; the Runtime only receives their bindings.
     const existingRows = await this.mcpRows(runtimeId);
     const existingById = new Map(existingRows.map((row) => [row.mcp_server_id, row]));
     const createdSecretKeys: string[] = [];
@@ -767,11 +824,44 @@ export class LocalRuntimeConfigurationStore {
       await Promise.all(createdSecretKeys.map((key) => this.secretStore.remove(key).catch(() => undefined)));
       throw error;
     }
-    const retained = new Set(storedServers.flatMap((server) => server.auth.kind === "none" || server.auth.secretStorageKey === undefined ? [] : [server.auth.secretStorageKey]));
-    const obsolete = existingRows
-      .map((row) => row.secret_storage_key)
-      .filter((key): key is string => key !== null && !retained.has(key));
-    await Promise.all(obsolete.map((key) => this.secretStore.remove(key).catch(() => undefined)));
+  }
+
+  async deviceMcpServers(): Promise<readonly LocalRuntimeMcpServerConfiguration[]> {
+    return (await this.deviceMcpRows()).map(toPublicMcpServer);
+  }
+
+  async saveDeviceMcpServer(server: LocalRuntimeMcpServerInput): Promise<LocalRuntimeMcpServerConfiguration> {
+    const existing = server.id === undefined ? undefined : await this.deviceMcpRow(server.id);
+    if (server.id !== undefined && existing === undefined) throw new LocalRuntimeConfigurationStoreError(404, "mcp_server_not_found");
+    const createdSecretKeys: string[] = [];
+    try {
+      const auth = await this.storeAuthentication(server.auth, this.credentialAuthority(server, existing), createdSecretKeys);
+      const stored = validateMcpServers([{ ...server, auth }])[0]!;
+      const id = await this.upsertDeviceMcpServer(stored, Date.now());
+      return toPublicMcpServer((await this.deviceMcpRow(id))!);
+    } catch (error) {
+      await Promise.all(createdSecretKeys.map(key => this.secretStore.remove(key).catch(() => undefined)));
+      throw error;
+    }
+  }
+
+  async removeDeviceMcpServer(id: string): Promise<void> {
+    const server = await this.deviceMcpRow(id);
+    if (server === undefined) throw new LocalRuntimeConfigurationStoreError(404, "mcp_server_not_found");
+    const references = await this.database.prepare(`
+      SELECT b.runtime_id, i.display_name FROM local_runtime_mcp_bindings b
+      JOIN local_runtime_instances i ON i.runtime_id = b.runtime_id
+      WHERE b.mcp_server_id = ? ORDER BY i.display_name LIMIT 20
+    `).all(id) as Array<{ runtime_id: string; display_name: string }>;
+    if (references.length) throw new LocalRuntimeConfigurationStoreError(409, "mcp_server_referenced_by_runtime");
+    await this.database.prepare("DELETE FROM local_device_mcp_servers WHERE mcp_server_id = ?").run(id);
+    await this.removeOrphanedSecrets();
+  }
+
+  async previewDeviceMcpServer(server: LocalRuntimeMcpServerInput) {
+    const existing = server.id === undefined ? undefined : await this.deviceMcpRow(server.id);
+    if (server.id !== undefined && existing === undefined) throw new LocalRuntimeConfigurationStoreError(404, "mcp_server_not_found");
+    return this.previewMcpServerWithExisting(server, existing);
   }
 
   private credentialAuthority(server: LocalRuntimeMcpServerInput, existing?: McpServerRow): McpServerRow | undefined {
@@ -789,6 +879,10 @@ export class LocalRuntimeConfigurationStore {
   async previewMcpServer(runtimeId: string, server: LocalRuntimeMcpServerInput) {
     const existing = server.id === undefined ? undefined : (await this.mcpRows(runtimeId)).find(row => row.mcp_server_id === server.id);
     if (server.id !== undefined && !existing) throw new LocalRuntimeConfigurationStoreError(404, "mcp_server_not_found");
+    return this.previewMcpServerWithExisting(server, existing);
+  }
+
+  private async previewMcpServerWithExisting(server: LocalRuntimeMcpServerInput, existing?: McpServerRow) {
     const values = new Map<string, Readonly<Record<string, string>>>();
     const transient: LocalRuntimeSecretStore = {
       async write(value) { const key = `probe_${randomUUID()}`; values.set(key, value); return key; },
@@ -812,6 +906,8 @@ export class LocalRuntimeConfigurationStore {
   private async replaceStored(runtimeId: string, input: LocalRuntimeConfigurationStorageInput, allowMissingCredentials = false): Promise<void> {
     const skillPackageIds = unique(input.skillPackageIds ?? []);
     const mcpServers = validateMcpServers(input.mcpServers ?? [], allowMissingCredentials);
+    const mcpServerIds = unique(input.mcpServerIds ?? mcpServers.map(server => server.id!).filter((id): id is string => id !== undefined));
+    if (input.mcpServerIds !== undefined) await this.assertDeviceMcpServers(mcpServerIds);
     await this.assertValidPackages(skillPackageIds);
     const now = Date.now();
     await this.database.transaction(async () => {
@@ -826,8 +922,12 @@ export class LocalRuntimeConfigurationStore {
           INSERT INTO local_runtime_skill_bindings(runtime_id, package_id, created_at) VALUES (?, ?, ?)
         `).run(runtimeId, packageId, now);
       }
-      await this.database.prepare("DELETE FROM local_runtime_mcp_servers WHERE runtime_id = ?").run(runtimeId);
-      for (const server of mcpServers) await this.insertMcpServer(runtimeId, server, now);
+      await this.database.prepare("DELETE FROM local_runtime_mcp_bindings WHERE runtime_id = ?").run(runtimeId);
+      for (const server of mcpServers) {
+        const id = await this.upsertDeviceMcpServer(server, now);
+        await this.insertMcpBinding(runtimeId, id, now);
+      }
+      for (const id of mcpServerIds) await this.insertMcpBinding(runtimeId, id, now);
     });
   }
 
@@ -978,6 +1078,7 @@ export class LocalRuntimeConfigurationStore {
       runtimeId,
       skills: skillRows.map(toSkillSummary),
       mcpServers: mcpRows.map(toPublicMcpServer),
+      mcpServerIds: mcpRows.map(row => row.mcp_server_id),
       // Keep the legacy public shape for the default-off state. Resolved
       // Runtime configuration always carries the explicit boolean used by the
       // factory; enabled Memory is exposed to management clients.
@@ -987,11 +1088,10 @@ export class LocalRuntimeConfigurationStore {
   }
 
   async secretStorageKeysForRuntime(runtimeId: string): Promise<readonly string[]> {
-    const rows = await this.database.prepare(`
-      SELECT secret_storage_key FROM local_runtime_mcp_servers
-      WHERE runtime_id = ? AND secret_storage_key IS NOT NULL
-    `).all(runtimeId) as Array<{ secret_storage_key: string }>;
-    return unique(rows.map((row) => row.secret_storage_key));
+    // Retained for host compatibility. Device catalog secrets are deliberately
+    // not Runtime-owned and must not be removed on Runtime deletion.
+    void runtimeId;
+    return [];
   }
 
   async missingCredentialServerKeys(runtimeId: string): Promise<readonly string[]> {
@@ -1003,7 +1103,7 @@ export class LocalRuntimeConfigurationStore {
       missing.push(row.source_key);
       if (row.secret_storage_key !== null) {
         await this.database.prepare(`
-          UPDATE local_runtime_mcp_servers SET secret_storage_key = NULL, updated_at = ? WHERE mcp_server_id = ?
+          UPDATE local_device_mcp_servers SET secret_storage_key = NULL, updated_at = ? WHERE mcp_server_id = ?
         `).run(Date.now(), row.mcp_server_id);
       }
     }
@@ -1141,17 +1241,23 @@ export class LocalRuntimeConfigurationStore {
     `).run(Date.now(), packageId);
   }
 
-  private async insertMcpServer(runtimeId: string, server: LocalRuntimeMcpServerWrite, now: number): Promise<void> {
+  private async upsertDeviceMcpServer(server: LocalRuntimeMcpServerWrite, now: number): Promise<string> {
     const authConfig = nonSecretAuthConfig(server.auth);
     const secretStorageKey = server.auth.kind === "none" ? null : server.auth.secretStorageKey ?? null;
+    const id = server.id ?? `local_mcp_${randomUUID()}`;
     await this.database.prepare(`
-      INSERT INTO local_runtime_mcp_servers(
-        mcp_server_id, runtime_id, display_name, source_key, transport, url, protocol_version,
+      INSERT INTO local_device_mcp_servers(
+        mcp_server_id, display_name, source_key, transport, url, protocol_version,
         timeout_ms, auth_kind, auth_config_json, secret_storage_key, tool_policy_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 'http', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, 'http', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(mcp_server_id) DO UPDATE SET
+        display_name = excluded.display_name, source_key = excluded.source_key, transport = excluded.transport,
+        url = excluded.url, protocol_version = excluded.protocol_version, timeout_ms = excluded.timeout_ms,
+        auth_kind = excluded.auth_kind, auth_config_json = excluded.auth_config_json,
+        secret_storage_key = excluded.secret_storage_key, tool_policy_json = excluded.tool_policy_json,
+        updated_at = excluded.updated_at
     `).run(
-      server.id ?? `local_mcp_${randomUUID()}`,
-      runtimeId,
+      id,
       server.displayName.trim(),
       server.key.trim(),
       server.url,
@@ -1170,14 +1276,49 @@ export class LocalRuntimeConfigurationStore {
       now,
       now,
     );
+    return id;
   }
 
   private async mcpRows(runtimeId: string): Promise<McpServerRow[]> {
     return await this.database.prepare(`
+      SELECT s.mcp_server_id, s.display_name, s.source_key, s.transport, s.url, s.protocol_version,
+             timeout_ms, auth_kind, auth_config_json, secret_storage_key, tool_policy_json
+      FROM local_runtime_mcp_bindings b
+      JOIN local_device_mcp_servers s ON s.mcp_server_id = b.mcp_server_id
+      WHERE b.runtime_id = ? ORDER BY s.display_name, s.mcp_server_id
+    `).all(runtimeId) as McpServerRow[];
+  }
+
+  private async deviceMcpRows(): Promise<McpServerRow[]> {
+    return await this.database.prepare(`
       SELECT mcp_server_id, display_name, source_key, transport, url, protocol_version,
              timeout_ms, auth_kind, auth_config_json, secret_storage_key, tool_policy_json
-      FROM local_runtime_mcp_servers WHERE runtime_id = ? ORDER BY display_name, mcp_server_id
-    `).all(runtimeId) as McpServerRow[];
+      FROM local_device_mcp_servers ORDER BY display_name, mcp_server_id
+    `).all() as McpServerRow[];
+  }
+
+  private async deviceMcpRow(id: string): Promise<McpServerRow | undefined> {
+    return await this.database.prepare(`
+      SELECT mcp_server_id, display_name, source_key, transport, url, protocol_version,
+             timeout_ms, auth_kind, auth_config_json, secret_storage_key, tool_policy_json
+      FROM local_device_mcp_servers WHERE mcp_server_id = ?
+    `).get(id) as McpServerRow | undefined;
+  }
+
+  private async assertDeviceMcpServers(ids: readonly string[]): Promise<void> {
+    const sourceKeys = new Set<string>();
+    for (const id of ids) {
+      const server = await this.deviceMcpRow(id);
+      if (server === undefined) throw new LocalRuntimeConfigurationStoreError(404, "mcp_server_not_found");
+      if (sourceKeys.has(server.source_key)) throw new LocalRuntimeConfigurationStoreError(409, "mcp_server_key_duplicate");
+      sourceKeys.add(server.source_key);
+    }
+  }
+
+  private async insertMcpBinding(runtimeId: string, mcpServerId: string, now: number): Promise<void> {
+    await this.database.prepare(`
+      INSERT OR IGNORE INTO local_runtime_mcp_bindings(runtime_id, mcp_server_id, created_at) VALUES (?, ?, ?)
+    `).run(runtimeId, mcpServerId, now);
   }
 
   private async resolveMcpServer(row: McpServerRow, environment: Record<string, string | undefined>): Promise<McpServerRegistration> {

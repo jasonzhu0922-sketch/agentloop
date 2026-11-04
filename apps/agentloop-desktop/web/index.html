@@ -14,8 +14,10 @@
       <button id="new-conversation" class="new-chat" type="button">＋ 新对话</button>
       <nav id="conversations" class="sessions" aria-label="本机对话"></nav>
       <div class="sidebar-foot">
-        <section class="local-capability" aria-label="本机能力"><div class="local-capability-head"><strong>本机能力</strong><span class="local-agent-state"><i class="online"></i><span>本机运行</span></span><button id="model-settings-open" type="button" aria-haspopup="dialog">设置</button></div><p class="local-agent-hint">共享 Local Runtime · 独立数据目录</p><div class="local-runtime-picker"><label class="sr-only" for="runtime-select">执行 Runtime</label><select id="runtime-select" class="local-runtime-select" aria-label="执行 Runtime" disabled></select></div><p class="local-agent-hint">对话和产物保存在本机。远程模型推理时，内容会发送给所选模型服务。</p></section>
-        <span id="account-identity" class="identity">正在确认云端账号…</span><div class="foot-actions"><button id="theme-toggle" class="icon-btn" type="button" title="切换主题" aria-label="切换主题">◐</button><button id="logout" class="icon-btn" type="button" title="退出登录" aria-label="退出登录">⇥</button></div>
+        <section class="local-capability" aria-label="本机能力"><div class="local-capability-head"><strong>本机能力</strong><span class="local-agent-state"><i class="online"></i><span>本机运行</span></span><button id="model-settings-open" type="button" aria-haspopup="dialog">设置</button></div><p class="local-agent-hint">当前账号专属 Runtime · 独立数据目录</p><div class="local-runtime-picker"><label class="sr-only" for="runtime-select">执行 Runtime</label><select id="runtime-select" class="local-runtime-select" aria-label="执行 Runtime" disabled></select></div></section>
+        <div class="identity-actions">
+          <span id="account-identity" class="identity">正在确认云端账号…</span><div class="foot-actions"><button id="theme-toggle" class="icon-btn" type="button" title="切换主题" aria-label="切换主题">◐</button><button id="logout" class="icon-btn" type="button" title="退出登录" aria-label="退出登录">⇥</button></div>
+        </div>
       </div>
     </aside>
     <main class="main">
@@ -35,16 +37,16 @@
           </form>
         </section>
         <aside id="details" class="details artifact-workspace" aria-label="产物与事件" hidden>
-          <div class="details-head"><div><strong>产物与事件</strong><small>当前任务的本机持久化记录</small></div><button id="details-close" class="artifact-head-button quiet" type="button" aria-label="隐藏产物区">×</button></div>
-          <div class="artifact-workspace-body"><section><h2 class="desktop-section-title">本次产物</h2><div id="artifacts" class="artifact-empty"><span class="artifact-empty-icon" aria-hidden="true">▧</span><strong>暂无产物</strong><p>任务生成的文件会在这里显示。普通回复不会作为文件产物。</p></div></section><details class="desktop-events"><summary>持久化事件</summary><pre id="events">尚无事件</pre></details></div>
+          <div class="details-head"><div><strong id="artifact-title">产物预览</strong><small id="artifact-subtitle">选择回复中的产物进行预览</small></div><div class="artifact-head-actions"><a id="artifact-download" class="artifact-head-button" hidden>下载</a><button id="artifact-maximize" class="artifact-head-button" type="button" aria-label="最大化产物区" aria-pressed="false">⛶</button><button id="details-close" class="artifact-head-button quiet" type="button" aria-label="隐藏产物区">×</button></div></div>
+          <div class="artifact-workspace-body"><div id="artifact-preview" class="desktop-artifact-preview" hidden></div><section class="desktop-artifact-picker"><h2 class="desktop-section-title">本次产物</h2><div id="artifacts" class="artifact-empty"><span class="artifact-empty-icon" aria-hidden="true">▧</span><strong>暂无产物</strong><p>任务生成的文件会在这里显示。普通回复不会作为文件产物。</p></div></section><details class="desktop-events"><summary>持久化事件</summary><pre id="events">尚无事件</pre></details></div>
         </aside>
       </div>
     </main>
   </div>
   <dialog id="model-settings" class="desktop-settings agent-settings-card" aria-labelledby="model-settings-title">
-    <div class="desktop-settings-header agent-settings-header"><div><strong id="model-settings-title">本机能力设置</strong><p>模型配置保存在这台设备上。API Key 仅在本机加密存储。</p></div><button id="model-settings-close" class="icon-btn" type="button" aria-label="关闭本机能力设置">×</button></div>
+    <div class="desktop-settings-header agent-settings-header"><div><strong id="model-settings-title">本机能力设置</strong><p>配置按当前账号隔离保存在本机。API Key 使用该账号独立密钥加密存储。</p></div><button id="model-settings-close" class="icon-btn" type="button" aria-label="关闭本机能力设置">×</button></div>
     <div class="desktop-settings-layout agent-settings-layout"><nav class="desktop-settings-nav agent-settings-nav" aria-label="设置分类">
-      <button type="button" data-settings-tab="general" class="active">常规</button><button type="button" data-settings-tab="models">模型配置</button><button type="button" data-settings-tab="skills">Skill 管理</button><button type="button" data-settings-tab="connectors">Connector 配置</button><button type="button" data-settings-tab="runtimes">Runtime 管理</button>
+      <button type="button" data-settings-tab="general" class="active">常规</button><button type="button" data-settings-tab="models">模型配置</button><button type="button" data-settings-tab="skills">Skill 管理</button><button type="button" data-settings-tab="connectors">Connector 配置</button><button type="button" data-settings-tab="mcp">MCP 配置</button><button type="button" data-settings-tab="runtimes">Runtime 管理</button>
     </nav><section id="settings-models" class="desktop-settings-content agent-settings-content" data-settings-page="models">
       <div class="settings-page-heading"><div><h2>模型配置</h2><p>使用 JSON 管理 Provider、模型和调用参数。新任务使用保存后的配置。</p></div><span class="settings-local-badge">仅本机保存</span></div>
       <p class="desktop-security-note">API Key 单独填写并加密保存，不写入配置 JSON。当前使用本机文件密钥，不是 OS Keychain；无法防护同用户恶意程序或拿到完整数据目录的攻击者。远程推理会向你指定的模型服务发送内容。支持 HTTP/HTTPS；HTTP 不加密传输 API Key 和推理内容，请优先使用 HTTPS，HTTP 仅用于可信网络。</p>

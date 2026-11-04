@@ -7,11 +7,12 @@ import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout } from "node:timers/promises";
 import test from "node:test";
-import { RuntimeWorkspaceService } from "@zhujun/agentloop";
+import { AppError, RuntimeWorkspaceService } from "@zhujun/agentloop";
 import type { LocalModelProviderPort } from "@zhujun/agentloop-local-runtime";
 import { loadConnectorModules } from "@zhujun/agentloop-local-runtime/connectors";
 import { startDesktop, type DesktopApplication } from "../src/application.ts";
 import { DEFAULT_RUNTIME_ID } from "../src/api/desktop-api.ts";
+import { accountDataDirectory } from "../src/accounts/account-managers.ts";
 import { DESKTOP_DEVELOPMENT_PORT, desktopLaunchOptions } from "../src/main.ts";
 import { builtinConnectorModules } from "../src/connectors/builtin-connector-modules.ts";
 import { fixtureAuth, TEST_OWNER } from "./fixtures/auth.ts";
@@ -61,6 +62,23 @@ test("Desktop Connector API exposes its host-approved built-ins", async t => {
   assert.equal((await call(`/api/runtimes/${DEFAULT_RUNTIME_ID}/connectors`)).status, 404, "Connector accounts are not Runtime settings");
 });
 
+test("Desktop MCP catalog is device-wide and prevents deleting a Runtime-selected item", async t => {
+  const { app } = await fixture(t);
+  const call = client(app.origin, await session(app.origin));
+  const { server } = await jsonCall(call, "/api/mcp", { server: {
+    displayName: "Shared MCP", key: "shared-mcp", transport: "http", url: "https://mcp.example.test/shared", auth: { kind: "none" },
+  } });
+  const { runtime } = await jsonCall(call, "/api/runtimes", { displayName: "MCP selection" });
+  await jsonCall(call, `/api/runtimes/${runtime.id}/stop`, {});
+  const settings = await jsonCall(call, `/api/runtimes/${runtime.id}/configuration`);
+  await jsonCall(call, `/api/runtimes/${runtime.id}/configuration`, { configuration: { skillPackageIds: [], mcpServerIds: [server.id] }, revision: settings.revision });
+  const selected = await jsonCall(call, `/api/runtimes/${runtime.id}/configuration`);
+  assert.deepEqual(selected.configuration.mcpServerIds, [server.id]);
+  assert.equal((await call(`/api/mcp/${server.id}/remove`, {})).status, 409);
+  await jsonCall(call, `/api/runtimes/${runtime.id}/configuration`, { configuration: { skillPackageIds: [], mcpServerIds: [] }, revision: selected.revision });
+  assert.deepEqual(await jsonCall(call, `/api/mcp/${server.id}/remove`, {}), { removed: true });
+});
+
 test("legacy Runtime-scoped Connector accounts migrate to the device-wide catalog", async t => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-desktop-connector-migration-")); const skills = join(root, "skills"); await mkdir(skills);
   const database = new DatabaseSync(join(root, "supervisor.db"));
@@ -74,7 +92,7 @@ test("legacy Runtime-scoped Connector accounts migrate to the device-wide catalo
   assert.equal(app.existing, false); t.after(async () => { if (!app.existing) await app.close(); await rm(root, { recursive: true, force: true }); });
   const { connections } = await jsonCall(client(app.origin, await session(app.origin)), "/api/connectors");
   assert.deepEqual(connections.map((connection: { id: string }) => connection.id), ["connection_legacy"]);
-  const verified = new DatabaseSync(join(root, "supervisor.db"), { readOnly: true });
+  const verified = new DatabaseSync(join(accountDataDirectory(root, TEST_OWNER), "supervisor.db"), { readOnly: true });
   const columns = verified.prepare("PRAGMA table_info(desktop_connector_settings)").all() as Array<{ name: string }>;
   verified.close();
   assert.equal(columns.some(column => column.name === "runtime_id"), false);
@@ -90,7 +108,32 @@ test("Desktop terminal logging summarizes operations without exposing submitted 
   const { run } = await jsonCall(call, "/api/runs", { requestId: "terminal-log-run", input: privateInput, modelKey: "local:test" });
   await settled(call, run.id);
   assert.ok(entries.some(entry => /^POST \/api\/runs → 200 \(\d+ms\)$/.test(entry)));
+  assert.ok(entries.some(entry => entry.includes("event=run.started")));
+  assert.ok(entries.some(entry => entry.includes("event=model.request.completed")));
+  assert.ok(entries.some(entry => entry.includes("event=run.completed")));
   assert.equal(entries.some(entry => entry.includes(privateInput) || entry.includes(run.id) || entry.includes("fixture-password-only")), false);
+});
+
+test("Desktop admits write and command tools into the Kernel and logs failed Runs", async t => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-desktop-execution-")); const skills = join(root, "skills"); await mkdir(skills);
+  const entries: string[] = []; let toolContext = "";
+  const app = await startDesktop({ mode: "development", dataDirectory: join(root, "desktop-data"),
+    models: modelPort({ ...greetingModel(), async complete(input) {
+      toolContext = JSON.stringify(input);
+      // Stop at the model boundary after inspecting the real admitted catalog.
+      throw new AppError("MODEL_ERROR", "desktop_test_provider_unavailable", 502);
+    } }), cloudAuth: fixtureAuth(), bundledSkillDirectories: [skills], openBrowser: false, log: entry => entries.push(entry) });
+  assert.equal(app.existing, false); t.after(async () => { if (!app.existing) await app.close(); await rm(root, { recursive: true, force: true }); });
+  const call = client(app.origin, await session(app.origin));
+  const { run } = await jsonCall(call, "/api/runs", { requestId: "html-execution", input: "创建 HTML 项目周报", modelKey: "local:test" });
+  assert.equal((await settled(call, run.id)).status, "failed");
+  assert.match(toolContext, /computer_write_file/);
+  assert.match(toolContext, /computer_run_command/);
+  const database = new DatabaseSync(join(accountDataDirectory(join(root, "desktop-data"), TEST_OWNER), "runtime.db"), { readOnly: true });
+  try {
+    assert.equal(database.prepare("SELECT allow_dangerous_tools FROM runs WHERE id = ?").get(run.id)?.allow_dangerous_tools, 1);
+  } finally { database.close(); }
+  assert.ok(entries.some(entry => entry.includes("event=run.failed") && entry.includes("MODEL_ERROR") && entry.includes("desktop_test_provider_unavailable")), entries.join("\n"));
 });
 
 test("Desktop general settings persist custom local storage and reload an idle Runtime", async t => {
@@ -98,7 +141,7 @@ test("Desktop general settings persist custom local storage and reload an idle R
   assert.equal((await fetch(`${app.origin}/api/device-storage`)).status, 401);
   const call = client(app.origin, await session(app.origin));
   const { storage } = await jsonCall(call, "/api/device-storage");
-  const canonicalRoot = await realpath(root);
+  const canonicalRoot = join(await realpath(accountDataDirectory(root, TEST_OWNER)), "storage");
   assert.deepEqual(storage, { workspaceRoot: join(canonicalRoot, "workspace"), uploadStorageRoot: join(canonicalRoot, "uploads") });
   const custom = { workspaceRoot: join(canonicalRoot, "custom-workspace"), uploadStorageRoot: join(canonicalRoot, "custom-uploads") };
   assert.deepEqual((await jsonCall(call, "/api/device-storage", custom)).storage, custom);
@@ -183,8 +226,8 @@ test("Desktop serves its own Multi Runtime presentation without importing the cl
   for (const className of ["app-shell", "sidebar", "conversation-scroll", "composer-box", "artifact-workspace"]) assert.ok(page.includes(className));
   assert.match(page, /account-identity/);
   for (const className of ["agent-settings-card", "agent-settings-layout", "agent-settings-nav", "agent-settings-content"]) assert.ok(page.includes(className), `settings shell missing ${className}`);
-  for (const label of ["常规", "模型配置", "Skill 管理", "Runtime 管理", "Connector 配置", "完成"]) assert.ok(page.includes(label), `settings navigation missing ${label}`);
-  for (const path of ["/app.js", "/model-settings.js", "/conversation.js", "/turn-projection.js", "/conversation.css", "/markdown.js", "/markdown.css", "/reference/ui/scroll-follow.js", "/reference/ui/composer-input.js", "/reference/ui/message-selection.js", "/reference/presentation/assistant-message-presentation.js", "/reference/projections/assistant-event-projection.js", "/reference/projections/execution-detail-projection.js", "/styles.css", "/multi-runtime.css", "/assets/xuanwu-mascot-icon.png"]) {
+  for (const label of ["常规", "模型配置", "Skill 管理", "MCP 配置", "Runtime 管理", "Connector 配置", "完成"]) assert.ok(page.includes(label), `settings navigation missing ${label}`);
+  for (const path of ["/app.js", "/artifact-workspace.js", "/model-settings.js", "/conversation.js", "/turn-projection.js", "/conversation.css", "/markdown.js", "/markdown.css", "/reference/ui/scroll-follow.js", "/reference/ui/composer-input.js", "/reference/ui/message-selection.js", "/reference/presentation/assistant-message-presentation.js", "/reference/projections/assistant-event-projection.js", "/reference/projections/execution-detail-projection.js", "/styles.css", "/multi-runtime.css", "/assets/xuanwu-mascot-icon.png"]) {
     const response = await fetch(`${app.origin}${path}`); assert.equal(response.status, 200);
     assert.equal(response.headers.get("access-control-allow-origin"), null);
     assert.match(response.headers.get("content-security-policy")!, /default-src 'none'/);
@@ -199,11 +242,22 @@ test("Desktop serves its own Multi Runtime presentation without importing the cl
   assert.match(settingsScript, /绑定 126 邮箱/);
   assert.match(settingsScript, /客户端授权码/);
   assert.match(settingsScript, /runtime-manager-card/);
+  assert.match(settingsScript, /runtime-detail-modal/);
+  assert.match(settingsScript, /配置扩展 Skill 与 MCP/);
+  assert.match(settingsScript, /\['configure', '配置'\]/);
+  assert.match(settingsScript, /runtimeCapabilityTabs/);
+  assert.match(settingsScript, /MCP Servers/);
+  assert.match(settingsScript, /runtime-skill-option/);
+  assert.match(settingsScript, /runtime-config-actions/);
   assert.match(settingsScript, /专属扩展 Skills/);
   assert.match(settingsScript, /function runtimeActionMenu/);
-  assert.doesNotMatch(page, /data-settings-tab="mcp"/);
+  assert.match(page, /data-settings-tab="mcp"/);
+  assert.match(settingsScript, /renderDeviceMcp/);
+  assert.match(settingsScript, /renderRuntimeMcpBindings/);
   assert.match(settingsScript, /api\('\/api\/connectors'\)/);
   assert.doesNotMatch(settingsScript, /runtimes\/\$\{target\}\/connectors/);
+  assert.match(script, /const \{ connections \} = await api\('\/api\/connectors'\)/);
+  assert.doesNotMatch(script, /runtimes\/\$\{encodeURIComponent\(runtimeId\)\}\/connectors/);
   // Only copied presentation bytes are exposed; other App and filesystem paths stay private.
   for (const path of ["/runtime-config.js", "/client/app.js", "/styles/runtime-overrides.css", "/assets/unknown.png"]) assert.equal((await fetch(`${app.origin}${path}`)).status, 401);
 });
@@ -301,7 +355,7 @@ test("HTTP Run retries, attachment bindings and event cursors survive applicatio
   const { events } = await jsonCall(call, `/api/runs/${first.id}/events`); assert.ok(events.length > 2);
   const cursor = events[Math.floor(events.length / 2)].seq;
   assert.deepEqual((await jsonCall(call, `/api/runs/${first.id}/events?afterSeq=${cursor}`)).events, events.filter((event: { seq: number }) => event.seq > cursor));
-  const db = new DatabaseSync(join(root, "runtime.db"), { readOnly: true });
+  const db = new DatabaseSync(join(accountDataDirectory(root, TEST_OWNER), "runtime.db"), { readOnly: true });
   try { assert.equal((db.prepare("SELECT COUNT(*) AS count FROM run_sources WHERE run_id = ? AND source_id = ?").get(second.id, source.id) as { count: number }).count, 1); } finally { db.close(); }
   const restored = await reopen();
   assert.equal((await client(restored.origin, auth)("/api/conversations")).status, 401, "Session is not persisted across restart");
@@ -324,7 +378,7 @@ test("a new Desktop conversation accepts a local upload before its first Run", a
     requestId: "draft-upload-run", input: "请读取附件", modelKey: "local:test", conversationId, uploadedSourceIds: [source.id],
   });
   await settled(call, run.id);
-  const db = new DatabaseSync(join(root, "runtime.db"));
+  const db = new DatabaseSync(join(accountDataDirectory(root, TEST_OWNER), "runtime.db"));
   try {
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM run_sources WHERE run_id = ? AND source_id = ?").get(run.id, source.id) as { count: number }).count, 1);
   } finally { db.close(); }
@@ -397,9 +451,9 @@ test("a persisted artifact fixture is served as an attachment, never active same
   await settled(call, run.id); await app.close();
   // Explicit persisted tool-receipt fixture: this test verifies read transport,
   // not a model-generated artifact or final-delivery acceptance.
-  const workspace = new RuntimeWorkspaceService(join(root, "workspace"), { ownerScoped: true });
+  const workspace = new RuntimeWorkspaceService(join(accountDataDirectory(root, TEST_OWNER), "storage", "workspace"), { ownerScoped: true });
   await writeFile(join(workspace.forConversation(TEST_OWNER, run.conversationId), "fixture.html"), "<script>throw new Error('must not execute')</script>");
-  const database = new DatabaseSync(join(root, "runtime.db"));
+  const database = new DatabaseSync(join(accountDataDirectory(root, TEST_OWNER), "runtime.db"));
   try {
     const { seq } = database.prepare("SELECT MAX(seq) + 1 AS seq FROM run_events WHERE run_id = ?").get(run.id) as { seq: number };
     database.prepare("INSERT INTO run_events(run_id, seq, type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)")
@@ -412,6 +466,22 @@ test("a persisted artifact fixture is served as an attachment, never active same
   assert.match(download.headers.get("content-disposition")!, /^attachment;/); assert.match(download.headers.get("content-security-policy")!, /sandbox/);
   assert.match(await download.text(), /must not execute/);
   assert.equal((await read(`/api/runs/${run.id}/artifacts/missing/download`)).status, 404);
+  const endpoint = `/api/runs/${run.id}/artifacts/${artifacts[0].id}`;
+  const content = await read(`${endpoint}/content`);
+  assert.equal(content.status, 200); assert.match(content.headers.get("content-type")!, /text\/html/);
+  assert.equal(content.headers.get("content-disposition"), "inline");
+  const policy = content.headers.get("content-security-policy")!;
+  assert.match(policy, /sandbox allow-scripts;/); assert.doesNotMatch(policy, /allow-same-origin/);
+  assert.match(policy, /frame-ancestors 'self'/); assert.match(policy, /default-src 'none'/);
+  assert.match(await content.text(), /must not execute/);
+  const preview = await jsonCall(read, `${endpoint}/preview`);
+  assert.equal(preview.kind, "text"); assert.match(preview.text, /must not execute/);
+  for (const action of ["content", "preview", "download"]) {
+    assert.equal((await fetch(`${restored.origin}${endpoint}/${action}`)).status, 401);
+    assert.equal((await read(`/api/runs/${run.id}/artifacts/missing/${action}`)).status, 404);
+    assert.equal((await read(`${endpoint}/${action}?runtimeId=missing`)).status, 409);
+  }
+
 });
 
 test("close refuses a cancelled-but-unwinding Run and keeps the local API usable", async t => {

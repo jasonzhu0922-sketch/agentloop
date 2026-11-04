@@ -85,6 +85,7 @@ export interface LocalRuntimeHostOptions {
   readonly planningMaxTurns?: number;
   readonly stepMaxTurns?: number;
   readonly computerCommandEnvironment?: Readonly<Record<string, string>>;
+  readonly computerCommandSandbox?: KernelOptions["computerCommandSandbox"];
   readonly runEventLogSink?: (runtime: LocalRuntimeDefinition, line: string) => void;
   readonly loadExecutionPolicy?: () => Promise<LocalRuntimeExecutionPolicy>;
   readonly identity?: LocalIdentityPort;

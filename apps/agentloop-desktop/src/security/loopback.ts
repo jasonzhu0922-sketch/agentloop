@@ -23,7 +23,7 @@ export function securityHeaders(response: ServerResponse): void {
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
-  response.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+  response.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self' blob: data:; media-src blob:; frame-src 'self' blob:; object-src blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
 }
 interface Session { token: string; csrf: string; expiresAt: number; ownerUserId: string;
   principal: CloudPrincipal; cloudToken: string; verifiedAt: number; verifying?: Promise<void> }

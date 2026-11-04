@@ -29,6 +29,7 @@ const suites = Object.freeze({
     "tests/runtime-workspace-service.test.ts",
   ],
   kernel: [
+    "tests/command-sandbox.test.ts",
     "tests/batch.test.ts",
     "tests/concurrency.test.ts",
     "tests/context-assembler.test.ts",

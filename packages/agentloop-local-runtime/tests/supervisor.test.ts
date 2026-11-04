@@ -225,6 +225,48 @@ test("shared configurations retain runtime identity, stopped state and encrypted
   assert.equal((await restored.supervisor.list())[1]?.status, "ready");
 });
 
+test("device MCP catalog binds independently per Runtime and refuses deletion while referenced", async (t) => {
+  const { supervisor, configurations, secrets } = await fixture(t);
+  const first = await supervisor.create("First", { skillPackageIds: [], mcpServers: [{
+    key: "shared-files", displayName: "Shared files", transport: "http", url: "https://mcp.example.test/files",
+    auth: { kind: "bearer", token: "test-only-catalog-credential" },
+  }] });
+  const second = await supervisor.create("Second");
+  const catalog = await configurations.deviceMcpServers();
+  assert.equal(catalog.length, 1);
+  const id = catalog[0]!.id;
+  assert.deepEqual((await configurations.configuration(first.id)).mcpServerIds, [id]);
+  assert.deepEqual((await configurations.configuration(second.id)).mcpServerIds, [], "selection must not leak to another Runtime");
+  await configurations.apply(second.id, { skillPackageIds: [], mcpServerIds: [id] });
+  assert.deepEqual((await configurations.configuration(second.id)).mcpServerIds, [id]);
+  assert.equal((await configurations.resolve(second.id)).mcpServers[0]?.key, "shared-files", "Runtime resolves the selected device item");
+  await assert.rejects(configurations.removeDeviceMcpServer(id), /mcp_server_referenced_by_runtime/);
+  await configurations.apply(first.id, { skillPackageIds: [], mcpServerIds: [] });
+  await configurations.apply(second.id, { skillPackageIds: [], mcpServerIds: [] });
+  await configurations.removeDeviceMcpServer(id);
+  assert.deepEqual(await configurations.deviceMcpServers(), []);
+  assert.deepEqual(await secrets.listKeys(), [], "unreferenced catalog credential is reclaimed only after deletion");
+});
+
+test("legacy Runtime MCP rows migrate to device catalog items without losing their binding", async (t) => {
+  const { database, root, supervisor } = await fixture(t);
+  const runtime = await supervisor.create("Migrated Runtime");
+  await supervisor.stop(runtime.id);
+  await database.exec(`CREATE TABLE local_runtime_mcp_servers (
+    mcp_server_id TEXT PRIMARY KEY, runtime_id TEXT NOT NULL, display_name TEXT NOT NULL, source_key TEXT NOT NULL,
+    transport TEXT NOT NULL, url TEXT NOT NULL, protocol_version TEXT, timeout_ms INTEGER, auth_kind TEXT NOT NULL,
+    auth_config_json TEXT NOT NULL, secret_storage_key TEXT, tool_policy_json TEXT NOT NULL, created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL, UNIQUE(runtime_id, source_key)
+  )`);
+  await database.prepare(`INSERT INTO local_runtime_mcp_servers VALUES (?, ?, ?, ?, 'http', ?, NULL, NULL, 'none', '{}', NULL, '{}', ?, ?)`)
+    .run("legacy-device-mcp", runtime.id, "Legacy MCP", "legacy", "https://mcp.example.test/legacy", Date.now(), Date.now());
+  const restored = new LocalRuntimeConfigurationStore(database, new EncryptedLocalRuntimeSecretStore(join(root, "secrets")));
+  await restored.ready();
+  assert.deepEqual((await restored.deviceMcpServers()).map(server => server.id), ["legacy-device-mcp"]);
+  assert.deepEqual((await restored.configuration(runtime.id)).mcpServerIds, ["legacy-device-mcp"]);
+  assert.equal(await database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'local_runtime_mcp_servers'").get(), undefined);
+});
+
 test("persisted draining state waits for restored work before completing a stop", async (t) => {
   let restoreActive = false;
   const { database, supervisor, reopen } = await fixture(t, { factory: async definition => ({

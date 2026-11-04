@@ -3,7 +3,7 @@
 .app-shell { height:100dvh; grid-template-rows:minmax(0,1fr); }
 .main,.workspace,.conversation { min-height:0; }
 .workspace { grid-template-columns:minmax(0,1fr); }
-.workspace.artifact-open { grid-template-columns:minmax(0,1fr) 376px; }
+.workspace.artifact-open { grid-template-columns:minmax(0,1fr) minmax(420px,48%); }
 .conversation { border-right:0; }
 .topbar-left { display:flex; align-items:center; gap:8px; min-width:0; }
 .crumb { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -339,6 +339,29 @@ button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid va
 .runtime-detail-heading strong { font-size:15px; }
 .runtime-detail-heading small { color:var(--text-3); font-size:11px; }
 .runtime-detail-actions { justify-self:start; margin-top:3px; }
+.runtime-detail-modal { position:fixed; z-index:30; inset:0; display:grid; place-items:center; padding:28px; background:rgb(15 23 42 / 48%); backdrop-filter:blur(3px); }
+.runtime-detail-panel { display:grid; align-content:start; gap:12px; width:min(760px,100%); max-height:min(80dvh,760px); overflow:auto; padding:22px; border:1px solid var(--border); border-radius:16px; background:var(--bg); box-shadow:0 28px 80px rgb(0 0 0 / 24%); }
+.runtime-detail-modal-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding-bottom:3px; }
+.runtime-detail-modal-head>div { display:grid; gap:5px; }
+.runtime-detail-modal-head strong { font-size:18px; }
+.runtime-detail-modal-head p { margin:0; color:var(--text-3); font-size:11px; line-height:1.5; }
+.desktop-settings-content.agent-settings-content .runtime-detail-close { display:grid; place-items:center; flex:none; width:30px; height:30px; padding:0; border:0; border-radius:7px; background:transparent; color:var(--text-3); font-size:25px; font-weight:300; line-height:1; }
+.desktop-settings-content.agent-settings-content .runtime-detail-close:hover { background:var(--bg-3); color:var(--text); }
+.runtime-capability-tabs { display:flex; gap:4px; border-bottom:1px solid var(--border); }
+.desktop-settings-content.agent-settings-content .runtime-capability-tabs button { border:0; border-bottom:2px solid transparent; border-radius:0; padding:8px 10px; background:transparent; color:var(--text-3); font-size:11px; }
+.desktop-settings-content.agent-settings-content .runtime-capability-tabs button.active { border-bottom-color:var(--brand); color:var(--brand); }
+.runtime-capability-tab-panel { display:grid; gap:12px; min-width:0; }
+.runtime-skill-options { display:grid; gap:7px; }
+.desktop-settings-content.agent-settings-content .runtime-skill-option { display:grid; grid-template-columns:18px minmax(0,1fr); align-items:start; gap:10px; padding:10px; border:1px solid var(--border); border-radius:7px; background:var(--bg); color:var(--text); }
+.desktop-settings-content.agent-settings-content .runtime-skill-option input { width:16px; height:16px; margin:2px 0 0; padding:0; accent-color:var(--brand); }
+.runtime-skill-option>span { display:grid; gap:3px; min-width:0; }
+.runtime-skill-option strong { font-size:12px; overflow-wrap:anywhere; }
+.runtime-skill-option small { color:var(--text-3); font-size:10px; font-weight:400; line-height:1.45; overflow-wrap:anywhere; }
+.runtime-config-actions { position:sticky; bottom:-22px; z-index:2; display:flex; justify-content:flex-end; gap:8px; margin:4px -22px -22px; padding:13px 22px 18px; border-top:1px solid var(--border); background:var(--bg); }
+.runtime-config-actions button { min-width:74px; }
+.desktop-settings-content.agent-settings-content .runtime-config-actions .primary { border-color:var(--brand); background:var(--brand); color:#fff; }
+.runtime-detail-choice { padding:9px 10px; border:1px solid var(--border); border-radius:7px; background:var(--bg); color:var(--text-2); font-size:11px; line-height:1.45; }
+.desktop-settings-content.agent-settings-content .runtime-detail-actions .primary { border-color:var(--brand); background:var(--brand); color:#fff; }
 
 @media(max-width:720px) {
   .desktop-settings.agent-settings-card {
@@ -373,4 +396,33 @@ button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid va
   .connector-catalog { grid-template-columns:1fr; }
   .runtime-manager-card { grid-template-columns:1fr; }
   .runtime-manager-actions { justify-content:flex-end; }
+  .runtime-detail-modal { padding:12px; }
+  .runtime-detail-panel { max-height:80dvh; padding:18px; }
+  .runtime-config-actions { bottom:-18px; margin:4px -18px -18px; padding:12px 18px 14px; }
 }
+
+/* Artifact workspace: independent preview and file selection, as in Multi Runtime. */
+.desktop-artifact { width:100%; text-align:left; font:inherit; cursor:pointer; }
+.desktop-artifact.active { border-color:var(--brand); background:var(--brand-soft); }
+.artifact-head-actions { flex-shrink:0; }
+#artifact-download { text-decoration:none; }
+.desktop-artifact-preview { flex:1 0 360px; min-height:360px; overflow:auto; border:1px solid var(--border); border-radius:8px; background:var(--bg); margin-bottom:14px; }
+.desktop-artifact-preview.frame-body { overflow:hidden; }
+.desktop-artifact-preview .preview-frame { display:block; width:100%; height:100%; min-height:360px; border:0; background:white; }
+.desktop-artifact-preview .preview-image { display:block; max-width:100%; max-height:100%; margin:auto; object-fit:contain; }
+.desktop-artifact-preview .preview-audio { display:block; width:100%; margin:24px auto; }
+.artifact-preview-status { padding:24px; color:var(--text-3); font-size:12px; }
+.artifact-preview-status.error { color:var(--bad); }
+.desktop-artifact-picker { flex:none; }
+.artifact-workspace-body:has(.desktop-artifact-preview:not([hidden])) .desktop-artifact-list { max-height:150px; overflow:auto; }
+.artifact-workspace.maximized { position:fixed; z-index:50; inset:16px; width:auto; margin:0; background:var(--bg-2); box-shadow:0 0 0 100vmax rgba(15,23,42,.35); }
+.preview-text,.preview-doc { padding:16px; overflow-wrap:anywhere; }
+.preview-text pre { white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.6 var(--mono); }
+.preview-sheet { padding:12px; }
+.preview-table-wrap { overflow:auto; }
+.preview-table { border-collapse:collapse; width:100%; font-size:12px; }
+.preview-table td { border:1px solid var(--border); padding:7px 9px; }
+.preview-slides { display:grid; gap:12px; padding:12px; }
+.preview-slide-canvas { display:block; width:100%; height:auto; }
+.preview-slide-number { margin-bottom:8px; color:var(--text-3); font-size:11px; }
+@media(max-width:1100px) { .artifact-workspace { width:min(720px,calc(100vw - 36px)); } }

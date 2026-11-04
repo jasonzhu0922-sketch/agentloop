@@ -91,3 +91,13 @@ test('pure presentation snapshots remain exactly aligned with Multi Runtime, not
     assert.equal(copied.slice(copied.indexOf('\n') + 1), original, file);
   }
 });
+
+
+test('artifact cards select the right artifact for preview instead of navigating to a download', () => {
+  const turn = createTurn(run('completed'));
+  turn.artifacts = [{ id: 'file"<unsafe>', name: '周报.html', role: 'final', bytes: 100 }];
+  const html = renderAssistant(turn);
+  assert.match(html, /<button type="button" class="desktop-artifact" data-artifact-id="file&quot;&lt;unsafe&gt;">/);
+  assert.match(html, /· 预览/);
+  assert.doesNotMatch(html, / download|\/download|· 下载/);
+});

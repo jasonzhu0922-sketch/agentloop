@@ -43,11 +43,12 @@ export function mcpInput(value: unknown): LocalRuntimeMcpServerInput {
   return s as unknown as LocalRuntimeMcpServerInput;
 }
 export function configurationInput(value: unknown): LocalRuntimeConfigurationInput {
-  const c = record(value, ["skillPackageIds", "mcpServers"]);
+  const c = record(value, ["skillPackageIds", "mcpServerIds"]);
   if (!Array.isArray(c.skillPackageIds) || c.skillPackageIds.length > 200) throw new HttpError(400, "settings_input_invalid");
   for (const id of c.skillPackageIds) string(id);
-  if (!Array.isArray(c.mcpServers) || c.mcpServers.length > 30) throw new HttpError(400, "settings_input_invalid");
-  return { skillPackageIds: c.skillPackageIds as string[], mcpServers: c.mcpServers.map(mcpInput) };
+  if (!Array.isArray(c.mcpServerIds) || c.mcpServerIds.length > 30) throw new HttpError(400, "settings_input_invalid");
+  for (const id of c.mcpServerIds) string(id);
+  return { skillPackageIds: c.skillPackageIds as string[], mcpServerIds: c.mcpServerIds as string[] };
 }
 export function memoryInput(value: unknown): LocalRuntimeMemoryConfigurationInput {
   const memory = record(value, ["enabled", "settlementModelKey"]);

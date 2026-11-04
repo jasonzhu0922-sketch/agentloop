@@ -366,9 +366,9 @@ export class LocalRuntimeSupervisor {
       this.emit();
       throw new LocalRuntimeSupervisorError(500, `runtime_resource_cleanup_failed:${error instanceof Error ? error.message : String(error)}`);
     }
-    const secretStorageKeys = await this.configurations.secretStorageKeysForRuntime(runtimeId);
+    // MCP credentials belong to the device catalog. Deleting a Runtime only
+    // cascades its bindings; it must never remove a shared catalog secret.
     await this.database.prepare("DELETE FROM local_runtime_instances WHERE runtime_id = ?").run(runtimeId);
-    await this.configurations.removeSecrets(secretStorageKeys);
     this.statusCache.delete(runtimeId);
     this.emit();
     return { runtimeId, reclaimedData: true };

@@ -292,6 +292,7 @@ export class LocalRuntimeFactory {
           ...mcpIntegration.tools,
         ],
         computerCommandEnvironment: this.input.computerCommandEnvironment,
+        computerCommandSandbox: this.input.computerCommandSandbox,
         ...(this.input.runEventLogSink === undefined ? {} : { runEventLogSink: (line) => this.input.runEventLogSink!(definition, line) }),
       });
       const secretValues = Object.values(configuration.integrationEnvironment).filter((value): value is string => typeof value === "string" && value.length > 0);

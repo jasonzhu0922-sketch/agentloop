@@ -148,6 +148,7 @@ export const wpsDefinition: ConnectorDefinition = {
     key: "kingsoft-wps",
     version: "0.1.0",
     displayName: "金山在线文档",
+    aliases: ["金山文档", "WPS", "WPS 云文档"],
     description: "Read-only Kingsoft/WPS online document connector for AgentLoop.",
     agentloopSdk: "^0.1.0",
     apiVersion: "document-transport",

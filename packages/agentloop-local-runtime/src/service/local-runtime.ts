@@ -46,6 +46,7 @@ export interface LocalRuntime {
   source(context: LocalExecutionContext, sourceId: string): ReturnType<RunService["source"]>;
   artifacts(context: LocalExecutionContext, runId: string): ReturnType<RunService["processArtifacts"]>;
   readArtifact(context: LocalExecutionContext, runId: string, artifactId: string): ReturnType<RunService["readProcessArtifact"]>;
+  previewArtifact(context: LocalExecutionContext, runId: string, artifactId: string): ReturnType<RunService["previewProcessArtifact"]>;
   /** Host-only directory consent; the host owns the native picker and Session. */
   grantDirectory(path: string, displayName?: string): ReturnType<LocalRuntimeControl["scopes"]["create"]>;
   directories(): ReturnType<LocalRuntimeControl["scopes"]["list"]>;
@@ -113,6 +114,7 @@ export class RuntimeFacade implements LocalRuntime {
   source(context: LocalExecutionContext, sourceId: string) { return this.#use(runtime => runtime.runs.source(this.#owner(context), sourceId)); }
   artifacts(context: LocalExecutionContext, runId: string) { return this.#use(runtime => runtime.runs.processArtifacts(this.#owner(context), runId)); }
   readArtifact(context: LocalExecutionContext, runId: string, artifactId: string) { return this.#use(runtime => runtime.runs.readProcessArtifact(this.#owner(context), runId, artifactId)); }
+  previewArtifact(context: LocalExecutionContext, runId: string, artifactId: string) { return this.#use(runtime => runtime.runs.previewProcessArtifact(this.#owner(context), runId, artifactId)); }
   grantDirectory(path: string, displayName?: string) { return this.#use(runtime => runtime.scopes.create(path, displayName)); }
   directories() { return this.#use(runtime => runtime.scopes.list()); }
   revokeDirectory(id: string) { return this.#use(runtime => runtime.scopes.revoke(id)); }

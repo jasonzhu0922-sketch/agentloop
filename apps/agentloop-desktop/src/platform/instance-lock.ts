@@ -28,7 +28,7 @@ function processIsAbsent(pid: number): boolean {
  * only an unreachable published origin paired with a conclusively dead PID is
  * recovered, and that evidence is retained beside the new lock.
  */
-export async function claimInstance(dataDirectory: string): Promise<InstanceClaim> {
+export async function claimInstance(dataDirectory: string, mode: "development" | "packaged" = "development"): Promise<InstanceClaim> {
   if (!isAbsolute(dataDirectory)) throw new Error("desktop_data_directory_must_be_absolute");
   await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
   const directory = await realpath(dataDirectory);
@@ -84,12 +84,12 @@ export async function claimInstance(dataDirectory: string): Promise<InstanceClai
     if (!entries.includes(".desktop-data.json")) {
       if (entries.some(entry => entry !== ".desktop-instance.lock")) throw new Error("desktop_data_directory_not_empty");
       installationId = randomUUID();
-      await writeFile(markerPath, JSON.stringify({ schema: "agentloop.desktop.data/v1", mode: "development", installationId }), { flag: "wx", mode: 0o600 });
+      await writeFile(markerPath, JSON.stringify({ schema: "agentloop.desktop.data/v1", mode, installationId }), { flag: "wx", mode: 0o600 });
     } else {
       const markerStat = await lstat(markerPath);
       if (!markerStat.isFile() || markerStat.size > 4096) throw new Error("desktop_data_marker_invalid");
       const marker = JSON.parse(await readFile(markerPath, "utf8")) as Record<string, unknown>;
-      if (marker.schema !== "agentloop.desktop.data/v1" || marker.mode !== "development" || typeof marker.installationId !== "string" || !/^[a-f0-9-]{36}$/.test(marker.installationId)) throw new Error("desktop_data_marker_invalid");
+      if (marker.schema !== "agentloop.desktop.data/v1" || marker.mode !== mode || typeof marker.installationId !== "string" || !/^[a-f0-9-]{36}$/.test(marker.installationId)) throw new Error("desktop_data_marker_invalid");
       installationId = marker.installationId;
     }
   } catch (error) { await release(); throw error; }

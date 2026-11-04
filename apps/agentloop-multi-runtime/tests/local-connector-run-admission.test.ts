@@ -62,6 +62,46 @@ test("an arbitrary Connector capability reaches the normal planner without provi
   }
 });
 
+test("a named Connector requirement reaches Planner through the authorized Run catalog", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-connector-named-source-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const definition = {
+      manifest: { schema: "agentloop.connectorManifest/v1" as const, key: "mail-provider", version: "0.1.0", displayName: "示例邮箱", aliases: ["examplemail"], description: "Mail", agentloopSdk: "*" },
+      capabilities: [{ id: "email.count", category: "source" as const, label: "Count mail", description: "Count received messages", risk: "low" as const, replaySafe: true }],
+    };
+    const operations = [{ id: "email.count", capabilityId: "email.count", mode: "read" as const, inputSchema: { type: "object" as const }, executionMode: "parallel" as const, replaySafe: true }];
+    const registry = new ConnectorRegistry();
+    registry.register({ definition, connect: async ({ connection }) => ({ definition, connection, operations,
+      execute: async () => { throw new Error("Discovery must not query mail"); }, mapEvidence: () => [] }),
+      project: async () => ({ connectorKey: definition.manifest.key, connectorVersion: "0.1.0", capabilities: definition.capabilities, operations, runtimeTools: [] }) });
+    const connectorRuntime = new ConnectorRuntimeService(registry, {
+      resolver: { resolve: async (id) => ({ id, connectorKey: "mail-provider", displayName: "我的示例邮箱", ownerType: "user", ownerId: "owner", scopes: [], credentialRef: "fixture", status: "active" }) },
+      credentialProvider: { get: async () => ({}) },
+    });
+    let planned = false;
+    const runs = new RunService({ database, skills: new SkillService(database), workspaceRoot: root, runToolProvider: connectorRuntime,
+      modelFactory: () => ({ limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 }, complete: async () => ({
+        content: "", finishReason: "tool_calls", toolCalls: [{ id: "resolve", name: "resolve_conversation_turn", arguments: {
+          mode: "execute", relation: "new_goal", inputMode: "none", effectiveGoal: "使用示例邮箱统计邮件",
+          taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "lookup", requiresExecution: true,
+            deliverables: [{ targetId: "answer", purpose: "统计邮件", expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
+          evidenceStrategy: "lookup_lite", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [],
+          memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [{ kind: "tool_source", reference: "示例邮箱" }],
+        } }],
+      }) }),
+      plannerFactory: () => ({ plan: async (task) => {
+        assert.ok(task.availableTools?.some((tool) => tool.source?.aliases?.includes("示例邮箱")));
+        assert.ok(task.availableCapabilities?.some((capability) => capability.id === "email.count"));
+        planned = true;
+        throw new Error("catalog_checked");
+      } }),
+    });
+    await assert.rejects(runs.executeConversation("owner", "使用示例邮箱统计邮件", { connectorConnectionIds: ["mail-connection"] }));
+    assert.equal(planned, true, "a configured source must not fail CAPABILITY_UNAVAILABLE before planning");
+  } finally { await database.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("Local Agent loads only its enabled connections and preserves selection through Router RPC and strict-local HTTP", { timeout: 20_000 }, async (t) => {
   for (const method of ["completeWpsAuthorization", "completeFeishuAuthorization"] as const) {
     t.mock.method(LocalAgentService.prototype, method, async () => ({ origin: "http://localhost:5174", attemptId: "oauth-attempt" }));
@@ -112,6 +152,8 @@ test("Local Agent loads only its enabled connections and preserves selection thr
         exportName: "createConfigured126MailConnector", credentials: { email: "fixture@126.com", authorizationCode: "fixture" },
       });
       connectionId = `local_connection_${saved.id}`;
+      const resolved = await store.resolve(runtimeId);
+      assert.equal(resolved.connections[0]?.displayName, "Mail", "existing stored connection JSON inherits its configured account name");
       // These invalid modules must never be loaded or selected by this Runtime.
       await store.upsert(runtimeId, { connectorKey: "disabled", displayName: "Disabled", modulePath: "/nonexistent-disabled.ts", enabled: false, credentials: { token: "disabled-fixture" } });
       await store.upsert("other-runtime", { connectorKey: "other", displayName: "Other Runtime", modulePath: "/nonexistent-other.ts", credentials: { token: "other-fixture" } });

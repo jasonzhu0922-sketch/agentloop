@@ -27,6 +27,8 @@ export interface ConnectorManifest {
   readonly key: string;
   readonly version: string;
   readonly displayName: string;
+  /** Stable, user-facing names for this service, shared by its connections. */
+  readonly aliases?: readonly string[];
   readonly description: string;
   readonly agentloopSdk: string;
   readonly apiVersion?: string;
@@ -64,6 +66,8 @@ export interface ConnectorOperation {
 export interface ConnectorConnection {
   readonly id: string;
   readonly connectorKey: string;
+  /** Application-owned name for this particular authorized connection. */
+  readonly displayName?: string;
   readonly ownerType: "user" | "workspace";
   readonly ownerId: string;
   readonly externalAccountId?: string;

@@ -20,6 +20,12 @@ API client or application persistence implementation. Connector modules are load
 by Runtime registration and do not need to be compile-time dependencies of the
 Multi Runtime application.
 
+Connector manifests may declare stable service `aliases` in addition to their
+`key` and `displayName`. The host may supply a connection `displayName` for an
+individual account. The SDK projects these names into ToolSource aliases so an
+explicit user request can be resolved against the authorized Run catalog. A
+name shared by multiple connections remains ambiguous and cannot select one.
+
 `connectorOperationTools` preserves canonical Connector evidence for audit and
 also projects it as `agentloop.toolEvidenceReceipt/v1`, the neutral receipt used
 by ordinary MCP tools. The receipt preserves source references, facts and

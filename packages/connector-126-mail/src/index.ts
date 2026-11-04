@@ -162,6 +162,7 @@ export const mail126Definition: ConnectorDefinition = {
     key: "126-mail",
     version: "0.1.0",
     displayName: "126 邮箱",
+    aliases: ["126mail", "126 mail", "126邮箱"],
     description: "Read-only 126 Mail connector for AgentLoop.",
     agentloopSdk: "^0.1.0",
     apiVersion: "imap",

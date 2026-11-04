@@ -3,19 +3,27 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=26" },
+  "engines": {
+    "node": ">=26"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json",
     "start": "node src/main.ts",
-    "test": "node --test --test-isolation=process tests/*.test.ts"
+    "test": "node --test --test-isolation=process tests/*.test.ts tests/*.test.mjs",
+    "package:mac": "node scripts/package-desktop.mjs --platform mac",
+    "package:win": "node scripts/package-desktop.mjs --platform win",
+    "test:packaging": "node --test tests/packaging.test.mjs tests/packaged-tools.test.mjs tests/macos-installer.test.mjs"
   },
   "dependencies": {
-    "@zhujun/agentloop-identity": "*",
-    "@zhujun/agentloop-artifact-preview": "*",
-    "esbuild": "^0.28.2",
     "@zhujun/agentloop": "*",
-    "@zhujun/agentloop-local-runtime": "*"
+    "@zhujun/agentloop-artifact-preview": "*",
+    "@zhujun/agentloop-identity": "*",
+    "@zhujun/agentloop-local-runtime": "*",
+    "esbuild": "^0.28.2"
   },
-  "devDependencies": { "@types/node": "^26.3.0", "typescript": "^7.0.2" }
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "typescript": "^7.0.2"
+  }
 }

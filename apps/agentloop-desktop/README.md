@@ -1,10 +1,10 @@
 # AgentLoop Desktop（开发预览）
 
-Desktop 是标准 `@zhujun/agentloop-local-runtime` 的独立宿主，不依赖 Multi Runtime 的 Router、配对或内部模块。前端沿用 Multi Runtime 的展示效果；包括开发态在内均使用独立 [Account Service](../agentloop-account-service/README.md) 注册、登录，不回退为开发身份。当前为源码开发预览，尚非已部署、已打包的发行版。
+Desktop 是标准 `@zhujun/agentloop-local-runtime` 的独立宿主，不依赖 Multi Runtime 的 Router、配对或内部模块。前端沿用 Multi Runtime 的展示效果；包括开发态在内均使用独立 [Account Service](../agentloop-account-service/README.md) 注册、登录，不回退为开发身份。支持源码开发预览和独立原生托盘包；界面统一在 Google Chrome 中运行。
 
 ## 启动
 
-仓库依赖已安装，要求 Node.js 26+。在仓库根目录执行：
+仓库依赖已安装，要求 Node.js 26+ 和本机 Python 3。在仓库根目录执行：
 
 ```sh
 cd /Users/zhujun/coding/agentloop
@@ -12,9 +12,17 @@ npm run build:desktop
 npm run start:desktop
 ```
 
+修改代码后需要完全重启开发实例时，在仓库根目录执行 `npm run restart:desktop`。它先停止 8796 端口上的旧 Desktop，最多等待 30 秒确认退出，再构建共享 Local Runtime 并执行 `start:desktop`（包含账号服务重启）。若旧进程因活动任务拒绝退出，命令会停止，不会复用旧实例；先结束或取消任务后重试。此重启命令使用 Bash 和 lsof，适用于 macOS/Linux 开发环境。
+
+开发入口会将 Kernel 已安装的 `jszip`、`pptxgenjs`、`docx` 模块目录传入工具 `NODE_PATH`，并解析当前 `python3` 的真实安装路径（可用 `RUNTIME_PYTHON` 显式指定解释器），避免账号目录中的 Skill 找不到仓库依赖或命中 pyenv shim。Python 的第三方依赖须安装在该解释器环境中；用户 site-packages 不会继承。沙箱仅获得这些工具安装目录的只读权限，工作区写入与账号隔离保持不变；不会在 Run 中联网补装依赖。安装包使用包内依赖，与开发机路径无关。
+
+旧版本升级到账号隔离后，共享模型配置和凭据仍保留在旧数据目录，不会自动分发给登录账号。本机操作人确认归属后，可先停止 Desktop，再运行 `npm run restore:desktop-models -- --data-dir <开发数据目录绝对路径> --account-id <目标账号ID>`，将其恢复到一个已经初始化且尚未保存模型配置的账号。该操作使用原配置校验逻辑，将凭据重新加密到目标账号；不覆盖目标已有配置，也不删除旧数据。恢复后执行 `npm run restart:desktop`。
+
 首次检出需先安装依赖并构建共享包（可执行根目录 `npm run build`）；账号包单独构建为 `npm run build:identity`。本机联调无需手动启动账号服务：`npm run start:desktop` 会先安全重启管理器登记的 Account Service 并等待 `127.0.0.1:8795` 健康就绪，再启动 Desktop。根目录启动脚本将 Desktop 自动指向该地址；无需手工设置环境变量。账号服务默认持久化在 `apps/agentloop-account-service/data/accounts.db`。正式客户端应使用我们部署的 HTTPS 账号服务域名，上述 loopback 仅用于本机联调，不是已经上线的云服务。
 
-只监听固定地址 `http://127.0.0.1:8796`，并在启动命令所在终端持续输出安全的运行摘要（配置保存、Run 提交、取消和失败请求；不记录提示词、凭据、查询参数、响应内容或资源 ID）。使用 `Ctrl+C` 关闭服务；若端口被占用，启动会明确失败，不会静默改用随机端口。可用 `--no-open` 禁用自动打开，`--data-dir /absolute/path/to/new-directory` 指定独立目录：`npm run start:desktop -- --no-open --data-dir /absolute/path/to/new-directory`。重复启动相同目录只打开已有实例，不再次创建 Runtime。指定 Chrome 而非默认浏览器的启动策略尚未实现。
+只监听固定地址 `http://127.0.0.1:8796`，并在启动命令所在终端持续输出 HTTP 操作摘要和公共 Runtime 事件摘要（Run 短 ID、事件序号、规划、模型请求、工具执行、完成与失败原因）。不主动打印请求正文或完整模型输出；失败消息沿用 Kernel 摘要。使用 `Ctrl+C` 关闭服务；若端口被占用，启动会明确失败，不会静默改用随机端口。可用 `--no-open` 禁用自动打开，`--data-dir /absolute/path/to/new-directory` 指定独立目录：`npm run start:desktop -- --no-open --data-dir /absolute/path/to/new-directory`。重复启动相同目录只打开已有实例后退出，日志仍由原启动终端接收，不再次创建 Runtime。指定 Chrome 而非默认浏览器的启动策略尚未实现。
+
+需要同时保存开发日志时，先在原终端 `Ctrl+C` 停止实例，再执行 `npm run start:desktop 2>&1 | tee /tmp/agentloop-desktop-dev.log`；另一个终端可用 `tail -f /tmp/agentloop-desktop-dev.log` 查看。修改公共 Runtime 后需先执行 `npm run build:local-runtime`，再重启 Desktop。
 
 默认数据目录：
 
@@ -33,8 +41,10 @@ npm run start:desktop
 - 本机 Session 最长 4 小时且不超过云端有效期；普通业务请求每 60 秒重新校验身份，页面启动读取 `/api/session` 强制校验。云端拒绝则撤销本机 Session，故障则明确失败，不伪造离线认证。
 - 退出先撤销本机 Session，再尝试云端撤销；远端结果未确认时页面明确提醒。退出不自动取消在途任务。进程重启或 Session 到期需重新登录，目前没有刷新凭据持久化。
 - 对话、Run、事件、附件和产物以稳定的 issuer + tenantId + userId 派生本机 owner，不能由前端指定；同账号重新登录恢复历史，不同账号隔离。账号服务域名变更需作为身份迁移处理，不能随意切换。
-- 旧 `desktop-development` 身份数据保留原样，不自动归给第一个注册者；不会因为改成云登录而删除旧数据。迁移入口尚未实现。
-- 模型配置与凭据属于设备级资源，同设备已登录账号共享。账号隔离不是操作系统用户隔离，也不意味着模型配置按账号独立。
+- 每个账号使用 `accounts/<cloud_owner>/` 独立目录，内含 supervisor/runtime/memory 数据库、模型/MCP/Connector 独立 vault、上传的 Skills、诊断与 `storage/workspace`、`storage/uploads`。账号来自已验证的 Session，网页不能指定或切换 owner；同账号退出、重新登录与进程重启继续使用原目录。
+- 首次登录按历史数据库中的 owner 迁移该账号的对话、Run、附件、工作区、Memory 和有归属的 Connector；快照过滤后执行外键检查和 VACUUM。迁移使用临时目录并原子发布，失败删除临时副本，原数据始终保留。旧 `desktop-development` 身份不自动归给任何云账号。
+- 历史共享模型、MCP、自定义 Skill 库及对应密钥没有可验证的用户归属，保留在旧目录，不分配给第一个登录者。模型可由本机操作人明确恢复到指定账号；MCP 和上传的 Skills 需由当前账号配置。Runtime 仅保留有该账号历史的实例身份，不继承无归属的旧能力绑定。
+- Runtime 管理和配置接口使用当前账号的管理器；对其他账号实例的查看、配置、重命名、启停、排空、重启与删除均返回 404。存储设置只接受当前账号 `storage/` 内的路径，并拒绝符号链接越界。账号隔离不等于操作系统用户隔离。
 
 当前实现与 Multi Runtime 已有四个账号接口同等能力，**不是 OAuth/PKCE**。邮箱验证、找回密码、PKCE、刷新 Token、安全存储与正式云端部署仍待完成，不能称生产账号体系已经就绪。
 
@@ -72,6 +82,7 @@ Desktop 模型基础地址支持 HTTP 或 HTTPS，包括域名和局域网地址
 
 - 复用 Multi Runtime 的侧边会话栏、玄武图标、蓝色主题、消息布局和底部输入框；展示快照位于 `web/multi-runtime.css`，不在启动时读取另一 App 的文件。
 - 本机历史、显式模型选择、新任务、取消、附件与产物下载。`⌘/Ctrl + Enter` 发送，Enter 换行；支持主题切换、窄屏会话导航和产物/事件面板。
+- Desktop 宿主提交任务时固定开放文件写入和命令工具，支持 HTML 等文件产物生成；浏览器不传入或覆盖该宿主策略，执行仍使用公共 Runtime，并由宿主强制启用操作系统命令沙箱。
 - 首次任务建立对话后才能上传附件，单个最多 1 MiB；上传源由本机 API 保存，后续 Run 引用 source ID，不接受浏览器传入任意路径。
 - 事件按持久化序号每 500ms 增量轮询，不是 SSE；界面诊断最多显示最近 200 条，不截断数据库历史。
 - 待确认发送在首次请求前保存 requestId 与业务载荷到当前标签页 `sessionStorage`，刷新后相同输入重试复用 ID。不保存 Token、Session 或模型密钥。随机端口变化后的跨 origin 草稿恢复尚未实现。
@@ -81,13 +92,13 @@ Desktop 模型基础地址支持 HTTP 或 HTTPS，包括域名和局域网地址
 
 ## 本机能力设置
 
-“本机能力 → 设置”由 Desktop 自己提供常规（含设备级 Memory）、模型、Skills、Connector、Runtime、MCP 页面。Multi Runtime 只作为交互和展示参考，Desktop 不导入它的 Router、Store、Installer 或内部类。
+“本机能力 → 设置”由 Desktop 自己提供常规（含当前账号 Memory）、模型、Skills、Connector、Runtime、MCP 页面。Multi Runtime 只作为交互和展示参考，Desktop 不导入它的 Router、Store、Installer 或内部类。
 
-- **Skills**：上传 ZIP 或目录到设备级 Skill 库。导入器独立校验 ZIP 路径、CRC、压缩比、文件类型和大小；导入后不会自动启用，也不会上传账号服务。Runtime 页勾选 Skill 绑定，停止 Runtime 后保存，重新启动后才进入执行上下文。声明元数据可编辑，原始 Skill 文件保持不可变。
+- **Skills**：上传 ZIP 或目录到当前账号 Skill 库。导入器独立校验 ZIP 路径、CRC、压缩比、文件类型和大小；导入后不会自动启用，也不会上传账号服务。Runtime 页勾选 Skill 绑定，停止 Runtime 后保存，重新启动后才进入执行上下文。声明元数据可编辑，原始 Skill 文件保持不可变。
 - **Runtime**：创建、重命名、停止、启动、排空、重启和删除独立 Runtime。Runtime 配置有版本号，过期页面不能覆盖新配置；活动 Run 或未退出的执行会阻止修改和关闭。默认 Runtime 不可删除。
 - **MCP**：按 Runtime 配置 HTTP MCP 服务和工具策略，可使用无认证、Bearer、API Key Header、Basic、Query Parameter、Custom Headers。凭据只进独立本机密钥库；服务地址变更不会沿用旧凭据。探测只在内存中完成，不保存草稿。服务地址禁止 userinfo、查询参数和片段。
-- **Connector**：Desktop 启动时由宿主批准并加载内置的飞书、126 邮箱和金山文档模块；网页不能提交任意代码路径。设置页管理当前账号的设备级连接、Scopes、启用状态和加密凭据；连接按账号隔离，并由全部 Runtime 共享。对话中必须逐项勾选本轮授权的连接，不能自动授予设备上的全部连接。
-- **常规 / Memory**：设备级开关和沉淀模型仅接受本机模型目录；保存会在无活动任务时重新加载运行实例，失败则恢复原配置。不会显示无法由运行时持久化的占位控件。
+- **Connector**：Desktop 启动时由宿主批准并加载内置的飞书、126 邮箱和金山文档模块；网页不能提交任意代码路径。设置页管理当前账号的本机连接、Scopes、启用状态和加密凭据；连接按账号隔离，并由当前账号的 Runtime 共享。对话中必须逐项勾选本轮授权的连接，不能自动授予设备上的全部连接。
+- **常规 / Memory**：当前账号开关和沉淀模型仅接受本机模型目录；保存会在无活动任务时重新加载运行实例，失败则恢复原配置。不会显示无法由运行时持久化的占位控件。
 
 Desktop 的内置 Connector 由启动宿主决定：开发模式解析工作区源码，安装包应在 Desktop 旁携带对应的 `connectors/*.mjs` bundle。可以通过 `AGENTLOOP_DESKTOP_CONNECTOR_MODULES_JSON` 再注册额外的宿主批准模块：
 
@@ -105,7 +116,11 @@ export AGENTLOOP_DESKTOP_CONNECTOR_MODULES_JSON='[{"modulePath":"/absolute/path/
 
 该 loopback 安全模型不隔离同一用户下的恶意本机进程、扩展或设备管理员。`POST /api/dev/session` 已移除并固定返回 404，Fake Auth 只允许测试夹具显式注入，不是启动选项。
 
-模型凭据保存在独立的 `private/model-secrets` AES-256-GCM 文件 vault，不与 MCP/Connector vault 共用。当前主密钥是同目录的受限权限文件，**不是 macOS Keychain / Windows DPAPI**，不能抵御同用户恶意程序或完整目录被盗。丢失主密钥时明确失败，不重新生成后覆盖旧密文。新配置提交后旧凭据清理失败会告警，不回滚到可能已删除的旧凭据；该告警仅在当前进程保留，尚无自动孤儿清理/恢复工具。
+模型凭据保存在当前账号目录下独立的 `private/model-secrets` AES-256-GCM 文件 vault，不与 MCP/Connector vault 共用。当前主密钥是同目录的受限权限文件，**不是 macOS Keychain / Windows DPAPI**，不能抵御同用户恶意程序或完整目录被盗。丢失主密钥时明确失败，不重新生成后覆盖旧密文。新配置提交后旧凭据清理失败会告警，不回滚到可能已删除的旧凭据；该告警仅在当前进程保留，尚无自动孤儿清理/恢复工具。
+
+命令沙箱由 Desktop 宿主强制设置，不能由网页或模型关闭：macOS 使用系统 Seatbelt（`sandbox-exec`），Linux 使用 bubblewrap 的独立命名空间。命令及子进程只能读写当前对话工作区；系统运行库和授权 Skill/工具目录只读，HOME/TMP/XDG 指向工作区内的私有目录。命令不开放网络或全局 IPC，不能读取其他账号目录、数据库、vault 或宿主 home。内置 Connector/MCP 仍通过各自的宿主授权协议访问网络。可信搜索进程使用相同沙箱。
+
+macOS 已使用真实 Node/Python 验证文件生成、只读 Skill 执行、跨账号读写/符号链接/子进程逃逸拒绝和 loopback 网络拒绝。Linux 后端尚未在本次 macOS 环境实测；Windows 尚无原生命令沙箱。缺少可用后端时命令以 `command_sandbox_unavailable` 明确拒绝，不回退到无约束执行；文件工具仍可在工作区生成产物。
 
 活动 HTTP 调用或 Run 阻止关闭；数据库已取消但执行协程尚未退出也不释放资源。使用 Ctrl+C / SIGTERM 关闭，若被活动任务拒绝，先等待或在页面取消，再次退出。没有 Web shutdown 接口。
 
@@ -117,10 +132,50 @@ npm run test:desktop
 npm run test:local-runtime
 ```
 
+账号隔离与命令沙箱补齐后，Desktop 65/65、共享 Runtime 40/40、Kernel 标准套件 265/265 通过，构建、Desktop typecheck 与 diff 检查通过。覆盖双账号配置/vault/Runtime 隔离、重新登录与重启、迁移失败原子性、子 Runtime 历史、多账号关闭拒绝，以及真实 macOS 命令边界。额外 Computer 工具套件仍有 3 项既有失败，已在修改前的 executor 临时副本中复现，不代表仓库全量测试通过。
+
 当前 Desktop 27 项、共享 Runtime 38 项、共享产物/Markdown 10 项通过，另有 Desktop 构建和严格 typecheck。覆盖真实 Kernel + 确定性模型、临时 SQLite、双进程单实例、重试/重启、事件游标、附件绑定、取消后 unwind、损坏数据保护、Session/CSRF 和静态资源边界。对话增量覆盖累积流文本、内部正文排除、重复/乱序批次、超过 200 事件后的历史计划、失败总结/取消、终态等待清理、产物分组、Markdown/XSS 和参考快照一致性。模型设置覆盖真实 loopback HTTP 的 Responses/Chat Completions → Kernel 测试、配置重开、版本冲突、活动执行拒绝修改、SQLite 提交失败回滚、主密钥丢失与提交后清理失败；扫描测试持久化文件和公开响应，不允许出现明文测试密钥。HTTP 域名/局域网配置测试使用合成凭据并禁止对外请求，不证明远程网关或真实模型可用。产物下载测试使用显式持久化文件/工具回执 fixture，不证明真实模型生成产物或最终交付。
 
-`web/reference/` 为 Multi Runtime 纯展示函数的显式快照，有一致性测试，不引用其 Router、账户或传输代码。`web/conversation.css` 为对话样式快照；Markdown 从共享包通过 esbuild 在开发宿主启动时生成静态模块，不是运行时加载另一应用。发行版预构建打包仍待实现。手工对话验收可运行 `node apps/agentloop-desktop/tests/fixtures/conversation-preview.ts`（仓库根目录），仅创建独立临时目录并使用明确标记的确定性模型，绝不接入用户凭据或真实网关。
+`web/reference/` 为 Multi Runtime 纯展示函数的显式快照，有一致性测试，不引用其 Router、账户或传输代码。`web/conversation.css` 为对话样式快照；Markdown 从共享包通过 esbuild 在开发宿主启动时生成静态模块，不是运行时加载另一应用。托盘包在构建时预生成 Markdown 资源，安装后不需要 esbuild 或源码仓库。手工对话验收可运行 `node apps/agentloop-desktop/tests/fixtures/conversation-preview.ts`（仓库根目录），仅创建独立临时目录并使用明确标记的确定性模型，绝不接入用户凭据或真实网关。
 
 账号增量验收：Desktop 30/30、账号服务与客户端 4/4，新增 Router HTTP 共享账号集成 1/1；共享 Identity、账号服务与 Desktop 构建及 Desktop 严格 typecheck 通过。测试覆盖云端撤销、账号隔离、重启恢复、密码/Token 不落本机盘、缺失认证配置不回退、云端故障和身份变更。旧 Multi Runtime 仍为 397/410，13 个遗留失败无新增，不能称仓库全绿。上段 27 项为账号接入前状态。
 
 浏览器账号验收使用全新临时目录、独立真实 HTTP 账号服务和确定性模型，通过注册、错误密码拒绝、正确登录、本机 Run 完成、退出与再次登录后恢复历史；不是云端部署或第三方真实模型验收。前批模型配置浏览器验收通过保存、脱敏重读、空白 Key 保留、无效参数拒绝、未保存关闭保护及约 388 CSS 像素窄屏布局。没有读取用户已有 Agent 数据。正式云部署、PKCE/refresh、Keychain、平台 Connector OAuth、安装包签名与 macOS/Windows 安装验收仍未完成。当前 Connector 设置和动态发现入口已实现，但尚未提供平台特定模块。静态资源启动时缓存，修改页面后需要重启 Desktop。
+
+
+## 原生托盘打包（macOS / Windows）
+
+Desktop 是 **macOS 菜单栏 / Windows 系统托盘应用**，由原生托盘管理本地 Node 服务，使用 Google Chrome 打开本地界面。没有内嵌浏览器。托盘支持启动服务、打开 Chrome、查看日志和退出；退出前会等待本地资源关闭，活动 Run 未结束时拒绝退出。
+
+```sh
+# 本机 macOS（Apple Silicon 或 Intel，要求与目标架构一致）
+# 与 Local Agent 一样，指定带 pip 的可重定位 Python 3.12 发行目录，不能使用 venv
+AGENTLOOP_PACKAGED_PYTHON_ROOT=/path/to/python-3.12-standalone npm run package:desktop:mac:local
+
+# Windows 原生主机（Node 26、.NET 8 SDK、PowerShell）
+# 在 PowerShell 中先设置 $env:AGENTLOOP_PACKAGED_PYTHON_ROOT = "C:\build\python-3.12"
+npm run package:desktop:win:local
+
+# 正式服务地址须显式给出 HTTPS 地址
+npm run package:desktop:mac -- --account-service https://accounts.example.com
+npm run package:desktop:win -- --account-service https://accounts.example.com
+```
+
+- macOS 需 Xcode Command Line Tools，默认输出 `.app` 和 `.pkg`，支持 macOS 14 及以上。PKG 固定安装到 `/Applications/AgentLoop Desktop Local.app`（正式 channel 为 `AgentLoop Desktop.app`），禁用 bundle relocation。应用使用 ad-hoc 签名；PKG 未签名、未做 Developer ID 公证。
+- Windows 输出含自包含 .NET 托盘与 Node 的便携 ZIP，解压后双击 `AgentLoop Desktop.exe`；目标机器不需要安装 Node、Python 或 .NET。当前提供原生 Windows 构建脚本；须在 Windows 上构建并验收。
+- 安装并保留 Google Chrome。首次启动自动打开界面，关闭 Chrome 标签页不会停止托盘服务。此版本不注册开机启动。
+- `--channel local` 固定连接 `http://127.0.0.1:8795`，也可传 `--account-service` 指定本地服务。账号服务独立运行，使用 `npm run restart:accounts` 启动仓库中的本地服务；客户端不会把账号数据库装进包内。
+- 默认 channel 为 `production`，必须指定 HTTPS 账号地址；local / production 使用不同的应用标识及数据目录。开发预览仍使用原来的 Development 目录和端口 8796，托盘包分配空闲 loopback 端口，避免与其冲突。
+- macOS 数据位于 `~/Library/Application Support/AgentLoop Desktop Local/runtime-data`；Windows 位于 `%LOCALAPPDATA%\AgentLoop Desktop Local\runtime-data`。正式包去掉 ` Local`。日志位于同级 `logs`。
+- 构建输出位于 `release/<channel>-<mac|win>-<arch>/`，macOS 可显式选择 `--target dmg`、`--target zip` 或 `--target dir`；Windows 默认仍为 ZIP。PKG 升级先请求目标安装路径下的后端正常退出，再停止托盘；若任务仍在运行且后端拒绝退出，会中止安装，不强杀任务。只管理同一 channel 的安装路径，不操作 Local Agent、源码预览或其他 channel，也不修改用户数据。安装后以当前登录用户启动托盘；没有登录用户或安装到其他卷时不自动启动。后置脚本只确认托盘与后端进程已启动，不代表真实登录或模型 Run 验收。通过 DMG/ZIP 或构建产物目录启动的其他副本须先手动退出，以免占用同一 channel 的单实例锁。
+- macOS 与 Windows 默认强制包含官方 Node 26.0.0、可重定位 Python 3.12、生产 Node 依赖、内置 Skill、三个 Connector 和预构建界面。Python 复用 Local Agent 的 `preparePackagedPythonRuntime` 和 `requirements.local-agent.txt`，包含 markitdown 0.1.7、pandas、openpyxl、pypdf、reportlab、Pillow 等同一套依赖基线；构建时没有 Python 输入即失败，不会生成缺 Python 的精简包。包内不含模型密钥、账号数据、自定义 Skill 或开发配置。LibreOffice、Poppler、Tesseract 可执行程序、FFmpeg 等外部工具与 Local Agent 一样不属于此默认依赖包。
+- `desktop-config.json` 记录账号地址、源码提交、工作区是否含未提交改动、Node 校验和、Python 版本与依赖基线校验和及构建时间；`runtime-python/packages.json` 记录实际 Python 包版本。工具执行使用宿主传入的包内 PATH / NODE_PATH / Python 配置，已禁用用户 site-packages，并隔离继承的 PYTHONHOME、PYTHONPATH。打包使用当前工作区，包含尚未提交的源代码修改。
+
+验证示例（不注册测试账号、不配置真实模型）：
+
+```sh
+npm run test:packaging --workspace agentloop-desktop
+node apps/agentloop-desktop/scripts/smoke-package.mjs "apps/agentloop-desktop/release/local-mac-arm64/AgentLoop Desktop Local.app/Contents/Resources" --probe-account-service
+```
+
+烟测将整个 Resources 复制到仓库外的临时目录，移除宿主 Node/Python 搜索路径，并注入错误的宿主 Python 配置。它通过真实 ComputerExecutor 调用随包 python / python3 / node，执行 Python 模块导入、XLSX/PDF/DOCX/PPTX 生成和 markitdown 转换，然后使用独立临时数据启动后端，检查预构建静态资源、账号服务配置、未登录隔离、真实账号服务对无效凭据的拒绝、退出和重启。它不等价于真实账号登录或真实模型 Run 验收。

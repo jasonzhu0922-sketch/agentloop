@@ -6,6 +6,8 @@ import type { CloudAuthPort } from "../auth/cloud-auth.ts";
 import { modelEndpoint } from "../security/model-endpoint.ts";
 import { LocalManagementError, LocalRuntimeConfigurationStoreError, LocalRuntimeSupervisorError, type ConnectorSettingInput } from "@zhujun/agentloop-local-runtime";
 import { configurationInput, mcpInput, memoryInput, storageInput, record, skillImportInput } from "./settings-input.ts";
+import { DesktopAccountManagers } from "../accounts/account-managers.ts";
+import { localAccountId } from "../auth/cloud-auth.ts";
 
 export const DEFAULT_RUNTIME_ID = "desktop-default";
 const MAX_BODY_BYTES = 1_500_000;
@@ -60,7 +62,7 @@ export class DesktopApi {
   origin = "";
   stopping = false;
   activeRequests = 0;
-  manager?: LocalRuntimeManager;
+  accounts?: DesktopAccountManagers;
   readonly #sessions = new AccountSessions();
   readonly #cloud?: CloudAuthPort;
   #loginInFlight = 0;
@@ -87,9 +89,9 @@ export class DesktopApi {
       assertLoopback(request, this.origin);
       const url = new URL(request.url!, this.origin);
       if (request.method === "GET" && url.pathname === "/__desktop/instance") {
-        json(response, 200, { instanceId: this.instanceId, ready: this.manager !== undefined && !this.stopping }); return;
+        json(response, 200, { instanceId: this.instanceId, ready: this.accounts !== undefined && !this.stopping }); return;
       }
-      if (this.stopping || !this.manager) throw new HttpError(503, "desktop_not_ready");
+      if (this.stopping || !this.accounts) throw new HttpError(503, "desktop_not_ready");
       const asset = this.#assets.get(url.pathname);
       if (request.method === "GET" && asset !== undefined) {
         response.writeHead(200, { "Content-Type": asset.type }); response.end(asset.content); return;
@@ -116,6 +118,7 @@ export class DesktopApi {
         this.#loginAttempts.push(Date.now()); this.#loginInFlight++;
         try {
           const cloud = await this.#cloud.authenticate(url.pathname.endsWith("register") ? "register" : "login", email, password);
+          await this.accounts.forOwner(localAccountId(this.#cloud.issuer, cloud.principal));
           const session = this.#sessions.issue(response, this.#cloud.issuer, cloud);
           json(response, 200, this.sessionView(session)); return;
         } finally { this.#loginInFlight--; }
@@ -134,19 +137,20 @@ export class DesktopApi {
         json(response, 200, this.sessionView(session)); return;
       }
       const context = Object.freeze({ ownerUserId: session.ownerUserId });
-      if (await this.managementRoute(request, response, url.pathname, context.ownerUserId)) return;
+      const manager = await this.accounts.forOwner(context.ownerUserId);
+      if (await this.managementRoute(request, response, url.pathname, context.ownerUserId, manager)) return;
       const runtimeId = url.searchParams.get("runtimeId") ?? DEFAULT_RUNTIME_ID;
       if (!/^[a-zA-Z0-9_-]{1,200}$/.test(runtimeId)) throw new HttpError(400, "runtime_id_invalid");
-      const runtime = this.manager.runtime(runtimeId);
+      const runtime = manager.runtime(runtimeId);
       if (request.method === "GET" && url.pathname === "/api/device-storage") {
-        json(response, 200, { storage: await this.manager.deviceStorageConfiguration() }); return;
+        json(response, 200, { storage: await manager.deviceStorageConfiguration() }); return;
       }
       if (request.method === "POST" && url.pathname === "/api/device-storage") {
         const body = await readJson(request); fields(body, ["workspaceRoot", "uploadStorageRoot"]);
-        json(response, 200, { storage: await this.manager.configureDeviceStorage(storageInput(body)) }); return;
+        json(response, 200, { storage: await manager.configureDeviceStorage(storageInput(body)) }); return;
       }
       if (request.method === "GET" && url.pathname === "/api/model-configuration") {
-        json(response, 200, await this.manager.modelConfiguration()); return;
+        json(response, 200, await manager.modelConfiguration()); return;
       }
       if (request.method === "POST" && url.pathname === "/api/model-configuration") {
         const body = await readJson(request); fields(body, ["configuration", "revision"]);
@@ -157,16 +161,16 @@ export class DesktopApi {
         for (const provider of input.providers) {
           try { modelEndpoint(provider?.baseUrl); } catch { throw new HttpError(400, "model_endpoint_invalid"); }
         }
-        try { json(response, 200, await this.manager.configureModels(input, text(body, "revision", 64))); }
+        try { json(response, 200, await manager.configureModels(input, text(body, "revision", 64))); }
         catch (error) { if (error instanceof TypeError) throw new HttpError(400, "model_configuration_invalid"); throw error; }
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/memory-configuration") {
-        json(response, 200, { memory: await this.manager.deviceMemoryConfiguration() }); return;
+        json(response, 200, { memory: await manager.deviceMemoryConfiguration() }); return;
       }
       if (request.method === "POST" && url.pathname === "/api/memory-configuration") {
         const body = await readJson(request); fields(body, ["enabled", "settlementModelKey"]);
-        json(response, 200, { memory: await this.manager.configureDeviceMemory(memoryInput(body)) }); return;
+        json(response, 200, { memory: await manager.configureDeviceMemory(memoryInput(body)) }); return;
       }
       if (request.method === "GET" && url.pathname === "/api/models") { json(response, 200, { models: await runtime.models() }); return; }
       if (request.method === "GET" && url.pathname === "/api/conversations") { json(response, 200, { conversations: await runtime.conversations(context) }); return; }
@@ -175,13 +179,13 @@ export class DesktopApi {
         fields(body, ["requestId", "input", "modelKey", "conversationId", "uploadedSourceIds", "connectorConnectionIds"]);
         const connections = body.connectorConnectionIds === undefined ? [] : ids(body.connectorConnectionIds);
         if (connections.length) {
-          const permitted = new Set((await this.manager.connectors(context.ownerUserId)).filter(c => c.enabled && c.moduleAvailable).map(c => c.id));
+          const permitted = new Set((await manager.connectors(context.ownerUserId)).filter(c => c.enabled && c.moduleAvailable).map(c => c.id));
           if (connections.some(id => !permitted.has(id))) throw new HttpError(403, "connector_connection_not_authorized");
         }
         const run = await runtime.startRun(context, { requestId: text(body, "requestId", 256), input: text(body, "input"), modelKey: text(body, "modelKey", 200),
           ...(body.conversationId === undefined ? {} : { conversationId: text(body, "conversationId", 200) }),
           uploadedSourceIds: body.uploadedSourceIds === undefined ? [] : ids(body.uploadedSourceIds),
-          connectorConnectionIds: connections, allowDangerousTools: false });
+          connectorConnectionIds: connections, allowDangerousTools: true });
         json(response, 200, { run }); return;
       }
       if (request.method === "POST" && url.pathname === "/api/sources") {
@@ -211,20 +215,32 @@ export class DesktopApi {
         json(response, error.status, { error: /^[a-z][a-z0-9_]{1,100}$/.test(error.message) ? error.message : "settings_operation_failed" });
       }
       else if (error instanceof AppError) {
-        const safe = new Set(["request_id_payload_conflict", "admission_outcome_unknown", "admission_run_deleted", "runtime_capacity_exhausted", "local_model_unavailable", "model_configuration_stale", "model_configuration_read_only", "model_configuration_invalid", "runtime_active_runs_prevent_reconfiguration", "runtime_operation_in_progress"]);
+        const safe = new Set(["account_storage_outside_scope", "account_data_migration_failed", "request_id_payload_conflict", "admission_outcome_unknown", "admission_run_deleted", "runtime_capacity_exhausted", "local_model_unavailable", "model_configuration_stale", "model_configuration_read_only", "model_configuration_invalid", "runtime_active_runs_prevent_reconfiguration", "runtime_operation_in_progress"]);
         json(response, error.status, { error: safe.has(error.message) ? error.message : error.code });
       } else json(response, 500, { error: "desktop_operation_failed" });
     } finally { this.activeRequests--; }
   };
 
-  private async managementRoute(request: IncomingMessage, response: ServerResponse, path: string, owner: string): Promise<boolean> {
-    const manager = this.manager!; const get = request.method === "GET", post = request.method === "POST";
+  private async managementRoute(request: IncomingMessage, response: ServerResponse, path: string, owner: string, manager: LocalRuntimeManager): Promise<boolean> {
+    const get = request.method === "GET", post = request.method === "POST";
     if (path === "/api/runtimes") {
       if (get) { json(response, 200, { runtimes: await manager.runtimes() }); return true; }
       if (post) { const b = await readJson(request); fields(b, ["displayName"]); json(response, 200, { runtime: await manager.createRuntime(text(b, "displayName", 100)) }); return true; }
     }
     if (get && path === "/api/skills") { json(response, 200, { skills: await manager.skillPackages() }); return true; }
     if (post && path === "/api/skills/import") { json(response, 200, { skills: await manager.importSkills(skillImportInput(await readJson(request, 46 * 1024 * 1024))) }); return true; }
+    if (path === "/api/mcp") {
+      if (get) { json(response, 200, { servers: await manager.deviceMcpServers() }); return true; }
+      if (post) { const b = await readJson(request); fields(b, ["server"]); json(response, 200, { server: await manager.configureDeviceMcpServer(mcpInput(b.server)) }); return true; }
+    }
+    if (post && path === "/api/mcp/test") { const b = await readJson(request); fields(b, ["server"]); json(response, 200, await manager.testDeviceMcpServer(mcpInput(b.server))); return true; }
+    const deviceMcp = /^\/api\/mcp\/([a-zA-Z0-9_-]{1,200})\/(remove|test)$/.exec(path);
+    if (deviceMcp && post) {
+      const [, id, action] = deviceMcp;
+      const b = await readJson(request);
+      if (action === "remove") { fields(b, []); await manager.removeDeviceMcpServer(id!); json(response, 200, { removed: true }); return true; }
+      fields(b, ["server"]); json(response, 200, await manager.testDeviceMcpServer(mcpInput({ ...(record(b.server, ["id", "displayName", "key", "transport", "url", "protocolVersion", "timeoutMs", "auth", "toolAllowlist", "toolBlocklist", "trust", "aliases", "capabilities"])), id }))); return true;
+    }
     const skill = /^\/api\/skills\/([a-zA-Z0-9_-]{1,200})\/metadata$/.exec(path);
     if (skill) {
       if (get) { json(response, 200, await manager.skillMetadata(skill[1]!)); return true; }
@@ -240,6 +256,7 @@ export class DesktopApi {
     const match = /^\/api\/runtimes\/([a-zA-Z0-9_-]{1,200})\/(configuration|start|stop|drain|restart|rename|remove|mcp\/test)$/.exec(path);
     if (!match) return false;
     const id = match[1]!, action = match[2]!;
+    if (!(await manager.runtimes()).some(runtime => runtime.id === id)) throw new HttpError(404, "runtime_not_found");
     if (action === "configuration") {
       if (get) { json(response, 200, await manager.runtimeSettings(id)); return true; }
       if (post) { const b = await readJson(request); fields(b, ["configuration", "revision"]); await manager.configureRuntime(id, configurationInput(b.configuration), text(b, "revision", 64)); json(response, 200, await manager.runtimeSettings(id)); return true; }
@@ -264,7 +281,8 @@ export class DesktopApi {
 
   private sessionView(session: ReturnType<AccountSessions["require"]>) {
     return { mode: "cloud", user: { id: session.principal.userId, email: session.principal.email }, tenant: { id: session.principal.tenantId },
-      accountId: session.ownerUserId, csrfToken: session.csrf, expiresAt: session.expiresAt };
+      accountId: session.ownerUserId, csrfToken: session.csrf, expiresAt: session.expiresAt,
+      migration: this.accounts?.migration(session.ownerUserId) };
   }
   private async runRoute(request: IncomingMessage, response: ServerResponse, runtime: ManagedLocalRuntime, parts: string[], url: URL, context: LocalExecutionContext) {
     if (parts[0] !== "api" || parts[1] !== "runs" || !parts[2]) throw new HttpError(404, "route_not_found");
@@ -279,6 +297,17 @@ export class DesktopApi {
       fields(await readJson(request), []); json(response, 200, { run: await runtime.cancelRun(context, id) }); return;
     }
     if (request.method === "GET" && parts.length === 4 && parts[3] === "artifacts") { json(response, 200, { artifacts: await runtime.artifacts(context, id) }); return; }
+    if (request.method === "GET" && parts.length === 6 && parts[3] === "artifacts" && parts[5] === "preview") {
+      json(response, 200, await runtime.previewArtifact(context, id, parts[4]!)); return;
+    }
+    if (request.method === "GET" && parts.length === 6 && parts[3] === "artifacts" && parts[5] === "content") {
+      const { artifact, content } = await runtime.readArtifact(context, id, parts[4]!);
+      // HTML gets an opaque sandbox origin even when opened directly. Its own
+      // inline styles/scripts can render, but cannot access Desktop or its API.
+      response.writeHead(200, { "Content-Type": artifact.mimeType, "Content-Disposition": "inline",
+        "Content-Security-Policy": "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'" });
+      response.end(content); return;
+    }
     if (request.method === "GET" && parts.length === 6 && parts[3] === "artifacts" && parts[5] === "download") {
       const { artifact, content } = await runtime.readArtifact(context, id, parts[4]!);
       response.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(artifact.name)}`,

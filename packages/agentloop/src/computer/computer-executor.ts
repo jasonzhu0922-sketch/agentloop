@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { sandboxCommand, type CommandSandboxPolicy } from "./command-sandbox.ts";
 import { createReadStream, promises as fs, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
@@ -53,7 +54,7 @@ const PATCH_MAX_LINES = 2_000;
 const PATCH_REPLACEMENT_MAX_CHARACTERS = 50_000;
 const FILE_REVISION_ID_PATTERN = /^rev_[a-f0-9]{32}$/;
 const COMMAND_FILE_CHANGE_RESULT_LIMIT = 200;
-const COMMAND_FILE_CHANGE_IGNORED_DIRECTORIES = new Set([".git", "node_modules", ".agentloop"]);
+const COMMAND_FILE_CHANGE_IGNORED_DIRECTORIES = new Set([".git", "node_modules", ".agentloop", ".agentloop-sandbox"]);
 const MISSING_BASENAME_LOOKUP_SCAN_LIMIT = 5_000;
 const MISSING_BASENAME_LOOKUP_CANDIDATE_LIMIT = 25;
 const WRITTEN_FILE_OUTLINE_LIMIT = 120;
@@ -266,6 +267,7 @@ export interface CommandRootMount {
 }
 
 export interface ComputerExecutorOptions {
+  readonly commandSandbox?: CommandSandboxPolicy;
   /**
    * Server-owned executable aliases. The model receives only the alias while
    * the executor resolves it to a canonical absolute binary path.
@@ -288,9 +290,11 @@ export class ComputerExecutor {
   private readonly readOnlyRoots: readonly string[];
   private readonly commandRoots: readonly CommandRootMount[];
   private readonly fileRevisionScope?: string;
+  private readonly commandSandbox?: CommandSandboxPolicy;
 
   constructor(workspaceRoot: string, options: ComputerExecutorOptions = {}) {
     this.workspaceRoot = realpathSync(resolve(workspaceRoot));
+    this.commandSandbox = options.commandSandbox;
     this.executableAliases = new Map(
       Object.entries(options.executableAliases ?? {}).map(([name, target]) => {
         if (!EXECUTABLE_NAME_PATTERN.test(name)) {
@@ -347,6 +351,7 @@ export class ComputerExecutor {
       readOnlyRoots: this.readOnlyRoots,
       commandRoots: options.commandRoots ?? this.commandRoots,
       fileRevisionScope: options.fileRevisionScope ?? this.fileRevisionScope,
+      commandSandbox: this.commandSandbox,
     });
   }
 
@@ -1072,14 +1077,19 @@ export class ComputerExecutor {
         parseRgJsonLine(line, this.workspaceRoot, { root: root.rootPath, displayRoot: root.rootWorkspacePath })
       : (line: string): SearchMatch | undefined =>
         parseGrepLine(line, root.absolutePath, this.workspaceRoot, root.rootPath, root.rootWorkspacePath);
+    const launch = this.commandSandbox === undefined ? undefined : await sandboxCommand({
+      command: binary, args, workspaceRoot: this.workspaceRoot,
+      readOnlyRoots: [...this.readOnlyRoots, ...this.commandRoots.map(root => root.path)],
+      policy: this.commandSandbox,
+    });
     return new Promise<SearchMatch[]>((resolve, reject) => {
       let settled = false;
       let stdoutBuffer = "";
       const results: SearchMatch[] = [];
-      const child = spawn(binary, args, {
+      const child = spawn(launch?.command ?? binary, launch?.args ?? args, {
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
-        env: buildCommandEnvironment(this.commandEnvironment),
+        env: buildCommandEnvironment({ ...this.commandEnvironment, ...launch?.environment }),
       });
       const timer = setTimeout(() => child.kill("SIGTERM"), SEARCH_BINARY_TIMEOUT_MS);
       const finish = (): void => {
@@ -1486,7 +1496,7 @@ export class ComputerExecutor {
       startState: "started";
       completionState: "exited" | "signaled";
       /** Workspace observation cannot prove that an arbitrary command had no outside effect. */
-      effectScope: "unbounded";
+      effectScope: "unbounded" | "workspace";
       workspaceFileChanges: { coverage: "complete" | "truncated"; count: number };
     };
     }> {
@@ -1546,7 +1556,7 @@ export class ComputerExecutor {
       schema: "agentloop.commandExecutionReceipt/v1";
       startState: "started";
       completionState: "exited" | "signaled";
-      effectScope: "unbounded";
+      effectScope: "unbounded" | "workspace";
       workspaceFileChanges: { coverage: "complete" | "truncated"; count: number };
     };
   }> {
@@ -1554,6 +1564,12 @@ export class ComputerExecutor {
     const args = this.resolveCommandArgumentAliases(input.args);
     const computationInputs = await this.captureCommandComputationInputs(input.computationInputs ?? []);
     const cwd = cwdResolution.path;
+    const launch = this.commandSandbox === undefined ? undefined : await sandboxCommand({
+      command: this.executableAliases.get(input.command) ?? input.command, args,
+      workspaceRoot: this.workspaceRoot,
+      readOnlyRoots: [...this.readOnlyRoots, ...this.commandRoots.map(root => root.path)],
+      policy: this.commandSandbox,
+    });
     const beforeFiles = await this.snapshotWorkspaceFiles();
     return new Promise((resolvePromise, rejectPromise) => {
       const stdoutChunks: Buffer[] = [];
@@ -1561,7 +1577,7 @@ export class ComputerExecutor {
       let timedOut = false;
       let settled = false;
       let forceTimer: ReturnType<typeof setTimeout> | undefined;
-      const child = spawn(this.executableAliases.get(input.command) ?? input.command, args, {
+      const child = spawn(launch?.command ?? this.executableAliases.get(input.command) ?? input.command, launch?.args ?? args, {
         cwd,
         shell: false,
         env: buildCommandEnvironment({
@@ -1571,6 +1587,7 @@ export class ComputerExecutor {
           // input or a process-global workspace. Generated scripts use it to
           // compose their own task paths while a package Skill is their CWD.
           AGENTLOOP_WORKSPACE_ROOT: this.workspaceRoot,
+          ...launch?.environment,
         }),
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -1676,7 +1693,7 @@ export class ComputerExecutor {
                 schema: "agentloop.commandExecutionReceipt/v1",
                 startState: "started",
                 completionState: exitCode === null ? "signaled" : "exited",
-                effectScope: "unbounded",
+                effectScope: launch === undefined ? "unbounded" : "workspace",
                 workspaceFileChanges: {
                   coverage: fileChangeSummary.truncated ? "truncated" : "complete",
                   count: fileChangeSummary.changes.length,

@@ -4,9 +4,9 @@ import { installModelSettings } from './model-settings.js';
 export function installCapabilitySettings({ api, element, refreshModels, status, currentRuntime, refreshCapabilities }) {
   const models = installModelSettings({ api, element, refreshModels, status, managed: true });
   const dialog = element('model-settings'), body = element('capability-body');
-  let tab = 'general', target, runtimeDetail, dirty = false, working = false, snapshot, runtimeList = [], packages = [];
-  const labels = { general: ['常规', '管理本机 Agent 与设备级 Memory 配置。'], skills: ['Skill 管理', '上传和维护本机 Skill 包；安装后可在各个 Runtime 配置中分别选择。'], runtimes: ['子 Runtime 管理', '新增、停止、重启、删除和查看各个本机 Runtime；每个 Runtime 独立选择扩展 Skill 与 MCP。'], connectors: ['Connector 配置', '个人 Connector 只保存在 Desktop；配置凭据不会上传到云端。'] };
-  const errors = { runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。' };
+  let tab = 'general', target, runtimeDetail, runtimeDetailMode = 'view', dirty = false, working = false, snapshot, runtimeList = [], packages = [], mcpCatalog = [];
+  const labels = { general: ['常规', '管理当前账号的本机存储与 Memory 配置。'], skills: ['Skill 管理', '上传和维护本机 Skill 包；安装后可在各个 Runtime 配置中分别选择。'], mcp: ['MCP 配置', '配置当前账号的 MCP Server；Runtime 只选择要启用的条目。'], runtimes: ['子 Runtime 管理', '新增、停止、重启、删除和查看各个本机 Runtime；每个 Runtime 独立选择扩展 Skill 与 MCP。'], connectors: ['Connector 配置', '个人 Connector 只保存在 Desktop；配置凭据不会上传到云端。'] };
+  const errors = { account_storage_outside_scope: '存储位置必须位于当前账号的存储目录内，不能指向其他账号或外部目录。', runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', mcp_server_key_duplicate: '同一 Runtime 不能同时选择 key 相同的 MCP 条目。', mcp_server_referenced_by_runtime: '该 MCP 已被一个或多个 Runtime 选择，不能删除。请先在对应 Runtime 中解除勾选。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。' };
   const connectorBindings = {
     '126-mail': {
       title: '绑定 126 邮箱', displayName: '我的 126 邮箱', scopes: ['email:search', 'email:read'],
@@ -23,7 +23,8 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
   function input(value = '', type = 'text') { const e = el('input'); e.type = type; e.value = value; e.autocomplete = 'off'; e.spellcheck = false; return e; }
   function field(title, control) { const e = el('label', undefined, 'capability-field'); e.append(el('span', title), control); return e; }
   function jsonEditor(value, rows = 8) { const e = el('textarea', undefined, 'desktop-json'); e.value = JSON.stringify(value, null, 2); e.rows = rows; e.spellcheck = false; return e; }
-  function card(title, description) { const e = el('section', undefined, 'capability-card'); e.append(el('strong', title)); if (description) e.append(el('p', description)); body.append(e); return e; }
+  function cardInto(container, title, description) { const e = el('section', undefined, 'capability-card'); e.append(el('strong', title)); if (description) e.append(el('p', description)); container.append(e); return e; }
+  function card(title, description) { return cardInto(body, title, description); }
   function canLeave() { if (working || dirty) { message(working ? '正在执行操作，请稍候。' : '有未保存更改，请先保存或重新读取。', true); return false; } return tab !== 'models' || models.canLeave(); }
   async function perform(fn) {
     if (working) return; working = true;
@@ -36,11 +37,11 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
   function markDirty() { dirty = true; }
   body.addEventListener('input', markDirty);
   body.addEventListener('change', e => { if (!e.target.dataset.runtimePicker) markDirty(); });
-  function reset() { dirty = false; body.replaceChildren(); snapshot = undefined; }
+  function reset() { dirty = false; body.querySelector('.runtime-detail-modal')?.remove(); body.replaceChildren(); snapshot = undefined; }
   async function changed() { await refreshCapabilities(); }
   async function load() {
     reset(); message('正在读取本机配置…');
-    [runtimeList, packages] = await Promise.all([api('/api/runtimes').then(r => r.runtimes), api('/api/skills').then(r => r.skills)]);
+    [runtimeList, packages, mcpCatalog] = await Promise.all([api('/api/runtimes').then(r => r.runtimes), api('/api/skills').then(r => r.skills), api('/api/mcp').then(r => r.servers)]);
     if (!runtimeList.some(r => r.id === target)) target = currentRuntime() || runtimeList[0]?.id;
     if (tab === 'general') {
       await renderGeneral();
@@ -58,10 +59,12 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
       snapshot = await api(`/api/runtimes/${target}/configuration`);
     }
     if (tab === 'skills') await renderSkills();
+    else if (tab === 'mcp') renderDeviceMcp();
     else if (tab === 'runtimes') renderRuntimes();
     else if (tab === 'connectors') await renderConnectors();
-    if (tab !== 'general' && !(tab === 'runtimes' && runtimeDetail === undefined)) body.append(button('放弃更改并重新读取', load));
-    dirty = false; message(tab === 'general' ? '设备级配置已读取。' : '配置已读取。凭据不会回显；导入和保存不代表真实执行已验收。');
+    if (tab !== 'general' && tab !== 'runtimes' && tab !== 'mcp') body.append(button('放弃更改并重新读取', load));
+    if (tab === 'runtimes' && runtimeDetail !== undefined) renderRuntimeDetail();
+    dirty = false; message(tab === 'general' ? '当前账号配置已读取。' : '配置已读取。凭据不会回显；导入和保存不代表真实执行已验收。');
   }
   function detail(rows) {
     const list = el('dl', undefined, 'capability-details');
@@ -70,15 +73,15 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
   }
   async function renderGeneral() {
     const [memoryResult, modelResult, storageResult] = await Promise.all([api('/api/memory-configuration'), api('/api/model-configuration'), api('/api/device-storage')]);
-    const workspace = input(storageResult.storage.workspaceRoot); workspace.className = 'general-storage-input'; workspace.setAttribute('aria-label', '共享工作目录');
+    const workspace = input(storageResult.storage.workspaceRoot); workspace.className = 'general-storage-input'; workspace.setAttribute('aria-label', '当前账号工作目录');
     const uploads = input(storageResult.storage.uploadStorageRoot); uploads.className = 'general-storage-input'; uploads.setAttribute('aria-label', '上传源文件目录');
     body.append(detail([
       ['Agent', 'Desktop · 开发模式'],
       ['服务端', window.location.origin],
-      ['共享工作目录', workspace],
+      ['当前账号工作目录', workspace],
       ['上传源文件目录', uploads],
       ['Skill 模式', 'Runtime 启动时统一加载'],
-    ]), el('p', '保存目录后会在没有活动任务时重载本机 Runtime。原位置的数据不会自动迁移或删除；请输入绝对路径。', 'general-storage-note'));
+    ]), el('p', '保存目录后会在没有活动任务时重载本机 Runtime。原位置的数据不会自动迁移或删除；请输入当前账号存储目录内的绝对路径。', 'general-storage-note'));
     const storageActions = el('div', undefined, 'capability-actions general-storage-actions');
     storageActions.append(button('放弃更改', async () => { dirty = false; await load(); }), button('保存目录配置', async () => {
       await api('/api/device-storage', { workspaceRoot: workspace.value, uploadStorageRoot: uploads.value });
@@ -114,7 +117,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     section.append(actions);
   }
   function stopped() { return runtimeList.find(r => r.id === target)?.status === 'stopped'; }
-  function draft() { return { skillPackageIds: snapshot.configuration.skills.map(s => s.packageId), mcpServers: snapshot.configuration.mcpServers.map(s => ({ ...s, auth: Object.fromEntries(Object.entries(s.auth).filter(([k]) => k !== 'credentialConfigured')) })) }; }
+  function draft() { return { skillPackageIds: snapshot.configuration.skills.map(s => s.packageId), mcpServerIds: [...snapshot.configuration.mcpServerIds] }; }
   async function save(configuration) { snapshot = await api(`/api/runtimes/${target}/configuration`, { configuration, revision: snapshot.revision }); dirty = false; await load(); await changed(); message('配置已保存。请启动此 Runtime 后执行任务验证。'); }
   async function renderSkills() {
     const zip = input('', 'file'); zip.accept = '.zip'; zip.setAttribute('aria-label', '选择 Skill ZIP');
@@ -124,11 +127,11 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
       if (!files.length) throw new Error('请选择文件');
       if (files.length > 1000 || files.reduce((sum, f) => sum + f.size, 0) > (isZip ? 16 : 32) * 1024 * 1024 || (!isZip && files.some(f => f.size > 8 * 1024 * 1024))) throw new Error('文件超过大小限制');
       const payload = isZip ? { zipBase64: await encode(files[0]) } : { files: await Promise.all(files.map(async f => ({ path: f.webkitRelativePath || f.name, contentBase64: await encode(f) }))) };
-      await api('/api/skills/import', payload); zip.value = ''; directory.value = ''; dirty = false; await load(); message('Skill 已导入设备库。请在 Runtime 页勾选并保存后启动。');
+      await api('/api/skills/import', payload); zip.value = ''; directory.value = ''; dirty = false; await load(); message('Skill 已导入当前账号的本机库。请在 Runtime 页勾选并保存后启动。');
     }
     zip.onchange = () => void perform(() => importFiles([...zip.files], true));
     directory.onchange = () => void perform(() => importFiles([...directory.files], false));
-    const heading = el('section', undefined, 'skill-library-heading'); const copy = el('div'); copy.append(el('strong', '本机 Skill 包'), el('p', '内核 Skills 默认加载；此处管理 Custom / 上传 Skill。支持 ZIP 或目录，导入内容只保存在本机设备库。'));
+    const heading = el('section', undefined, 'skill-library-heading'); const copy = el('div'); copy.append(el('strong', '本机 Skill 包'), el('p', '内核 Skills 默认加载；此处管理 Custom / 上传 Skill。支持 ZIP 或目录，导入内容只保存在本机当前账号的本机库。'));
     // Opening a file chooser must happen before any import work disables the
     // hidden input. The import itself remains serialized by perform() above.
     const pickerButton = (title, picker) => { const control = el('button', title); control.type = 'button'; control.onclick = () => picker.click(); return control; };
@@ -141,14 +144,13 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
       const actions = el('div', undefined, 'capability-actions skill-package-actions'); actions.append(button('维护元数据', async () => {
         if (dirty) throw new Error('请先保存或放弃更改');
         const meta = await api(`/api/skills/${p.packageId}/metadata`); const editor = jsonEditor(meta.declaration, 16);
-        c.replaceChildren(el('strong', p.displayName || p.skillName), el('p', '编辑设备库中的声明元数据，不改写原始 Skill 内容；保存后需重启使用此包的 Runtime。'), editor);
+        c.replaceChildren(el('strong', p.displayName || p.skillName), el('p', '编辑当前账号的本机库中的声明元数据，不改写原始 Skill 内容；保存后需重启使用此包的 Runtime。'), editor);
         editor.disabled = !meta.editable;
         c.append(button('保存声明', async () => { await api(`/api/skills/${p.packageId}/metadata`, { declaration: JSON.parse(editor.value) }); dirty = false; await load(); message('声明已保存，请重启使用此 Skill 的 Runtime。'); }));
       })); c.append(state, actions);
     }
   }
   function renderRuntimes() {
-    if (runtimeDetail !== undefined) { renderRuntimeDetail(); return; }
     const heading = el('section', undefined, 'runtime-manager-heading');
     const copy = el('div'); copy.append(el('strong', '子 Runtime 管理'), el('p', '每个 Runtime 具有独立会话、扩展 Skill 与 MCP 配置。'));
     const add = button('＋ 新增', () => createPanel(false)); add.classList.add('runtime-create'); heading.append(copy, add); body.append(heading);
@@ -161,7 +163,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
       const activity = runtime.activeRunCount ? `当前 ${runtime.activeRunCount} 个活动任务` : '当前无活动任务';
       main.append(title, el('p', activity), el('small', `${runtime.extensionSkillCount} 个扩展 Skill · ${runtime.mcpServerCount} 个 MCP`));
       const actions = runtimeActionMenu(runtime);
-      actions.prepend(button('查看', () => { runtimeDetail = runtime.id; target = runtime.id; return load(); }));
+      actions.prepend(button('查看', () => openRuntimeDetail(runtime, 'view')));
       item.append(main, actions); list.append(item);
     }
     function createPanel(open) {
@@ -186,63 +188,104 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     const menu = el('div', undefined, 'runtime-action-menu'); menu.hidden = true;
     const more = button('•••', () => { menu.hidden = !menu.hidden; }); more.classList.add('runtime-more'); more.setAttribute('aria-label', `操作 ${runtime.displayName}`);
     const operations = runtime.status === 'stopped'
-      ? [['start', '启动']]
+      ? [['configure', '配置'], ['start', '启动']]
       : runtime.status === 'ready'
         ? [['stop', '停止'], ['drain', '排空'], ['restart', '重启']]
         : [['stop', '停止']];
-    for (const [action, titleText] of operations) menu.append(button(titleText, () => lifecycle(runtime, action)));
+    for (const [action, titleText] of operations) menu.append(button(titleText, () => action === 'configure' ? openRuntimeDetail(runtime, 'configure') : lifecycle(runtime, action)));
     if (!runtime.isDefault) menu.append(button('删除 Runtime', () => removeRuntime(runtime), true));
     actions.append(more, menu); return actions;
   }
+  function openRuntimeDetail(runtime, mode) { runtimeDetail = runtime.id; runtimeDetailMode = mode; target = runtime.id; return load(); }
   function renderRuntimeDetail() {
     const runtime = runtimeList.find(item => item.id === runtimeDetail); if (!runtime || !snapshot) { runtimeDetail = undefined; void load(); return; }
-    const heading = el('section', undefined, 'runtime-detail-heading'); const back = button('‹ Runtime 管理', () => { runtimeDetail = undefined; target = undefined; dirty = false; return load(); }); back.classList.add('runtime-back');
-    const title = el('div'); title.append(el('strong', runtime.displayName), el('small', `${runtime.isDefault ? '默认 · ' : ''}${runtime.status} · ${runtime.extensionSkillCount} 个扩展 Skill · ${runtime.mcpServerCount} 个 MCP`)); heading.append(back, title); body.append(heading);
-    const overview = card('Runtime 基本信息'); const name = input(runtime.displayName); name.maxLength = 100;
-    overview.append(field('显示名称', name), button('重命名', async () => { await api(`/api/runtimes/${target}/rename`, { displayName: name.value }); dirty = false; await load(); await changed(); }));
-    const lifecycleActions = runtimeActionMenu(runtime); lifecycleActions.classList.add('runtime-detail-actions'); overview.append(lifecycleActions);
-    const skills = card('专属扩展 Skills', '只影响此 Runtime。停止 Runtime 后可调整；取消勾选仅解除绑定，不删除设备库文件。');
-    const choices = [];
-    for (const pkg of packages) { const checkbox = input('', 'checkbox'); checkbox.checked = snapshot.configuration.skills.some(skill => skill.packageId === pkg.packageId); checkbox.disabled = !stopped() || pkg.validationStatus !== 'valid'; choices.push([pkg, checkbox]); skills.append(field(pkg.displayName || pkg.skillName, checkbox)); }
-    const saveButton = button('保存 Skill 绑定', async () => { const config = draft(); config.skillPackageIds = choices.filter(([, control]) => control.checked).map(([pkg]) => pkg.packageId); await save(config); }); saveButton.disabled = !stopped(); skills.append(saveButton);
-    renderMcp();
+    const configuring = runtimeDetailMode === 'configure';
+    const modal = el('section', undefined, 'runtime-detail-modal'); const panel = el('div', undefined, 'runtime-detail-panel'); modal.append(panel); body.append(modal);
+    const heading = el('header', undefined, 'runtime-detail-modal-head'); const title = el('div'); title.append(el('strong', configuring ? `配置 ${runtime.displayName}` : runtime.displayName), el('p', configuring ? '此 Runtime 已停止。可单独选择扩展 Skill 与 MCP Server。' : `${runtime.isDefault ? '默认 · ' : ''}${runtime.status} · ${runtime.extensionSkillCount} 个扩展 Skill · ${runtime.mcpServerCount} 个 MCP`));
+    const close = button('×', () => { runtimeDetail = undefined; target = undefined; dirty = false; return load(); }); close.classList.add('runtime-detail-close'); close.setAttribute('aria-label', '关闭 Runtime 详情'); heading.append(title, close); panel.append(heading);
+    if (!configuring) { renderRuntimeReadOnly(panel, runtime); return; }
+    const tabs = runtimeCapabilityTabs(panel, 'Runtime 扩展配置');
+    const skills = cardInto(tabs.skills, '专属扩展 Skills', '只影响此 Runtime。取消勾选仅解除绑定，不删除当前账号的本机库文件。');
+    const choices = []; const skillList = el('div', undefined, 'runtime-skill-options'); skills.append(skillList);
+    if (!packages.length) skillList.append(el('p', '暂无可选的 Custom / 上传 Skill；此 Runtime 仍会使用内核 Skills。'));
+    for (const pkg of packages) {
+      const checkbox = input('', 'checkbox'); checkbox.checked = snapshot.configuration.skills.some(skill => skill.packageId === pkg.packageId); checkbox.disabled = pkg.validationStatus !== 'valid';
+      const option = el('label', undefined, 'runtime-skill-option'); const copy = el('span'); copy.append(el('strong', pkg.displayName || pkg.skillName), el('small', pkg.description || '暂无描述。'));
+      option.append(checkbox, copy); skillList.append(option); choices.push([pkg, checkbox]);
+    }
+    const mcp = renderRuntimeMcpBindings(tabs.mcp);
+    const actions = el('footer', undefined, 'runtime-config-actions');
+    actions.append(button('取消', () => { runtimeDetail = undefined; target = undefined; dirty = false; return load(); }), button('保存', async () => {
+      const configuration = draft(); configuration.skillPackageIds = choices.filter(([, control]) => control.checked).map(([pkg]) => pkg.packageId); configuration.mcpServerIds = mcp.read();
+      await api(`/api/runtimes/${target}/configuration`, { configuration, revision: snapshot.revision });
+      runtimeDetail = undefined; target = undefined; dirty = false; await changed(); await load(); message('Runtime 配置已保存。');
+    })); actions.lastElementChild.classList.add('primary'); panel.append(actions);
   }
-  function renderMcp() {
-    let servers = draft().mcpServers;
-    const list = card('HTTP MCP 服务', '支持无认证、Bearer、API Key Header、Basic、Query Parameter、Custom Headers。HTTP 为明文传输，请仅用于可信网络。URL 不允许携带凭据、查询参数或片段。');
-    const choices = el('div', undefined, 'capability-actions'); list.append(choices);
-    const editorArea = el('div', undefined, 'capability-editor'); list.append(editorArea);
+  function renderRuntimeReadOnly(panel, runtime) {
+    const tabs = runtimeCapabilityTabs(panel, 'Runtime 扩展详情');
+    const enabledSkillIds = new Set(snapshot.configuration.skills.map(skill => skill.packageId));
+    const selectedSkills = packages.filter(pkg => enabledSkillIds.has(pkg.packageId));
+    const skills = cardInto(tabs.skills, '已选择的扩展 Skills', '内核 Skills 默认加载；以下为该 Runtime 专属启用的扩展包。');
+    if (!selectedSkills.length) skills.append(el('p', '未选择扩展 Skill。'));
+    else for (const pkg of selectedSkills) skills.append(el('div', `${pkg.displayName || pkg.skillName} · 已启用`, 'runtime-detail-choice'));
+    const servers = snapshot.configuration.mcpServers;
+    const mcp = cardInto(tabs.mcp, '已配置的 MCP Servers', '仅列出此 Runtime 使用的 MCP；凭据不会回显。');
+    if (!servers.length) mcp.append(el('p', '未配置 MCP Server。'));
+    else for (const server of servers) mcp.append(el('div', `${server.displayName} · ${server.key}${server.auth?.credentialConfigured ? ' · 凭据已配置' : ''}`, 'runtime-detail-choice'));
+    if (runtime.status === 'stopped') {
+      const actions = el('div', undefined, 'capability-actions runtime-detail-actions'); actions.append(button('配置扩展 Skill 与 MCP', () => openRuntimeDetail(runtime, 'configure'))); actions.lastElementChild.classList.add('primary'); panel.append(actions);
+    }
+  }
+  function runtimeCapabilityTabs(panel, label) {
+    const tablist = el('div', undefined, 'runtime-capability-tabs'); tablist.setAttribute('role', 'tablist'); tablist.setAttribute('aria-label', label);
+    const tabButton = (title, name) => { const control = el('button', title); control.type = 'button'; control.onclick = () => activate(name); control.setAttribute('role', 'tab'); return control; };
+    const skillsTab = tabButton('Skills', 'skills');
+    const mcpTab = tabButton('MCP Servers', 'mcp');
+    const skills = el('section', undefined, 'runtime-capability-tab-panel'); skills.setAttribute('role', 'tabpanel');
+    const mcp = el('section', undefined, 'runtime-capability-tab-panel'); mcp.setAttribute('role', 'tabpanel');
+    function activate(tabName) {
+      const showSkills = tabName === 'skills'; skills.hidden = !showSkills; mcp.hidden = showSkills;
+      skillsTab.classList.toggle('active', showSkills); mcpTab.classList.toggle('active', !showSkills);
+      skillsTab.setAttribute('aria-selected', String(showSkills)); mcpTab.setAttribute('aria-selected', String(!showSkills));
+    }
+    tablist.append(skillsTab, mcpTab); panel.append(tablist, skills, mcp); activate('skills'); return { skills, mcp };
+  }
+  function renderRuntimeMcpBindings(container) {
+    const selected = new Set(snapshot.configuration.mcpServerIds);
+    const card = cardInto(container, '可用 MCP Servers', '选择此 Runtime 要使用的 Desktop MCP 条目。这里不保存地址或凭据；请到“ MCP 配置 ”维护设备条目。');
+    const list = el('div', undefined, 'runtime-skill-options'); card.append(list);
+    if (!mcpCatalog.length) list.append(el('p', '尚无 Desktop MCP 条目。请先在 MCP 配置页添加。'));
+    for (const server of mcpCatalog) {
+      const checkbox = input('', 'checkbox'); checkbox.checked = selected.has(server.id);
+      const option = el('label', undefined, 'runtime-skill-option'); const copy = el('span'); copy.append(el('strong', server.displayName), el('small', `${server.key}${server.auth?.credentialConfigured ? ' · 凭据已配置' : ' · 无凭据或凭据未配置'}`)); option.append(checkbox, copy); list.append(option);
+      checkbox.onchange = () => { checkbox.checked ? selected.add(server.id) : selected.delete(server.id); dirty = true; };
+    }
+    return { read: () => [...selected] };
+  }
+  function renderDeviceMcp() {
+    const card = card('Desktop MCP Servers', '这台 Desktop 的统一 MCP JSON 配置。所有 Runtime 都可以选择已有条目；删除已被 Runtime 引用的条目会被拒绝。凭据不会回显。');
+    const choices = el('div', undefined, 'capability-actions'), editor = el('div', undefined, 'capability-editor'); card.append(choices, editor);
     let selected = -1, configEditor, authKind, authMeta, secret;
     function flush() {
       if (selected < 0) return;
       const config = JSON.parse(configEditor.value), meta = JSON.parse(authMeta.value || '{}');
       if (Object.keys(config).some(k => ['auth', 'credentialConfigured', 'secretStorageKey'].includes(k))) throw new Error('认证请使用独立字段');
       const auth = { ...meta, kind: authKind.value };
-      if (secret.value) {
-        if (auth.kind === 'bearer') auth.token = secret.value;
-        else if (auth.kind === 'basic') auth.password = secret.value;
-        else if (auth.kind === 'custom_headers') auth.headers = JSON.parse(secret.value);
-        else if (auth.kind !== 'none') auth.value = secret.value;
-      }
-      servers[selected] = { ...config, auth };
+      if (secret.value) { if (auth.kind === 'bearer') auth.token = secret.value; else if (auth.kind === 'basic') auth.password = secret.value; else if (auth.kind === 'custom_headers') auth.headers = JSON.parse(secret.value); else if (auth.kind !== 'none') auth.value = secret.value; }
+      mcpCatalog[selected] = { ...config, auth };
     }
     function renderEditor() {
-      choices.replaceChildren(); editorArea.replaceChildren();
-      servers.forEach((s, i) => { const b = button(s.displayName, () => { flush(); selected = i; renderEditor(); }); b.classList.toggle('selected', i === selected); choices.append(b); });
-      if (selected < 0) { editorArea.append(el('p', '选择服务进行编辑，或添加一个服务。')); return; }
-      const { auth, ...config } = servers[selected]; configEditor = jsonEditor(config, 12); authKind = el('select');
+      choices.replaceChildren(); editor.replaceChildren();
+      mcpCatalog.forEach((server, index) => { const b = button(server.displayName, () => { flush(); selected = index; renderEditor(); }); b.classList.toggle('selected', index === selected); choices.append(b); });
+      if (selected < 0) { editor.append(el('p', '选择一个服务进行编辑，或添加一个服务。')); return; }
+      const { auth, ...config } = mcpCatalog[selected]; configEditor = jsonEditor(config, 12); authKind = el('select');
       for (const kind of ['none', 'bearer', 'api_key_header', 'basic', 'query_parameter', 'custom_headers']) { const o = el('option', kind); o.value = kind; authKind.append(o); } authKind.value = auth.kind;
-      const { kind, token, password, value, headers, ...publicAuth } = auth; authMeta = jsonEditor(publicAuth, 3);
-      secret = input(token ?? password ?? value ?? (headers ? JSON.stringify(headers) : ''), 'password'); secret.placeholder = '留空保留已保存凭据；更换地址或认证目标需重填'; secret.autocomplete = 'new-password';
+      const { kind, credentialConfigured, ...publicAuth } = auth; authMeta = jsonEditor(publicAuth, 3); secret = input('', 'password'); secret.placeholder = '留空保留已保存凭据；更换认证目标需重填'; secret.autocomplete = 'new-password';
       authKind.onchange = () => { authMeta.value = JSON.stringify(({ api_key_header: { headerName: 'X-API-Key' }, basic: { username: '' }, query_parameter: { parameterName: 'api_key' }, custom_headers: { headerNames: [] } })[authKind.value] ?? {}, null, 2); secret.value = ''; };
-      editorArea.append(field('服务配置 JSON（不含认证）', configEditor), field('认证方式', authKind), field('认证元数据（headerName / username / parameterName / headerNames）', authMeta), field('凭据（Custom Headers 填 JSON 对象）', secret));
-      editorArea.append(button('探测当前服务', async () => { flush(); const result = await api(`/api/runtimes/${target}/mcp/test`, { server: servers[selected] }); message(result.ok ? `连接成功，发现 ${result.toolCount} 个可用工具；尚未保存。` : '探测失败，未保存。请检查服务、认证和协议。', !result.ok); }));
-      const remove = button('移除此服务', () => { servers.splice(selected, 1); selected = -1; dirty = true; renderEditor(); }); remove.disabled = !stopped(); editorArea.append(remove);
-      for (const e of editorArea.querySelectorAll('input,textarea,select')) e.disabled = !stopped();
+      editor.append(field('服务配置 JSON（不含认证）', configEditor), field('认证方式', authKind), field('认证元数据（headerName / username / parameterName / headerNames）', authMeta), field('凭据（Custom Headers 填 JSON 对象）', secret));
+      editor.append(button('保存当前 MCP', async () => { flush(); await api('/api/mcp', { server: mcpCatalog[selected] }); dirty = false; await load(); message('Desktop MCP 已保存；所有 Runtime 可选择该条目。'); }), button('探测当前服务', async () => { flush(); const result = await api('/api/mcp/test', { server: mcpCatalog[selected] }); message(result.ok ? `连接成功，发现 ${result.toolCount} 个可用工具；尚未保存。` : '探测失败，未保存。请检查服务、认证和协议。', !result.ok); }), button('删除此 MCP', async () => { const id = mcpCatalog[selected].id; if (!id) { mcpCatalog.splice(selected, 1); selected = -1; renderEditor(); return; } await api(`/api/mcp/${id}/remove`, {}); dirty = false; await load(); message('Desktop MCP 已删除。'); }, true));
     }
-    list.append(button('添加服务', () => { if (!stopped()) throw new Error('runtime_must_be_stopped_for_configuration'); flush(); servers.push({ displayName: '新 MCP', key: `mcp-${Date.now()}`, transport: 'http', url: 'http://127.0.0.1:8000/mcp', auth: { kind: 'none' }, timeoutMs: 5000 }); selected = servers.length - 1; dirty = true; renderEditor(); }));
-    selected = servers.length ? 0 : -1; renderEditor();
-    const saveButton = button('保存 MCP 配置', async () => { flush(); const config = draft(); config.mcpServers = servers; await save(config); }); saveButton.disabled = !stopped(); list.append(saveButton);
+    card.append(button('＋ 添加 MCP', () => { mcpCatalog.push({ displayName: '新 MCP', key: `mcp-${Date.now()}`, transport: 'http', url: 'http://127.0.0.1:8000/mcp', auth: { kind: 'none' }, timeoutMs: 5000 }); selected = mcpCatalog.length - 1; renderEditor(); })); selected = mcpCatalog.length ? 0 : -1; renderEditor();
   }
   async function renderConnectors() {
     const [{ connectors }, { connections }] = await Promise.all([api('/api/connectors/catalog'), api('/api/connectors')]);
@@ -326,7 +369,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     tab = next; element('settings-models').hidden = tab !== 'models'; element('settings-capabilities').hidden = tab === 'models';
     for (const b of document.querySelectorAll('[data-settings-tab]')) { b.classList.toggle('active', b.dataset.settingsTab === tab); b.setAttribute('aria-pressed', String(b.dataset.settingsTab === tab)); }
     if (tab === 'models') await models.load();
-    else { element('capability-title').textContent = labels[tab][0]; element('capability-description').textContent = labels[tab][1]; element('capability-scope').textContent = ['skills', 'connectors'].includes(tab) ? '跨 Runtime 共享' : '仅本机保存'; await load(); }
+    else { element('capability-title').textContent = labels[tab][0]; element('capability-description').textContent = labels[tab][1]; element('capability-scope').textContent = ['skills', 'mcp', 'connectors'].includes(tab) ? '跨 Runtime 共享' : '仅本机保存'; await load(); }
   }
   for (const b of document.querySelectorAll('[data-settings-tab]')) b.onclick = () => void perform(() => show(b.dataset.settingsTab));
   // show() checks canLeave before perform sets working.

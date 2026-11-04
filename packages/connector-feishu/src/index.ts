@@ -77,6 +77,7 @@ export const feishuDefinition: ConnectorDefinition = {
     key: "feishu",
     version: "0.1.0",
     displayName: "飞书",
+    aliases: ["飞书文档", "Feishu", "Lark"],
     description: "Read-only Feishu document connector for AgentLoop.",
     agentloopSdk: "^0.1.0",
     apiVersion: "open-apis",

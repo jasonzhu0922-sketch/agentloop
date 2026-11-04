@@ -98,7 +98,7 @@ export class ConnectorSettings implements LocalConnectorConfigurationPort {
       const module = this.modules.get(row.connector_key);
       if (!module) throw new LocalManagementError(409, "connector_module_unavailable");
       modules.set(row.connector_key, module.registration);
-      byId.set(row.id, { connection: { id: row.id, connectorKey: row.connector_key, ownerType: "user", ownerId: row.owner_id,
+      byId.set(row.id, { connection: { id: row.id, connectorKey: row.connector_key, displayName: row.display_name, ownerType: "user", ownerId: row.owner_id,
         scopes: JSON.parse(row.scopes) as string[], credentialRef: row.secret_ref ?? `no_secret_${row.id}`, status: "active" }, ...(row.secret_ref ? { secret: row.secret_ref } : {}) });
     }
     const secrets = this.secrets;

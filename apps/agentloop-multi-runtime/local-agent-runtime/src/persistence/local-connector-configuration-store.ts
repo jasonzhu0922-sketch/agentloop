@@ -201,7 +201,9 @@ export class LocalConnectorConfigurationStore {
 
   async resolve(runtimeId: string): Promise<LocalConnectorRuntimeResolution> {
     const rows = (await this.rows(runtimeId)).filter((row) => row.enabled === 1);
-    const connections = rows.map((row) => JSON.parse(row.connection_json) as ConnectorConnection);
+    // display_name is authoritative for old and new records; older connection
+    // JSON predates per-connection names and must not require re-binding.
+    const connections = rows.map((row) => ({ ...JSON.parse(row.connection_json) as ConnectorConnection, displayName: row.display_name }));
     const byId = new Map(connections.map((connection) => [connection.id, connection]));
     const modules = rows.map((row) => ({
       modulePath: row.module_path,

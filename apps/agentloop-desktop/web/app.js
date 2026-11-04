@@ -1,3 +1,4 @@
+import { createArtifactWorkspace } from './artifact-workspace.js';
 import { installCapabilitySettings } from './capability-settings.js';
 import { createTurn, updateTurn, hasTerminalEvent } from './turn-projection.js';
 import { createConversationView } from './conversation.js';
@@ -14,8 +15,9 @@ function node(tag, className, text) {
   if (text !== undefined) result.textContent = text;
   return result;
 }
+const artifactWorkspace = createArtifactWorkspace({ element, api, onOpen: () => details(true) });
 const view = createConversationView({ container: element('transcript'), scroll: element('conversation-scroll'), status,
-  artifactUrl: (runId, artifactId) => `/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/download?runtimeId=${encodeURIComponent(runtimeId || 'desktop-default')}`,
+  onArtifact(id, artifactId) { selectedRunId = id; renderTurns(); renderDetails(); artifactWorkspace.select(artifactId); },
   onSelect(id) { selectedRunId = id; renderTurns(); renderDetails(); details(true); } });
 function renderTurns(forceBottom = false) {
   element('empty-state').hidden = orderedRunIds.length > 0 || Boolean(pending);
@@ -24,10 +26,11 @@ function renderTurns(forceBottom = false) {
 function renderDetails() {
   const turn = turns.get(selectedRunId);
   element('events').textContent = turn?.events.slice(-200).map(event => `${event.seq} ${event.type} ${JSON.stringify(event.data)}`).join('\n') || '尚无事件';
-  renderArtifacts(turn?.id, turn?.artifacts || []);
+  artifactWorkspace.render(turn, runtimeId || 'desktop-default');
 }
 function details(open) {
   element('details').hidden = !open; element('workspace').classList.toggle('artifact-open', open);
+  if (open) artifactWorkspace.activate(); else artifactWorkspace.collapse();
   element('details-toggle').setAttribute('aria-expanded', String(open));
 }
 function navigation(open) {
@@ -35,10 +38,6 @@ function navigation(open) {
   element('navigation-toggle').setAttribute('aria-expanded', String(open));
 }
 function resetAttachments() { element('attachments').replaceChildren(); element('attachments').hidden = true; }
-function emptyArtifacts() {
-  const container = element('artifacts'); container.className = 'artifact-empty';
-  container.replaceChildren(node('span', 'artifact-empty-icon', '▧'), node('strong', '', '暂无产物'), node('p', '', '任务生成的文件会在这里显示。普通回复不会作为文件产物。'));
-}
 async function api(path, body) {
   const scoped = /^(\/api\/(?:models|conversations|runs|sources))(?:\/|$)/.test(path) && !path.includes('runtimeId=');
   if (scoped) { const joiner = path.includes('?') ? '&' : '?'; path = `${path}${joiner}runtimeId=${encodeURIComponent(runtimeId || 'desktop-default')}`; }
@@ -72,7 +71,10 @@ async function loadRuntimes() {
 async function loadConnectors() {
   const container = element('run-connectors'); container.replaceChildren();
   try {
-    const { connections } = await api(`/api/runtimes/${encodeURIComponent(runtimeId)}/connectors`);
+    // Connector accounts are device-level and owner-scoped, rather than part
+    // of an individual Runtime configuration. The API intentionally has no
+    // Runtime-scoped Connector route.
+    const { connections } = await api('/api/connectors');
     if (!connections.length) return;
     const title = node('span', 'desktop-connector-title', '本轮授权 Connector'); container.append(title);
     for (const connection of connections.filter(c => c.enabled && c.moduleAvailable)) { const label = node('label', 'desktop-connector-choice'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = connection.id; checkbox.checked = false; checkbox.disabled = locked; label.append(checkbox, node('span', '', connection.displayName)); container.append(label); }
@@ -107,16 +109,6 @@ async function transcript(token = generation) {
   orderedRunIds = runs.map(run => run.id); selectedRunId = runs.at(-1)?.id;
   renderTurns(true); renderDetails();
   return runs;
-}
-function renderArtifacts(id, artifacts) {
-  element('artifacts').replaceChildren(); element('artifacts').className = 'desktop-artifact-list';
-  if (!artifacts.length) emptyArtifacts();
-  for (const item of artifacts) {
-    const link = node('a', 'desktop-artifact'); const name = node('span', '', item.name);
-    name.append(node('small', '', `${item.bytes} 字节 · ${item.role} · 下载`)); link.append(node('span', 'desktop-artifact-icon', '▤'), name);
-    link.href = `/api/runs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(item.id)}/download?runtimeId=${encodeURIComponent(runtimeId || 'desktop-default')}`; link.download = item.name;
-    element('artifacts').append(link);
-  }
 }
 async function watch(id, token) {
   activeRun = id; busy(true);
@@ -179,7 +171,7 @@ element('composer').onsubmit = async event => {
     const { run } = await api('/api/runs', { requestId: pending.requestId, ...pending.payload });
     view.submitted();
     sessionStorage.removeItem(PENDING_KEY);
-    pending = undefined; conversationId = run.conversationId; selectedSources = []; resetAttachments(); emptyArtifacts();
+    pending = undefined; conversationId = run.conversationId; selectedSources = []; resetAttachments();
     element('message').value = ''; resetComposerInput(element('message')); generation++;
     turns.set(run.id, updateTurn(createTurn(run), run)); if (!orderedRunIds.includes(run.id)) orderedRunIds.push(run.id);
     selectedRunId = run.id; renderTurns(true); renderDetails();

@@ -23,6 +23,8 @@
     "build:desktop": "npm run build --workspace agentloop-desktop",
     "test:desktop": "npm run test --workspace agentloop-desktop",
     "start:desktop": "npm run restart:accounts && AGENTLOOP_DESKTOP_AUTH_BASE_URL=http://127.0.0.1:8795 npm run start --workspace agentloop-desktop -- --development",
+    "restart:desktop": "bash apps/agentloop-desktop/scripts/stop-development.sh && npm run build:local-runtime && npm run start:desktop",
+    "restore:desktop-models": "node apps/agentloop-desktop/scripts/restore-legacy-models.ts",
     "build:artifact-preview": "npm run build --workspace @zhujun/agentloop-artifact-preview",
     "build:skills": "npm run build --workspace @zhujun/agentloop-skills",
     "build:plan-template": "npm run build --workspace @zhujun/agentloop-plan-template",
@@ -60,7 +62,11 @@
     "build:connector-sdk": "npm run build --workspace @zhujun/agentloop-connector-sdk",
     "build:connector-feishu": "npm run build --workspace @zhujun/connector-feishu",
     "build:connector-126-mail": "npm run build --workspace @zhujun/connector-126-mail",
-    "build:connector-wps": "npm run build --workspace @zhujun/connector-wps"
+    "build:connector-wps": "npm run build --workspace @zhujun/connector-wps",
+    "package:desktop:mac": "npm run package:mac --workspace agentloop-desktop --",
+    "package:desktop:win": "npm run package:win --workspace agentloop-desktop --",
+    "package:desktop:mac:local": "npm run package:desktop:mac -- --channel local",
+    "package:desktop:win:local": "npm run package:desktop:win -- --channel local"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",

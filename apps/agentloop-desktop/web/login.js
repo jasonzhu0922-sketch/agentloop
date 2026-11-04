@@ -14,6 +14,7 @@ const messages = {
   email_registered: '该邮箱已注册，请直接登录。', cloud_auth_not_configured: 'Desktop 尚未配置云端账号服务。请设置账号服务地址后重启。',
   cloud_auth_unavailable: '云端账号服务暂时不可用，请检查网络或稍后重试。', cloud_auth_response_invalid: '账号服务返回了不兼容的响应。',
   cloud_auth_rate_limited: '尝试过于频繁，请稍后重试。', logout_before_account_switch: '已有登录账号，请先退出登录。',
+  account_data_migration_failed: '本机历史数据迁移未完成，原数据已保留。请查看本机数据完整性后重试。',
 };
 if (new URLSearchParams(location.search).get('logout') === 'local-only') {
   element('auth-error').textContent = '本机已退出；云端暂不可达，远端凭据撤销未确认。活动任务不会自动取消。';

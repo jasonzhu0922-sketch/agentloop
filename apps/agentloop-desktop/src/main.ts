@@ -7,6 +7,7 @@ import { modelEndpoint } from "./security/model-endpoint.ts";
 import { CloudAccountAuth } from "./auth/cloud-auth.ts";
 import { registrationsFromEnvironment } from "@zhujun/agentloop-local-runtime/connectors";
 import { builtinConnectorModules } from "./connectors/builtin-connector-modules.ts";
+import { developmentToolEnvironment } from "./platform/development-tools.ts";
 
 /** Development command port; Account Service uses 8795 by default. */
 export const DESKTOP_DEVELOPMENT_PORT = 8796;
@@ -47,6 +48,7 @@ async function main(): Promise<void> {
   const authUrl = process.env.AGENTLOOP_DESKTOP_AUTH_BASE_URL;
   const log = (entry: string) => console.log(`[AgentLoop Desktop] ${new Date().toISOString()} ${entry}`);
   const app = await startDesktop({ mode: "development", dataDirectory: dataDirectory ?? defaultDataDirectory(), models: configuredModels(), openBrowser, port: DESKTOP_DEVELOPMENT_PORT, log,
+    computerCommandEnvironment: await developmentToolEnvironment(),
     cloudAuth: authUrl ? new CloudAccountAuth(authUrl) : undefined,
     // Built-ins are selected by the Desktop host, never by the browser. The
     // environment remains available for additional host-approved modules.

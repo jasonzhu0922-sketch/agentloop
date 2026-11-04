@@ -5,7 +5,7 @@ import { AppDatabase, AppError, loadMcpToolsFromConfig } from "@zhujun/agentloop
 import { importSkillFiles, readSkillZip, type SkillImportFile, LocalManagementError } from "../configuration/skill-import.ts";
 import { ConnectorSettings, type ConnectorSettingInput } from "../configuration/connector-settings.ts";
 import type { ConnectorModuleRegistration } from "../connectors/connector-module-loader.ts";
-import type { LocalConnectorConfigurationPort, LocalIdentityPort, LocalModelProviderPort, LocalRuntimeControl } from "../contracts/host.ts";
+import type { LocalConnectorConfigurationPort, LocalIdentityPort, LocalModelProviderPort, LocalRuntimeControl, LocalRuntimeHostOptions } from "../contracts/host.ts";
 import { LocalRuntimeSupervisorError } from "../contracts/host.ts";
 import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, type LocalRuntimeMcpServerInput, type LocalRuntimeMemoryConfigurationInput, type LocalRuntimeSecretStore, type ResolvedLocalMemoryConfiguration, type LocalRuntimeDeviceStorageInput, type ResolvedLocalRuntimeDeviceStorage } from "../configuration/local-runtime-configuration-store.ts";
 import { LocalRunAdmissionService } from "./local-run-admission.ts";
@@ -46,6 +46,11 @@ export interface LocalRuntimeManagerOptions {
   readonly workspaceRoot?: string;
   readonly uploadStorageRoot?: string;
   readonly maxConcurrentRuns?: number;
+  /** Trusted host environment for command tools, never editable through configuration APIs. */
+  readonly computerCommandEnvironment?: Readonly<Record<string, string>>;
+  readonly runEventLogSink?: LocalRuntimeHostOptions["runEventLogSink"];
+  readonly computerCommandSandbox?: LocalRuntimeHostOptions["computerCommandSandbox"];
+  readonly authorizeStorage?: (input: LocalRuntimeDeviceStorageInput) => Promise<void>;
 }
 
 /** No close/control/database handle: lifecycle belongs to the manager. */
@@ -70,6 +75,10 @@ export interface LocalRuntimeManager {
   importSkills(input: { files: readonly SkillImportFile[] } | { zip: Buffer }): ReturnType<LocalRuntimeConfigurationStore["listSkillPackages"]>;
   skillMetadata(id: string): ReturnType<LocalRuntimeConfigurationStore["skillMetadata"]>;
   updateSkillMetadata(id: string, declaration: unknown): ReturnType<LocalRuntimeConfigurationStore["updateSkillMetadata"]>;
+  deviceMcpServers(): ReturnType<LocalRuntimeConfigurationStore["deviceMcpServers"]>;
+  configureDeviceMcpServer(server: LocalRuntimeMcpServerInput): ReturnType<LocalRuntimeConfigurationStore["saveDeviceMcpServer"]>;
+  removeDeviceMcpServer(id: string): ReturnType<LocalRuntimeConfigurationStore["removeDeviceMcpServer"]>;
+  testDeviceMcpServer(server: LocalRuntimeMcpServerInput): Promise<{ ok: boolean; toolCount: number }>;
   testMcpServer(runtimeId: string, server: LocalRuntimeMcpServerInput): Promise<{ ok: boolean; toolCount: number }>;
   connectorCatalog(): Promise<ReturnType<ConnectorSettings["catalog"]>>;
   connectors(owner: string): ReturnType<ConnectorSettings["list"]>;
@@ -81,6 +90,7 @@ export interface LocalRuntimeManager {
   restartRuntime(runtimeId: string): Promise<LocalRuntimeSummary>;
   removeRuntime(runtimeId: string): ReturnType<LocalRuntimeSupervisor["remove"]>;
   runtime(runtimeId: string): ManagedLocalRuntime;
+  assertIdle(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -105,6 +115,8 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
   const factory = new LocalRuntimeFactory({ databasePath: join(options.dataDirectory, "runtime.db"),
     runtimeDataRoot: join(options.dataDirectory, "runtimes"), skillPackageStoreRoot: join(options.dataDirectory, "skill-packages"),
     models: options.models, identity: options.identity,
+    computerCommandEnvironment: options.computerCommandEnvironment, runEventLogSink: options.runEventLogSink,
+    computerCommandSandbox: options.computerCommandSandbox,
     environment: options.bundledSkillDirectories === undefined ? {} : { AGENTLOOP_BUNDLED_SKILL_DIRECTORIES: options.bundledSkillDirectories.join(",") },
   }, modelConfigurations, connectors ?? options.connectors);
   const supervisor = new LocalRuntimeSupervisor(database, (definition, configuration) => factory.create(definition, {
@@ -119,12 +131,13 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
     await modelConfigurations?.ready();
     await configurations.ready();
     storage.value = await configurations.deviceStorageConfiguration(storage.value);
+    await options.authorizeStorage?.(storage.value);
     if (options.memory !== undefined) {
       await configurations.ready();
       await configurations.applyDeviceMemory(options.memory);
     }
     await supervisor.ready(options.defaultRuntimeId);
-    return new RuntimeManager(supervisor, configurations, modelConfigurations, options.models === undefined, library, connectors, storage);
+    return new RuntimeManager(supervisor, configurations, modelConfigurations, options.models === undefined, library, connectors, storage, options.authorizeStorage);
   } catch (error) { await supervisor.close(); throw error; }
 }
 
@@ -140,7 +153,8 @@ class RuntimeManager implements LocalRuntimeManager {
   readonly #supervisor: LocalRuntimeSupervisor;
   readonly #configurations: LocalRuntimeConfigurationStore;
   constructor(supervisor: LocalRuntimeSupervisor, configurations: LocalRuntimeConfigurationStore, models?: LocalModelConfigurationStore, modelsEditable = false,
-    private library = "", private connectorSettings?: ConnectorSettings, private storage?: { value: ResolvedLocalRuntimeDeviceStorage }) {
+    private library = "", private connectorSettings?: ConnectorSettings, private storage?: { value: ResolvedLocalRuntimeDeviceStorage },
+    private authorizeStorage?: LocalRuntimeManagerOptions["authorizeStorage"]) {
     this.#supervisor = supervisor; this.#configurations = configurations;
     this.#models = models; this.#modelsEditable = modelsEditable && models !== undefined;
   }
@@ -200,6 +214,7 @@ class RuntimeManager implements LocalRuntimeManager {
   configureDeviceStorage(input: LocalRuntimeDeviceStorageInput) {
     return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
       if (!this.storage) throw new AppError("CONFLICT", "device_storage_unavailable", 409);
+      await this.authorizeStorage?.(input);
       const previous = this.storage.value, next = await this.#configurations.applyDeviceStorage(input);
       this.storage.value = next;
       try { await this.#supervisor.reloadRunningInstances(); }
@@ -253,6 +268,21 @@ class RuntimeManager implements LocalRuntimeManager {
   })); }
   skillMetadata(id: string) { return this.guard(() => this.#configurations.skillMetadata(id)); }
   updateSkillMetadata(id: string, value: unknown) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(() => this.#configurations.updateSkillMetadata(id, value))); }
+  deviceMcpServers() { return this.guard(() => this.#configurations.deviceMcpServers()); }
+  configureDeviceMcpServer(server: LocalRuntimeMcpServerInput) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
+    const result = await this.#configurations.saveDeviceMcpServer(server);
+    await this.#supervisor.reloadRunningInstances();
+    return result;
+  })); }
+  removeDeviceMcpServer(id: string) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
+    await this.#configurations.removeDeviceMcpServer(id);
+    await this.#supervisor.reloadRunningInstances();
+  })); }
+  testDeviceMcpServer(server: LocalRuntimeMcpServerInput) { return this.guard(async () => {
+    const draft = await this.#configurations.previewDeviceMcpServer(server);
+    const result = await loadMcpToolsFromConfig({ servers: [{ ...draft.registration, timeoutMs: Math.min(draft.registration.timeoutMs ?? 5000, 10000) }] }, { environment: draft.environment });
+    return { ok: result.failedServers.length === 0, toolCount: result.tools.length };
+  }); }
   testMcpServer(id: string, server: LocalRuntimeMcpServerInput) { return this.guard(async () => {
     await this.#supervisor.configuration(id);
     const draft = await this.#configurations.previewMcpServer(id, server);
@@ -299,10 +329,17 @@ class RuntimeManager implements LocalRuntimeManager {
       source: (context, sourceId) => use(facade => facade.source(context, sourceId)),
       artifacts: (context, runId) => use(facade => facade.artifacts(context, runId)),
       readArtifact: (context, runId, artifactId) => use(facade => facade.readArtifact(context, runId, artifactId)),
+      previewArtifact: (context, runId, artifactId) => use(facade => facade.previewArtifact(context, runId, artifactId)),
       grantDirectory: (path, name) => use(facade => facade.grantDirectory(path, name)),
       directories: () => use(facade => facade.directories()),
       revokeDirectory: scopeId => use(facade => facade.revokeDirectory(scopeId)),
     } satisfies ManagedLocalRuntime);
+  }
+
+  async assertIdle(): Promise<void> {
+    if (this.#pending > 0) throw new AppError("CONFLICT", "runtime_operations_prevent_close", 409);
+    await this.refresh();
+    if (this.#supervisor.hasActiveWork()) throw new AppError("CONFLICT", "runtime_active_runs_prevent_close", 409);
   }
 
   close(): Promise<void> {

@@ -41,7 +41,9 @@ export function connectorSourceDescriptor(
     id: `connector.${manifest.key}.${instance.connection.id}`,
     displayName: manifest.displayName,
     transport: "connector",
-    aliases: [manifest.key, instance.connection.id],
+    aliases: [...new Set([manifest.key, manifest.displayName, ...(manifest.aliases ?? []),
+      instance.connection.id, instance.connection.displayName].filter((name): name is string =>
+      typeof name === "string" && name.trim().length > 0).map((name) => name.trim()))],
     capabilities,
   };
 }
