@@ -7,7 +7,7 @@ import { createComposerPreferences } from '../web/composer-preferences.js';
 
 // Run the actual app controller with a small DOM/transport fixture. Rendering
 // dependencies are replaced; the sidebar, click handlers and state are real.
-async function fixture(preferencesStorage = new Map()) {
+async function fixture(preferencesStorage = new Map(), running = false) {
   const source = await readFile(new URL('../web/app.js', import.meta.url), 'utf8');
   class Element {
     children = []; value = ''; hidden = false; disabled = false; textContent = ''; attributes = {};
@@ -31,7 +31,10 @@ async function fixture(preferencesStorage = new Map()) {
     sessionStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     localStorage: { getItem: key => preferencesStorage.get(key), setItem: (key, value) => preferencesStorage.set(key, value) }, createComposerPreferences,
     createArtifactWorkspace: () => ({ render: noop, collapse: noop, activate: noop }),
-    createConversationView: () => ({ clear() { clearCount++; }, render: noop }),
+    createConversationView: () => ({ clear() { clearCount++; }, render: noop, submitting: noop, submitted: noop }),
+    createTurn: run => ({ ...run, events: [], lastSeq: 0 }),
+    updateTurn: (turn, run) => Object.assign(turn, run),
+    readRunUpdate: () => new Promise(() => {}),
     installCapabilitySettings: noop, resetComposerInput: noop,
     async fetch(path, options) {
       requests.push({ path, ...options }); const url = new URL(path, 'http://fixture'); let data;
@@ -40,6 +43,14 @@ async function fixture(preferencesStorage = new Map()) {
       else if (url.pathname === '/api/connectors') data = { connections: [{ id: 'mail', displayName: 'Mail', enabled: true, moduleAvailable: true }] };
       else if (url.pathname === '/api/models') data = { models: ['model-a', 'model-b'] };
       else if (url.pathname === '/api/conversations') data = { conversations: records };
+      else if (running && url.pathname === '/api/runs' && options.method === 'POST') {
+        const payload = JSON.parse(options.body);
+        data = { run: { id: 'run-new', status: 'running', conversationId: payload.conversationId } };
+      }
+      else if (running && url.pathname === '/api/conversations/first') data = { runs: [{ id: 'run-first', status: 'running', conversationId: 'first' }] };
+      else if (running && url.pathname === '/api/runs/run-first/events') data = { events: [] };
+      else if (running && url.pathname === '/api/runs/run-first/artifacts') data = { artifacts: [] };
+      else if (running && url.pathname === '/api/runs/run-first/human-loop/current') data = {};
       else if (url.pathname.endsWith('/remove')) {
         if (failure) return { ok: false, status: failure, json: async () => ({ error: 'fixture_failure' }) };
         records = records.filter(item => item.id !== url.pathname.split('/')[3]); data = { removed: true };
@@ -62,6 +73,40 @@ test('sidebar deletion cancellation and failure preserve the selected conversati
   assert.equal(ui.element('conversation-title').textContent, '第一条会话');
   assert.match(ui.element('status').textContent, /任务执行中/);
   assert.equal(ui.element('send').disabled, false);
+});
+
+test('a running conversation permits navigation and reconnects when selected again', async () => {
+  const ui = await fixture(new Map(), true);
+  await ui.rows()[0].children[0].onclick();
+  assert.equal(ui.element('message').disabled, true);
+  assert.equal(ui.element('cancel').hidden, false);
+  assert.equal(ui.element('new-conversation').disabled, false);
+  assert.equal(ui.rows()[1].children[0].disabled, false);
+  await ui.rows()[1].children[0].onclick();
+  assert.equal(ui.element('message').disabled, false);
+  assert.equal(ui.element('cancel').hidden, true);
+  await ui.rows()[0].children[0].onclick();
+  assert.equal(ui.element('message').disabled, true);
+  assert.equal(ui.element('cancel').hidden, false);
+  ui.element('new-conversation').onclick();
+  assert.equal(ui.element('message').disabled, false);
+  assert.equal(ui.element('cancel').hidden, true);
+  assert.equal(ui.requests.filter(request => request.path.startsWith('/api/conversations/first?')).length, 2);
+});
+
+test('a new conversation can start a run while another conversation is running', async () => {
+  const ui = await fixture(new Map(), true);
+  await ui.rows()[0].children[0].onclick();
+  ui.element('new-conversation').onclick();
+  ui.element('model').value = 'model-a'; ui.element('message').value = '并行任务';
+  void ui.element('composer').onsubmit({ preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  const request = ui.requests.find(item => item.path.startsWith('/api/runs?') && item.method === 'POST');
+  assert.ok(request);
+  assert.notEqual(JSON.parse(request.body).conversationId, 'first');
+  assert.equal(ui.element('message').disabled, true);
+  await ui.rows()[0].children[0].onclick();
+  assert.equal(ui.element('cancel').hidden, false);
 });
 
 test('deleting another conversation preserves current state; deleting the active one clears it', async () => {

@@ -7794,8 +7794,9 @@ function conversationTurnTool(context: ConversationIntentExternalContext): Model
           type: "object",
           additionalProperties: false,
           required: ["mode", "visibleDirectoryIds"],
+          description: "Binding for Runtime-issued visible directories only, never an MCP provider, tool, or uploaded file. When no visible directories are available use mode=none and visibleDirectoryIds=[].",
           properties: {
-            mode: { type: "string", enum: ["none", "primary_data"] },
+            mode: { type: "string", enum: visibleDirectoryIds.length === 0 ? ["none"] : ["none", "primary_data"] },
             visibleDirectoryIds: {
               type: "array",
               maxItems: Math.min(12, visibleDirectoryIds.length),
@@ -8751,6 +8752,7 @@ function parseConversationTurnResolution(
   if (!isConversationTurnRelation(normalizedRelation)) return reject("relation must be new_goal, continue_prior, correct_prior, refine_prior, or challenge_prior.");
   if (!isConversationTurnInputMode(normalizedInputMode)) return reject("inputMode must be none, prior_result, prior_artifact, or refresh_sources.");
   if (evidenceStrategy === undefined) return reject("evidenceStrategy must be one of none, lookup_lite, source_grounded, strict_user_source, or bound_visible_sources.");
+  const independentShapeFailures: string[] = [];
   if (sourceBinding === undefined) {
     const rawBinding = optionalRecord(argumentsRecord.sourceBinding);
     const rawIds = Array.isArray(rawBinding.visibleDirectoryIds)
@@ -8758,11 +8760,20 @@ function parseConversationTurnResolution(
       : [];
     const uploadedIds = new Set(context.sources.map((source) => source.id));
     if (rawIds.some((id) => uploadedIds.has(id))) {
-      return reject("sourceBinding must contain mode=none and visibleDirectoryIds=[] when the selected ID is an uploaded source. Uploaded source IDs cannot be placed in sourceBinding.visibleDirectoryIds because uploaded sources are not visible directories; choose evidenceStrategy=source_grounded or none as appropriate.");
+      independentShapeFailures.push("sourceBinding must contain mode=none and visibleDirectoryIds=[] when the selected ID is an uploaded source. Uploaded source IDs cannot be placed in sourceBinding.visibleDirectoryIds because uploaded sources are not visible directories; choose evidenceStrategy=source_grounded or none as appropriate.");
+    } else {
+      independentShapeFailures.push("sourceBinding must contain mode (none or primary_data) and visibleDirectoryIds (unique Runtime-issued visible directory IDs; use [] with mode=none). Uploaded sources are not visible directory candidates.");
     }
-    return reject("sourceBinding must contain mode (none or primary_data) and visibleDirectoryIds (unique Runtime-issued visible directory IDs; use [] with mode=none). Uploaded sources are not visible directory candidates.");
   }
-  if (taskIntent === undefined) return reject(taskIntentFeedback);
+  if (taskIntent === undefined) independentShapeFailures.push(taskIntentFeedback);
+  if (independentShapeFailures.length > 0) {
+    // These fields are independently parsed. Report their failures together so
+    // a bounded retry can repair the whole response instead of discovering
+    // one malformed field per model turn.
+    independentShapeFailures.push(...groundingFailures);
+    return reject(independentShapeFailures.join("\n"));
+  }
+  if (sourceBinding === undefined || taskIntent === undefined) throw new Error("Unreachable invalid turn shape");
   if (taskIntent.requiresExecution !== (mode === "execute")) return reject("taskIntent.requiresExecution must be true exactly when mode=execute.");
   if (
     taskIntent !== undefined

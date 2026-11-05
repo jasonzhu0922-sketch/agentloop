@@ -8,7 +8,7 @@ import { autoResizeComposerInput, resetComposerInput, shouldSubmitComposerOnKeyd
 const element = id => document.getElementById(id);
 let csrf; let conversationId; let activeRun; let pending; let selectedSources = []; let runtimeId;
 let generation = 0; let selectedRunId; let cancelling = false;
-let locked = true; const turns = new Map(); let orderedRunIds = [];
+let locked = true; let operationLocked = true; const turns = new Map(); let orderedRunIds = [];
 let PENDING_KEY; let preferences;
 const status = (message, error = false) => { element('status').textContent = message; element('status').className = `composer-status${error ? ' error' : ''}`; };
 const runState = value => ({ running: '执行中', completed: '已完成', cancelled: '已取消', failed: '执行失败' }[value] ?? value);
@@ -55,13 +55,13 @@ async function api(path, body) {
   return data;
 }
 function busy(value) {
-  locked = value;
-  element('send').disabled = value; element('message').disabled = value; element('model').disabled = value;
+  operationLocked = value; locked = value || Boolean(activeRun);
+  element('send').disabled = locked; element('message').disabled = locked; element('model').disabled = locked;
   element('cancel').disabled = !activeRun || cancelling; element('cancel').hidden = !activeRun; element('send').hidden = Boolean(activeRun);
-  element('file').disabled = value; element('upload-file').disabled = value;
+  element('file').disabled = locked; element('upload-file').disabled = locked;
   element('new-conversation').disabled = value;
   element('runtime-select').disabled = value;
-  for (const checkbox of element('run-connectors').querySelectorAll('input')) checkbox.disabled = value;
+  for (const checkbox of element('run-connectors').querySelectorAll('input')) checkbox.disabled = locked;
   for (const button of element('conversations').querySelectorAll('button')) button.disabled = value;
 }
 async function loadRuntimes() {
@@ -96,19 +96,19 @@ async function conversations() {
   const { conversations } = await api('/api/conversations'); element('conversations').replaceChildren();
   for (const item of conversations) {
     const row = node('div', `session-wrap${item.id === conversationId ? ' active' : ''}`);
-    const button = node('button', `session${item.id === conversationId ? ' active' : ''}`); button.type = 'button'; button.disabled = locked;
+    const button = node('button', `session${item.id === conversationId ? ' active' : ''}`); button.type = 'button'; button.disabled = operationLocked;
     const body = node('span', 'session-body'); body.append(node('span', 'session-title', item.title));
     button.append(node('span', 'session-dot'), body);
     if (item.id === conversationId) element('conversation-title').textContent = item.title;
     button.onclick = () => selectConversation(item.id).catch(error => status(error.message, true));
-    const remove = node('button', 'session-delete', '×'); remove.type = 'button'; remove.disabled = locked;
+    const remove = node('button', 'session-delete', '×'); remove.type = 'button'; remove.disabled = operationLocked;
     remove.title = '删除会话'; remove.setAttribute('aria-label', `删除会话：${item.title}`);
     remove.onclick = () => deleteConversation(item);
     row.append(button, remove); element('conversations').append(row);
   }
 }
 async function deleteConversation(item) {
-  if (locked || !window.confirm(`确定删除会话「${item.title}」及其历史记录？此操作无法撤销。`)) return;
+  if (operationLocked || !window.confirm(`确定删除会话「${item.title}」及其历史记录？此操作无法撤销。`)) return;
   busy(true);
   try {
     await api(`/api/conversations/${encodeURIComponent(item.id)}/remove`, {});
@@ -144,7 +144,7 @@ async function transcript(token = generation) {
   return runs;
 }
 async function watch(id, token) {
-  activeRun = id; busy(true);
+  activeRun = id; busy(false);
   try {
     while (token === generation) {
       const turn = turns.get(id); if (!turn) break;
@@ -158,8 +158,8 @@ async function watch(id, token) {
       }
       await new Promise(resolve => setTimeout(resolve, 500));
     }
-  } catch (error) { status(`连接中断：${error.message}。重新选择对话可从持久化记录恢复。`, true); }
-  finally { if (token === generation) { activeRun = undefined; cancelling = false; busy(false); } }
+  } catch (error) { if (token === generation) status(`连接中断：${error.message}。重新选择对话可从持久化记录恢复。`, true); }
+  finally { if (token === generation) { activeRun = undefined; cancelling = false; busy(operationLocked); } }
 }
 async function respondHumanLoop(id, request, value) {
   const token = generation, turn = turns.get(id), scope = runtimeId || 'desktop-default';
@@ -180,9 +180,9 @@ async function respondHumanLoop(id, request, value) {
   if (!activeRun) void watch(id, token);
 }
 async function selectConversation(id) {
-  if (locked) return;
+  if (operationLocked) return;
   busy(true); navigation(false);
-  const token = ++generation; conversationId = id; pending = undefined; selectedSources = [];
+  const token = ++generation; activeRun = undefined; cancelling = false; conversationId = id; pending = undefined; selectedSources = [];
   sessionStorage.removeItem(PENDING_KEY);
   restoreConnectors();
   resetAttachments(); turns.clear(); orderedRunIds = []; selectedRunId = undefined; view.clear(); renderDetails();
@@ -224,25 +224,26 @@ element('composer').onsubmit = async event => {
 };
 element('cancel').onclick = async () => {
   if (!activeRun || cancelling) return;
-  cancelling = true; busy(true);
-  try { await api(`/api/runs/${encodeURIComponent(activeRun)}/cancel`, {}); status('已请求取消；执行退出前，本地服务仍会保护资源。'); }
-  catch (error) { cancelling = false; busy(Boolean(activeRun)); status(error.message, true); }
+  const token = generation; const id = activeRun;
+  cancelling = true; busy(false);
+  try { await api(`/api/runs/${encodeURIComponent(id)}/cancel`, {}); if (token === generation) status('已请求取消；执行退出前，本地服务仍会保护资源。'); }
+  catch (error) { if (token === generation) { cancelling = false; busy(operationLocked); status(error.message, true); } }
 };
 function resetConversation() {
-  generation++; conversationId = crypto.randomUUID(); pending = undefined; selectedSources = [];
+  generation++; activeRun = undefined; cancelling = false; conversationId = crypto.randomUUID(); pending = undefined; selectedSources = [];
   sessionStorage.removeItem(PENDING_KEY);
   restoreConnectors();
   turns.clear(); orderedRunIds = []; selectedRunId = undefined; view.clear(); resetAttachments(); renderDetails(); resetComposerInput(element('message'));
   element('empty-state').hidden = false; element('conversation-title').textContent = '新对话'; element('message').value = ''; details(false); navigation(false);
 }
 element('new-conversation').onclick = () => {
-  if (locked) return;
+  if (operationLocked) return;
   resetConversation(); status(element('model').value ? '新对话 · 可直接发送任务。' : '新对话 · 请选择模型后发送任务。'); busy(false);
   void conversations().catch(error => status(error.message, true));
 };
 element('runtime-select').onchange = async event => {
-  if (locked) { event.target.value = runtimeId; return; }
-  runtimeId = event.target.value; generation++; conversationId = crypto.randomUUID(); pending = undefined; selectedSources = []; turns.clear(); orderedRunIds = []; selectedRunId = undefined; view.clear(); resetAttachments(); renderDetails(); element('conversation-title').textContent = '新对话';
+  if (operationLocked) { event.target.value = runtimeId; return; }
+  runtimeId = event.target.value; generation++; activeRun = undefined; cancelling = false; conversationId = crypto.randomUUID(); pending = undefined; selectedSources = []; turns.clear(); orderedRunIds = []; selectedRunId = undefined; view.clear(); resetAttachments(); renderDetails(); element('conversation-title').textContent = '新对话';
   busy(true); try { await refreshModels(); await conversations(); await loadConnectors(); status('已切换本机 Runtime，请选择模型后发送。'); } catch (error) { status('Runtime 切换失败，请重新读取。', true); } finally { busy(false); }
 };
 element('file').onchange = async event => {

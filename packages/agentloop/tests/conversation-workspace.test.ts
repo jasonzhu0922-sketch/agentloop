@@ -644,6 +644,39 @@ test("conversation resolver gives field-specific repair feedback for a missing a
   }
 });
 
+test("conversation resolver reports independent malformed fields in the same repair turn", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const model = new MissingExpectedArtifactCountResolverModel();
+    const runs = new RunService({
+      database, skills: new SkillService(database),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        const properties = request.tools[0]!.inputSchema.properties as Record<string, any>;
+        assert.deepEqual(properties.sourceBinding.properties.mode.enum, ["none"]);
+        assert.match(properties.sourceBinding.description, /never an MCP provider/);
+        const response = await model.complete(request);
+        const args = response.toolCalls[0]!.arguments as Record<string, unknown>;
+        if (model.resolverAttempts === 1) {
+          args.sourceBinding = { mode: "tool_source", visibleDirectoryIds: [] };
+          args.requiredCapabilityReferences = [{ kind: "tool_source", reference: "invented-provider" }];
+        } else {
+          assert.match(request.systemPrompt, /sourceBinding must contain mode/);
+          assert.match(request.systemPrompt, /taskIntent\.deliverables\[0\]\.expectedArtifactCount/);
+          assert.match(request.systemPrompt, /requiredCapabilityReferences must be/);
+          args.requiredCapabilityReferences = [];
+        }
+        return response;
+      } }),
+      plannerFactory: () => ({ plan: async () => { throw new AppError("PLANNING_ERROR", "resolver repaired", 422); } }),
+    });
+    await assert.rejects(() => runs.executeConversation(owner.user.id, "生成一个 PDF 文件"), /resolver repaired/);
+    assert.equal(model.resolverAttempts, 2);
+  } finally {
+    await database.close();
+  }
+});
+
 test("conversation resolver gives field-specific repair feedback for an invalid evidence strategy", async () => {
   const database = new AppDatabase(":memory:");
   try {

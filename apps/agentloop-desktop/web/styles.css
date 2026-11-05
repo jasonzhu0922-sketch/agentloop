@@ -11,9 +11,7 @@
 .session { width:100%; }
 .session:disabled { opacity:.55; }
 .session-wrap.active { background:var(--brand-soft); }
-.session-wrap.active .session-delete,.session-wrap:focus-within .session-delete { opacity:1; }
-.session-delete:focus-visible { outline:2px solid var(--brand); outline-offset:1px; }
-@media (hover:none) { .session-delete { opacity:1; } }
+.session-delete:focus-visible { opacity:1; outline:2px solid var(--brand); outline-offset:1px; }
 .local-capability-head .local-agent-state { font-size:10px; }
 .msg-text { overflow-wrap:anywhere; }
 .desktop-turn { display:grid; gap:24px; min-width:0; }

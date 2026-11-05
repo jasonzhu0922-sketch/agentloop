@@ -339,7 +339,7 @@ export class ModelPlanner implements Planner {
       ],
       contractLines: [
         "Fill the smallest Outcome Plan using agentloop.outcomePlan/v2 so Runtime can start useful work.",
-        "Use the supplied TaskProfile shape as the default shape; only choose a narrower valid shape when the user request is simpler.",
+        "Use the supplied TaskProfile shape as the default shape; only choose a narrower valid shape when the user request is simpler and no required planTopology applies. A supplied planTopology is mandatory and takes precedence over general leaf-count guidance.",
         "Use one leaf for ordinary answers/artifacts; split only for reusable source facts.",
         "When a conversation TaskProfile has shape single_leaf, submit exactly one deliver leaf that owns every conversation target. Gather source evidence inside that leaf; do not create a fact_acquisition-to-deliver pair merely to rewrite the same findings.",
         "Plan source work by coverage of each requested fact, not by the first available Tool or Skill. Before selecting capabilities, identify what must be answered and compare it with each source's declared scope and freshness. For multi-fact web research, decompose the goal into claim units such as identity, relationship, date/status, and disputed-claim correction; each unit must have exact entities/aliases and a complete query direction, never a placeholder like 'keywords' or a single token. For lookups, identification, explanations and comparisons alike, bind complementary acquisition when the provider does not establish a requested fact; include that acquisition and the final synthesis in the leaf objective. Do not replace a missing requested fact with a related provider field or a caveat. Keep complementary acquisition in the same conversation deliver leaf, and omit redundant sources when one source covers the request.",
@@ -1875,10 +1875,10 @@ function assertRequiredPlanTopology(
   throw new AppError(
     "PLANNING_ERROR",
     `OutcomePlan violates required plan topology: ${JSON.stringify({
-      required: topology,
       receivedShape: proposal.shape,
       missingRoles,
       missingDependencies,
+      required: topology,
     })}`,
     422,
   );

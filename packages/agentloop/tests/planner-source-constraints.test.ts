@@ -618,9 +618,19 @@ test("externally grounded data analysis cannot collapse acquisition and delivery
     availableToolNames: tools.map((tool) => tool.name),
     availableTools: tools,
   };
+  let topologyAttempts = 0;
+  const topologyFailures: string[] = [];
   const model: ModelAdapter = {
     limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
     complete: async (request) => {
+      topologyAttempts += 1;
+      if (topologyAttempts === 2) {
+        const context = request.runtimeContext?.content ?? "";
+        assert.match(context, /"receivedShape":"single_leaf"/);
+        assert.match(context, /"missingRoles":\["deliver"\]/);
+        assert.match(context, /"missingDependencies":\[\{"predecessorRole":"fact_acquisition","successorRole":"deliver"\}\]/);
+        assert.match(context, /Required topology:/);
+      }
       const submitTool = request.tools.find((tool) => tool.name === "submit_outcome_plan");
       const leaves = submitTool?.inputSchema.properties?.leaves as Record<string, unknown> | undefined;
       const leafItems = leaves?.items as Record<string, unknown> | undefined;
@@ -656,9 +666,14 @@ test("externally grounded data analysis cannot collapse acquisition and delivery
   };
 
   await assert.rejects(
-    new ModelPlanner(model, { maxPlanningTurns: 1 }).plan(task),
-    /violates required plan topology.*fact_then_produce.*deliver/,
+    new ModelPlanner(model, { maxPlanningTurns: 3 }).plan(task, undefined, async (event) => {
+      if (event.type === "planning.contract_failed") topologyFailures.push(String(event.data.validationError));
+    }),
+    /violates required plan topology.*deliver.*fact_then_produce/,
   );
+  assert.equal(topologyAttempts, 2);
+  assert.match(topologyFailures[0]!, /"missingRoles":\["deliver"\]/);
+  assert.match(topologyFailures[0]!, /"successorRole":"deliver"/);
 });
 
 test("source-grounded conversation lookup receives a single delivery boundary in its planning schema", async () => {
