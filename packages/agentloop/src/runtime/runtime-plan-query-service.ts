@@ -1,6 +1,7 @@
 import type { ExecutionPlan, SkillComplianceAssessment } from "../planning/contracts.ts";
 import { PlanRepository } from "../planning/plan-repository.ts";
 import { AppError } from "../shared/errors.ts";
+import type { RunRoundRepository, RoundHistoryEntry } from "./run-round-repository.ts";
 
 export interface RuntimePlanQueryRun {
   readonly status: "running" | "completed" | "failed" | "cancelled";
@@ -39,10 +40,12 @@ export interface RuntimeHostPlanProjection {
 /** Read-only Plan and Host projection; all Plan mutation remains in Runtime orchestration. */
 export class RuntimePlanQueryService {
   private readonly plans: PlanRepository;
+  private readonly rounds: RunRoundRepository;
   private readonly run: (actorUserId: string, runId: string) => Promise<RuntimePlanQueryRun>;
 
-  constructor(input: { readonly plans: PlanRepository; readonly run: (actorUserId: string, runId: string) => Promise<RuntimePlanQueryRun> }) {
+  constructor(input: { readonly plans: PlanRepository; readonly rounds: RunRoundRepository; readonly run: (actorUserId: string, runId: string) => Promise<RuntimePlanQueryRun> }) {
     this.plans = input.plans;
+    this.rounds = input.rounds;
     this.run = input.run;
   }
 
@@ -67,6 +70,21 @@ export class RuntimePlanQueryService {
         assessments: [],
       };
     }
+  }
+
+  async history(actorUserId: string, runId: string): Promise<readonly ExecutionPlan[]> {
+    const run = await this.run(actorUserId, runId);
+    try {
+      return await this.plans.listByRun(runId);
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== "NOT_FOUND") throw error;
+      return [];
+    }
+  }
+
+  async roundHistory(actorUserId: string, runId: string): Promise<readonly RoundHistoryEntry[]> {
+    await this.run(actorUserId, runId);
+    return await this.rounds.history(runId);
   }
 
   async hostProjection(actorUserId: string, runId: string): Promise<RuntimeHostPlanProjection> {

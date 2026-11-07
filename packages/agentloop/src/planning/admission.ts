@@ -91,6 +91,8 @@ export function admitPlan(input: {
   reusableEvidenceKinds?: readonly EvidenceKind[];
   /** Server-validated Runtime Result inputs for this new Plan. */
   resultBindings?: readonly RuntimeResultBinding[];
+  /** Delivery targets owned by this Round. Omit for the initial whole-goal Plan. */
+  targetScopeIds?: readonly string[];
   /** The Run-owned state is the only task-semantics authority at Admission. */
   canonicalState: CanonicalRunState;
   now?: number;
@@ -98,7 +100,14 @@ export function admitPlan(input: {
   if (input.canonicalState.runId !== input.runId) reject("Canonical Run State belongs to another Run");
   assertCanonicalDeliveryTargetInventory(input.canonicalState);
   const taskSemantics = input.canonicalState.intent.understanding;
-  const canonicalTargets = Object.values(input.canonicalState.targets);
+  const allCanonicalTargets = Object.values(input.canonicalState.targets);
+  const targetScope = input.targetScopeIds === undefined
+    ? allCanonicalTargets
+    : allCanonicalTargets.filter((target) => input.targetScopeIds!.includes(target.targetId));
+  if (input.targetScopeIds !== undefined && targetScope.length !== new Set(input.targetScopeIds).size) {
+    reject("Plan target scope contains unknown canonical delivery target(s)");
+  }
+  const canonicalTargets = targetScope;
   const taskIntent = taskSemantics.intent;
   const canonicalRequiredToolSourceIds = input.canonicalState.intent.requiredToolSourceIds;
   const proposal = bindRequiredSkillCompanions(input.proposal, input.availableSkills);
@@ -371,7 +380,7 @@ export function admitPlan(input: {
 
   const admittedSteps = normalizeDependencyEvidenceReuse(steps);
   assertDeliveryTargetCoverage(admittedSteps, canonicalTargets);
-  assertArtifactTargetCoverage(admittedSteps, taskSemantics);
+  assertArtifactTargetCoverage(admittedSteps, taskSemantics, input.targetScopeIds);
   assertStructuredCapabilitiesMatchTaskSemantics(admittedSteps, taskSemantics);
   assertTerminalArtifactDelivery(admittedSteps, taskIntent);
   assertRequiredSourceGrounding(
@@ -1213,9 +1222,11 @@ function assertDeliveryTargetCoverage(
 function assertArtifactTargetCoverage(
   steps: readonly PlanStep[],
   taskSemantics?: StructuredTaskUnderstanding,
+  targetScopeIds?: readonly string[],
 ): void {
   const requested = taskSemantics?.artifactTargets ?? [];
-  if (requested.length === 0) return;
+  const scopedRequested = targetScopeIds === undefined ? requested : requested.filter((target) => targetScopeIds.includes(target.id));
+  if (scopedRequested.length === 0) return;
   const targets = steps.flatMap((step) => step.executionBinding.artifactTargets ?? []);
   const ids = new Set<string>();
   for (const target of targets) {
@@ -1228,8 +1239,8 @@ function assertArtifactTargetCoverage(
   ).every((item) => item.targetId !== undefined && item.purpose !== undefined) === true;
   if (requestedHasExplicitIdentity) {
     const terminalIds = new Set(terminal.map((target) => target.id));
-    const missing = requested.filter((target) => !terminalIds.has(target.id));
-    const unexpected = terminal.filter((target) => !requested.some((requestedTarget) => requestedTarget.id === target.id));
+    const missing = scopedRequested.filter((target) => !terminalIds.has(target.id));
+    const unexpected = terminal.filter((target) => !scopedRequested.some((requestedTarget) => requestedTarget.id === target.id));
     if (missing.length > 0 || unexpected.length > 0) {
       const details = [
         ...(missing.length === 0 ? [] : [`missing ${missing.map((target) => target.id).join(", ")}`]),
@@ -1240,7 +1251,7 @@ function assertArtifactTargetCoverage(
     return;
   }
   const targetCounts = countArtifactTargetShapes(terminal);
-  const requestedCounts = countArtifactTargetShapes(requested);
+  const requestedCounts = countArtifactTargetShapes(scopedRequested);
   for (const [shape, count] of requestedCounts) {
     if ((targetCounts.get(shape) ?? 0) < count) {
       reject(`Plan has no terminal artifactTargets covering requested ${shape} deliverable(s)`);

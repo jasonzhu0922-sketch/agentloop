@@ -28,9 +28,10 @@ npm run start:desktop
 
 - macOS：`~/Library/Application Support/AgentLoop Desktop Development`
 
-联网搜索默认关闭。开发版从 `apps/agentloop-desktop/.env` 读取配置；打包版从 Desktop 数据目录读取 `.env`。需要启用时，创建仅当前用户可读的文件，设置 `WEB_SEARCH_DISABLED=0`、`WEB_SEARCH_PROVIDER=bocha`、`WEB_SEARCH_ENDPOINT` 和 `WEB_SEARCH_API_KEY`；重启 Desktop 后生效。该设备级配置由本机账号共享，凭据不会通过设置接口返回，也不要提交到代码仓库。
+Desktop 设置中的“联网搜索”页是账户级配置入口：搜索端点和 API Key 保存在当前账号的本机加密 Secret Store，API Key 不回显，也不再要求写入 `.env`。旧版 `.env` 中的 `WEB_SEARCH_*` 仍可作为首次启动迁移来源；打包时不再要求携带搜索 API Key。保存设置后本机 Runtime 会自动重载，新的任务使用新配置。
 
 同一文件可设置 `PLANNING_MAX_TURNS`（1–64，规划模型轮次）和 `STEP_MAX_TURNS`（1–256，每个执行步骤的模型轮次）。配置在重启 Desktop 后生效。
+打包时会从 `apps/agentloop-desktop/.env` 读取这两个轮次设置作为安装版默认值；缺失时使用内核默认值。安装版数据目录的 `.env` 可分别覆盖这两项。修改源码目录配置后需重新打包。
 - Windows：`%LOCALAPPDATA%/AgentLoop Desktop Development`
 - Linux 开发环境：`$XDG_DATA_HOME/agentloop-desktop-development`，未设置时使用 `~/.local/share`；不是本期安装包目标。
 
@@ -87,7 +88,7 @@ Desktop 模型基础地址支持 HTTP 或 HTTPS，包括域名和局域网地址
 - 复用 Multi Runtime 的侧边会话栏、玄武图标、蓝色主题、消息布局和底部输入框；展示快照位于 `web/multi-runtime.css`，不在启动时读取另一 App 的文件。
 - 本机历史、显式模型选择、新任务、取消、附件与产物下载。`⌘/Ctrl + Enter` 发送，Enter 换行；支持主题切换、窄屏会话导航和产物/事件面板。
 - Desktop 宿主提交任务时固定开放文件写入和命令工具，支持 HTML 等文件产物生成；浏览器不传入或覆盖该宿主策略，执行仍使用公共 Runtime，并由宿主强制启用操作系统命令沙箱。
-- 首次任务建立对话后才能上传附件，单个最多 1 MiB；上传源由本机 API 保存，后续 Run 引用 source ID，不接受浏览器传入任意路径。
+- 首次任务建立对话后才能上传附件，单个最多 4 MiB；上传源由本机 API 保存，后续 Run 引用 source ID，不接受浏览器传入任意路径。
 - 事件按持久化序号每 500ms 增量轮询，不是 SSE；界面诊断最多显示最近 200 条，不截断数据库历史。
 - 待确认发送在首次请求前保存 requestId 与业务载荷到当前标签页 `sessionStorage`，刷新后相同输入重试复用 ID。不保存 Token、Session 或模型密钥。随机端口变化后的跨 origin 草稿恢复尚未实现。
 - 对话流对齐 Multi Runtime：真实事件投影实时正文、进度、可折叠计划/工具轨迹、Skill 状态、来源、时间与复制；失败总结和取消不呈现成功交付。完成回复使用相同的共享安全 GFM 渲染器，支持标题、表格和代码块，原始 HTML 转义、危险 URL 拒绝；外部图片仍受本机 CSP 阻止。
@@ -122,9 +123,9 @@ export AGENTLOOP_DESKTOP_CONNECTOR_MODULES_JSON='[{"modulePath":"/absolute/path/
 
 模型凭据保存在当前账号目录下独立的 `private/model-secrets` AES-256-GCM 文件 vault，不与 MCP/Connector vault 共用。当前主密钥是同目录的受限权限文件，**不是 macOS Keychain / Windows DPAPI**，不能抵御同用户恶意程序或完整目录被盗。丢失主密钥时明确失败，不重新生成后覆盖旧密文。新配置提交后旧凭据清理失败会告警，不回滚到可能已删除的旧凭据；该告警仅在当前进程保留，尚无自动孤儿清理/恢复工具。
 
-命令沙箱由 Desktop 宿主强制设置，不能由网页或模型关闭：macOS 使用系统 Seatbelt（`sandbox-exec`），Linux 使用 bubblewrap 的独立命名空间。命令及子进程只能读写当前对话工作区；系统运行库和授权 Skill/工具目录只读，HOME/TMP/XDG 指向工作区内的私有目录。命令不开放网络或全局 IPC，不能读取其他账号目录、数据库、vault 或宿主 home。内置 Connector/MCP 仍通过各自的宿主授权协议访问网络。可信搜索进程使用相同沙箱。
+命令沙箱由 Desktop 宿主强制设置，不能由网页或模型关闭：macOS 使用系统 Seatbelt（`sandbox-exec`），Linux 使用 bubblewrap 的独立命名空间。命令及子进程只能读写当前对话工作区；系统运行库和授权 Skill/工具目录只读，HOME/TMP/XDG 指向工作区内的私有目录。命令可解析域名并访问网络（包括内网和本机服务），因此工作区数据可通过网络发送；仍不开放全局 IPC 或直接读取其他账号目录、数据库、vault 和宿主 home。内置 Connector/MCP 仍通过各自的宿主授权协议访问网络。可信搜索进程使用相同沙箱。
 
-macOS 已使用真实 Node/Python 验证文件生成、只读 Skill 执行、跨账号读写/符号链接/子进程逃逸拒绝和 loopback 网络拒绝。Linux 后端尚未在本次 macOS 环境实测；Windows 尚无原生命令沙箱。缺少可用后端时命令以 `command_sandbox_unavailable` 明确拒绝，不回退到无约束执行；文件工具仍可在工作区生成产物。
+macOS 已使用真实 Node/Python 验证文件生成、只读 Skill 执行、跨账号读写/符号链接/子进程逃逸拒绝和 loopback 网络连接。Linux 后端尚未在本次 macOS 环境实测；Windows 尚无原生命令沙箱。缺少可用后端时命令以 `command_sandbox_unavailable` 明确拒绝，不回退到无约束执行；文件工具仍可在工作区生成产物。
 
 活动 HTTP 调用或 Run 阻止关闭；数据库已取消但执行协程尚未退出也不释放资源。使用 Ctrl+C / SIGTERM 关闭，若被活动任务拒绝，先等待或在页面取消，再次退出。没有 Web shutdown 接口。
 

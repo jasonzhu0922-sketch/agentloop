@@ -1627,9 +1627,19 @@ test("computer_write_file appends chunks and receipts the final file state", asy
     const definition = allowed.definitions.find((tool) => tool.name === "computer_write_file");
     assert.match(definition?.description ?? "", /Use only mode for write behavior/);
     assert.match(definition?.description ?? "", /Append requires an existing file/);
+    assert.match(definition?.description ?? "", /48000-character bound/);
     assert.match(definition?.description ?? "", /final file sha256/);
     const writeSchemaProperties = definition?.inputSchema.properties as Record<string, unknown> | undefined;
     assert.equal(writeSchemaProperties?.overwrite, undefined);
+    assert.equal((writeSchemaProperties?.content as { maxLength?: number })?.maxLength, 48_000);
+    assert.throws(
+      () => allowed.prepare({
+        id: "write-too-large",
+        name: "computer_write_file",
+        arguments: { path: "reports/large.md", content: "x".repeat(48_001), mode: "create" },
+      }),
+      /at most 48000 characters/u,
+    );
 
     const first = allowed.prepare({
       id: "write-first",
@@ -3015,7 +3025,7 @@ test("computer_run_command rejects structured data files as interpreter entry po
 });
 
 test("computer_run_command can use only Runtime-authorized Skill execution roots as cwd", async () => {
-  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-skill-root-"));
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop command skill root-"));
   const skillRoot = await fs.mkdtemp(join(tmpdir(), "agentloop-command-skill-package-"));
   try {
     await fs.mkdir(join(skillRoot, "scripts"), { recursive: true });
@@ -3166,6 +3176,16 @@ test("computer_run_command can use only Runtime-authorized Skill execution roots
     });
     await assert.rejects(
       () => escapingWorkspaceAlias.tool.execute({ grant: skillRootGrant(["computer_run_command"], skillRoot) }, escapingWorkspaceAlias.input),
+      (error: unknown) => hasCode(error, "FORBIDDEN"),
+    );
+    await fs.symlink(await fs.realpath(tmpdir()), join(root, "outside-link"));
+    const symlinkWorkspaceAlias = allowed.prepare({
+      id: "workspace-alias-symlink-escape",
+      name: "computer_run_command",
+      arguments: { command: "trusted-node", args: ["scripts/probe.mjs", "@workspace/outside-link"], cwd: "@skills/demo-skill", timeoutMs: 2_000 },
+    });
+    await assert.rejects(
+      () => symlinkWorkspaceAlias.tool.execute({ grant: skillRootGrant(["computer_run_command"], skillRoot) }, symlinkWorkspaceAlias.input),
       (error: unknown) => hasCode(error, "FORBIDDEN"),
     );
   } finally {

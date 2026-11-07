@@ -191,12 +191,14 @@ export async function collectProcessArtifacts(input: {
     const fileVerified = acceptance?.sha256 === file.sha256
       && (acceptance.bytes === undefined || acceptance.bytes === file.bytes);
     const targets = Object.values(input.canonicalState?.targets ?? {}).filter((target) =>
-      target.artifactBinding?.path === path);
+      (target.artifactBindings ?? (target.artifactBinding ? [target.artifactBinding] : [])).some((binding) => binding.path === path));
     const acceptedTargets = targets.filter((target) => target.status === "accepted" && target.claims.some((claim) =>
       input.canonicalState?.steps[claim.stepId]?.status === "satisfied" &&
-      claim.artifact?.path === path && claim.artifact.versionId === target.artifactBinding?.versionId
-      && claim.artifact.sha256 === file.sha256 && claim.artifact.bytes === file.bytes
-      && target.artifactBinding.sha256 === file.sha256 && target.artifactBinding.bytes === file.bytes));
+      (claim.artifacts ?? (claim.artifact ? [claim.artifact] : [])).some((artifact) =>
+        artifact.path === path && artifact.sha256 === file.sha256 && artifact.bytes === file.bytes
+        && (target.artifactBindings ?? (target.artifactBinding ? [target.artifactBinding] : [])).some((binding) =>
+          binding.path === path && binding.versionId === artifact.versionId
+          && binding.sha256 === file.sha256 && binding.bytes === file.bytes))));
     const committed = input.canonicalState?.terminal?.status === "completed" && acceptedTargets.length > 0;
     const targetIds = targets.map((target) => target.targetId);
     const ownerIds = new Set(targets.flatMap((target) => target.ownerStepIds));

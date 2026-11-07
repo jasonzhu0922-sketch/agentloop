@@ -5,12 +5,15 @@ import { createTurn, updateTurn } from './turn-projection.js';
 import { readRunUpdate } from './run-polling.js';
 import { createConversationView } from './conversation.js';
 import { autoResizeComposerInput, resetComposerInput, shouldSubmitComposerOnKeydown } from './reference/ui/composer-input.js';
+const RUNTIME_ICON_ASSETS = Object.freeze({ xuanwu: 'xuanwu-mascot-icon.png', qinglong: 'runtime-qinglong.png', baihu: 'runtime-baihu.png', zhuque: 'runtime-zhuque.png', qilin: 'runtime-qilin.png', taotie: 'runtime-taotie.png', yinglong: 'runtime-yinglong.png', pixiu: 'runtime-pixiu.png' });
+const runtimeIconUrl = key => `/assets/${RUNTIME_ICON_ASSETS[key] || RUNTIME_ICON_ASSETS.xuanwu}`;
 const element = id => document.getElementById(id);
-let csrf; let conversationId; let activeRun; let pending; let selectedSources = []; let runtimeId;
+let csrf; let conversationId; let activeRun; let pending; let selectedSources = []; let runtimeId; const runtimeNames = new Map(); const runtimeIcons = new Map();
+let conversationRuntimeLocked = false; let conversationPersisted = false;
 let generation = 0; let selectedRunId; let cancelling = false;
 let locked = true; let operationLocked = true; const turns = new Map(); let orderedRunIds = [];
 let PENDING_KEY; let preferences;
-const status = (message, error = false) => { element('status').textContent = message; element('status').className = `composer-status${error ? ' error' : ''}`; };
+const status = (message, error = false) => { const target = element('status'); target.textContent = message; target.hidden = !message; target.className = `composer-status${error ? ' error' : ''}`; };
 const runState = value => ({ running: '执行中', completed: '已完成', cancelled: '已取消', failed: '执行失败' }[value] ?? value);
 function node(tag, className, text) {
   const result = document.createElement(tag); result.className = className;
@@ -20,8 +23,7 @@ function node(tag, className, text) {
 const artifactWorkspace = createArtifactWorkspace({ element, api, onOpen: () => details(true) });
 const view = createConversationView({ container: element('transcript'), scroll: element('conversation-scroll'), status,
   onHumanLoopResponse: respondHumanLoop,
-  onArtifact(id, artifactId) { selectedRunId = id; renderTurns(); renderDetails(); artifactWorkspace.select(artifactId); },
-  onSelect(id) { selectedRunId = id; renderTurns(); renderDetails(); details(true); } });
+  onArtifact(id, artifactId) { selectedRunId = id; renderTurns(); renderDetails(); artifactWorkspace.select(artifactId); } });
 function renderTurns(forceBottom = false) {
   element('empty-state').hidden = orderedRunIds.length > 0 || Boolean(pending);
   view.render(orderedRunIds.map(id => turns.get(id)), selectedRunId, forceBottom);
@@ -42,7 +44,7 @@ function navigation(open) {
 }
 function resetAttachments() { element('attachments').replaceChildren(); element('attachments').hidden = true; }
 async function api(path, body) {
-  const scoped = /^(\/api\/(?:models|conversations|runs|sources))(?:\/|$)/.test(path) && !path.includes('runtimeId=');
+  const scoped = /^(\/api\/(?:models|conversations|runs|sources))(?:\/|$)/.test(path) && path !== '/api/conversations' && !path.includes('runtimeId=');
   if (scoped) { const joiner = path.includes('?') ? '&' : '?'; path = `${path}${joiner}runtimeId=${encodeURIComponent(runtimeId || 'desktop-default')}`; }
   const response = await fetch(path, { method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin',
     headers: body === undefined ? {} : { 'Content-Type': 'application/json', 'X-Desktop-CSRF': csrf ?? '' },
@@ -60,16 +62,65 @@ function busy(value) {
   element('cancel').disabled = !activeRun || cancelling; element('cancel').hidden = !activeRun; element('send').hidden = Boolean(activeRun);
   element('file').disabled = locked; element('upload-file').disabled = locked;
   element('new-conversation').disabled = value;
-  element('runtime-select').disabled = value;
+  updateRuntimePicker();
   for (const checkbox of element('run-connectors').querySelectorAll('input')) checkbox.disabled = locked;
   for (const button of element('conversations').querySelectorAll('button')) button.disabled = value;
 }
+function updateRuntimePicker() {
+  const select = element('runtime-select');
+  select.disabled = operationLocked || conversationRuntimeLocked;
+  const hint = element('runtime-lock-hint');
+  if (hint) hint.textContent = conversationRuntimeLocked ? '会话已绑定' : operationLocked ? '正在准备' : '单击机器人开始新会话';
+  const badge = element('runtime-badge-name');
+  if (badge) badge.textContent = runtimeNames.get(runtimeId) || runtimeId || '本机 Runtime';
+  for (const button of element('runtime-robots').querySelectorAll('button')) {
+    button.disabled = operationLocked || Boolean(activeRun);
+    const current = button.runtimeId === runtimeId;
+    button.classList.toggle('current', current); button.setAttribute('aria-pressed', String(current));
+  }
+}
+function decorateRun(run) {
+  if (!run) return run;
+  return { ...run, runtimeName: runtimeNames.get(run.runtimeId) || run.runtimeName || run.runtimeId || '本机 Runtime', runtimeIconKey: runtimeIcons.get(run.runtimeId) || run.runtimeIconKey || 'xuanwu' };
+}
 async function loadRuntimes() {
   const { runtimes } = await api('/api/runtimes');
+  runtimeNames.clear(); runtimeIcons.clear(); for (const runtime of runtimes) { runtimeNames.set(runtime.id, runtime.displayName); runtimeIcons.set(runtime.id, runtime.iconKey || 'xuanwu'); }
   const select = element('runtime-select'); select.replaceChildren();
   for (const runtime of runtimes) { const option = node('option', '', `${runtime.displayName} · ${runtime.status}`); option.value = runtime.id; select.append(option); }
-  select.value = runtimeId || runtimes[0]?.id || 'desktop-default'; runtimeId = select.value; select.disabled = false;
+  select.value = runtimeId || runtimes[0]?.id || 'desktop-default'; runtimeId = select.value;
+  renderRuntimeRobots(runtimes);
+  updateRuntimePicker();
   return runtimes;
+}
+function renderRuntimeRobots(runtimes) {
+  const container = element('runtime-robots'); container.replaceChildren();
+  const shape = runtimes.length > 3 ? 'runtime-arc' : '';
+  container.className = `runtime-robots${shape ? ` ${shape}` : ''}`;
+  if (runtimes.length > 3) {
+    const current = runtimes.find(runtime => runtime.id === runtimeId) || runtimes[0];
+    const hub = node('button', 'runtime-hub'); hub.type = 'button'; hub.runtimeId = current.id; hub.title = `使用「${current.displayName}」开启新会话`;
+    const avatar = document.createElement('img'); avatar.src = runtimeIconUrl(current.iconKey); avatar.alt = `${current.displayName} Runtime`;
+    hub.append(avatar); hub.onclick = () => void startRuntimeConversation(current.id);
+    container.append(hub);
+  }
+  const robotTints = ['#d7eee4', '#dbe5ff', '#f7e3c4', '#eadcf7', '#f7dada', '#d9eef3'];
+  for (const runtime of runtimes) {
+    const button = node('button', 'runtime-robot'); button.type = 'button'; button.runtimeId = runtime.id;
+    button.style?.setProperty('--robot-tint', robotTints[runtimes.indexOf(runtime) % robotTints.length]);
+    button.title = `单击以使用「${runtime.displayName}」开启新会话`;
+    const avatar = document.createElement('img'); avatar.src = runtimeIconUrl(runtime.iconKey); avatar.alt = `${runtime.displayName} Runtime`;
+    button.replaceChildren(avatar, ...(runtimes.length > 3 ? [] : [node('span', '', runtime.displayName)]));
+    if (runtimes.length > 3) {
+      const index = runtimes.indexOf(runtime); const angle = runtimes.length === 1 ? -90 : -150 + (120 * index / (runtimes.length - 1));
+      button.style?.setProperty('--arc-x', `${Math.round(Math.cos(angle * Math.PI / 180) * 58)}px`);
+      button.style?.setProperty('--arc-y', `${Math.round(Math.sin(angle * Math.PI / 180) * 42)}px`);
+      button.title = `单击以使用「${runtime.displayName}」开启新会话`;
+    }
+    button.onclick = () => void startRuntimeConversation(runtime.id);
+    container.append(button);
+  }
+  updateRuntimePicker();
 }
 function restoreConnectors() {
   const selected = new Set(preferences?.connectors(runtimeId, conversationId) || []);
@@ -95,12 +146,14 @@ async function loadConnectors() {
 async function conversations() {
   const { conversations } = await api('/api/conversations'); element('conversations').replaceChildren();
   for (const item of conversations) {
-    const row = node('div', `session-wrap${item.id === conversationId ? ' active' : ''}`);
-    const button = node('button', `session${item.id === conversationId ? ' active' : ''}`); button.type = 'button'; button.disabled = operationLocked;
-    const body = node('span', 'session-body'); body.append(node('span', 'session-title', item.title));
-    button.append(node('span', 'session-dot'), body);
-    if (item.id === conversationId) element('conversation-title').textContent = item.title;
-    button.onclick = () => selectConversation(item.id).catch(error => status(error.message, true));
+    const isCurrent = item.id === conversationId && (!item.runtimeId || item.runtimeId === runtimeId);
+    const row = node('div', `session-wrap${isCurrent ? ' active' : ''}`);
+    const button = node('button', `session${isCurrent ? ' active' : ''}`); button.type = 'button'; button.disabled = operationLocked;
+    const body = node('span', 'session-body'); body.append(node('span', 'session-title', item.title), node('span', 'session-runtime', item.runtimeName || item.runtimeId || '本机 Runtime'));
+    const avatar = document.createElement('img'); avatar.className = 'session-runtime-icon'; avatar.src = runtimeIconUrl(item.runtimeIconKey || runtimeIcons.get(item.runtimeId)); avatar.alt = `${item.runtimeName || '本机 Runtime'} 图标`;
+    button.append(avatar, body);
+    if (isCurrent) element('conversation-title').textContent = item.title;
+    button.onclick = () => selectConversation(item.id, item.runtimeId).catch(error => status(error.message, true));
     const remove = node('button', 'session-delete', '×'); remove.type = 'button'; remove.disabled = operationLocked;
     remove.title = '删除会话'; remove.setAttribute('aria-label', `删除会话：${item.title}`);
     remove.onclick = () => deleteConversation(item);
@@ -111,13 +164,13 @@ async function deleteConversation(item) {
   if (operationLocked || !window.confirm(`确定删除会话「${item.title}」及其历史记录？此操作无法撤销。`)) return;
   busy(true);
   try {
-    await api(`/api/conversations/${encodeURIComponent(item.id)}/remove`, {});
+    await api(`/api/conversations/${encodeURIComponent(item.id)}/remove?runtimeId=${encodeURIComponent(item.runtimeId || runtimeId)}`, {});
   } catch (error) {
     status(error.status === 409 ? '该会话仍有任务执行中，请停止任务并等待结束后再删除。' : `删除会话失败：${error.message}`, true);
     busy(false); return;
   }
-  preferences?.removeConversation(runtimeId, item.id);
-  if (conversationId === item.id) resetConversation();
+  preferences?.removeConversation(item.runtimeId || runtimeId, item.id);
+  if (conversationId === item.id && (!item.runtimeId || item.runtimeId === runtimeId)) resetConversation();
   status('会话已删除。');
   try { await conversations(); }
   catch (error) { status(`会话已删除，但列表刷新失败：${error.message}`, true); }
@@ -130,12 +183,12 @@ async function transcript(token = generation) {
   // Hydrate every turn from durable events, not only the newest Run. The same
   // projector handles reconnect, history, and incremental running updates.
   const hydrated = await Promise.all(runs.map(async run => {
-    const turn = createTurn(run);
-    const [{ events }, { artifacts }] = await Promise.all([
-      api(`/api/runs/${encodeURIComponent(run.id)}/events`), api(`/api/runs/${encodeURIComponent(run.id)}/artifacts`),
+    const turn = createTurn(decorateRun(run));
+    const [{ events }, { artifacts }, { rounds }] = await Promise.all([
+      api(`/api/runs/${encodeURIComponent(run.id)}/events`), api(`/api/runs/${encodeURIComponent(run.id)}/artifacts`), api(`/api/runs/${encodeURIComponent(run.id)}/rounds`),
     ]);
     const humanLoop = run.status === 'running' ? await api(`/api/runs/${encodeURIComponent(run.id)}/human-loop/current`) : {};
-    return updateTurn(turn, run, events, artifacts, humanLoop);
+    return updateTurn(turn, decorateRun(run), events, artifacts, humanLoop, rounds);
   }));
   if (token !== generation) return;
   turns.clear(); for (const turn of hydrated) turns.set(turn.id, turn);
@@ -148,11 +201,11 @@ async function watch(id, token) {
   try {
     while (token === generation) {
       const turn = turns.get(id); if (!turn) break;
-      const { run, events, artifacts, humanLoop } = await readRunUpdate(api, turn);
+      const { run, events, artifacts, rounds, humanLoop } = await readRunUpdate(api, turn);
       if (token !== generation) return;
-      updateTurn(turn, run, events, artifacts, humanLoop);
+      updateTurn(turn, decorateRun(run), events, artifacts, humanLoop, rounds);
       renderTurns(); if (selectedRunId === id) renderDetails();
-      status(`本机任务 · ${turn.humanLoop?.status === 'open' ? '等待你的输入，请在问题卡片中回答' : runState(run.status)}`);
+      status(`「${turn.run.runtimeName || turn.run.runtimeId || runtimeNames.get(runtimeId) || '本机 Runtime'}」· ${turn.humanLoop?.status === 'open' ? '等待你的输入，请在问题卡片中回答' : runState(run.status)}`);
       if (run.status !== 'running') {
         await conversations(); break;
       }
@@ -179,9 +232,12 @@ async function respondHumanLoop(id, request, value) {
   // the form. Reconnect to the same Run instead of creating another one.
   if (!activeRun) void watch(id, token);
 }
-async function selectConversation(id) {
+async function selectConversation(id, conversationScope) {
   if (operationLocked) return;
-  busy(true); navigation(false);
+  if (conversationScope && conversationScope !== runtimeId) {
+    runtimeId = conversationScope; element('runtime-select').value = runtimeId; updateRuntimePicker();
+  }
+  conversationRuntimeLocked = true; conversationPersisted = true; busy(true); navigation(false);
   const token = ++generation; activeRun = undefined; cancelling = false; conversationId = id; pending = undefined; selectedSources = [];
   sessionStorage.removeItem(PENDING_KEY);
   restoreConnectors();
@@ -190,7 +246,7 @@ async function selectConversation(id) {
     const runs = await transcript(token); if (token !== generation) return; await conversations();
     const last = runs?.at(-1);
     if (last) {
-      status(`本机任务 · ${runState(last.status)}`);
+      status(`「${last.runtimeName || last.runtimeId || runtimeNames.get(runtimeId) || '本机 Runtime'}」· ${runState(last.status)}`);
       if (last.status === 'running') { void watch(last.id, generation); return; }
     }
   } finally { if (!activeRun) busy(false); }
@@ -212,9 +268,10 @@ element('composer').onsubmit = async event => {
     const { run } = await api('/api/runs', { requestId: pending.requestId, ...pending.payload });
     view.submitted();
     sessionStorage.removeItem(PENDING_KEY);
-    pending = undefined; conversationId = run.conversationId; selectedSources = []; resetAttachments();
+    pending = undefined; conversationId = run.conversationId; conversationRuntimeLocked = true; conversationPersisted = true; selectedSources = []; resetAttachments();
     element('message').value = ''; resetComposerInput(element('message')); generation++;
-    turns.set(run.id, updateTurn(createTurn(run), run)); if (!orderedRunIds.includes(run.id)) orderedRunIds.push(run.id);
+    const decoratedRun = decorateRun(run);
+    turns.set(run.id, updateTurn(createTurn(decoratedRun), decoratedRun)); if (!orderedRunIds.includes(run.id)) orderedRunIds.push(run.id);
     selectedRunId = run.id; renderTurns(true); renderDetails();
     // A sidebar refresh failure must not abandon an already accepted Run or
     // mislabel it as an unconfirmed send.
@@ -230,7 +287,7 @@ element('cancel').onclick = async () => {
   catch (error) { if (token === generation) { cancelling = false; busy(operationLocked); status(error.message, true); } }
 };
 function resetConversation() {
-  generation++; activeRun = undefined; cancelling = false; conversationId = crypto.randomUUID(); pending = undefined; selectedSources = [];
+  generation++; activeRun = undefined; cancelling = false; conversationRuntimeLocked = false; conversationPersisted = false; conversationId = crypto.randomUUID(); pending = undefined; selectedSources = [];
   sessionStorage.removeItem(PENDING_KEY);
   restoreConnectors();
   turns.clear(); orderedRunIds = []; selectedRunId = undefined; view.clear(); resetAttachments(); renderDetails(); resetComposerInput(element('message'));
@@ -241,19 +298,37 @@ element('new-conversation').onclick = () => {
   resetConversation(); status(element('model').value ? '新对话 · 可直接发送任务。' : '新对话 · 请选择模型后发送任务。'); busy(false);
   void conversations().catch(error => status(error.message, true));
 };
-element('runtime-select').onchange = async event => {
-  if (operationLocked) { event.target.value = runtimeId; return; }
-  runtimeId = event.target.value; generation++; activeRun = undefined; cancelling = false; conversationId = crypto.randomUUID(); pending = undefined; selectedSources = []; turns.clear(); orderedRunIds = []; selectedRunId = undefined; view.clear(); resetAttachments(); renderDetails(); element('conversation-title').textContent = '新对话';
-  busy(true); try { await refreshModels(); await conversations(); await loadConnectors(); status('已切换本机 Runtime，请选择模型后发送。'); } catch (error) { status('Runtime 切换失败，请重新读取。', true); } finally { busy(false); }
-};
+async function startRuntimeConversation(targetRuntimeId) {
+  if (operationLocked) return;
+  if (activeRun) { status('当前任务仍在执行，请完成或取消后再切换 Runtime。', true); return; }
+  const targetName = runtimeNames.get(targetRuntimeId) || targetRuntimeId;
+  const hasRounds = orderedRunIds.length > 0 || turns.size > 0;
+  const shouldRemoveEmpty = !hasRounds && conversationPersisted && conversationId;
+  busy(true);
+  try {
+    if (shouldRemoveEmpty) {
+      await api(`/api/conversations/${encodeURIComponent(conversationId)}/remove`, {});
+      preferences?.removeConversation(runtimeId, conversationId);
+    }
+    runtimeId = targetRuntimeId;
+    element('runtime-select').value = runtimeId; updateRuntimePicker();
+    resetConversation();
+    await refreshModels(); await loadConnectors(); await conversations();
+    status('');
+  } catch (error) {
+    status(`Runtime 会话切换失败：${error.message}`, true);
+  } finally { busy(false); }
+}
+element('runtime-select').onchange = event => { if (event.target.value) void startRuntimeConversation(event.target.value); };
 element('file').onchange = async event => {
   const file = event.target.files[0]; if (!file) return;
-  if (file.size > 1_048_576 || file.size === 0) { status('附件必须为 1 字节至 1 MiB。', true); return; }
+  if (file.size > 4 * 1024 * 1024 || file.size === 0) { status('附件必须为 1 字节至 4 MiB。', true); return; }
   busy(true);
   try {
     const bytes = new Uint8Array(await file.arrayBuffer()); let binary = '';
     for (const byte of bytes) binary += String.fromCharCode(byte);
     const { source } = await api('/api/sources', { conversationId, originalName: file.name, contentBase64: btoa(binary) });
+    conversationRuntimeLocked = true; conversationPersisted = true;
     selectedSources.push(source.id); element('attachments').hidden = false;
     const chip = node('span', 'source-chip'); const remove = node('button', '', '×'); remove.type = 'button'; remove.setAttribute('aria-label', `移除附件 ${source.originalName}`);
     remove.onclick = () => { if (locked) return; selectedSources = selectedSources.filter(id => id !== source.id); chip.remove(); element('attachments').hidden = selectedSources.length === 0; };
@@ -303,14 +378,14 @@ try {
   element('account-identity').textContent = session.user.email;
   await loadRuntimes(); await loadConnectors();
   const models = await refreshModels();
-  await conversations(); status(models.length ? (element('model').value ? '云端账号已登录，可直接发送任务。' : '云端账号已登录，请选择本机模型后发送。') : '云端账号已登录，尚未配置本机模型。请在本机能力设置中添加 Provider 和模型。');
+  await conversations(); status(models.length ? (element('model').value ? '请选择任务并发送。' : '请选择本机模型后发送。') : '尚未配置本机模型。请在本机能力设置中添加 Provider 和模型。');
   const saved = sessionStorage.getItem(PENDING_KEY);
   if (saved) {
     const restored = JSON.parse(saved);
     if (typeof restored.requestId !== 'string' || typeof restored.payload?.input !== 'string' || !Array.isArray(restored.payload?.uploadedSourceIds)) throw new Error('待确认发送记录无效，请检查当前标签页的本机存储。');
     if (restored.runtimeId !== undefined && typeof restored.runtimeId !== 'string') throw new Error('待确认发送记录无效，请检查当前标签页的本机存储。');
     if (restored.runtimeId && restored.runtimeId !== runtimeId) { runtimeId = restored.runtimeId; await loadRuntimes(); await refreshModels(); await loadConnectors(); }
-    pending = restored; conversationId = pending.payload.conversationId || crypto.randomUUID(); selectedSources = pending.payload.uploadedSourceIds;
+    pending = restored; conversationId = pending.payload.conversationId || crypto.randomUUID(); conversationRuntimeLocked = true; conversationPersisted = true; selectedSources = pending.payload.uploadedSourceIds;
     element('message').value = pending.payload.input; element('model').value = pending.payload.modelKey;
     const pendingConnectors = new Set(pending.payload.connectorConnectionIds || []);
     for (const checkbox of element('run-connectors').querySelectorAll('input')) checkbox.checked = pendingConnectors.has(checkbox.value);

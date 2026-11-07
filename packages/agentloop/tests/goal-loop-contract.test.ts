@@ -4,6 +4,7 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { admitPlan } from "../src/planning/admission.ts";
+import { ModelPlanner } from "../src/planning/planner.ts";
 import { ModelStepAssessor } from "../src/planning/assessor.ts";
 import { goalCriterionBasis } from "../src/planning/criterion-basis.ts";
 import { bindCanonicalPlan, createCanonicalRunState, recordCanonicalAssessment, startCanonicalStep } from "../src/runtime/canonical-run-state.ts";
@@ -19,6 +20,580 @@ import type { SqlConnection, SqlDialect } from "../src/storage/connection.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { singleStepTestPlanner, approvingTestAssessor, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
 import { HUMAN_LOOP_TOOL_NAME } from "../src/tools/human-loop-tool.ts";
+import { AppError } from "../src/shared/errors.ts";
+
+test("planning failure waits and resumes the same Run after reopening the database", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "agentloop-planning-resume-"));
+  const path = join(directory, "runtime.db");
+  let database = new AppDatabase(path);
+  let planningCalls = 0;
+  let modelCalls = 0;
+  let memoryCommits = 0;
+  const model = { limits: TEST_MODEL_LIMITS, complete: async () => {
+    modelCalls += 1;
+    return { content: "The completed result.", finishReason: "stop" as const, toolCalls: [] };
+  } };
+  const base = singleStepTestPlanner();
+  const createService = () => new RunService({ database, workspaceRoot: directory, skills: new SkillService(database),
+    memory: { name: "recovery-memory", commitExplicit: async () => { memoryCommits += 1; return { kind: "not_applicable" }; },
+      recall: async () => undefined, enqueueSettlement: async () => ({ kind: "enqueued", settlementJobId: "test", enqueuedAt: 1 }) },
+    modelFactory: () => model, assessorFactory: () => approvingTestAssessor(),
+    plannerFactory: () => ({ plan: async (task, _signal, emit) => {
+      planningCalls += 1;
+      await emit?.({ type: "planning.started", data: { maxPlanningTurns: 1 } });
+      await emit?.({ type: "planning.turn.started", data: { turn: 1 } });
+      if (planningCalls === 1) throw new AppError("PLANNING_ERROR", "Cannot produce a valid plan", 422);
+      return await base.plan(task);
+    } }),
+  });
+  try {
+    let runs = createService();
+    const started = await runs.execute("owner", "Answer the requested question.");
+    assert.equal(started.status, "running");
+    const request = await runs.currentHumanLoop("owner", started.id);
+    assert.equal(request?.origin, "planner");
+    await database.close();
+    database = new AppDatabase(path);
+    runs = createService();
+    const responses = await Promise.allSettled([
+      runs.respondHumanLoop("owner", started.id, request!.id, true, request!.revision),
+      runs.respondHumanLoop("owner", started.id, request!.id, true, request!.revision),
+    ]);
+    assert.equal(responses.filter((result) => result.status === "fulfilled").length, 1);
+    for (let attempt = 0; attempt < 200 && (await runs.get("owner", started.id)).status === "running"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const finished = await runs.get("owner", started.id);
+    assert.equal(finished.status, "completed");
+    assert.equal(finished.output, "The completed result.");
+    assert.equal(planningCalls, 2);
+    assert.equal(modelCalls, 1);
+    assert.equal(memoryCommits, 1);
+    const budget = await database.prepare("SELECT used_turns, max_turns FROM run_planning_budgets WHERE run_id = ?")
+      .get<{ used_turns: number; max_turns: number }>(started.id);
+    assert.deepEqual({ ...budget }, { used_turns: 2, max_turns: 2 });
+    const events = await runs.events("owner", started.id);
+    assert.equal(events.filter((event) => event.type === "run.started").length, 1);
+    assert.equal(events.filter((event) => event.type === "canonical_run_state.initialized").length, 1);
+    assert.equal(events.filter((event) => event.type === "run.completed").length, 1);
+  } finally {
+    await database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a safe model stream interrupted after emission enters recovery_required", async () => {
+  const database = new AppDatabase(":memory:");
+  const streamReceipt = {
+    schema: "agentloop.modelStreamReceipt/v1",
+    transport: "sse",
+    httpStatus: 200,
+    rawBytes: 128,
+    rawSha256: "a".repeat(64),
+    readChunkCount: 2,
+    sseEventCount: 1,
+    jsonEventCount: 1,
+    nonJsonEventCount: 0,
+    doneEventCount: 0,
+    unrecognizedJsonEventCount: 0,
+    unterminatedFinalEventBytes: 0,
+    finishReasonObserved: false,
+    sinkEmissionObserved: true,
+    observedDeltaFields: ["content"],
+    anomalyReasons: ["stream_consumption_failed"],
+  };
+  const model = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => ({ content: "unused", finishReason: "stop" as const, toolCalls: [] }),
+    streamComplete: async (_request: import("../src/runtime/contracts.ts").ModelInvocation, sink: import("../src/runtime/contracts.ts").ModelStreamSink) => {
+      await sink({ type: "text_delta", text: "partial" });
+      throw new AppError("MODEL_ERROR", "Model provider returned an unreadable streaming response", 502, {
+        streamFailureStage: "read",
+        streamReceipt,
+      });
+    },
+  };
+  try {
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => model,
+      plannerFactory: singleStepTestPlanner,
+      assessorFactory: () => approvingTestAssessor(),
+    });
+    const run = await runs.execute("owner", "Produce the requested result.");
+    assert.equal(run.status, "running");
+    const recovery = await runs.recoveryForRun("owner", run.id);
+    assert.equal(recovery.state?.state, "waiting_recovery");
+    assert.equal(recovery.action?.kind, "recovery_review");
+    assert.equal(recovery.action?.replayPolicy, "safe");
+    assert.equal(recovery.action?.metadata.reason, "model_stream_interrupted");
+    const actions = await runs.actionsForRun("owner", run.id);
+    assert.equal(actions.filter((action) => action.kind === "model_turn" && action.state === "failed").length, 1);
+    assert.equal(actions.filter((action) => action.kind === "recovery_review" && action.state === "recovery_required").length, 1);
+    const events = await runs.events("owner", run.id);
+    assert.equal(events.some((event) => event.type === "run.recovery_required"), true);
+    assert.equal(events.some((event) => event.type === "run.failed"), false);
+    assert.equal(events.some((event) => event.type === "failure_report.generated"), false);
+  } finally {
+    await database.close();
+  }
+});
+
+test("safe model stream recovery resumes the interrupted Step from committed evidence", async () => {
+  const database = new AppDatabase(":memory:");
+  let streamCalls = 0;
+  const streamReceipt = {
+    schema: "agentloop.modelStreamReceipt/v1",
+    transport: "sse",
+    httpStatus: 200,
+    rawBytes: 128,
+    rawSha256: "b".repeat(64),
+    readChunkCount: 2,
+    sseEventCount: 1,
+    jsonEventCount: 1,
+    nonJsonEventCount: 0,
+    doneEventCount: 0,
+    unrecognizedJsonEventCount: 0,
+    unterminatedFinalEventBytes: 0,
+    finishReasonObserved: false,
+    sinkEmissionObserved: true,
+    observedDeltaFields: ["content"],
+    anomalyReasons: ["stream_consumption_failed"],
+  };
+  const model = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => ({ content: "unused", finishReason: "stop" as const, toolCalls: [] }),
+    streamComplete: async (_request: import("../src/runtime/contracts.ts").ModelInvocation, sink: import("../src/runtime/contracts.ts").ModelStreamSink) => {
+      streamCalls += 1;
+      if (streamCalls === 1) {
+        await sink({ type: "text_delta", text: "partial" });
+        throw new AppError("MODEL_ERROR", "Model provider returned an unreadable streaming response", 502, {
+          streamFailureStage: "read",
+          streamReceipt,
+        });
+      }
+      await sink({ type: "text_delta", text: "recovered" });
+      return { content: "recovered", finishReason: "stop" as const, toolCalls: [] };
+    },
+  };
+  try {
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => model,
+      plannerFactory: singleStepTestPlanner,
+      assessorFactory: () => approvingTestAssessor(),
+      recoveryPlannerFactory: () => ({
+        decide: async (input) => ({
+          actionId: input.action.id,
+          expectedActionRevision: input.action.revision,
+          decision: "resume_step" as const,
+          rationale: "The model turn has no committed external effect and can be replayed safely.",
+          evidenceRefs: [],
+        }),
+      }),
+    });
+    const paused = await runs.execute("owner", "Produce the requested result.");
+    assert.equal(paused.status, "running");
+    const advanced = await runs.advanceRecovery("owner", paused.id);
+    assert.equal(advanced.state?.state, "ready_to_resume");
+    const resumed = await runs.resumeRecovery("owner", paused.id);
+    assert.equal(resumed.status, "completed", resumed.output);
+    assert.equal(resumed.output, "recovered");
+    assert.equal(streamCalls, 2);
+    const events = await runs.events("owner", paused.id);
+    assert.equal(events.some((event) => event.type === "recovery.resume_started"), true);
+    assert.equal(events.some((event) => event.type === "run.completed" && event.data.recovered === true), true);
+  } finally {
+    await database.close();
+  }
+});
+
+test("two delivery targets execute in separate Rounds and final Result aggregates both Round Results", async () => {
+  const database = new AppDatabase(":memory:");
+  let planningCalls = 0;
+  let executionCalls = 0;
+  let sawPriorRoundBinding = false;
+  try {
+    const goal = "请分别给出交付 A 和交付 B。";
+    const model = { limits: TEST_MODEL_LIMITS, complete: async (request: import("../src/runtime/contracts.ts").ModelInvocation) => {
+      if (request.runId.startsWith("conversation-turn:")) return { content: "", finishReason: "tool_calls" as const, toolCalls: [{
+        id: "resolve-two-targets", name: "resolve_conversation_turn", arguments: {
+          mode: "execute", relation: "new_goal", inputMode: "none", effectiveGoal: goal,
+          taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "analysis", requiresExecution: true,
+            deliverables: [
+              { targetId: "target-a", purpose: "交付 A", expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" },
+              { targetId: "target-b", purpose: "交付 B", expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" },
+            ] },
+          evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [],
+          memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
+        },
+      }] };
+      executionCalls += 1;
+      return { content: `deliverable-${executionCalls}`, finishReason: "stop" as const, toolCalls: [] };
+    } };
+    const runs = new RunService({ database, skills: new SkillService(database), modelFactory: () => model,
+      assessorFactory: () => approvingTestAssessor(), plannerFactory: () => ({ plan: async (task, _signal, emit) => {
+        planningCalls += 1;
+        await emit?.({ type: "planning.started", data: { maxPlanningTurns: 1 } });
+        await emit?.({ type: "planning.turn.started", data: { turn: 1 } });
+        if (task.targetScopeIds !== undefined) {
+          assert.deepEqual(task.targetScopeIds, ["target-b"]);
+          assert.equal(task.roundResultBindings?.length, 1);
+          assert.equal(task.priorRoundResult?.schema, "agentloop.roundResultCard/v1");
+          assert.equal(task.priorRoundResult?.roundNumber, 1);
+          assert.equal(task.priorRoundResult?.planVersion, 1);
+          assert.deepEqual(task.priorRoundResult?.decision.openTargetIds, ["target-b"]);
+          assert.equal(task.priorRoundResult?.resultRefs.length, 1);
+          sawPriorRoundBinding = true;
+        }
+        const targetId = task.targetScopeIds?.[0] ?? "target-a";
+        return { goal, shape: "multi_deliverable", selectedSkillIds: [], steps: [{
+          id: `round-${planningCalls}-deliver`, objective: `Fulfill ${targetId}`,
+          dependencies: [], role: "deliver", skillIds: [], requiredCapabilities: ["conversation_delivery"], targetIds: [targetId],
+          successCriteria: [{ id: `deliver-${targetId}`, description: `Deliver ${targetId}`, source: "task" }],
+        }] };
+      } }) });
+    const started = await runs.executeConversation("owner", goal);
+    for (let attempt = 0; attempt < 400 && (await runs.get("owner", started.id)).status === "running"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const finished = await runs.get("owner", started.id);
+    assert.equal(finished.status, "completed", finished.output);
+    assert.equal(planningCalls, 2);
+    assert.equal(executionCalls, 2);
+    assert.equal(sawPriorRoundBinding, true);
+    const rounds = await database.prepare("SELECT round_number, status, plan_id FROM run_rounds WHERE run_id = ? ORDER BY round_number")
+      .all<{ round_number: number; status: string; plan_id: string }>(started.id);
+    assert.equal(rounds.length, 2);
+    assert.deepEqual(rounds.map((round) => ({ round: round.round_number, status: round.status })), [
+      { round: 1, status: "completed" }, { round: 2, status: "completed" },
+    ]);
+    const resultRows = await database.prepare("SELECT result_json FROM run_round_results WHERE run_id = ? ORDER BY round_number")
+      .all<{ result_json: string }>(started.id);
+    assert.equal(resultRows.length, 2);
+    const roundResults = resultRows.map((row) => JSON.parse(row.result_json));
+    assert.deepEqual(roundResults.map((result) => result.decision.kind), ["next_round", "complete_goal"]);
+    assert.equal(roundResults[0].decision.openTargetIds[0], "target-b");
+    assert.deepEqual((await runs.roundHistory("owner", started.id)).map((round) => ({
+      roundNumber: round.roundNumber, status: round.status, decision: round.result?.decision.kind,
+    })), [
+      { roundNumber: 1, status: "completed", decision: "next_round" },
+      { roundNumber: 2, status: "completed", decision: "complete_goal" },
+    ]);
+    const outcome = await database.prepare("SELECT result_json FROM run_outcomes WHERE run_id = ?").get<{ result_json: string }>(started.id);
+    const finalResult = JSON.parse(outcome!.result_json);
+    assert.equal(finalResult.kind, "run");
+    assert.equal(finalResult.inputs.length, 2);
+    assert.deepEqual(new Set(finalResult.inputs.map((ref: { resultId: string }) => ref.resultId)),
+      new Set(roundResults.flatMap((result) => result.steps.map((step: { result: { resultId: string } }) => step.result.resultId))));
+  } finally { await database.close(); }
+});
+
+test("next-Round planning failure waits and resumes the same Run", async () => {
+  const database = new AppDatabase(":memory:");
+  let planningCalls = 0;
+  let executionCalls = 0;
+  let failedNextRound = false;
+  const goal = "请分别给出交付 A 和交付 B。";
+  try {
+    const model = { limits: TEST_MODEL_LIMITS, complete: async (request: import("../src/runtime/contracts.ts").ModelInvocation) => {
+      if (request.runId.startsWith("conversation-turn:")) return { content: "", finishReason: "tool_calls" as const, toolCalls: [{
+        id: "resolve-two-targets", name: "resolve_conversation_turn", arguments: {
+          mode: "execute", relation: "new_goal", inputMode: "none", effectiveGoal: goal,
+          taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "analysis", requiresExecution: true,
+            deliverables: [
+              { targetId: "target-a", purpose: "交付 A", expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" },
+              { targetId: "target-b", purpose: "交付 B", expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" },
+            ] },
+          evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [],
+          memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
+        },
+      }] };
+      executionCalls += 1;
+      return { content: `deliverable-${executionCalls}`, finishReason: "stop" as const, toolCalls: [] };
+    } };
+    const runs = new RunService({ database, skills: new SkillService(database), modelFactory: () => model,
+      assessorFactory: () => approvingTestAssessor(), plannerFactory: () => ({ plan: async (task, _signal, emit) => {
+        planningCalls += 1;
+        await emit?.({ type: "planning.started", data: { maxPlanningTurns: 1 } });
+        await emit?.({ type: "planning.turn.started", data: { turn: 1 } });
+        if (task.targetScopeIds !== undefined && !failedNextRound) {
+          failedNextRound = true;
+          throw new AppError("PLANNING_ERROR", "next-round plan failed", 422);
+        }
+        const targetId = task.targetScopeIds?.[0] ?? "target-a";
+        return { goal, shape: "multi_deliverable", selectedSkillIds: [], steps: [{
+          id: `round-${planningCalls}-deliver`, objective: `Fulfill ${targetId}`,
+          dependencies: [], role: "deliver", skillIds: [], requiredCapabilities: ["conversation_delivery"], targetIds: [targetId],
+          successCriteria: [{ id: `deliver-${targetId}`, description: `Deliver ${targetId}`, source: "task" }],
+        }] };
+      } }) });
+    const started = await runs.executeConversation("owner", goal);
+    let request = await runs.currentHumanLoop("owner", started.id);
+    for (let attempt = 0; attempt < 200 && request === undefined; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      request = await runs.currentHumanLoop("owner", started.id);
+    }
+    assert.equal(request?.origin, "planner");
+    assert.equal((await runs.get("owner", started.id)).status, "running");
+    const waitingRecovery = await database.prepare("SELECT state, resume_attempts FROM run_planning_recovery WHERE run_id = ?")
+      .get<{ state: string; resume_attempts: number }>(started.id);
+    assert.deepEqual({ ...waitingRecovery }, { state: "waiting", resume_attempts: 0 });
+    assert.equal((await runs.events("owner", started.id)).some((event) => event.type === "round.next.failed" && event.data.recoverable === true), true);
+    await runs.respondHumanLoop("owner", started.id, request!.id, true, request!.revision);
+    for (let attempt = 0; attempt < 400 && (await runs.get("owner", started.id)).status === "running"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal((await runs.get("owner", started.id)).status, "completed");
+    assert.equal(planningCalls, 3);
+    assert.equal(executionCalls, 2);
+    assert.deepEqual((await runs.roundHistory("owner", started.id)).map((round) => round.status), ["completed", "completed"]);
+    assert.equal((await database.prepare("SELECT state FROM run_planning_recovery WHERE run_id = ?").get<{ state: string }>(started.id))?.state, "completed");
+  } finally {
+    await database.close();
+  }
+});
+
+test("intent failure resumes the original Run without changing its frozen clock", async () => {
+  const database = new AppDatabase(":memory:");
+  const goal = "Explain the requested result.";
+  let resolverCalls = 0;
+  let clockValue = Date.parse("2026-11-05T00:00:00Z");
+  try {
+    const model = { limits: TEST_MODEL_LIMITS, complete: async (request: import("../src/runtime/contracts.ts").ModelInvocation) => {
+      if (request.runId.startsWith("conversation-turn:")) {
+        resolverCalls += 1;
+        if (resolverCalls <= 3) return { content: "", finishReason: "stop" as const, toolCalls: [] };
+        assert.match(request.runtimeContext?.content ?? "", /2026-11-05T00:00:00/);
+        return { content: "", finishReason: "tool_calls" as const, toolCalls: [{ id: "intent", name: "resolve_conversation_turn", arguments: {
+          mode: "execute", relation: "new_goal", inputMode: "none", effectiveGoal: goal,
+          taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "answer", requiresExecution: true,
+            deliverables: [{ targetId: "answer", purpose: goal, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
+          evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [],
+          memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
+        } }] };
+      }
+      return { content: "Completed answer.", finishReason: "stop" as const, toolCalls: [] };
+    } };
+    const runs = new RunService({ database, skills: new SkillService(database), modelFactory: () => model,
+      clock: () => clockValue, timeZone: "UTC", plannerFactory: () => singleStepTestPlanner(), assessorFactory: () => approvingTestAssessor() });
+    const run = await runs.executeConversation("owner", goal);
+    const request = await runs.currentHumanLoop("owner", run.id);
+    assert.equal(request?.origin, "planner");
+    clockValue += 86_400_000;
+    await runs.respondHumanLoop("owner", run.id, request!.id, true, request!.revision);
+    for (let attempt = 0; attempt < 200 && (await runs.get("owner", run.id)).status === "running"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal((await runs.get("owner", run.id)).status, "completed");
+    assert.equal(resolverCalls, 4);
+    const budget = await database.prepare("SELECT used_turns, max_turns FROM run_intent_budgets WHERE run_id = ?")
+      .get<{ used_turns: number; max_turns: number }>(run.id);
+    assert.deepEqual({ ...budget }, { used_turns: 4, max_turns: 6 });
+  } finally { await database.close(); }
+});
+
+test("an interrupted claimed planning recovery resumes after reconciliation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "agentloop-planning-reconcile-"));
+  const path = join(directory, "runtime.db");
+  let database = new AppDatabase(path);
+  let planningCalls = 0;
+  const model = { limits: TEST_MODEL_LIMITS, complete: async () => ({ content: "Recovered.", finishReason: "stop" as const, toolCalls: [] }) };
+  const base = singleStepTestPlanner();
+  const createService = () => new RunService({ database, workspaceRoot: directory, skills: new SkillService(database),
+    modelFactory: () => model, assessorFactory: () => approvingTestAssessor(),
+    plannerFactory: () => ({ plan: async (task, _signal, emit) => {
+      planningCalls += 1;
+      await emit?.({ type: "planning.started", data: { maxPlanningTurns: 1 } });
+      await emit?.({ type: "planning.turn.started", data: { turn: 1 } });
+      if (planningCalls === 1) return { goal: task.canonicalState.intent.userInput, selectedSkillIds: [], steps: [] };
+      return await base.plan(task);
+    } }),
+  });
+  try {
+    let runs = createService();
+    const run = await runs.execute("owner", "Answer the question.");
+    const request = await runs.currentHumanLoop("owner", run.id);
+    assert.equal(request?.origin, "planner");
+    (runs as unknown as { resumePlanningRun: () => Promise<void> }).resumePlanningRun = async () => {};
+    await runs.respondHumanLoop("owner", run.id, request!.id, true, request!.revision);
+    await database.close();
+    database = new AppDatabase(path);
+    runs = createService();
+    assert.equal(await runs.reconcileInterruptedRuns([run.id]), 1);
+    for (let attempt = 0; attempt < 200 && (await runs.get("owner", run.id)).status === "running"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal((await runs.get("owner", run.id)).status, "completed");
+    const events = await runs.events("owner", run.id);
+    assert.equal(events.filter((event) => event.type === "planning.final_admission.failed").length, 1);
+    assert.equal(events.filter((event) => event.type === "run.completed").length, 1);
+  } finally { await database.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("rejecting a planning retry cancels the original Run without granting more budget", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const model = { limits: TEST_MODEL_LIMITS, complete: async () => ({ content: "", finishReason: "length" as const, toolCalls: [] }) };
+    const runs = new RunService({ database, skills: new SkillService(database), modelFactory: () => model,
+      plannerFactory: () => new ModelPlanner(model, { maxPlanningTurns: 1 }) });
+    const run = await runs.execute("owner", "Create a report.");
+    const request = await runs.currentHumanLoop("owner", run.id);
+    assert.ok(request);
+    await runs.respondHumanLoop("owner", run.id, request.id, { accepted: false }, request.revision);
+    assert.equal((await runs.get("owner", run.id)).status, "cancelled");
+    await assert.rejects(runs.respondHumanLoop("owner", run.id, request.id, true, request.revision), /no longer accepting/);
+    const budget = await database.prepare("SELECT used_turns, max_turns FROM run_planning_budgets WHERE run_id = ?")
+      .get<{ used_turns: number; max_turns: number }>(run.id);
+    assert.deepEqual({ ...budget }, { used_turns: 1, max_turns: 1 });
+  } finally { await database.close(); }
+});
+
+test("a second planning failure terminates rather than asking or retrying indefinitely", async () => {
+  const database = new AppDatabase(":memory:");
+  let calls = 0;
+  try {
+    const model = { limits: TEST_MODEL_LIMITS, complete: async () => {
+      calls += 1;
+      return { content: "", finishReason: "length" as const, toolCalls: [] };
+    } };
+    const runs = new RunService({ database, skills: new SkillService(database), modelFactory: () => model,
+      plannerFactory: () => new ModelPlanner(model, { maxPlanningTurns: 1 }) });
+    const run = await runs.execute("owner", "Create a report.");
+    const request = await runs.currentHumanLoop("owner", run.id);
+    await runs.respondHumanLoop("owner", run.id, request!.id, true, request!.revision);
+    for (let attempt = 0; attempt < 200 && (await runs.get("owner", run.id)).status === "running"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal((await runs.get("owner", run.id)).status, "failed");
+    assert.equal(calls, 2);
+    assert.equal(await runs.currentHumanLoop("owner", run.id), undefined);
+    const budget = await database.prepare("SELECT used_turns, max_turns FROM run_planning_budgets WHERE run_id = ?")
+      .get<{ used_turns: number; max_turns: number }>(run.id);
+    assert.deepEqual({ ...budget }, { used_turns: 2, max_turns: 2 });
+  } finally { await database.close(); }
+});
+
+test("cancellation during planning recovery cannot admit a late Plan", async () => {
+  const database = new AppDatabase(":memory:");
+  let release!: () => void;
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let calls = 0;
+  try {
+    const model = { limits: TEST_MODEL_LIMITS, complete: async () => ({ content: "done", finishReason: "stop" as const, toolCalls: [] }) };
+    const base = singleStepTestPlanner();
+    const runs = new RunService({ database, skills: new SkillService(database), modelFactory: () => model,
+      plannerFactory: () => ({ plan: async (task, _signal, emit) => {
+        await emit?.({ type: "planning.started", data: { maxPlanningTurns: 1 } });
+        await emit?.({ type: "planning.turn.started", data: { turn: 1 } });
+        if (++calls === 1) throw new AppError("PLANNING_ERROR", "plan failed", 422);
+        entered();
+        await blocked;
+        return await base.plan(task);
+      } }), assessorFactory: () => approvingTestAssessor() });
+    const run = await runs.execute("owner", "Answer the question.");
+    const request = await runs.currentHumanLoop("owner", run.id);
+    await runs.respondHumanLoop("owner", run.id, request!.id, true, request!.revision);
+    await started;
+    await runs.cancel("owner", run.id);
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal((await runs.get("owner", run.id)).status, "cancelled");
+    const plans = await database.prepare("SELECT id FROM plans WHERE run_id = ?").all(run.id);
+    assert.equal(plans.length, 0);
+    assert.equal((await runs.events("owner", run.id)).some((event) => event.type === "run.completed"), false);
+  } finally { release?.(); await database.close(); }
+});
+
+test("planning recovery refuses a changed Skill version before executing tools", async () => {
+  const database = new AppDatabase(":memory:");
+  let calls = 0;
+  try {
+    const skills = new SkillService(database);
+    const skill = await skills.create("owner", { name: "sample-skill", description: "Sample", instructions: "Original instructions" });
+    const model = { limits: TEST_MODEL_LIMITS, complete: async () => ({ content: "done", finishReason: "stop" as const, toolCalls: [] }) };
+    const runs = new RunService({ database, skills, modelFactory: () => model,
+      plannerFactory: () => ({ plan: async (_task, _signal, emit) => {
+        calls += 1;
+        await emit?.({ type: "planning.started", data: { maxPlanningTurns: 1 } });
+        await emit?.({ type: "planning.turn.started", data: { turn: 1 } });
+        throw new AppError("PLANNING_ERROR", "plan failed", 422);
+      } }) });
+    const run = await runs.execute("owner", "Answer the question.");
+    const request = await runs.currentHumanLoop("owner", run.id);
+    await database.prepare("UPDATE skills SET content_hash = ? WHERE id = ?").run("changed", skill.id);
+    await runs.respondHumanLoop("owner", run.id, request!.id, true, request!.revision);
+    for (let attempt = 0; attempt < 200 && (await runs.get("owner", run.id)).status === "running"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal((await runs.get("owner", run.id)).status, "failed");
+    assert.equal(calls, 1);
+    assert.equal((await database.prepare("SELECT id FROM plans WHERE run_id = ?").all(run.id)).length, 0);
+  } finally { await database.close(); }
+});
+
+test("failed conversation intent resolution preserves its own bounded model-call budget", async () => {
+  const database = new AppDatabase(":memory:");
+  let calls = 0;
+  try {
+    const model = { limits: TEST_MODEL_LIMITS, complete: async () => {
+      calls += 1;
+      return { content: "", finishReason: "stop" as const, toolCalls: [] };
+    } };
+    const runs = new RunService({ database, skills: new SkillService(database), modelFactory: () => model });
+    const runId = (await runs.executeConversation("owner", "Prepare a report from the requested data.")).id;
+    assert.ok(runId);
+    const budget = await database.prepare("SELECT max_turns, used_turns FROM run_intent_budgets WHERE run_id = ?")
+      .get<{ max_turns: number; used_turns: number }>(runId);
+    assert.deepEqual({ ...budget }, { max_turns: 3, used_turns: 3 });
+    assert.equal(calls, 3);
+    const events = await runs.events("owner", runId);
+    assert.equal(events.filter((event) => event.type === "conversation.turn.attempt_started").length, 3);
+    assert.deepEqual(events.find((event) => event.type === "planning.intent.failed")?.data,
+      { stage: "intent_resolution", errorCode: "PLANNING_ERROR" });
+    assert.equal(events.some((event) => event.type === "canonical_run_state.initialized"), false);
+    assert.equal((await runs.get("owner", runId)).status, "running");
+    assert.equal((await runs.currentHumanLoop("owner", runId))?.origin, "planner");
+  } finally {
+    await database.close();
+  }
+});
+
+test("initial planning failure retains its structured boundary in the durable Run events", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const model = { limits: TEST_MODEL_LIMITS, complete: async () => ({
+      content: "private model response", finishReason: "length" as const, toolCalls: [],
+    }) };
+    const runs = new RunService({ database, skills: new SkillService(database),
+      modelFactory: () => model,
+      plannerFactory: () => new ModelPlanner(model, { maxPlanningTurns: 1 }),
+    });
+    const runId = (await runs.execute("owner", "Create a Markdown report.")).id;
+    assert.ok(runId);
+    const events = await runs.events("owner", runId);
+    const failure = events.find((event) => event.type === "planning.contract_failed");
+    assert.ok(failure);
+    assert.equal(failure.data.stage, "response");
+    assert.equal(failure.data.errorCode, "PLANNING_ERROR");
+    assert.equal(failure.data.planningTurn, 1);
+    assert.equal(failure.data.maxPlanningTurns, 1);
+    assert.doesNotMatch(JSON.stringify(failure.data), /private model response/);
+    assert.equal((await runs.get("owner", runId)).status, "running");
+    const round = await database.prepare("SELECT status, plan_id, revision FROM run_rounds WHERE run_id = ? AND round_number = 1")
+      .get<{ status: string; plan_id: string | null; revision: number }>(runId);
+    assert.deepEqual({ ...round }, { status: "planning", plan_id: null, revision: 1 });
+    const budget = await database.prepare("SELECT max_turns, used_turns FROM run_planning_budgets WHERE run_id = ?")
+      .get<{ max_turns: number; used_turns: number }>(runId);
+    assert.deepEqual({ ...budget }, { max_turns: 1, used_turns: 1 });
+  } finally {
+    await database.close();
+  }
+});
 
 for (const humanPause of [false, true]) {
   test(`canonical assessment gaps survive local exhaustion and drive one shared recovery path (humanPause=${humanPause})`, async () => {
@@ -118,6 +693,24 @@ for (const humanPause of [false, true]) {
       }
       const final = await runs.get("owner", run.id);
       assert.equal(final.status, "completed", final.output);
+      const round = await database.prepare("SELECT status, plan_id, revision FROM run_rounds WHERE run_id = ? AND round_number = 1")
+        .get<{ status: string; plan_id: string | null; revision: number }>(run.id);
+      assert.equal(round?.status, "completed");
+      assert.ok(round?.plan_id);
+      assert.equal(round?.revision, 3);
+      const storedResult = await database.prepare("SELECT result_json, canonical_revision FROM run_round_results WHERE run_id = ?")
+        .get<{ result_json: string; canonical_revision: number }>(run.id);
+      assert.ok(storedResult);
+      const roundResult = JSON.parse(storedResult.result_json);
+      assert.equal(roundResult.schema, "agentloop.roundResult/v1");
+      assert.equal(roundResult.planId, round.plan_id);
+      assert.equal(roundResult.canonicalRevision, storedResult.canonical_revision);
+      assert.deepEqual(roundResult.decision, { kind: "complete_goal", canonicalRevision: storedResult.canonical_revision });
+      assert.equal(roundResult.output, "The difference is 20.");
+      assert.equal(roundResult.steps.length, 1);
+      assert.equal(roundResult.steps[0].stepId, "complete-records");
+      assert.match(roundResult.steps[0].result.resultId, /^rr_/);
+      assert.ok(roundResult.steps[0].assessmentId);
       assert.equal(final.output, "The difference is 20.");
       assert.equal(sourceReads, 2);
       assert.equal(recoveryCalls, 1);

@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS canonical_run_state_revisions (
       );
 CREATE TABLE IF NOT EXISTS plans (
         id VARCHAR(191) PRIMARY KEY,
-        run_id VARCHAR(191) NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+        run_id VARCHAR(191) NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
         version BIGINT NOT NULL,
         goal LONGTEXT NOT NULL,
         selected_skill_ids_json LONGTEXT NOT NULL,

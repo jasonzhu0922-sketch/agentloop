@@ -15,7 +15,7 @@ const executor = new ComputerExecutor(process.cwd(), { commandEnvironment: envir
 async function command(command, args) {
   const result = await executor.runCommand({ command, args, cwd: '.', timeoutMs: 30000 });
   assert.equal(result.exitCode, 0, `${command}: ${result.stderr}`);
-  assert.equal(result.executionReceipt.effectScope, 'workspace', 'packaged commands must run inside the Desktop sandbox');
+  assert.equal(result.executionReceipt.effectScope, 'unbounded', 'network-capable commands can affect services outside the workspace');
   return result.stdout.trim();
 }
 const nodePath = await command('node', ['-p', 'process.execPath']);

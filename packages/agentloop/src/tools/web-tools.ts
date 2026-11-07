@@ -4,6 +4,7 @@ import { ComputerExecutor } from "../computer/computer-executor.ts";
 import { contentStructure, type ContentReference } from "../runtime/content-reference.ts";
 import { requireRecord, requireString } from "../shared/validation.ts";
 import type { RuntimeTool } from "./tool-registry.ts";
+import { renderWebPage } from "./web-render.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MIN_TIMEOUT_MS = 1_000;
@@ -51,6 +52,8 @@ interface WebFetchResult {
   readonly decoding?: WebTextDecoding;
   readonly sha256?: string;
   readonly truncated: boolean;
+  readonly renderMode?: "browser";
+  readonly renderIncomplete?: boolean;
   readonly evidenceReceipt: WebToolEvidenceReceipt;
 }
 
@@ -125,7 +128,7 @@ export function createWebTools(options: WebToolsOptions = {}): RuntimeTool<unkno
 function createFetchTool(
   options: WebToolsOptions,
   timeoutMs: number,
-): RuntimeTool<{ url: string; format: "markdown" | "text" }> {
+): RuntimeTool<{ url: string; format: "markdown" | "text"; render?: "browser" }> {
   return {
     name: "webfetch",
     description: [
@@ -133,10 +136,12 @@ function createFetchTool(
       "Follows redirects including JavaScript and meta-refresh redirects; returns { schema, url, title, content, bytes, truncated, evidenceReceipt }.",
       "Prefer this over computer_run_command + curl for reading articles, documentation, or search result pages.",
       "Readable content is saved as an immutable contentLocation with sha256 and a structural summary; read that reference for omitted details instead of fetching again.",
+      "For pages requiring JavaScript, use render=browser to render with locally installed Chrome. Browser rendering uses an isolated session and only GET/HEAD requests; it may be incomplete.",
     ].join(" "),
     inputSchema: objectSchema(["url"], {
       url: { type: "string" },
       format: { type: "string", enum: ["markdown", "text"] },
+      render: { type: "string", enum: ["browser"] },
     }),
     executionMode: "parallel",
     replaySafe: true,
@@ -150,17 +155,35 @@ function createFetchTool(
       if (format !== "markdown" && format !== "text") {
         throw badRequest('format must be either "markdown" or "text"');
       }
-      return { url, format };
+      if (record.render !== undefined && record.render !== "browser") throw badRequest('render must be "browser"');
+      return { url, format, ...(record.render === "browser" ? { render: "browser" as const } : {}) };
     },
     execute: async (context, value) => {
       const root = context.grant.workspaceRoot;
       if (root === undefined) throw forbidden("webfetch requires a Run workspace for durable content references");
-      const result = await fetchWebPage(value.url, value.format, options, timeoutMs);
+      const result = value.render === "browser"
+        ? await fetchRenderedPage(value.url, value.format, options, timeoutMs)
+        : await fetchWebPage(value.url, value.format, options, timeoutMs);
       if (result.binary) return result;
       const contentLocation = await new ComputerExecutor(root).storeContentReference(result.content);
       return { ...result, contentLocation, contentSummary: contentStructure(result.content) };
     },
   };
+}
+
+async function fetchRenderedPage(url: string, format: "markdown" | "text", options: WebToolsOptions, timeoutMs: number): Promise<WebFetchResult> {
+  let page: Awaited<ReturnType<typeof renderWebPage>>;
+  try {
+    page = await renderWebPage(url, { timeoutMs, allowPrivateTargets: options.allowPrivateTargets === true });
+  } catch (error) {
+    throw new AppError("TOOL_EXECUTION_ERROR", `Chrome rendering failed: ${error instanceof Error ? error.message : "unknown error"}`, 502);
+  }
+  const content = format === "markdown" ? htmlToMarkdown(page.html) : htmlToText(page.html);
+  const result = { schema: "agentloop.webFetch/v1" as const, url: page.url, title: extractTitle(page.html), content,
+    bytes: Buffer.byteLength(page.html), contentType: "text/html", binary: false,
+    sha256: createHash("sha256").update(page.html).digest("hex"), truncated: false,
+    renderMode: "browser" as const, renderIncomplete: page.incomplete };
+  return { ...result, evidenceReceipt: webFetchReceipt(result) };
 }
 
 function createSearchTool(
@@ -372,6 +395,8 @@ function webFetchReceipt(result: Omit<WebFetchResult, "evidenceReceipt">): WebTo
       sha256: contentSha256,
       truncated: result.truncated,
       decoding: result.decoding,
+      renderMode: result.renderMode,
+      renderIncomplete: result.renderIncomplete,
     })],
     facts: [{
       kind: "source_summary",
@@ -384,10 +409,14 @@ function webFetchReceipt(result: Omit<WebFetchResult, "evidenceReceipt">): WebTo
       sha256: contentSha256,
       truncated: result.truncated,
       decoding: result.decoding,
+      renderMode: result.renderMode,
+      renderIncomplete: result.renderIncomplete,
       textPreview: result.content.slice(0, 800),
     }],
     caveats: [
       "Full Tool result remains in canonical events; model context may receive only this structured receipt.",
+      ...(result.renderMode === "browser" ? ["Content was extracted from an isolated Chrome-rendered DOM."] : []),
+      ...(result.renderIncomplete ? ["Browser rendering may be incomplete because a resource was blocked, failed, or did not become idle."] : []),
       ...(result.binary === true ? ["Fetched resource is binary or non-text; readable page content was not extracted."] : []),
       ...(result.decoding?.lossy === true ? ["Text decoding encountered invalid byte sequences. The extracted text is incomplete evidence; do not infer facts from corrupted characters. Use another readable source."] : []),
       ...(result.truncated ? ["Web page read was truncated; fetch a narrower source before citing omitted text."] : []),
@@ -618,15 +647,27 @@ async function httpGet(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": options.userAgent ?? DEFAULT_USER_AGENT,
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-      },
-      redirect: "follow",
-      signal: controller.signal,
-    });
+    let current = url;
+    let response: Response | undefined;
+    for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+      assertSafeTarget(current, options.allowPrivateTargets === true);
+      response = await fetch(current, {
+        headers: {
+          "User-Agent": options.userAgent ?? DEFAULT_USER_AGENT,
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        },
+        redirect: "manual",
+        signal: controller.signal,
+      });
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      const location = response.headers.get("location");
+      await response.body?.cancel();
+      if (location === null) throw badRequest(`HTTP ${response.status} redirect has no location`);
+      if (hop === MAX_REDIRECT_HOPS) throw badRequest(`Too many redirects while fetching ${url}`);
+      current = new URL(location, current).toString();
+    }
+    if (response === undefined) throw badRequest(`Unable to fetch ${url}`);
     if (!response.ok) throw badRequest(`HTTP ${response.status} while fetching ${url}`);
     const contentType = response.headers.get("content-type") ?? undefined;
     const { bytes, truncated } = await readBoundedBytes(response, MAX_FETCH_BYTES);

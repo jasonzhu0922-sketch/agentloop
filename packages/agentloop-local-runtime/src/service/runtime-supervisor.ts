@@ -20,6 +20,7 @@ export type { LocalRuntimeDefinition, LocalRuntimeControl } from "../contracts/h
 import type { LocalRuntimeDefinition, LocalRuntimeControl } from "../contracts/host.ts";
 
 export interface LocalRuntimeSummary extends LocalRuntimeDefinition {
+  readonly iconKey: string;
   readonly status: LocalRuntimeLifecycleStatus;
   readonly activeRunCount: number;
   readonly pendingAction?: PendingAction;
@@ -178,6 +179,7 @@ export class LocalRuntimeSupervisor {
       const configuration = await this.configurations.configuration(row.runtime_id);
       return {
         ...toDefinition(row),
+        iconKey: configuration.iconKey,
         status: row.status,
         activeRunCount: (this.instances.get(row.runtime_id)?.activeRunIds.size ?? 0) + (this.pendingAdmissions.get(row.runtime_id) ?? 0),
         ...(row.pending_action === null ? {} : { pendingAction: row.pending_action }),

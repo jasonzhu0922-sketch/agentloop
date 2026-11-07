@@ -16,6 +16,30 @@ const MIGRATIONS: readonly SchemaMigration[] = [
     if (!(database instanceof AppDatabase)) throw new SchemaMigrationError("Assessment profile migration requires an AppDatabase facade");
     await database.installAssessmentProfileSchema();
   } },
+  { id: "runtime/0010_run_rounds", definition: "initial-run-round-lifecycle:v1", apply: async (database) => {
+    if (!(database instanceof AppDatabase)) throw new SchemaMigrationError("Run Round migration requires an AppDatabase facade");
+    await database.installRunRoundSchema();
+  } },
+  { id: "runtime/0011_planning_budget", definition: "durable-planning-turn-budget:v1", apply: async (database) => {
+    if (!(database instanceof AppDatabase)) throw new SchemaMigrationError("Planning budget migration requires an AppDatabase facade");
+    await database.installPlanningBudgetSchema();
+  } },
+  { id: "runtime/0012_intent_budget", definition: "durable-conversation-intent-turn-budget:v1", apply: async (database) => {
+    if (!(database instanceof AppDatabase)) throw new SchemaMigrationError("Intent budget migration requires an AppDatabase facade");
+    await database.installIntentBudgetSchema();
+  } },
+  { id: "runtime/0013_planning_recovery", definition: "durable-planning-recovery-context:v1", apply: async (database) => {
+    if (!(database instanceof AppDatabase)) throw new SchemaMigrationError("Planning recovery migration requires an AppDatabase facade");
+    await database.installPlanningRecoverySchema();
+  } },
+  { id: "runtime/0014_round_results", definition: "durable-assessed-round-results:v1", apply: async (database) => {
+    if (!(database instanceof AppDatabase)) throw new SchemaMigrationError("Round result migration requires an AppDatabase facade");
+    await database.installRoundResultSchema();
+  } },
+  { id: "runtime/0015_multi_plan_per_run", definition: "remove-single-plan-per-run-constraint:v1", apply: async (database) => {
+    if (!(database instanceof AppDatabase)) throw new SchemaMigrationError("Multi-Plan migration requires an AppDatabase facade");
+    await database.installMultiPlanSchema();
+  } },
 ];
 
 export async function migrateRuntimeState(database: SqlConnection): Promise<void> {

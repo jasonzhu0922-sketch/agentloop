@@ -15,6 +15,10 @@ run `d122954c-c894-4240-af9d-6f281a30689f` 因 `RUN_LIMIT_EXCEEDED` 失败：模
 
 ### 2.1 webfetch
 
+`webfetch` 支持可选参数 `render: "browser"`，通过本机已安装的 Google Chrome 执行 JavaScript，并提取渲染后的 DOM。默认仍使用静态 HTTP 抓取。运行环境需要安装 Chrome；`playwright-core` 不包含浏览器。渲染使用独立会话，不读取用户 Chrome 的 Cookie 或登录状态。
+
+渲染资源请求由 Runtime 发起，解析并校验地址后连接到已校验的 IP；仅支持 GET/HEAD，不支持 WebSocket、Service Worker 或需要登录的会话。浏览器流量配置为不可用的代理，并禁用 QUIC 和非代理 WebRTC UDP。响应包含 `renderMode` 和 `renderIncomplete`，后者表示资源受限、失败或等待页面稳定超时，不能当作正文完整的保证。每个资源、总数据量、请求数量和等待时间均有限制。
+
 - 原生 Node fetch，跟随 HTTP 与 JS/meta-refresh 重定向（最多 5 跳，跳过 baidu 等公共跳转页）。
 - HTML → markdown/text 提取，剥离噪音：`script/style/noscript/template/iframe/svg/head/header/nav/footer/aside/form/figure/figcaption/caption/datalist/optgroup/option`。
 - SSRF 防护：默认拒绝 loopback/私网/link-local 目标，`allowPrivateTargets: true` 可放开。

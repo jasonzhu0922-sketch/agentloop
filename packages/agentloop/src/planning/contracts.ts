@@ -171,6 +171,26 @@ export interface TaskSpec {
   readonly capabilityRecovery?: CapabilityRecoveryCatalog;
   /** Planner-only projection compiled by an optional Local Agent Memory plugin. */
   readonly memoryProjection?: MemoryProjection;
+  /** Server-owned Results handed from the immediately completed Round. */
+  readonly roundResultBindings?: readonly RuntimeResultBinding[];
+  /** Server-owned summary of the immediately completed Round. It is context, not completion authority. */
+  readonly priorRoundResult?: RoundResultCard;
+  /** Canonical delivery targets this Round is allowed to own. */
+  readonly targetScopeIds?: readonly string[];
+}
+
+export interface RoundResultCard {
+  readonly schema: "agentloop.roundResultCard/v1";
+  readonly roundNumber: number;
+  readonly planId: string;
+  readonly planVersion: number;
+  readonly outputSummary: string;
+  readonly decision: {
+    readonly kind: "next_round";
+    readonly openGapIds: readonly string[];
+    readonly openTargetIds: readonly string[];
+  };
+  readonly resultRefs: readonly RuntimeResultRef[];
 }
 
 export interface CapabilityRecoveryCatalog {

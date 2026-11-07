@@ -24,3 +24,32 @@ test("Desktop search requires explicit opt-in and reads only search settings", a
   await writeFile(join(root, ".env"), "STEP_MAX_TURNS=0\n");
   await assert.rejects(desktopRuntimeEnvironment(root), /step_max_turns_invalid/);
 });
+
+test("installed turn defaults can be overridden independently by device configuration", async t => {
+  const root = await mkdtemp(join(tmpdir(), "desktop-turn-defaults-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const defaults = { planningMaxTurns: 8, stepMaxTurns: 64 };
+  assert.deepEqual(await desktopRuntimeEnvironment(root, defaults), defaults);
+  await writeFile(join(root, ".env"), "STEP_MAX_TURNS=40\n");
+  assert.deepEqual(await desktopRuntimeEnvironment(root, defaults), { planningMaxTurns: 8, stepMaxTurns: 40 });
+  await writeFile(join(root, ".env"), "STEP_MAX_TURNS=257\n");
+  await assert.rejects(desktopRuntimeEnvironment(root, defaults), /step_max_turns_invalid/);
+});
+
+test("packaged search defaults can be disabled or configured on the device", async t => {
+  const root = await mkdtemp(join(tmpdir(), "desktop-web-defaults-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const defaults = { webSearch: { searchProvider: "baidu" as const } };
+  assert.deepEqual(await desktopRuntimeEnvironment(root, defaults), defaults);
+  await writeFile(join(root, ".env"), "WEB_SEARCH_DISABLED=1\n");
+  assert.deepEqual(await desktopRuntimeEnvironment(root, defaults), {});
+  await writeFile(join(root, ".env"), "WEB_SEARCH_DISABLED=0\nWEB_SEARCH_PROVIDER=bocha\nWEB_SEARCH_ENDPOINT=https://search.example/v1\nWEB_SEARCH_API_KEY=secret\n");
+  assert.deepEqual(await desktopRuntimeEnvironment(root, defaults), { webSearch: { searchProvider: "bocha", searchEndpoint: "https://search.example/v1", searchApiKey: "secret" } });
+});
+
+test("incomplete legacy Bocha environment does not block Desktop startup", async t => {
+  const root = await mkdtemp(join(tmpdir(), "desktop-web-incomplete-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, ".env"), "WEB_SEARCH_DISABLED=0\nWEB_SEARCH_PROVIDER=bocha\nWEB_SEARCH_ENDPOINT=https://search.example/v1\n");
+  assert.deepEqual(await desktopRuntimeEnvironment(root), {});
+});

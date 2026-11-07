@@ -6,6 +6,7 @@ import type {
   RuntimeInstance,
   RuntimeProfile,
   RuntimeRunStatus,
+  RuntimeRoundHistoryEntry,
   SubmitConversationTask,
 } from "../../shared/contracts.ts";
 import type { RuntimeArtifact } from "../../shared/contracts.ts";
@@ -76,6 +77,13 @@ export class MultiRuntimeRouter {
     if (projection === undefined) return undefined;
     const endpoint = this.runtimes.get(projection.assignment.runtimeId)?.endpoint;
     return { assignment: projection.assignment, artifacts: await endpoint?.artifacts?.(projection.assignment.remoteRunId) ?? projection.run?.artifacts ?? [] };
+  }
+
+  async rounds(id: string): Promise<{ readonly assignment: RuntimeAssignment; readonly rounds: readonly RuntimeRoundHistoryEntry[] } | undefined> {
+    const projection = await this.assignment(id);
+    if (projection === undefined) return undefined;
+    const endpoint = this.runtimes.get(projection.assignment.runtimeId)?.endpoint;
+    return { assignment: projection.assignment, rounds: await endpoint?.rounds?.(projection.assignment.remoteRunId) ?? [] };
   }
 
   async readArtifact(id: string, artifactId: string): Promise<{ readonly assignment: RuntimeAssignment; readonly artifact: RuntimeArtifact; readonly content: Uint8Array } | undefined> {

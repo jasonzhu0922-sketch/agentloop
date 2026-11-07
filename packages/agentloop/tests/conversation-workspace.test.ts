@@ -584,22 +584,15 @@ test("a malformed canonical turn resolution exhausts bounded repair and never fa
 
     const prior = await runs.execute(owner.user.id, "write merged_output.pdf as initial", { allowDangerousTools: true });
     const plannerCallsBeforeFollowUp = plannerCalls;
-    let failedRunId: string | undefined;
-    await assert.rejects(
-      () => runs.executeConversation(owner.user.id, "现在把合并文件拆分为平均的 4 份", {
+    const paused = await runs.executeConversation(owner.user.id, "现在把合并文件拆分为平均的 4 份", {
         allowDangerousTools: true,
         conversationId: prior.conversationId,
-      }),
-      (error: unknown) => {
-        failedRunId = error instanceof AppError && typeof error.details?.runId === "string" ? error.details.runId : undefined;
-        return error instanceof AppError && error.code === "PLANNING_ERROR" && /canonical contract after 3 attempts/.test(error.message);
-      },
-    );
-
-    assert.ok(failedRunId);
+      });
+    assert.equal(paused.status, "running");
+    assert.equal((await runs.currentHumanLoop(owner.user.id, paused.id))?.origin, "planner");
     assert.equal(model.resolverAttempts, 3);
     assert.equal(plannerCalls, plannerCallsBeforeFollowUp);
-    const events = await runs.events(owner.user.id, failedRunId);
+    const events = await runs.events(owner.user.id, paused.id);
     assert.equal(events.filter((event) => event.type === "conversation.turn.resolution_rejected").length, 3);
     assert.equal(events.some((event) => event.type === "conversation.turn.resolved"), false);
   } finally {
@@ -816,12 +809,11 @@ test("conversation resolver preserves a concrete contract error after three unre
       } }),
       plannerFactory: () => ({ plan: async () => { plannerCalls += 1; throw new Error("invalid resolution reached Planner"); } }),
     });
-    await assert.rejects(() => runs.executeConversation(owner.user.id, "生成一个 PDF 文件"), (error: unknown) => {
-      assert.ok(error instanceof AppError);
-      assert.match(error.message, /canonical contract after 3 attempts/);
-      assert.match(String(error.details?.repairFeedback), /requiredCapabilityReferences must be/);
-      return true;
-    });
+    const paused = await runs.executeConversation(owner.user.id, "生成一个 PDF 文件");
+    assert.equal(paused.status, "running");
+    assert.equal((await runs.currentHumanLoop(owner.user.id, paused.id))?.origin, "planner");
+    const events = await runs.events(owner.user.id, paused.id);
+    assert.match(String(events.filter((event) => event.type === "conversation.turn.resolution_rejected").at(-1)?.data.feedback), /requiredCapabilityReferences must be/);
     assert.equal(attempts, 3);
     assert.equal(plannerCalls, 0);
   } finally {

@@ -155,12 +155,11 @@ for (const outcome of ["model_clarifies", "binding_unresolved", "invalid_shape"]
     });
     const execute = () => service.executeConversation("owner", "把上一轮的分析结果生成 HTML 汇总");
     if (outcome === "invalid_shape") {
-      await assert.rejects(execute, (error: unknown) => {
-        assert.ok(error instanceof AppError);
-        assert.match(error.message, /canonical contract after 3 attempts/);
-        assert.match(String(error.details?.repairFeedback), /memoryAction must be/);
-        return true;
-      });
+      const paused = await execute();
+      assert.equal(paused.status, "running");
+      assert.equal((await service.currentHumanLoop("owner", paused.id))?.origin, "planner");
+      const events = await service.events("owner", paused.id);
+      assert.match(String(events.filter((event) => event.type === "conversation.turn.resolution_rejected").at(-1)?.data.feedback), /memoryAction must be/);
       assert.equal(plannerCalls, 0);
     } else {
       const run = await execute();

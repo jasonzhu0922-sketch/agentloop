@@ -92,6 +92,46 @@ test("planning extension errors fail open to the normal Planner", async () => {
   }
 });
 
+test("final admission records both rejected extension and fallback Planner candidates", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-planning-admission-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const proposal = { goal: "Produce the requested answer", selectedSkillIds: [], steps: [] };
+    const extension: PlanningExtension = {
+      name: "invalid-extension",
+      beforePlanning: async () => ({
+        kind: "plan_proposal", proposal,
+        source: { kind: "planning_extension", extensionName: "invalid-extension" },
+      }),
+    };
+    const runs = new RunService({ database, skills: new SkillService(database), workspaceRoot: workspace,
+      modelFactory: () => new StaticModel("unused"),
+      plannerFactory: () => ({ plan: async () => proposal }),
+      planningExtensions: [extension],
+    });
+    let runId = "";
+    await assert.rejects(runs.execute("owner", "Produce the requested answer"), (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "PLAN_NOT_ADMITTED");
+      runId = String((error as { details?: { runId?: string } }).details?.runId ?? "");
+      return true;
+    });
+    assert.ok(runId);
+    const events = await runs.events("owner", runId);
+    const failures = events.filter((event) => event.type === "planning.final_admission.failed");
+    assert.equal(failures.length, 2);
+    assert.deepEqual(failures.map((event) => event.data), [
+      { stage: "final_admission", errorCode: "PLAN_NOT_ADMITTED",
+        source: { kind: "planning_extension", extensionName: "invalid-extension" } },
+      { stage: "final_admission", errorCode: "PLAN_NOT_ADMITTED" },
+    ]);
+    assert.ok(failures[0]!.seq < failures[1]!.seq);
+    assert.equal((await runs.get("owner", runId)).status, "failed");
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
 class ContextAssertingPlanner implements Planner {
   seenContext = false;
   private readonly requireContext: boolean;

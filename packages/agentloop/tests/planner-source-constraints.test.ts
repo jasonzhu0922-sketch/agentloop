@@ -133,7 +133,7 @@ test("Planner previews a proposal against the selected Skill capability closure"
     ],
   };
   let calls = 0;
-  const failures: string[] = [];
+  const failures: Array<Readonly<Record<string, unknown>>> = [];
   const model: ModelAdapter = {
     limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
     async complete(): Promise<ModelResponse> {
@@ -172,17 +172,47 @@ test("Planner previews a proposal against the selected Skill capability closure"
   };
 
   const proposal = await new ModelPlanner(model, { maxPlanningTurns: 2 }).plan(task, undefined, async (event) => {
-    if (event.type === "planning.contract_failed") failures.push(String(event.data.validationError));
+    if (event.type === "planning.contract_failed") failures.push(event.data);
   });
 
   assert.equal(calls, 2);
   assert.equal(failures.length, 1);
   // Inventory knowledge does not expand the selected Skill execution closure.
   // The preview rejects this capability before it can reach Plan admission.
-  assert.match(failures[0]!, /requires unknown capabilities:/);
-  assert.ok(failures[0]!.includes(unselectedCapability));
+  assert.match(String(failures[0]!.validationError), /requires unknown capabilities:/);
+  assert.ok(String(failures[0]!.validationError).includes(unselectedCapability));
+  assert.equal(failures[0]!.stage, "admission");
+  assert.equal(failures[0]!.errorCode, "PLAN_NOT_ADMITTED");
+  assert.equal(failures[0]!.planningTurn, 1);
+  assert.equal(failures[0]!.maxPlanningTurns, 2);
   assert.deepEqual(proposal.steps[0]?.requiredCapabilities, [selectedCapability]);
   assert.deepEqual(proposal.steps[0]?.skillIds, [selectedSource.id]);
+});
+
+test("Planner records response and proposal failure boundaries without retaining model content", async () => {
+  for (const [kind, response, stage] of [
+    ["truncated response", { content: "private response", finishReason: "length", toolCalls: [] }, "response"],
+    ["invalid proposal", { content: "private response", finishReason: "tool_calls", toolCalls: [
+      { id: "invalid", name: "submit_outcome_plan", arguments: {} },
+    ] }, "proposal"],
+  ] as const) {
+    const events: Array<Readonly<Record<string, unknown>>> = [];
+    const model: ModelAdapter = {
+      limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
+      complete: async () => response,
+    };
+    await assert.rejects(new ModelPlanner(model, { maxPlanningTurns: 1 }).plan(
+      planningRetryTask(), undefined, async (event) => {
+        if (event.type === "planning.contract_failed") events.push(event.data);
+      },
+    ), kind);
+    assert.equal(events.length, 1, kind);
+    assert.equal(events[0]!.stage, stage, kind);
+    assert.equal(events[0]!.errorCode, "PLANNING_ERROR", kind);
+    assert.equal(events[0]!.planningTurn, 1, kind);
+    assert.equal(events[0]!.maxPlanningTurns, 1, kind);
+    assert.doesNotMatch(JSON.stringify(events[0]), /private response/, kind);
+  }
 });
 
 function retryingPlannerModel(): { readonly model: ModelAdapter; readonly calls: () => number } {
@@ -1048,6 +1078,7 @@ test("Planner stops repeated ownership failures and respects the total turn budg
     await t.test(repeated ? "same violation stops early" : "different violations cannot exceed turn limit", async () => {
       const fixture = webpageSummaryPlanningFixture();
       let calls = 0;
+      const decisions: Array<Readonly<Record<string, unknown>>> = [];
       const planner = new ModelPlanner({
         limits: { contextWindowTokens: 40_000, maxOutputTokens: 4_096 },
         async complete() {
@@ -1055,8 +1086,13 @@ test("Planner stops repeated ownership failures and respects the total turn budg
           return fixture.response(!repeated && calls === 1 ? "quote" : "ownership");
         },
       }, { maxPlanningTurns: repeated ? 8 : 2 });
-      await assert.rejects(planner.plan(fixture.task), /multiply owned webpage-summary/);
+      await assert.rejects(planner.plan(fixture.task, undefined, async (event) => {
+        if (event.type === "planning.repair.decided") decisions.push(event.data);
+      }), /multiply owned webpage-summary/);
       assert.equal(calls, 2);
+      assert.equal(decisions[0]!.decision, "retry");
+      assert.equal(decisions[1]!.decision, repeated ? "repeated_failure" : "budget_exhausted");
+      assert.equal(decisions[1]!.planningTurn, 2);
     });
   }
 });

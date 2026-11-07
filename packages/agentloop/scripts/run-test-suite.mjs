@@ -6,6 +6,7 @@ const suites = Object.freeze({
     "tests/assessment-contract.test.ts",
     "tests/assessment-identity.test.ts",
     "tests/goal-loop-contract.test.ts",
+    "tests/run-round.test.ts",
     "tests/skill-identity.test.ts",
     "tests/capability-unavailable.test.ts",
     "tests/canonical-run-state.test.ts",

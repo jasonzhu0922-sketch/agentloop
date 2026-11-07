@@ -200,7 +200,9 @@ export class RuntimeActionRepository {
   async reconcileRunningRuns(runIds?: readonly string[]): Promise<InterruptedRunRecord[]> {
     const scopedRunIds = runIds === undefined ? undefined : [...new Set(runIds)];
     if (scopedRunIds !== undefined && scopedRunIds.length === 0) return [];
-    const runScope = scopedRunIds === undefined ? "" : ` AND runs.id IN (${scopedRunIds.map(() => "?").join(", ")})`;
+    const runScope = `${scopedRunIds === undefined ? "" : ` AND runs.id IN (${scopedRunIds.map(() => "?").join(", ")})`}
+      AND NOT EXISTS (SELECT 1 FROM run_planning_recovery planning_recovery
+        WHERE planning_recovery.run_id = runs.id AND planning_recovery.state = 'resuming')`;
     const now = Date.now();
     const interrupted: InterruptedRunRecord[] = [];
     await this.database.transaction(async () => {
@@ -382,8 +384,9 @@ export class RuntimeActionRepository {
     readonly stepId?: string;
     readonly reason: string;
     readonly metadata?: Readonly<Record<string, unknown>>;
+    readonly replayPolicy?: ReplayPolicy;
   }): Promise<RuntimeActionRecord> {
-    return this.requireRecoveryReviewWithPolicy(input, "unsafe");
+    return this.requireRecoveryReviewWithPolicy(input, input.replayPolicy ?? "unsafe");
   }
 
   /** Persist an internal repair boundary without pausing the Run for UI-driven recovery. */

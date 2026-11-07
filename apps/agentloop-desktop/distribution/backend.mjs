@@ -41,6 +41,7 @@ try {
   desktop = await startDesktop({
     computerCommandEnvironment,
     mode: 'packaged', dataDirectory: process.env.AGENTLOOP_DESKTOP_DATA_DIR,
+    runtimeTurnDefaults: { ...config.turnDefaults, webSearch: config.searchDefaults },
     webDirectory: join(root, 'web'), openBrowser: false,
     cloudAuth: new CloudAccountAuth(config.accountServiceUrl),
     connectorModules: [

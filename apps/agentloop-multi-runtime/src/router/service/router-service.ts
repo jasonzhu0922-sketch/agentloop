@@ -1,4 +1,4 @@
-import type { RuntimeArtifact, RuntimeCommandOutput, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
+import type { RuntimeArtifact, RuntimeCommandOutput, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRoundHistoryEntry, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
 import type { ModelInvocation, ModelResponse, ModelRetryReporter, ModelStreamSink } from "@zhujun/agentloop";
 import {
   RuntimeCapacityError,
@@ -188,6 +188,14 @@ export class RouterService {
     const artifacts = await this.endpointFactory(assignment.runtimeEndpoint).artifacts?.(assignment.remoteRunId) ?? [];
     if (assignment.runtimeEndpoint.startsWith("local-runtime://")) return { assignment, artifacts };
     return { assignment, artifacts: await this.captureArtifacts(assignment, artifacts) };
+  }
+
+  async rounds(id: string): Promise<{ readonly assignment: StoredAssignment; readonly rounds: readonly RuntimeRoundHistoryEntry[] } | undefined> {
+    const assignment = await this.store.assignment(id);
+    if (assignment === undefined) return undefined;
+    if (assignment.remoteRunId.length === 0) return { assignment, rounds: [] };
+    const rounds = await this.endpointFactory(assignment.runtimeEndpoint).rounds?.(assignment.remoteRunId) ?? [];
+    return { assignment, rounds };
   }
 
   async readArtifact(id: string, artifactId: string): Promise<{ readonly assignment: StoredAssignment; readonly artifact: RuntimeArtifact; readonly content: Uint8Array } | undefined> {

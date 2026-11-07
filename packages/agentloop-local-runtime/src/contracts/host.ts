@@ -45,6 +45,9 @@ export interface ResolvedLocalRuntimeConfiguration {
   readonly customSkillDirectories: readonly string[];
   readonly mcpServers: readonly McpServerRegistration[];
   readonly integrationEnvironment: Readonly<Record<string, string | undefined>>;
+  /** Account-scoped web search configuration. The API key is resolved only
+   * inside the Runtime factory and is never part of the management projection. */
+  readonly webSearch?: WebToolsOptions;
   readonly memory?: { readonly enabled: boolean; readonly settlementModelKey?: string };
 }
 

@@ -7,6 +7,7 @@ import type {
   RuntimeHumanLoopResponse,
   RuntimeRecoveryDetail,
   RuntimeRunEvent,
+  RuntimeRoundHistoryEntry,
   RuntimeToolArguments,
 } from "../../shared/contracts.ts";
 import type { RuntimeHostRun, RuntimeHostRunPort, RuntimeRunCheckpoint } from "../ports/runtime-run-port.ts";
@@ -35,6 +36,22 @@ export class AgentLoopRuntimeRunPort implements RuntimeHostRunPort {
 
   async get(actorUserId: string, runId: string): Promise<RuntimeHostRun> {
     return await this.runs.get(actorUserId, runId);
+  }
+
+  async roundHistory(actorUserId: string, runId: string): Promise<readonly RuntimeRoundHistoryEntry[]> {
+    const history = await this.runs.roundHistory(actorUserId, runId);
+    return history.map((round) => ({
+      roundNumber: round.roundNumber,
+      status: round.status,
+      ...(round.planId === undefined ? {} : { planId: round.planId }),
+      revision: round.revision,
+      ...(round.result === undefined ? {} : {
+        result: {
+          ...round.result,
+          output: round.result.output.length <= 8_000 ? round.result.output : `${round.result.output.slice(0, 7_999)}...`,
+        },
+      }),
+    }));
   }
 
   async cancel(actorUserId: string, runId: string): Promise<RuntimeHostRun> {

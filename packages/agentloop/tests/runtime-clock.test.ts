@@ -76,14 +76,19 @@ for (const fixture of [
       // provenance for the selected mail query.
       await database.prepare("INSERT INTO runs (id, owner_user_id, conversation_id, depth, status, input, created_at) VALUES ('unrelated', 'owner', 'mail-conversation', 0, 'completed', '解释上个月这个时间范围', 3)").run();
       priorRunId = priorStatus === "failed" ? "failed-mail" : "completed-mail";
-      await assert.rejects(() => service.executeConversation("owner", followup, { conversationId: "mail-conversation" }), (error: unknown) => {
-        assert.ok(error instanceof AppError);
-        if (invalidQuote) {
-          assert.match(error.message, /canonical contract after 3 attempts/);
-          assert.match(String(error.details?.repairFeedback), /Rejected expression: "上个月"/);
-        } else assert.match(error.message, /verified follow-up reached Planner/);
-        return true;
-      });
+      if (invalidQuote) {
+        const paused = await service.executeConversation("owner", followup, { conversationId: "mail-conversation" });
+        assert.equal(paused.status, "running");
+        assert.equal((await service.currentHumanLoop("owner", paused.id))?.origin, "planner");
+        const events = await service.events("owner", paused.id);
+        assert.equal(events.some((event) => event.type === "canonical_run_state.initialized"), false);
+      } else {
+        await assert.rejects(() => service.executeConversation("owner", followup, { conversationId: "mail-conversation" }), (error: unknown) => {
+          assert.ok(error instanceof AppError);
+          assert.match(error.message, /verified follow-up reached Planner/);
+          return true;
+        });
+      }
       assert.equal(attempts, invalidQuote ? 3 : 2);
       assert.equal(reachedPlanner, !invalidQuote);
     } finally { database.close(); await rm(root, { recursive: true, force: true }); }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ModelPlanner } from "../src/planning/planner.ts";
-import { runAgentLoop } from "../src/runtime/agent-loop.ts";
+import { deliveryClaimsForCurrentTargetBindings, runAgentLoop } from "../src/runtime/agent-loop.ts";
 import { buildRuntimeDeliveryCandidate } from "../src/runtime/delivery-candidate.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
@@ -28,6 +28,22 @@ import { AppError } from "../src/shared/errors.ts";
 import { ToolRegistry } from "../src/tools/tool-registry.ts";
 import type { RuntimeTool } from "../src/tools/tool-registry.ts";
 import { TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
+
+test("plural delivery claim requires every bound instance to have matching acceptance", () => {
+  const targets = [1, 2, 3].map((n) => ({ targetId: `pdf.${n}`, deliveryTargetId: "pdf" }));
+  const bindings = targets.map((target, index) => ({ ...target, path: `part${index + 1}.pdf`, versionId: `v${index}`,
+    bytes: 10, sha256: String(index + 1).repeat(64), observedByToolCallId: "split" }));
+  const evidence = bindings.map((binding, index) => ({ toolCallId: `verify-${index}`, toolName: "verify_artifact_acceptance", isError: false,
+    result: JSON.stringify({ schema: "agentloop.artifactAcceptance/v1", artifact: { path: binding.path, sha256: binding.sha256 }, verdict: "accepted" }) }));
+  assert.deepEqual(deliveryClaimsForCurrentTargetBindings(bindings, evidence.slice(0, 2), targets), []);
+  const claims = deliveryClaimsForCurrentTargetBindings(bindings, evidence, targets);
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0]?.targetId, "pdf");
+  assert.deepEqual(claims[0]?.artifacts?.map((item) => item.path), bindings.map((item) => item.path));
+  assert.deepEqual(deliveryClaimsForCurrentTargetBindings(bindings.slice(0, 2), evidence, targets), []);
+  assert.deepEqual(deliveryClaimsForCurrentTargetBindings(bindings, evidence.map((item, index) => index === 1
+    ? { ...item, result: JSON.stringify({ schema: "agentloop.artifactAcceptance/v1", artifact: { path: bindings[1]!.path, sha256: "f".repeat(64) }, verdict: "accepted" }) } : item), targets), []);
+});
 
 test("parallel tools settle into model source order while completion events stay truthful", async () => {
   const model = new ParallelScenarioModel();
@@ -2993,6 +3009,65 @@ test("a truncated unexecuted Tool call receives the same bounded-action repair i
     event.type === "tool.rejected" && event.data.toolCallId === "oversized" && event.data.failurePhase === "runtime",
   ), true);
   assert.equal(events.filter((event) => event.type === "loop.candidate_repair_grace_granted").length, 1);
+});
+
+test("repeated output-truncated Tool calls stop instead of consuming the whole Run budget", async () => {
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["computer_write_file"]);
+  const registry = new ToolRegistry([{
+    name: "computer_write_file",
+    description: "Write a file in bounded chunks.",
+    inputSchema: {
+      type: "object",
+      properties: { path: { type: "string" }, content: { type: "string", maxLength: 48_000 } },
+      required: ["path", "content"],
+    },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => ({ ok: true }),
+  }]);
+  let calls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      calls += 1;
+      return {
+        content: "",
+        finishReason: "length",
+        toolCalls: [{
+          id: `oversized-${calls}`,
+          name: "computer_write_file",
+          arguments: '{"path":"deck.json","content":"unterminated',
+        }],
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: grant.runId,
+      systemPrompt: "Create the requested artifact.",
+      input: "create a large artifact",
+      model,
+      tools: registry,
+      grant,
+      maxSteps: 20,
+      candidateRepairGraceSteps: 4,
+      deferFailureReport: true,
+      emit: (event) => { events.push(event); },
+    }),
+    (error: unknown) => error !== null
+      && typeof error === "object"
+      && "code" in error
+      && (error as { code: unknown }).code === "RUN_LIMIT_EXCEEDED",
+  );
+  assert.equal(calls, 3);
+  assert.equal(events.filter((event) => event.type === "loop.no_progress").length, 2);
+  assert.match(
+    events.filter((event) => event.type === "loop.no_progress").at(-1)?.data.reason ?? "",
+    /repeated an output-truncated Tool call/u,
+  );
 });
 
 test("modify-artifact writes overwrite a same-Run read target without another model turn", async () => {

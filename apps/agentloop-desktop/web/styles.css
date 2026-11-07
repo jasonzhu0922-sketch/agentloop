@@ -11,6 +11,8 @@
 .session { width:100%; }
 .session:disabled { opacity:.55; }
 .session-wrap.active { background:var(--brand-soft); }
+.session-runtime { overflow:hidden; color:var(--text-3); font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+.session-runtime-icon { flex:none; width:22px; height:22px; object-fit:contain; border-radius:7px; background:var(--bg-2); }
 .session-delete:focus-visible { opacity:1; outline:2px solid var(--brand); outline-offset:1px; }
 .local-capability-head .local-agent-state { font-size:10px; }
 .msg-text { overflow-wrap:anywhere; }
@@ -35,17 +37,30 @@
 .msg.user .msg-body { max-width:78%; }
 .messages:empty { display:none; }
 .msg-meta { margin-top:10px; color:var(--text-3); font-size:11px; }
-.composer { border-top:0; background:transparent; }
-.composer-box { background:var(--bg-2); }
+.composer { position:relative; border-top:0; background:transparent; }
+.composer-box { position:relative; background:var(--bg-2); }
 .composer-input { min-height:48px; }
 .composer-bar { flex-wrap:wrap; }
 .composer-status { min-height:18px; margin:0 0 8px; color:var(--text-3); font-size:11px; overflow-wrap:anywhere; }
 .composer-status.error { color:var(--bad); }
 .desktop-footnote { margin:7px 0 0; color:var(--text-3); font-size:10px; text-align:center; }
-.local-runtime-picker { display:flex; align-items:center; min-width:0; margin-top:2px; padding:7px 0 0; border-top:1px solid var(--border); }
-.local-runtime-select { width:100%; min-width:0; min-height:30px; appearance:none; border:1px solid var(--border); border-radius:7px; background:var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='m4 6 4 4 4-4' stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right 9px center / 14px; color:var(--text); padding:5px 28px 5px 8px; font-size:11px; font-weight:600; outline:0; cursor:pointer; }
-.local-runtime-select:focus-visible { border-color:var(--brand); box-shadow:0 0 0 3px var(--brand-soft); }
-.local-runtime-select:disabled { cursor:not-allowed; opacity:.55; }
+.runtime-dock { position:absolute; z-index:2; left:50%; top:-48px; display:flex; align-items:center; gap:8px; min-height:42px; padding:0; background:transparent; transform:translateX(-50%); }
+.runtime-dock-copy { display:none; }
+.runtime-dock-copy small { color:var(--text-3); font-size:10px; }
+.runtime-robots { display:flex; align-items:center; gap:4px; min-width:0; overflow:visible; padding:1px; }
+.runtime-robot { display:grid; justify-items:center; gap:2px; min-width:46px; padding:2px 4px; border:1px solid transparent; border-radius:9px; background:transparent; color:var(--text-2); cursor:pointer; font-size:9px; font-weight:650; }
+.runtime-robot img { width:30px; height:30px; border-radius:10px; background:var(--bg-2); object-fit:contain; transition:transform .16s ease, filter .16s ease; }
+.runtime-robot:hover img,.runtime-robot:focus-visible img { transform:translateY(-2px); filter:drop-shadow(0 5px 8px rgba(30,45,80,.18)); }
+.runtime-robot.current { border-color:transparent; background:transparent; color:var(--brand); }
+.runtime-robot.current img { filter:drop-shadow(0 3px 7px color-mix(in srgb, var(--brand) 38%, transparent)); }
+.runtime-robot:disabled { cursor:not-allowed; opacity:.5; }
+.local-runtime-select:focus-visible { outline:0; }
+.runtime-robots.runtime-arc { position:relative; width:40px; height:40px; }
+.runtime-hub { display:grid; place-items:center; width:40px; height:40px; padding:3px; border:0; border-radius:50%; background:transparent; cursor:pointer; }
+.runtime-hub img { width:30px; height:30px; padding:2px; border-radius:50%; object-fit:contain; }
+.runtime-robots.runtime-arc .runtime-robot { position:absolute; left:50%; top:50%; min-width:34px; padding:2px; opacity:0; pointer-events:none; transform:translate(-50%,-50%) translate(0,0) scale(.65); transition:opacity .16s ease, transform .2s ease; }
+.runtime-robots.runtime-arc:hover .runtime-robot,.runtime-robots.runtime-arc:focus-within .runtime-robot { opacity:1; pointer-events:auto; transform:translate(-50%,-50%) translate(var(--arc-x),var(--arc-y)) scale(1); }
+.runtime-robots.runtime-arc .runtime-robot img { width:32px; height:32px; }
 .desktop-run-connectors { display:flex; flex-wrap:wrap; align-items:center; gap:7px; margin:0 0 7px; font-size:11px; }
 .desktop-connector-title { color:var(--text-3); }
 .desktop-connector-choice { display:inline-flex; align-items:center; gap:4px; padding:4px 7px; border:1px solid var(--border); border-radius:999px; background:var(--bg-2); }
@@ -87,6 +102,7 @@ button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid va
   .topbar { padding:10px 12px; gap:8px; }
   .status-pill { display:none; }
   .topbar-right { flex:none; }
+  .runtime-dock { top:-44px; }
   .empty-state { padding:50px 20px 30px; }
   .empty-state h2 { font-size:22px; }
   .composer { padding:10px 14px 12px; }
@@ -152,8 +168,9 @@ button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid va
  * Local Agent settings. Transport and persistence remain Desktop-owned. */
 .desktop-settings.agent-settings-card {
   width:min(1080px,calc(100vw - 48px));
-  height:min(820px,calc(100dvh - 48px));
-  max-height:none;
+  height:auto;
+  min-height:min(620px,calc(100dvh - 48px));
+  max-height:calc(100dvh - 48px);
   grid-template-rows:auto minmax(0,1fr) auto;
   padding:22px;
   gap:16px;
@@ -205,6 +222,7 @@ button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid va
   color:var(--text);
   font-weight:650;
 }
+.desktop-settings-nav.agent-settings-nav button.active { box-shadow:inset 3px 0 0 var(--brand); }
 .desktop-settings-content.agent-settings-content {
   min-width:0;
   min-height:0;
@@ -240,8 +258,29 @@ button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid va
 .desktop-settings-content.agent-settings-content .capability-actions { gap:6px; }
 .desktop-settings-content.agent-settings-content .capability-actions button,
 .desktop-settings-content.agent-settings-content .capability-card button { border-radius:5px; padding:7px 10px; }
+.desktop-settings-content.agent-settings-content .capability-actions .primary { border-color:var(--brand); background:var(--brand); color:#fff; }
+.desktop-settings-content.agent-settings-content .capability-actions .primary:hover { border-color:var(--brand-hover); background:var(--brand-hover); color:#fff; }
+.desktop-settings-content.agent-settings-content .capability-actions button:disabled { cursor:not-allowed; }
 .desktop-settings-content.agent-settings-content .capability-editor { gap:9px; }
 .desktop-settings-content.agent-settings-content .desktop-json { border-radius:6px; background:var(--bg); }
+.desktop-settings-content.agent-settings-content .web-search-card { gap:16px; padding:18px; border-color:var(--border-2); box-shadow:0 8px 24px rgba(30,45,80,.04); }
+.desktop-settings-content.agent-settings-content .web-search-card>strong { font-size:14px; }
+.web-search-toggle { display:flex; align-items:center; gap:11px; padding:11px 12px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); cursor:pointer; }
+.web-search-toggle:hover { border-color:var(--brand); background:var(--brand-soft); }
+.web-search-toggle>input { flex:none; width:17px; height:17px; margin:0; accent-color:var(--brand); }
+.web-search-toggle>span { display:grid; gap:2px; }
+.web-search-toggle strong { font-size:12px; }
+.web-search-toggle small { color:var(--text-3); font-size:11px; font-weight:400; line-height:1.45; }
+.web-search-fields { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:14px 16px; }
+.web-search-fields .capability-field:first-child { grid-column:1 / -1; }
+.web-search-fields .capability-field input,
+.web-search-fields .capability-field select { width:100%; min-height:38px; padding:9px 11px; background:var(--bg); font-size:12px; }
+.web-search-fields .capability-field input:focus,
+.web-search-fields .capability-field select:focus { outline:0; border-color:var(--brand); box-shadow:0 0 0 3px var(--brand-soft); }
+.web-search-fields .capability-field input:disabled,
+.web-search-fields .capability-field select:disabled { cursor:not-allowed; opacity:.55; }
+.web-search-card .capability-help { max-width:860px; padding-top:2px; color:var(--text-3); }
+.web-search-card .capability-actions { justify-content:flex-end; padding-top:14px; border-top:1px solid var(--border); }
 .agent-settings-footer { display:flex; justify-content:flex-end; align-items:center; min-height:42px; }
 .agent-settings-footer button { min-width:82px; padding:8px 14px; border:1px solid var(--border); border-radius:7px; background:var(--bg-2); color:var(--text-2); }
 .agent-settings-footer button:hover { border-color:var(--brand); color:var(--brand); }
@@ -325,6 +364,7 @@ button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid va
 .runtime-manager-card.selected { border-color:var(--brand); box-shadow:inset 4px 0 var(--brand); background:color-mix(in srgb,var(--brand-soft) 25%,var(--bg-2)); }
 .runtime-manager-main { display:grid; min-width:0; gap:5px; }
 .runtime-manager-title { display:flex; flex-wrap:wrap; align-items:center; gap:7px; }
+.runtime-manager-icon { width:34px; height:34px; margin-right:3px; object-fit:contain; border-radius:10px; background:var(--bg-2); }
 .runtime-manager-title strong { font-size:13px; }
 .runtime-manager-main p,.runtime-manager-main small { margin:0; color:var(--text-3); font-size:11px; line-height:1.45; }
 .runtime-tag { border-radius:5px; padding:3px 6px; background:var(--bg); color:var(--text-3); font-size:10px; line-height:1; }
@@ -350,6 +390,14 @@ button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid va
 .runtime-detail-modal-head>div { display:grid; gap:5px; }
 .runtime-detail-modal-head strong { font-size:18px; }
 .runtime-detail-modal-head p { margin:0; color:var(--text-3); font-size:11px; line-height:1.5; }
+.runtime-icon-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(112px,1fr)); gap:8px; margin-top:10px; }
+.runtime-icon-option { display:grid; justify-items:center; gap:3px; padding:9px 7px; border:1px solid transparent; border-radius:12px; background:var(--bg-2); color:var(--text-2); cursor:pointer; }
+.runtime-icon-option:hover,.runtime-icon-option:focus-visible { border-color:var(--brand); background:var(--bg-3); }
+.runtime-icon-option.selected { border-color:var(--brand); background:color-mix(in srgb,var(--brand-soft) 30%,var(--bg-2)); box-shadow:0 0 0 2px color-mix(in srgb,var(--brand) 14%,transparent); }
+.runtime-icon-option img { width:52px; height:52px; border-radius:14px; background:var(--bg-2); object-fit:contain; }
+.runtime-icon-option span { font-size:12px; font-weight:700; }
+.runtime-icon-option small { color:var(--text-3); font-size:10px; }
+.runtime-detail-icon { width:54px; height:54px; object-fit:contain; vertical-align:middle; margin-right:8px; }
 .desktop-settings-content.agent-settings-content .runtime-detail-close { display:grid; place-items:center; flex:none; width:30px; height:30px; padding:0; border:0; border-radius:7px; background:transparent; color:var(--text-3); font-size:25px; font-weight:300; line-height:1; }
 .desktop-settings-content.agent-settings-content .runtime-detail-close:hover { background:var(--bg-3); color:var(--text); }
 .runtime-capability-tabs { display:flex; gap:4px; border-bottom:1px solid var(--border); }
@@ -371,7 +419,9 @@ button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid va
 @media(max-width:720px) {
   .desktop-settings.agent-settings-card {
     width:calc(100vw - 24px);
-    height:calc(100dvh - 24px);
+    height:auto;
+    min-height:min(560px,calc(100dvh - 24px));
+    max-height:calc(100dvh - 24px);
     padding:16px;
     gap:12px;
   }
@@ -380,6 +430,8 @@ button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid va
   .desktop-settings-nav.agent-settings-nav button,
   .desktop-settings-nav.agent-settings-nav button.active { padding:8px 7px; font-size:11px; }
   .desktop-settings-content.agent-settings-content { padding:16px 12px; }
+  .web-search-fields { grid-template-columns:1fr; gap:12px; }
+  .web-search-fields .capability-field:first-child { grid-column:auto; }
   .agent-settings-footer { min-height:36px; }
   .desktop-settings-header.agent-settings-header { gap:12px; }
   .desktop-settings-header.agent-settings-header p { font-size:11px; }

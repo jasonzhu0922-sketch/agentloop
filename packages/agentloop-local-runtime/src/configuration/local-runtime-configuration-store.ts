@@ -15,8 +15,19 @@ import {
   type McpServerRegistration,
   type ToolSourceCapability,
 } from "@zhujun/agentloop";
+import type { WebToolsOptions } from "@zhujun/agentloop";
 
 export type LocalSkillPackageSourceKind = "custom_directory" | "uploaded";
+
+export const DEFAULT_RUNTIME_ICON = "xuanwu" as const;
+export const RUNTIME_ICON_KEYS = ["xuanwu", "qinglong", "baihu", "zhuque", "qilin", "taotie", "yinglong", "pixiu"] as const;
+export type RuntimeIconKey = typeof RUNTIME_ICON_KEYS[number];
+export function runtimeIconKey(value: unknown): RuntimeIconKey {
+  if (typeof value !== "string" || !(RUNTIME_ICON_KEYS as readonly string[]).includes(value)) {
+    throw new LocalRuntimeConfigurationStoreError(400, "runtime_icon_invalid");
+  }
+  return value as RuntimeIconKey;
+}
 
 export interface LocalSkillPackageSummary {
   readonly packageId: string;
@@ -132,6 +143,7 @@ export interface LocalRuntimeMcpServerInput {
 }
 
 export interface LocalRuntimeConfigurationInput {
+  readonly iconKey?: string;
   readonly skillPackageIds?: readonly string[];
   /** Device MCP catalog item ids selected by this Runtime. */
   readonly mcpServerIds?: readonly string[];
@@ -145,7 +157,23 @@ export interface LocalRuntimeMemoryConfigurationInput {
   readonly settlementModelKey?: string;
 }
 
+export interface LocalWebSearchConfigurationInput {
+  readonly enabled?: boolean;
+  readonly searchProvider?: WebToolsOptions["searchProvider"];
+  readonly searchEndpoint?: string;
+  /** Supplied only when creating or replacing the credential. */
+  readonly searchApiKey?: string;
+}
+
+export interface ResolvedLocalWebSearchConfiguration {
+  readonly enabled: boolean;
+  readonly searchProvider?: WebToolsOptions["searchProvider"];
+  readonly searchEndpoint?: string;
+  readonly credentialConfigured: boolean;
+}
+
 interface LocalRuntimeConfigurationStorageInput {
+  readonly iconKey?: string;
   readonly skillPackageIds?: readonly string[];
   readonly mcpServerIds?: readonly string[];
   readonly mcpServers?: readonly LocalRuntimeMcpServerWrite[];
@@ -153,6 +181,7 @@ interface LocalRuntimeConfigurationStorageInput {
 
 export interface LocalRuntimeConfiguration {
   readonly runtimeId: string;
+  readonly iconKey: RuntimeIconKey;
   readonly skills: readonly LocalSkillPackageSummary[];
   readonly mcpServers: readonly LocalRuntimeMcpServerConfiguration[];
   readonly mcpServerIds: readonly string[];
@@ -236,6 +265,24 @@ function normalizeDeviceStorage(input: LocalRuntimeDeviceStorageInput): Resolved
   return { workspaceRoot: workspace, uploadStorageRoot: uploads };
 }
 
+function normalizeWebSearchConfiguration(input: LocalWebSearchConfigurationInput): LocalWebSearchConfigurationInput & { enabled: boolean } {
+  if (!input || typeof input !== "object") throw new LocalRuntimeConfigurationStoreError(400, "web_search_configuration_invalid");
+  const enabled = input.enabled !== false;
+  const provider = input.searchProvider;
+  if (provider !== undefined && provider !== "bocha" && provider !== "baidu" && provider !== "bing") throw new LocalRuntimeConfigurationStoreError(400, "web_search_provider_invalid");
+  let endpoint = input.searchEndpoint?.trim();
+  if (endpoint !== undefined && endpoint !== "") {
+    try {
+      const parsed = new URL(endpoint);
+      if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error();
+      endpoint = parsed.href;
+    } catch { throw new LocalRuntimeConfigurationStoreError(400, "web_search_endpoint_invalid"); }
+  } else endpoint = undefined;
+  const key = input.searchApiKey?.trim();
+  if (key !== undefined && key.length > 4096) throw new LocalRuntimeConfigurationStoreError(400, "web_search_api_key_invalid");
+  return { enabled, ...(provider === undefined ? {} : { searchProvider: provider }), ...(endpoint === undefined ? {} : { searchEndpoint: endpoint }), ...(key === undefined ? {} : { searchApiKey: key }) };
+}
+
 /** Supervisor-owned authority for per-Runtime Skills and device-catalog MCP bindings. */
 export class LocalRuntimeConfigurationStore {
   private readonly packageRoots = new Map<string, string>();
@@ -244,6 +291,7 @@ export class LocalRuntimeConfigurationStore {
   private readonly customSkillDirectories: readonly string[];
   private readonly uploadedPackageRoot?: string;
   private readonly modelConfigurations?: LocalModelConfigurationStore;
+  private readonly webSearchSecrets: LocalRuntimeSecretStore;
   private readonly additionalSecretReferences: () => Promise<readonly string[]>;
 
   constructor(
@@ -254,6 +302,7 @@ export class LocalRuntimeConfigurationStore {
     modelConfigurations?: LocalModelConfigurationStore,
     additionalSecretReferences: () => Promise<readonly string[]> = async () => [],
     private readonly sharedMcpCatalog = false,
+    webSearchSecrets: LocalRuntimeSecretStore = EMPTY_SECRET_STORE,
   ) {
     this.database = database;
     this.secretStore = secretStore;
@@ -261,6 +310,7 @@ export class LocalRuntimeConfigurationStore {
     this.uploadedPackageRoot = uploadedPackageRoot;
     this.modelConfigurations = modelConfigurations;
     this.additionalSecretReferences = additionalSecretReferences;
+    this.webSearchSecrets = webSearchSecrets;
   }
 
   async ready(): Promise<void> {
@@ -297,6 +347,7 @@ export class LocalRuntimeConfigurationStore {
       CREATE TABLE IF NOT EXISTS local_runtime_configurations (
         runtime_id TEXT PRIMARY KEY REFERENCES local_runtime_instances(runtime_id) ON DELETE CASCADE,
         updated_at INTEGER NOT NULL,
+        icon_key TEXT NOT NULL DEFAULT 'xuanwu',
         memory_enabled INTEGER NOT NULL DEFAULT 0,
         settlement_model_key TEXT
       );
@@ -311,6 +362,12 @@ export class LocalRuntimeConfigurationStore {
         updated_at INTEGER NOT NULL,
         workspace_root TEXT NOT NULL,
         upload_storage_root TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS local_web_search_configuration (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        configuration_json TEXT NOT NULL,
+        secret_storage_key TEXT,
+        updated_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS local_runtime_skill_bindings (
         runtime_id TEXT NOT NULL REFERENCES local_runtime_instances(runtime_id) ON DELETE CASCADE,
@@ -347,11 +404,22 @@ export class LocalRuntimeConfigurationStore {
     await this.database.exec("DROP INDEX IF EXISTS local_device_mcp_server_source_key_idx");
     await this.database.exec("CREATE INDEX IF NOT EXISTS local_device_mcp_server_source_key_idx ON local_device_mcp_servers(source_key)");
     await this.migrateMemoryConfigurationColumns();
+    await this.migrateRuntimeIconColumn();
     await this.migrateMcpServerTableForQueryAuthentication();
     await this.migrateRuntimeMcpServersToDeviceCatalog();
     await this.removeOrphanedSecrets();
     await this.synchronizeCustomDirectories(this.customSkillDirectories);
     await this.restoreUploadedPackages();
+  }
+
+  private async migrateRuntimeIconColumn(): Promise<void> {
+    const columns = await this.database.prepare("PRAGMA table_info(local_runtime_configurations)").all() as Array<{ name: string }>;
+    if (!columns.some(column => column.name === "icon_key")) {
+      await this.database.exec("ALTER TABLE local_runtime_configurations ADD COLUMN icon_key TEXT NOT NULL DEFAULT 'xuanwu'");
+    }
+    const placeholders = RUNTIME_ICON_KEYS.map(() => "?").join(", ");
+    await this.database.prepare(`UPDATE local_runtime_configurations SET icon_key = 'xuanwu' WHERE icon_key IS NULL OR icon_key = '' OR icon_key NOT IN (${placeholders})`)
+      .run(...RUNTIME_ICON_KEYS);
   }
 
   private async migrateMemoryConfigurationColumns(): Promise<void> {
@@ -804,7 +872,7 @@ export class LocalRuntimeConfigurationStore {
   async apply(runtimeId: string, input: LocalRuntimeConfigurationInput): Promise<void> {
     if (input.mcpServerIds !== undefined) {
       if (input.mcpServers !== undefined) throw new LocalRuntimeConfigurationStoreError(400, "mcp_configuration_ambiguous");
-      await this.replaceStored(runtimeId, { skillPackageIds: input.skillPackageIds, mcpServerIds: input.mcpServerIds });
+      await this.replaceStored(runtimeId, { iconKey: input.iconKey, skillPackageIds: input.skillPackageIds, mcpServerIds: input.mcpServerIds });
       return;
     }
     // Compatibility path for older local hosts. Definitions are still stored
@@ -820,7 +888,7 @@ export class LocalRuntimeConfigurationStore {
         const auth = await this.storeAuthentication(server.auth, this.credentialAuthority(server, existing), createdSecretKeys);
         storedServers.push({ ...server, auth });
       }
-      await this.replaceStored(runtimeId, { skillPackageIds: input.skillPackageIds, mcpServers: storedServers });
+      await this.replaceStored(runtimeId, { iconKey: input.iconKey, skillPackageIds: input.skillPackageIds, mcpServers: storedServers });
     } catch (error) {
       await Promise.all(createdSecretKeys.map((key) => this.secretStore.remove(key).catch(() => undefined)));
       throw error;
@@ -915,13 +983,15 @@ export class LocalRuntimeConfigurationStore {
     const mcpServerIds = unique(input.mcpServerIds ?? mcpServers.map(server => server.id!).filter((id): id is string => id !== undefined));
     if (input.mcpServerIds !== undefined) await this.assertDeviceMcpServers(mcpServerIds);
     await this.assertValidPackages(skillPackageIds);
+    const existing = await this.database.prepare("SELECT icon_key FROM local_runtime_configurations WHERE runtime_id = ?").get(runtimeId) as { icon_key?: string } | undefined;
+    const iconKey = runtimeIconKey(input.iconKey ?? existing?.icon_key ?? DEFAULT_RUNTIME_ICON);
     const now = Date.now();
     await this.database.transaction(async () => {
       await this.database.prepare(`
-        INSERT INTO local_runtime_configurations(runtime_id, updated_at, memory_enabled, settlement_model_key) VALUES (?, ?, 0, NULL)
+        INSERT INTO local_runtime_configurations(runtime_id, updated_at, icon_key, memory_enabled, settlement_model_key) VALUES (?, ?, ?, 0, NULL)
         ON CONFLICT(runtime_id) DO UPDATE SET updated_at = excluded.updated_at,
-          memory_enabled = 0, settlement_model_key = NULL
-      `).run(runtimeId, now);
+          icon_key = excluded.icon_key, memory_enabled = 0, settlement_model_key = NULL
+      `).run(runtimeId, now, iconKey);
       await this.database.prepare("DELETE FROM local_runtime_skill_bindings WHERE runtime_id = ?").run(runtimeId);
       for (const packageId of skillPackageIds) {
         await this.database.prepare(`
@@ -1068,8 +1138,8 @@ export class LocalRuntimeConfigurationStore {
 
   async configuration(runtimeId: string): Promise<LocalRuntimeConfiguration> {
     const configuration = await this.database.prepare(`
-      SELECT updated_at FROM local_runtime_configurations WHERE runtime_id = ?
-    `).get(runtimeId) as { updated_at: number } | undefined;
+      SELECT updated_at, icon_key FROM local_runtime_configurations WHERE runtime_id = ?
+    `).get(runtimeId) as { updated_at: number; icon_key?: string } | undefined;
     if (configuration === undefined) throw new LocalRuntimeConfigurationStoreError(404, "runtime_configuration_not_found");
     const skillRows = await this.database.prepare(`
       SELECT p.package_id, p.skill_name, p.display_name, p.source_kind, p.storage_key,
@@ -1082,6 +1152,7 @@ export class LocalRuntimeConfigurationStore {
     const memory = await this.deviceMemory();
     return {
       runtimeId,
+      iconKey: runtimeIconKey(configuration.icon_key ?? DEFAULT_RUNTIME_ICON),
       skills: skillRows.map(toSkillSummary),
       mcpServers: mcpRows.map(toPublicMcpServer),
       mcpServerIds: mcpRows.map(row => row.mcp_server_id),
@@ -1142,8 +1213,43 @@ export class LocalRuntimeConfigurationStore {
     if (configuration === undefined) throw new LocalRuntimeConfigurationStoreError(404, "runtime_configuration_not_found");
     const memory = await this.deviceMemory();
     await this.assertValidMemoryConfiguration(memory);
-    return { customSkillDirectories, mcpServers, integrationEnvironment: environment, memory,
+    const webSearch = await this.resolvedWebSearch();
+    return { customSkillDirectories, mcpServers, integrationEnvironment: environment,
+      ...(webSearch === undefined ? {} : { webSearch }), memory,
       ...(this.modelConfigurations === undefined ? {} : { modelConfiguration: await this.modelConfigurations.resolve() }) };
+  }
+
+  async deviceWebSearchConfiguration(defaults?: WebToolsOptions): Promise<ResolvedLocalWebSearchConfiguration> {
+    const row = await this.database.prepare(`SELECT configuration_json, secret_storage_key FROM local_web_search_configuration WHERE singleton = 1`).get() as { configuration_json: string; secret_storage_key: string | null } | undefined;
+    if (row === undefined) {
+      if (defaults === undefined) return { enabled: false, credentialConfigured: false };
+      await this.applyDeviceWebSearch({ enabled: true, searchProvider: defaults.searchProvider, searchEndpoint: defaults.searchEndpoint, searchApiKey: defaults.searchApiKey });
+    }
+    return await this.publicWebSearch();
+  }
+
+  async applyDeviceWebSearch(input: LocalWebSearchConfigurationInput): Promise<ResolvedLocalWebSearchConfiguration> {
+    const normalized = normalizeWebSearchConfiguration(input);
+    const previous = await this.database.prepare(`SELECT configuration_json, secret_storage_key FROM local_web_search_configuration WHERE singleton = 1`).get() as { configuration_json: string; secret_storage_key: string | null } | undefined;
+    const prior = previous === undefined ? undefined : JSON.parse(previous.configuration_json) as { enabled: boolean; searchProvider?: WebToolsOptions["searchProvider"]; searchEndpoint?: string };
+    const priorSecrets = previous?.secret_storage_key === null || previous?.secret_storage_key === undefined ? undefined : await this.webSearchSecrets.read(previous.secret_storage_key);
+    const sameTarget = prior?.searchProvider === normalized.searchProvider && prior?.searchEndpoint === normalized.searchEndpoint;
+    const key = normalized.enabled ? (normalized.searchApiKey?.trim() || (sameTarget ? priorSecrets?.WEB_SEARCH_API_KEY : undefined)) : undefined;
+    if (normalized.enabled && normalized.searchProvider === "bocha" && !normalized.searchEndpoint) throw new LocalRuntimeConfigurationStoreError(400, "web_search_endpoint_required");
+    if (normalized.enabled && normalized.searchProvider === "bocha" && !key) throw new LocalRuntimeConfigurationStoreError(400, "web_search_api_key_required");
+    const values: Record<string, string> = key === undefined ? {} : { WEB_SEARCH_API_KEY: key };
+    const secretStorageKey = Object.keys(values).length ? await this.webSearchSecrets.write(values) : null;
+    const stored = { enabled: normalized.enabled, ...(normalized.searchProvider === undefined ? {} : { searchProvider: normalized.searchProvider }), ...(normalized.searchEndpoint === undefined ? {} : { searchEndpoint: normalized.searchEndpoint }) };
+    try {
+      await this.database.prepare(`INSERT INTO local_web_search_configuration(singleton, configuration_json, secret_storage_key, updated_at)
+        VALUES (1, ?, ?, ?) ON CONFLICT(singleton) DO UPDATE SET configuration_json = excluded.configuration_json,
+        secret_storage_key = excluded.secret_storage_key, updated_at = excluded.updated_at`).run(JSON.stringify(stored), secretStorageKey, Date.now());
+    } catch (error) {
+      if (secretStorageKey !== null) await this.webSearchSecrets.remove(secretStorageKey);
+      throw error;
+    }
+    if (previous?.secret_storage_key && previous.secret_storage_key !== secretStorageKey) await this.webSearchSecrets.remove(previous.secret_storage_key).catch(() => undefined);
+    return await this.publicWebSearch();
   }
 
   async deviceMemoryConfiguration(): Promise<ResolvedLocalMemoryConfiguration> {
@@ -1184,6 +1290,23 @@ export class LocalRuntimeConfigurationStore {
       SELECT memory_enabled, settlement_model_key FROM local_memory_configuration WHERE singleton = 1
     `).get() as { memory_enabled: number; settlement_model_key: string | null } | undefined;
     return resolvedMemory(row?.memory_enabled === 1, row?.settlement_model_key ?? null);
+  }
+
+  private async resolvedWebSearch(): Promise<WebToolsOptions | undefined> {
+    const row = await this.database.prepare(`SELECT configuration_json, secret_storage_key FROM local_web_search_configuration WHERE singleton = 1`).get() as { configuration_json: string; secret_storage_key: string | null } | undefined;
+    if (row === undefined) return undefined;
+    const config = JSON.parse(row.configuration_json) as { enabled: boolean; searchProvider?: WebToolsOptions["searchProvider"]; searchEndpoint?: string };
+    if (!config.enabled) return undefined;
+    const values = row.secret_storage_key === null ? undefined : await this.webSearchSecrets.read(row.secret_storage_key);
+    if (row.secret_storage_key !== null && values === undefined) throw new LocalRuntimeConfigurationStoreError(409, "web_search_credentials_missing");
+    return { ...(config.searchProvider === undefined ? {} : { searchProvider: config.searchProvider }), ...(config.searchEndpoint === undefined ? {} : { searchEndpoint: config.searchEndpoint }), ...(values?.WEB_SEARCH_API_KEY === undefined ? {} : { searchApiKey: values.WEB_SEARCH_API_KEY }) };
+  }
+
+  private async publicWebSearch(): Promise<ResolvedLocalWebSearchConfiguration> {
+    const row = await this.database.prepare(`SELECT configuration_json, secret_storage_key FROM local_web_search_configuration WHERE singleton = 1`).get() as { configuration_json: string; secret_storage_key: string | null } | undefined;
+    if (row === undefined) return { enabled: false, credentialConfigured: false };
+    const config = JSON.parse(row.configuration_json) as { enabled: boolean; searchProvider?: WebToolsOptions["searchProvider"]; searchEndpoint?: string };
+    return { enabled: config.enabled, ...(config.searchProvider === undefined ? {} : { searchProvider: config.searchProvider }), ...(config.searchEndpoint === undefined ? {} : { searchEndpoint: config.searchEndpoint }), credentialConfigured: row.secret_storage_key !== null };
   }
 
   private async assertValidMemoryConfiguration(memory: ResolvedLocalMemoryConfiguration): Promise<void> {

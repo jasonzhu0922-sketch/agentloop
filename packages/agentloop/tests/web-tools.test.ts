@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -17,6 +17,7 @@ import {
   parseBaiduResults,
   parseRssItems,
 } from "../src/tools/web-tools.ts";
+import { renderWebPage } from "../src/tools/web-render.ts";
 
 const workspaceRoot = mkdtempSync(join(tmpdir(), "web-tools-refs-"));
 after(() => rmSync(workspaceRoot, { recursive: true, force: true }));
@@ -64,6 +65,66 @@ test("webfetch accepts http(s) targets and validates format", () => {
   const allowed = registry.materialize(grant(["webfetch"]));
   const text = allowed.prepare({ id: "fetch-text", name: "webfetch", arguments: { url: "http://127.0.0.1:8787/x", format: "text" } });
   assert.deepEqual(text.input, { url: "http://127.0.0.1:8787/x", format: "text" });
+});
+
+test("webfetch rejects HTTP redirects to private targets before requesting them", async () => {
+  const originalFetch = globalThis.fetch;
+  const requested: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    requested.push(String(input));
+    return new Response(null, { status: 302, headers: { location: "http://127.0.0.1/private" } });
+  }) as typeof fetch;
+  try {
+    const allowed = new ToolRegistry(createWebTools()).materialize(grant(["webfetch"]));
+    const prepared = allowed.prepare({ id: "redirect-private", name: "webfetch", arguments: { url: "https://example.com/" } });
+    await assert.rejects(() => prepared.tool.execute(grantContext(["webfetch"]), prepared.input), /private/);
+    assert.deepEqual(requested, ["https://example.com/"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+const chromeAvailable = process.platform === "darwin"
+  ? existsSync("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+  : process.platform === "win32"
+    ? [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA].some(root => root !== undefined && existsSync(join(root, "Google", "Chrome", "Application", "chrome.exe")))
+    : ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"].some(existsSync);
+
+test("browser rendering executes scripts and reads dynamically fetched content", { skip: !chromeAvailable }, async () => {
+  const server = createServer((req, res) => {
+    if (req.url === "/data") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: "dynamic article content" }));
+    } else {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end('<html><body><main id="article"></main><script>fetch("/data").then(r => r.json()).then(x => document.querySelector("#article").textContent = x.message)</script></body></html>');
+    }
+  });
+  await listen(server);
+  try {
+    const port = (server.address() as AddressInfo).port;
+    const allowed = new ToolRegistry(createWebTools({ allowPrivateTargets: true })).materialize(grant(["webfetch"]));
+    const prepared = allowed.prepare({ id: "render-dynamic", name: "webfetch", arguments: { url: `http://127.0.0.1:${port}/`, render: "browser" } });
+    const result = await prepared.tool.execute(grantContext(["webfetch"]), prepared.input) as { content: string; renderMode: string; renderIncomplete: boolean };
+    assert.match(result.content, /dynamic article content/);
+    assert.equal(result.renderMode, "browser");
+    assert.equal(result.renderIncomplete, false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("browser rendering blocks private destinations before connecting", { skip: !chromeAvailable }, async () => {
+  let hits = 0;
+  const server = createServer((_req, res) => { hits++; res.end("private"); });
+  await listen(server);
+  try {
+    const port = (server.address() as AddressInfo).port;
+    await assert.rejects(() => renderWebPage(`http://127.0.0.1:${port}/`, { timeoutMs: 5000, allowPrivateTargets: false }));
+    assert.equal(hits, 0);
+  } finally {
+    await close(server);
+  }
 });
 
 test("websearch parse bounds the result count", () => {

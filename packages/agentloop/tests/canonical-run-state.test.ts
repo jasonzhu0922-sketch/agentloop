@@ -11,14 +11,39 @@ import {
   markCanonicalReadyForTerminal,
   recordCanonicalAssessment,
   recordCanonicalStepResult,
+  reconcileCanonicalDeliveryTargetBindings,
   reviseCanonicalPlan,
   startCanonicalStep,
 } from "../src/runtime/canonical-run-state.ts";
 import { CanonicalRunStateRepository } from "../src/runtime/canonical-run-state-repository.ts";
 import { StepResultCommitter } from "../src/runtime/step-result-committer.ts";
 import { TerminalCommitter } from "../src/runtime/terminal-committer.ts";
+import { RunRoundRepository } from "../src/runtime/run-round-repository.ts";
+import { decideRoundProgress } from "../src/runtime/round-progress.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
 import type { ExecutionPlan, SkillComplianceAssessment, StepEvidence } from "../src/planning/contracts.ts";
+
+test("plural delivery tracks every accepted version and reopens when any changes", () => {
+  const base = createCanonicalRunState({ runId: "plural", userInput: "split", understanding: understanding(), now: 1 });
+  const target = { targetId: "pdf", purpose: "split", surface: "workspace_artifact" as const, kind: "document", format: "pdf", expectedCount: 3,
+    terminalRequired: true as const, status: "open" as const, ownerStepIds: ["produce"], claims: [] };
+  const state = { ...base, targets: { pdf: target }, steps: { produce: { stepId: "produce", targetIds: ["pdf"], status: "running" as const, evidenceRefs: [], updatedAt: 1 } } };
+  const bindings = [1, 2, 3].map((n) => ({ targetId: `pdf.${n}`, deliveryTargetId: "pdf", path: `part${n}.pdf`, versionId: `v${n}`,
+    bytes: 10, sha256: String(n).repeat(64), declarationId: `d${n}`, observedByToolCallId: "split", bindingAuthority: "runtime" as const }));
+  const bound = reconcileCanonicalDeliveryTargetBindings(state, { stepId: "produce", bindings, now: 2 });
+  const artifacts = bindings.map((binding, index) => ({ ...binding, acceptanceToolCallId: `verify${index}` }));
+  const candidate = { schema: "agentloop.runtimeDeliveryCandidate/v1" as const, output: "done", caveats: [],
+    evidenceKinds: { satisfied: [], caveated: [], failed: [] }, sourceToolCallIds: [], deliveryClaims: [{ targetId: "pdf", evidenceRefs: [], artifacts }] };
+  const verdict = { id: "assessment", stepId: "produce", approved: true, criteria: [{ criterionId: "delivery_target:pdf", targetId: "pdf", satisfied: true, rationale: "ok", evidenceRefs: [] }] };
+  const partial = recordCanonicalAssessment(bound, verdict, { candidateOutput: "done", toolCalls: [], modelSteps: 1,
+    deliveryCandidate: { ...candidate, deliveryClaims: [{ ...candidate.deliveryClaims[0]!, artifacts: artifacts.slice(0, 2) }] } }, 3);
+  assert.equal(partial.targets.pdf?.status, "open");
+  const accepted = recordCanonicalAssessment(bound, verdict, { candidateOutput: "done", toolCalls: [], modelSteps: 1, deliveryCandidate: candidate }, 3);
+  assert.equal(accepted.targets.pdf?.status, "accepted");
+  assert.equal(accepted.targets.pdf?.claims[0]?.artifacts?.length, 3);
+  const changed = reconcileCanonicalDeliveryTargetBindings(accepted, { stepId: "produce", bindings: bindings.map((binding, index) => index === 1 ? { ...binding, versionId: "v2-new" } : binding), now: 4 });
+  assert.equal(changed.targets.pdf?.status, "open");
+});
 
 function understanding() {
   return understandTask({
@@ -87,6 +112,22 @@ function evidence(): StepEvidence {
     modelSteps: 2,
   };
 }
+
+test("round progress separates incomplete work, open goal gaps, and goal completion", () => {
+  const state = createCanonicalRunState({ runId: "round-progress", userInput: "生成中文 PPTX", understanding: understanding(), now: 1 });
+  const plan = planFor(state);
+  const bound = bindCanonicalPlan(state, plan, 2);
+  assert.deepEqual(decideRoundProgress(plan, bound), { kind: "continue_round", incompleteStepIds: ["produce"] });
+  const completedPlan = { ...plan, steps: plan.steps.map((step) => ({ ...step, status: "completed" as const })) };
+  const completedStep = { ...bound, steps: { ...bound.steps, produce: { ...bound.steps.produce!, status: "satisfied" as const } } };
+  const withGap = { ...completedStep, gaps: [{ id: "gap-1", status: "open" as const, missingEvidenceKinds: [],
+    violatedSkillRequirements: [], evidenceRefs: [], suggestedAction: "repair_leaf" as const, openedAt: 1 }] };
+  assert.deepEqual(decideRoundProgress(completedPlan, withGap), { kind: "next_round", openGapIds: ["gap-1"], openTargetIds: [] });
+  assert.deepEqual(decideRoundProgress(completedPlan, { ...completedStep, gaps: [], targets: {} }), { kind: "complete_goal" });
+  assert.throws(() => decideRoundProgress(completedPlan, { ...completedStep, steps: { ...completedStep.steps,
+    foreign: { ...completedStep.steps.produce!, stepId: "foreign", status: "pending" } } }), /outside the current Plan/);
+  assert.throws(() => decideRoundProgress({ ...completedPlan, version: 2 }, completedStep), /current non-terminal Plan/);
+});
 
 function analysisUnderstanding() {
   return understandTask({
@@ -402,6 +443,8 @@ test("terminal Outcome failure rolls back the canonical terminal mutation", asyn
   const plans = new PlanRepository(database);
   let state = await states.create(createCanonicalRunState({ runId: "run-terminal-atomic", userInput: "生成中文 PPTX", understanding: understanding(), now: 1 }));
   let plan = await plans.create(planFor(state));
+  await new RunRoundRepository(database).createInitial(state.runId, 1);
+  await new RunRoundRepository(database).bindPlan(state.runId, plan.id, 2);
   state = await states.commit({
     expectedRevision: state.revision,
     state: bindCanonicalPlan(state, plan, 2),
@@ -458,6 +501,10 @@ test("terminal Outcome failure rolls back the canonical terminal mutation", asyn
   assert.equal(persistedState.terminal, undefined);
   assert.equal(persistedPlan.status, "running");
   assert.equal(persistedRun?.status, "running");
+  assert.equal(await database.prepare("SELECT run_id FROM run_round_results WHERE run_id = ?").get(state.runId), undefined);
+  const round = await database.prepare("SELECT status, revision FROM run_rounds WHERE run_id = ?")
+    .get<{ status: string; revision: number }>(state.runId);
+  assert.deepEqual({ ...round }, { status: "executing", revision: 2 });
   await database.close();
 });
 

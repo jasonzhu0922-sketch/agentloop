@@ -28,6 +28,11 @@ test('cumulative public streaming replaces rather than duplicates text; replay i
   assert.equal(other.text, '另一轮'); assert.equal(turn.lastSeq, 3);
 });
 
+test('assistant cards identify the Runtime that handled the Run', () => {
+  const turn = createTurn({ ...run(), runtimeId: 'runtime-a', runtimeName: '写作 Runtime' });
+  assert.match(renderAssistant(turn), /execution-provenance-chip runtime">写作 Runtime<\/span>/);
+});
+
 test('complete event replay retains early Plan state beyond the diagnostic display limit', () => {
   const turn = createTurn(run());
   updateTurn(turn, run(), [event(1, 'plan.admitted', { steps: [{ id: 'step', objective: '检查', status: 'pending' }] }), event(2, 'plan.step.started', { stepId: 'step' }), ...Array.from({ length: 240 }, (_, index) => event(index + 3, 'model.requested'))]);
@@ -44,6 +49,16 @@ test('durable terminal output is authoritative and a failed report is never rend
   const html = renderAssistant(turn); assert.match(html, /尚非成功交付/); assert.match(html, /已持久化的失败总结/); assert.doesNotMatch(html, /class="thinking"/);
   const empty = createTurn(run()); empty.text = 'interim'; updateTurn(empty, run('completed'));
   assert.equal(empty.text, ''); assert.match(renderAssistant(empty), /未返回文本内容/);
+});
+
+test('interrupted safe model streams render a recovery wait instead of a terminal failure', () => {
+  const turn = createTurn(run());
+  updateTurn(turn, run(), [event(1, 'run.recovery_required', {
+    actionId: 'recovery-action', reason: 'model_stream_interrupted',
+  })]);
+  assert.equal(turn.recovery?.status, 'required');
+  assert.match(renderAssistant(turn), /模型流中断，当前步骤已保留，等待恢复决策/);
+  assert.doesNotMatch(renderAssistant(turn), /本次未能形成可提交的最终结果/);
 });
 
 test('cancelled and interrupted Runs cannot leave active tool/Plan or successful delivery badges', () => {
@@ -111,7 +126,7 @@ test('polling drains a racing terminal commit and does not mutate a turn before 
     return { run: run('failed') };
   }, turn);
   assert.equal(JSON.stringify(turn), snapshot, 'a stale response can be discarded without touching the old conversation');
-  assert.equal(paths.length, 4);
+  assert.equal(paths.length, 5);
   updateTurn(turn, update.run, update.events, update.artifacts);
   assert.ok(hasTerminalEvent(turn)); assert.equal(turn.lastSeq, 2);
   assert.match(renderAssistant(turn), /partial.txt/); assert.doesNotMatch(renderAssistant(turn), /最终产物/);
@@ -151,4 +166,12 @@ test('artifact cards select the right artifact for preview instead of navigating
   assert.match(html, /<button type="button" class="desktop-artifact" data-artifact-id="file&quot;&lt;unsafe&gt;">/);
   assert.match(html, /· 预览/);
   assert.doesNotMatch(html, / download|\/download|· 下载/);
+  assert.match(html, /^<article class="msg assistant [^"]+" data-assistant-message="run-a">/);
+  assert.doesNotMatch(html, /aria-label="查看该轮执行详情"|aria-pressed=/);
+});
+
+test('only artifact buttons bind the conversation preview action', async () => {
+  const source = await readFile(new URL('../web/conversation.js', import.meta.url), 'utf8');
+  assert.match(source, /button\.onclick = \(\) => onArtifact\(turn\.id, button\.dataset\.artifactId\)/);
+  assert.doesNotMatch(source, /card\.(?:onclick|onkeydown)\s*=/);
 });

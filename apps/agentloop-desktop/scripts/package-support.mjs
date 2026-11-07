@@ -1,5 +1,38 @@
 import { cp, mkdir, readFile, readdir, realpath, writeFile, access } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
+import { parseEnv } from 'node:util';
+
+export async function packagedTurnDefaults(path) {
+  let content;
+  try { content = await readFile(path, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+  const env = parseEnv(content), result = {};
+  for (const [name, property, max] of [['PLANNING_MAX_TURNS', 'planningMaxTurns', 64], ['STEP_MAX_TURNS', 'stepMaxTurns', 256]]) {
+    const value = env[name];
+    if (value === undefined || value === '') continue;
+    if (!/^[0-9]+$/.test(value) || Number(value) < 1 || Number(value) > max) throw new Error(`desktop_${name.toLowerCase()}_invalid`);
+    result[property] = Number(value);
+  }
+  return result;
+}
+
+export async function packagedSearchDefaults(path) {
+  let content;
+  try { content = await readFile(path, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return undefined; throw error; }
+  const env = parseEnv(content);
+  if (env.WEB_SEARCH_DISABLED === '1' || env.WEB_SEARCH_DISABLED !== '0') return undefined;
+  const provider = env.WEB_SEARCH_PROVIDER;
+  if (provider !== undefined && !['bocha', 'baidu', 'bing'].includes(provider)) throw new Error('Desktop packaged search provider is invalid');
+  let endpoint;
+  if (env.WEB_SEARCH_ENDPOINT) {
+    endpoint = new URL(env.WEB_SEARCH_ENDPOINT);
+    if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error('Desktop packaged search endpoint must be a credential-free HTTPS URL');
+  }
+  // Credentials are deliberately not required at package time. If a legacy
+  // environment still supplies one, it is migrated into the account vault on
+  // first launch; otherwise the user configures it from Desktop Settings.
+  if (!env.WEB_SEARCH_API_KEY) return undefined;
+  return { ...(provider === undefined ? {} : { searchProvider: provider }), ...(endpoint === undefined ? {} : { searchEndpoint: endpoint.href }), searchApiKey: env.WEB_SEARCH_API_KEY };
+}
 
 export function packageOptions(args, platform = process.platform, arch = process.arch) {
   const values = {};

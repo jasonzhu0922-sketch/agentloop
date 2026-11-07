@@ -3,15 +3,16 @@ import { projectAssistantEvent } from './reference/projections/assistant-event-p
 // Adapt public local Run/event records, never Router Assignments. Every durable
 // event is projected before display limits are applied; cursors are per Run.
 export function createTurn(run) {
-  return { id: run.id, run, revision: 0, text: '', reasoning: '', plan: [], events: [], artifacts: [], lastSeq: 0, status: run.status };
+  return { id: run.id, run, revision: 0, text: '', reasoning: '', plan: [], rounds: [], events: [], artifacts: [], lastSeq: 0, status: run.status };
 }
-export function updateTurn(turn, run, incoming = [], artifacts, humanLoop) {
+export function updateTurn(turn, run, incoming = [], artifacts, humanLoop, rounds) {
   let changed = ['status', 'output', 'finishedAt', 'errorCode', 'modelKey'].some(key => turn.run[key] !== run[key]);
   // Keep stable cards/previews on unchanged polls, but also render artifact-only
   // changes (including an updated file or a process-to-final transition).
   if (artifacts !== undefined && JSON.stringify(turn.artifacts) !== JSON.stringify(artifacts)) {
     turn.artifacts = artifacts; changed = true;
   }
+  if (rounds !== undefined && JSON.stringify(turn.rounds) !== JSON.stringify(rounds)) { turn.rounds = rounds; changed = true; }
   for (const event of [...incoming].sort((a, b) => a.seq - b.seq)) {
     if (!Number.isSafeInteger(event.seq) || event.seq <= turn.lastSeq) continue;
     changed = true;

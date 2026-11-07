@@ -78,6 +78,33 @@ test("managed runtimes pass trusted search opt-in to the factory and default to 
   assert.equal(calls[1]?.planning, 8); assert.equal(calls[1]?.step, 64);
 });
 
+test("web search settings persist per device, redact the key, and reload the Runtime", async t => {
+  const { manager, reopen } = await fixture(t);
+  assert.deepEqual(await manager.webSearchConfiguration(), { enabled: false, credentialConfigured: false });
+  assert.deepEqual(await manager.configureWebSearch({ enabled: true, searchProvider: "bocha", searchEndpoint: "https://search.example/v1", searchApiKey: "device-secret" }), {
+    enabled: true, searchProvider: "bocha", searchEndpoint: "https://search.example/v1", credentialConfigured: true,
+  });
+  const reopened = await reopen();
+  assert.deepEqual(await reopened.webSearchConfiguration(), {
+    enabled: true, searchProvider: "bocha", searchEndpoint: "https://search.example/v1", credentialConfigured: true,
+  });
+  await reopened.configureWebSearch({ enabled: false });
+  assert.deepEqual(await reopened.webSearchConfiguration(), { enabled: false, credentialConfigured: false });
+});
+
+test("Runtime icon identity is persisted, exposed in summaries, and rejects unknown keys", async t => {
+  const { manager, reopen } = await fixture(t);
+  await manager.stopRuntime("stable-default");
+  const before = await manager.runtimeSettings("stable-default");
+  const updated = await manager.configureRuntime("stable-default", { iconKey: "qinglong", skillPackageIds: [], mcpServerIds: [] }, before.revision);
+  assert.equal(updated.iconKey, "qinglong");
+  assert.equal((await manager.runtimes()).find(runtime => runtime.id === "stable-default")?.iconKey, "qinglong");
+  const next = await manager.runtimeSettings("stable-default");
+  await assert.rejects(() => manager.configureRuntime("stable-default", { iconKey: "not-a-beast", skillPackageIds: [], mcpServerIds: [] }, next.revision), /runtime_icon_invalid/);
+  const reopened = await reopen();
+  assert.equal((await reopened.runtimeSettings("stable-default")).configuration.iconKey, "qinglong");
+});
+
 test("managed business views survive lifecycle changes and database reopen without exposing controls", async (t) => {
   t.mock.method(globalThis, "fetch", async () => { throw new Error("unexpected_network"); });
   const { manager, reopen } = await fixture(t);

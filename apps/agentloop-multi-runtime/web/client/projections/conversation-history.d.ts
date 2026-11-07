@@ -34,6 +34,7 @@ export interface PersistedConversationMessage {
   readonly attachments?: readonly unknown[];
   readonly events?: readonly unknown[];
   readonly plan?: readonly unknown[];
+  readonly rounds?: readonly unknown[];
 }
 
 export function conversationMessagesFromTurns(turns: readonly PersistedConversationTurn[], models?: readonly { readonly key?: string; readonly displayName?: string }[]): PersistedConversationMessage[];

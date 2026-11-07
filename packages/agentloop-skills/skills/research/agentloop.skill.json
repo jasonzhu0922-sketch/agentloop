@@ -1,0 +1,27 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "research",
+    "description": "Research an open-ended question using relevant available sources, assess evidence and uncertainty, and synthesize a traceable answer. Use for investigations, landscape reviews, comparisons, and fact-finding that require finding or assessing source material."
+  },
+  "activation": {
+    "semanticTags": ["research", "evidence", "investigation"],
+    "intentExamples": [
+      "Investigate an organization's role and services using available sources.",
+      "Research and compare developments on a topic, citing supporting evidence.",
+      "Review the supplied materials and identify what is known and uncertain.",
+      "查找资料，研究某个组织在所属集团中的职能、定位和业务地位。",
+      "调研某个主题的发展情况，对比来源并说明依据和不确定性。",
+      "基于提供的材料研究一个问题，区分已知事实、推断和缺失信息。",
+      "研究一个主题并为后续培训课件整理有来源依据的内容大纲。",
+      "研究一个主题并把证据和内容提纲交给演示文稿制作流程。"
+    ]
+  },
+  "workflow": {
+    "roles": ["primary_builder"],
+    "artifactKinds": ["none"],
+    "sourceKinds": [],
+    "qaKinds": [],
+    "requiredSkills": []
+  }
+}

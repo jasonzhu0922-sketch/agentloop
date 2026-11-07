@@ -1,4 +1,4 @@
-import type { RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments } from "../../shared/contracts.ts";
+import type { RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRoundHistoryEntry, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments } from "../../shared/contracts.ts";
 import { RuntimeDispatchOutcomeUnknownError } from "../ports/control-plane-contracts.ts";
 import type { ModelInvocation, ModelResponse } from "@zhujun/agentloop";
 import type { ModelRetryReporter, ModelStreamSink } from "@zhujun/agentloop";
@@ -52,6 +52,16 @@ export class HttpRuntimeControl implements RuntimeControlPort {
     const body = await response.json() as RuntimeRunStatus & { error?: string };
     if (!response.ok || typeof body.remoteRunId !== "string") throw new Error(body.error ?? `runtime status failed with HTTP ${response.status}`);
     return body;
+  }
+
+  async rounds(remoteRunId: string): Promise<readonly RuntimeRoundHistoryEntry[]> {
+    const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/rounds`, `${this.endpoint.replace(/\/$/, "")}/`), {
+      headers: this.authorization === undefined ? {} : { authorization: this.authorization },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const body = await response.json() as { rounds?: RuntimeRoundHistoryEntry[]; error?: string };
+    if (!response.ok || !Array.isArray(body.rounds)) throw new Error(body.error ?? `runtime round history failed with HTTP ${response.status}`);
+    return body.rounds;
   }
 
   async artifacts(remoteRunId: string) {

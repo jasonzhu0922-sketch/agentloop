@@ -416,6 +416,7 @@ export class ModelPlanner implements Planner {
         },
       });
 
+      let failureStage: "response" | "proposal" | "shape" | "admission" = "response";
       try {
         if (response.finishReason === "length") {
           throw planningResponseError("Planner response was truncated", turn, response);
@@ -423,10 +424,12 @@ export class ModelPlanner implements Planner {
         if (response.toolCalls.length !== 1 || outcomePlanCalls.length !== 1) {
           throw planningResponseError("Planner must submit exactly one structured submit_outcome_plan call", turn, response);
         }
+        failureStage = "proposal";
         const proposal = normalizeOutcomePlanProposal(
           bindRequiredSkillCompanions(parseOutcomePlanProposal(outcomePlanCalls[0], planningTask), planningTask.availableSkills),
           planningTask,
         );
+        failureStage = "shape";
         assertInitialOutcomePlanShape(proposal, planningTask);
         await emit?.({
           type: "planning.outcome_plan.submitted",
@@ -437,6 +440,7 @@ export class ModelPlanner implements Planner {
             leafCount: proposal.steps.length,
           },
         });
+        failureStage = "admission";
         admitPlan({
           runId: task.runId,
           proposal,
@@ -457,6 +461,11 @@ export class ModelPlanner implements Planner {
             canonicalTurnResolution(planningTask),
           ),
           resultBindings: runtimeResultBindingsForPlanningTask(planningTask),
+          ...(planningTask.targetScopeIds !== undefined
+            ? { targetScopeIds: planningTask.targetScopeIds }
+            : Object.keys(planningTask.canonicalState.targets).length > 1
+              ? { targetScopeIds: [...new Set(proposal.steps.flatMap((step) => step.targetIds ?? []))] }
+              : {}),
           canonicalState: planningTask.canonicalState,
         });
         await emit?.({
@@ -477,6 +486,9 @@ export class ModelPlanner implements Planner {
           data: {
             validationError: summarizePlanningError(planningError.message),
             planningTurn: turn,
+            maxPlanningTurns: this.maxPlanningTurns,
+            stage: failureStage,
+            errorCode: error instanceof AppError ? error.code : "INTERNAL_ERROR",
           },
         });
         const sourceProviderViolations = boundSourceProviderContractViolations(planningTask, outcomePlanCalls);
@@ -502,6 +514,15 @@ export class ModelPlanner implements Planner {
               candidateSkillIds: resolution.candidateSkillIds,
             },
           });
+          await emit?.({
+            type: "planning.repair.decided",
+            data: {
+              planningTurn: turn,
+              maxPlanningTurns: this.maxPlanningTurns,
+              decision: turn < this.maxPlanningTurns ? "retry" : "budget_exhausted",
+              strategy: "capability_recovery",
+            },
+          });
           continue;
         }
         const contractRetry = sourceProviderViolations.length > 0
@@ -514,6 +535,15 @@ export class ModelPlanner implements Planner {
         if (contractRetry !== undefined && repairKey !== undefined && !attemptedContractRepairs.has(repairKey)) {
           attemptedContractRepairs.add(repairKey);
           runtimeDirective = contractRetry.directive;
+          await emit?.({
+            type: "planning.repair.decided",
+            data: {
+              planningTurn: turn,
+              maxPlanningTurns: this.maxPlanningTurns,
+              decision: turn < this.maxPlanningTurns ? "retry" : "budget_exhausted",
+              strategy: contractRetry.kind,
+            },
+          });
           if (contractRetry.kind === "native_skill_binding") {
             await emit?.({
               type: "planning.skill_binding.repair_offered",
@@ -525,6 +555,15 @@ export class ModelPlanner implements Planner {
           }
           continue;
         }
+        await emit?.({
+          type: "planning.repair.decided",
+          data: {
+            planningTurn: turn,
+            maxPlanningTurns: this.maxPlanningTurns,
+            decision: contractRetry === undefined ? "no_strategy" : "repeated_failure",
+            ...(contractRetry === undefined ? {} : { strategy: contractRetry.kind }),
+          },
+        });
         throw planningError;
       }
     }
@@ -1329,6 +1368,9 @@ function planningRuntimeContext(
           : { requiredToolSourceIds: canonicalRequiredToolSourceIds(task) }),
         ...(task.workspaceFacts === undefined ? {} : { workspaceFacts: task.workspaceFacts }),
         canonicalRunState: task.canonicalState,
+        ...(task.roundResultBindings === undefined ? {} : { roundResultBindings: task.roundResultBindings }),
+        ...(task.priorRoundResult === undefined ? {} : { priorRoundResult: task.priorRoundResult }),
+        ...(task.targetScopeIds === undefined ? {} : { targetScopeIds: task.targetScopeIds }),
         canonicalIntentPolicy: "Read task, format, evidence, deliverables, constraints, and turn binding only from canonicalRunState.intent. Do not reinterpret them from Plan text or conversation summaries.",
         visibleDirectories: task.visibleDirectories ?? [],
         sources: task.sources ?? [],
@@ -1716,10 +1758,10 @@ function conversationResultInput(task: TaskSpec): NonNullable<NonNullable<TaskSp
 }
 
 function runtimeResultBindingsForPlanningTask(task: TaskSpec): readonly RuntimeResultBinding[] {
-  return runtimeResultBindingsForConversationTurn({
+  return [...(task.roundResultBindings ?? []), ...runtimeResultBindingsForConversationTurn({
     resolution: canonicalTurnResolution(task),
     resultCards: task.conversationWorkingSet?.resultCards,
-  });
+  })];
 }
 
 function artifactFollowupReason(

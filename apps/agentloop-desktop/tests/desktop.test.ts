@@ -359,6 +359,17 @@ test("model settings reject URL credentials/non-HTTP endpoints/invalid parameter
   assert.equal((await readCall("/api/model-configuration", { revision: host.revision, configuration })).status, 409);
 });
 
+test("Desktop accepts attachments up to 4 MiB and rejects larger files", async t => {
+  const { app } = await fixture(t); const call = client(app.origin, await session(app.origin));
+  const upload = (size: number) => call("/api/sources", {
+    conversationId: "upload-limit", originalName: "limit.txt", contentBase64: Buffer.alloc(size, "a").toString("base64"),
+  });
+  const accepted = await upload(4 * 1024 * 1024);
+  assert.equal(accepted.status, 200);
+  assert.equal((await accepted.json()).source.byteSize, 4 * 1024 * 1024);
+  assert.equal((await upload(4 * 1024 * 1024 + 1)).status, 400);
+});
+
 test("HTTP Run retries, attachment bindings and event cursors survive application restart", async t => {
   const { root, app, reopen } = await fixture(t);
   const auth = await session(app.origin); const call = client(app.origin, auth);

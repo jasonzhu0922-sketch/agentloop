@@ -2,6 +2,11 @@ import type { SqlConnection, SqlDialect, SqlStatement } from "./connection.ts";
 import { SqliteConnection } from "./sqlite-connection.ts";
 import { installAssessmentProfileSchema } from "./assessment-profile-schema.ts";
 import { TIDB_KERNEL_SCHEMA_SQL } from "./tidb-schema-definitions.ts";
+import { installRunRoundSchema } from "./run-round-schema.ts";
+import { installIntentBudgetSchema, installPlanningBudgetSchema } from "./planning-budget-schema.ts";
+import { installPlanningRecoverySchema } from "./planning-recovery-schema.ts";
+import { installRoundResultSchema } from "./round-result-schema.ts";
+import { installMultiPlanSchema } from "./multi-plan-schema.ts";
 
 /**
  * Schema owner and connection facade. Wraps any `SqlConnection`; the default
@@ -69,6 +74,36 @@ export class AppDatabase implements SqlConnection {
   async installAssessmentProfileSchema(): Promise<void> {
     await this.migrated;
     await installAssessmentProfileSchema(this.connection);
+  }
+
+  async installRunRoundSchema(): Promise<void> {
+    await this.migrated;
+    await installRunRoundSchema(this.connection);
+  }
+
+  async installPlanningBudgetSchema(): Promise<void> {
+    await this.migrated;
+    await installPlanningBudgetSchema(this.connection);
+  }
+
+  async installIntentBudgetSchema(): Promise<void> {
+    await this.migrated;
+    await installIntentBudgetSchema(this.connection);
+  }
+
+  async installPlanningRecoverySchema(): Promise<void> {
+    await this.migrated;
+    await installPlanningRecoverySchema(this.connection);
+  }
+
+  async installRoundResultSchema(): Promise<void> {
+    await this.migrated;
+    await installRoundResultSchema(this.connection);
+  }
+
+  async installMultiPlanSchema(): Promise<void> {
+    await this.migrated;
+    await installMultiPlanSchema(this.connection);
   }
 
   exec(sql: string): Promise<void> {
@@ -188,7 +223,7 @@ export class AppDatabase implements SqlConnection {
 
       CREATE TABLE IF NOT EXISTS plans (
         id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
         version INTEGER NOT NULL,
         goal TEXT NOT NULL,
         selected_skill_ids_json TEXT NOT NULL,
@@ -532,6 +567,11 @@ export class AppDatabase implements SqlConnection {
       CREATE INDEX IF NOT EXISTS audit_actor_idx ON audit_events(actor_user_id, created_at DESC);
     `;
     await this.connection.exec(this.dialect === "tidb" ? TIDB_KERNEL_SCHEMA_SQL : canonicalSchema);
+    await installRunRoundSchema(this.connection);
+    await installPlanningBudgetSchema(this.connection);
+    await installPlanningRecoverySchema(this.connection);
+    await installRoundResultSchema(this.connection);
+    await installMultiPlanSchema(this.connection);
 
     // Kernel boundary: business rows are owned by opaque host-provided user
     // ids, so business tables must not enforce foreign keys into any

@@ -1,4 +1,4 @@
-import type { LocalRuntimeConfigurationInput, LocalRuntimeMcpServerInput, LocalRuntimeMemoryConfigurationInput, LocalRuntimeDeviceStorageInput, SkillImportFile } from "@zhujun/agentloop-local-runtime";
+import type { LocalRuntimeConfigurationInput, LocalRuntimeMcpServerInput, LocalRuntimeMemoryConfigurationInput, LocalRuntimeDeviceStorageInput, LocalWebSearchConfigurationInput, SkillImportFile } from "@zhujun/agentloop-local-runtime";
 import { HttpError } from "../security/loopback.ts";
 
 export function record(value: unknown, allowed: readonly string[]): Record<string, unknown> {
@@ -43,12 +43,13 @@ export function mcpInput(value: unknown): LocalRuntimeMcpServerInput {
   return s as unknown as LocalRuntimeMcpServerInput;
 }
 export function configurationInput(value: unknown): LocalRuntimeConfigurationInput {
-  const c = record(value, ["skillPackageIds", "mcpServerIds"]);
+  const c = record(value, ["iconKey", "skillPackageIds", "mcpServerIds"]);
+  if (c.iconKey !== undefined) string(c.iconKey, 40);
   if (!Array.isArray(c.skillPackageIds) || c.skillPackageIds.length > 200) throw new HttpError(400, "settings_input_invalid");
   for (const id of c.skillPackageIds) string(id);
   if (!Array.isArray(c.mcpServerIds) || c.mcpServerIds.length > 30) throw new HttpError(400, "settings_input_invalid");
   for (const id of c.mcpServerIds) string(id);
-  return { skillPackageIds: c.skillPackageIds as string[], mcpServerIds: c.mcpServerIds as string[] };
+  return { ...(c.iconKey === undefined ? {} : { iconKey: c.iconKey as string }), skillPackageIds: c.skillPackageIds as string[], mcpServerIds: c.mcpServerIds as string[] };
 }
 export function memoryInput(value: unknown): LocalRuntimeMemoryConfigurationInput {
   const memory = record(value, ["enabled", "settlementModelKey"]);
@@ -61,6 +62,14 @@ export function storageInput(value: unknown): LocalRuntimeDeviceStorageInput {
   const storage = record(value, ["workspaceRoot", "uploadStorageRoot"]);
   string(storage.workspaceRoot, 4096); string(storage.uploadStorageRoot, 4096);
   return { workspaceRoot: storage.workspaceRoot as string, uploadStorageRoot: storage.uploadStorageRoot as string };
+}
+export function webSearchInput(value: unknown): LocalWebSearchConfigurationInput {
+  const search = record(value, ["enabled", "searchProvider", "searchEndpoint", "searchApiKey"]);
+  if (typeof search.enabled !== "boolean") throw new HttpError(400, "web_search_configuration_invalid");
+  if (search.searchProvider !== undefined && !["bocha", "baidu", "bing"].includes(search.searchProvider as string)) throw new HttpError(400, "web_search_provider_invalid");
+  if (search.searchEndpoint !== undefined && search.searchEndpoint !== "") string(search.searchEndpoint, 4096);
+  if (search.searchApiKey !== undefined && search.searchApiKey !== "") string(search.searchApiKey, 4096);
+  return search as LocalWebSearchConfigurationInput;
 }
 function base64(value: unknown, max: number): Buffer {
   if (typeof value !== "string" || value.length > Math.ceil(max / 3) * 4 || value.length % 4 !== 0) throw new HttpError(400, "skill_content_invalid");

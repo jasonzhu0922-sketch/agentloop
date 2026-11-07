@@ -1693,7 +1693,8 @@ export class ComputerExecutor {
                 schema: "agentloop.commandExecutionReceipt/v1",
                 startState: "started",
                 completionState: exitCode === null ? "signaled" : "exited",
-                effectScope: launch === undefined ? "unbounded" : "workspace",
+                // Network-capable commands can have effects outside the workspace.
+                effectScope: "unbounded",
                 workspaceFileChanges: {
                   coverage: fileChangeSummary.truncated ? "truncated" : "complete",
                   count: fileChangeSummary.changes.length,
@@ -2832,6 +2833,9 @@ function isInsideRoot(candidate: string, root: string): boolean {
 }
 
 function absolutePathCandidates(value: string): string[] {
+  // A complete argv element is one path even when it contains spaces. Scan
+  // embedded paths only for arguments that are not themselves absolute paths.
+  if (isAbsolute(value)) return [value];
   const candidates: string[] = [];
   const pattern = /(?:^|[\s"'=([<{,])((?:\/[^\s"'`<>|;&),\]}]+)+)/gu;
   for (const match of value.matchAll(pattern)) {

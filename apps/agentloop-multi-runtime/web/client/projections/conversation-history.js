@@ -55,6 +55,7 @@ export function conversationMessagesFromTurns(turns, models = []) {
         completedAt: finiteNumber(finalTurn.completedAt, createdAt),
         events: [],
         plan: [],
+        rounds: [],
       }];
     }
     return [user, {
@@ -75,6 +76,7 @@ export function conversationMessagesFromTurns(turns, models = []) {
       createdAt,
       events: [],
       plan: [],
+      rounds: [],
     }];
   });
 }

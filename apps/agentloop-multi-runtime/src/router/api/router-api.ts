@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { assertUploadedSourceContent } from "@zhujun/agentloop";
-import type { RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
+import type { RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRoundHistoryEntry, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
 import { IdentityError, type IdentityService, type Principal } from "../identity/service.ts";
 import { ConversationDispatchInProgressError, ConversationRuntimeBindingError, RuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../ports/control-plane-contracts.ts";
 import { DeviceError, type DeviceRepository } from "../devices/device-service.ts";
@@ -56,6 +56,7 @@ interface RouterTaskApi {
   deleteConversation?(tenantId: string, ownerUserId: string, conversationId: string): Promise<void>;
   assignment(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly run?: RuntimeRunStatus } | undefined>;
   artifacts?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly artifacts: readonly RuntimeArtifact[] } | undefined>;
+  rounds?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly rounds: readonly RuntimeRoundHistoryEntry[] } | undefined>;
   readArtifact?(id: string, artifactId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly artifact: RuntimeArtifact; readonly content: Uint8Array } | undefined>;
   previewArtifact?(id: string, artifactId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly preview: RuntimeArtifactPreview } | undefined>;
   heartbeat?(input: { readonly runtimeId: string; readonly status: "ready" | "draining" | "offline"; readonly activeRunCount: number; readonly queuedRunCount: number; readonly maxConcurrentRuns?: number; readonly observedAt: number }): Promise<void>;
@@ -402,6 +403,14 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
         const projection = await router.artifacts(decodeURIComponent(artifactListMatch[1]));
         if (projection === undefined || projection.assignment.tenantId !== identity.tenantId || projection.assignment.ownerUserId !== identity.ownerUserId) return json(response, 404, { error: "assignment_not_found" });
         return json(response, 200, { artifacts: projection.artifacts });
+      }
+      const roundListMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/rounds$/);
+      if (request.method === "GET" && roundListMatch !== null) {
+        if (router.rounds === undefined) return json(response, 501, { error: "round_history_not_configured" });
+        const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
+        const projection = await router.rounds(decodeURIComponent(roundListMatch[1]));
+        if (projection === undefined || projection.assignment.tenantId !== identity.tenantId || projection.assignment.ownerUserId !== identity.ownerUserId) return json(response, 404, { error: "assignment_not_found" });
+        return json(response, 200, { rounds: projection.rounds });
       }
       const cancelMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/cancel$/);
       if (request.method === "POST" && cancelMatch !== null) {

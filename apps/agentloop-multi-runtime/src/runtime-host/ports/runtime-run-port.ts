@@ -6,6 +6,7 @@ import type {
   RuntimeHumanLoopResponse,
   RuntimeRecoveryDetail,
   RuntimeRunEvent,
+  RuntimeRoundHistoryEntry,
   RuntimeToolArguments,
 } from "../../shared/contracts.ts";
 
@@ -27,6 +28,7 @@ export interface RuntimeHostRunPort {
     readonly modelKey?: string;
   }): Promise<RuntimeHostRun>;
   get(actorUserId: string, runId: string): Promise<RuntimeHostRun>;
+  roundHistory?(actorUserId: string, runId: string): Promise<readonly RuntimeRoundHistoryEntry[]>;
   cancel?(actorUserId: string, runId: string): Promise<RuntimeHostRun>;
   events?(actorUserId: string, runId: string): Promise<readonly RuntimeRunEvent[]>;
   latestEvent?(actorUserId: string, runId: string): Promise<RuntimeRunEvent | undefined>;

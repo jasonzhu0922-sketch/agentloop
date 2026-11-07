@@ -1,4 +1,4 @@
-import type { PortableResourceRef, RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeDispatchResult, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments } from "../../shared/contracts.ts";
+import type { PortableResourceRef, RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeDispatchResult, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeRecoveryDetail, RuntimeRoundHistoryEntry, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments } from "../../shared/contracts.ts";
 import { HostDispatchStore, RuntimeDispatchInFlightError } from "../persistence/host-dispatch-store.ts";
 import type { RuntimeHostRunPort } from "../ports/runtime-run-port.ts";
 
@@ -65,6 +65,13 @@ export class RuntimeHostService implements RuntimeControlPort {
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
     if (this.runs.processArtifacts === undefined) throw new TypeError("runtime artifact query is not configured");
     return await this.runs.processArtifacts(ownerUserId, remoteRunId);
+  }
+
+  async rounds(remoteRunId: string): Promise<readonly RuntimeRoundHistoryEntry[]> {
+    const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
+    if (ownerUserId === undefined) throw new TypeError("runtime run not found");
+    if (this.runs.roundHistory === undefined) throw new TypeError("runtime round history is not configured");
+    return await this.runs.roundHistory(ownerUserId, remoteRunId);
   }
 
   async readArtifact(remoteRunId: string, artifactId: string): Promise<{ readonly artifact: RuntimeArtifact; readonly content: Uint8Array }> {

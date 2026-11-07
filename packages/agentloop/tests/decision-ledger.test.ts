@@ -137,6 +137,25 @@ test("a non-blocking Runtime evidence caveat remains terminally caveatable when 
   assert.equal(completionCaveatReasonCode(plan, [assessment]), "completed_with_unverified_quality");
 });
 
+test("completion ignores caveats belonging to a retired repair boundary", () => {
+  const plan = {
+    runId: "run-1",
+    steps: [
+      { id: "old", kind: "leaf", status: "failed", dependencies: [], retiredAt: 1,
+        evidence: { completionCaveat: { reason: "repair_limit" } } },
+      { id: "replacement", kind: "leaf", status: "completed", dependencies: [], evidence: {} },
+    ],
+  } as any;
+  const retiredAssessment = {
+    id: "old-assessment", planId: "plan-1", stepId: "old", attempt: 1, approved: true,
+    criteria: [{ criterionId: "quality", satisfied: false, status: "unverified" as const, blocking: false,
+      rationale: "Not verified in the old step.", evidenceRefs: [] }],
+    skills: [], evidenceDigest: "digest", feedback: "", createdAt: 1,
+  };
+
+  assert.equal(completionCaveatReasonCode(plan, [retiredAssessment]), undefined);
+});
+
 test("a non-blocking model-judged criterion is retained as unverified without rejecting delivery", async () => {
   const model = {
     limits: { maxOutputTokens: 1_024 },

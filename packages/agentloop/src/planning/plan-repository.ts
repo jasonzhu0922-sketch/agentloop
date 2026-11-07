@@ -122,9 +122,21 @@ export class PlanRepository {
   }
 
   async getByRun(runId: string): Promise<ExecutionPlan> {
-    const row = await this.database.prepare("SELECT * FROM plans WHERE run_id = ?").get(runId) as PlanRow | undefined;
+    const row = await this.database.prepare(`SELECT plans.* FROM plans
+      LEFT JOIN run_rounds current_round ON current_round.run_id = plans.run_id
+        AND current_round.plan_id = plans.id
+      WHERE plans.run_id = ?
+      ORDER BY CASE WHEN current_round.plan_id IS NULL THEN 1 ELSE 0 END,
+        plans.created_at DESC, plans.id DESC LIMIT 1`).get(runId) as PlanRow | undefined;
     if (row === undefined) throw notFound("Plan");
     return await this.hydrate(row);
+  }
+
+  async listByRun(runId: string): Promise<ExecutionPlan[]> {
+    const rows = await this.database.prepare("SELECT * FROM plans WHERE run_id = ? ORDER BY created_at, id")
+      .all(runId) as unknown as PlanRow[];
+    if (rows.length === 0) throw notFound("Plan");
+    return await Promise.all(rows.map((row) => this.hydrate(row)));
   }
 
   async get(planId: string): Promise<ExecutionPlan> {

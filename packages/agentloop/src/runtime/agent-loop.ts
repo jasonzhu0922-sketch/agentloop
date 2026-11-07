@@ -228,6 +228,10 @@ interface StructuredToolCandidateSelection {
 // providers count hidden reasoning against the same output budget used for the
 // visible answer or tool-call arguments.
 const CONVERGENCE_MAX_OUTPUT_TOKENS = 4_096;
+// Once a provider truncates a Tool call, the next repair turn must be small
+// enough to make a bounded write or action possible. This also prevents a
+// repeated oversized call from holding the stream open for several minutes.
+const LENGTH_REPAIR_MAX_OUTPUT_TOKENS = 16_384;
 const EMPTY_CANDIDATE_REPAIR_ATTEMPTS = 2;
 // Extra tool-enabled steps granted after the primary budget when the model is
 // still actively executing. Defaults to 0 so the primary `maxSteps` budget is
@@ -563,7 +567,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     input: Omit<Parameters<typeof buildRuntimeDeliveryCandidate>[0], "expectedArtifactKind" | "expectedArtifactFormat">,
   ): RuntimeDeliveryCandidate => buildRuntimeDeliveryCandidate({
     ...input,
-    ...(!semanticDeliveryTargetsEnabled ? {} : { deliveryClaims: deliveryClaimsForCurrentTargetBindings(workProducts!.derive().semantics.deliveryTargets ?? [], toolEvidence) }),
+    ...(!semanticDeliveryTargetsEnabled ? {} : { deliveryClaims: deliveryClaimsForCurrentTargetBindings(workProducts!.derive().semantics.deliveryTargets ?? [], toolEvidence, options.workProductContext!.deliveryTargets!) }),
     ...(options.progressPolicy?.targetIds === undefined ? {} : { targetIds: options.progressPolicy.targetIds }),
     ...(options.progressPolicy?.expectedArtifactKind === undefined
       ? {}
@@ -629,6 +633,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let convergenceRequested = false;
   let previousPrepareRejectionSignature: string | undefined;
   let consecutivePrepareRejectionSteps = 0;
+  let previousLengthTruncationSignature: string | undefined;
+  let consecutiveLengthTruncationSteps = 0;
   let invalidHumanLoopAttempts = 0;
   let humanLoopRepairPending = false;
   let toolProgressState = initialRuntimeToolProgressState();
@@ -1313,7 +1319,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         ...(modelStepDefinitions.length === 0 ? {} : { toolChoice: "auto" as const }),
         maxOutputTokens: convergenceOnly
           ? Math.min(convergenceMaxOutputTokens, options.model.limits.maxOutputTokens)
-          : options.model.limits.maxOutputTokens,
+          : consecutiveLengthTruncationSteps > 0
+            ? Math.min(LENGTH_REPAIR_MAX_OUTPUT_TOKENS, options.model.limits.maxOutputTokens)
+            : options.model.limits.maxOutputTokens,
       };
       earlyOutcomes = new Map<string, ToolOutcome>();
       response = await completeWithStreamingAndDispatch({
@@ -1432,6 +1440,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         "The previous two completion attempts were empty. Use the compacted canonical evidence and return the user-visible completion now.",
       ].join("\n"));
       continue;
+    }
+    if (response.finishReason !== "length") {
+      previousLengthTruncationSignature = undefined;
+      consecutiveLengthTruncationSteps = 0;
     }
     // A length-truncated response can contain an incomplete native tool call.
     // Only calls that a provider explicitly marked ready may have executed, so
@@ -1949,11 +1961,36 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     // authorization boundary.
     if (response.finishReason === "length" && outcomes.every((outcome) => outcome.isError)) {
       const feedback = "The previous execution turn reached the output limit before any requested Tool call could execute";
+      const lengthTruncationSignature = signatureForLengthTruncatedToolCalls(response.toolCalls);
+      if (lengthTruncationSignature !== undefined && lengthTruncationSignature === previousLengthTruncationSignature) {
+        consecutiveLengthTruncationSteps += 1;
+      } else {
+        previousLengthTruncationSignature = lengthTruncationSignature;
+        consecutiveLengthTruncationSteps = 1;
+      }
+      const repeatedLengthTruncation = consecutiveLengthTruncationSteps > 1;
+      if (repeatedLengthTruncation) {
+        await emit({
+          type: "loop.no_progress",
+          data: {
+            step,
+            phase: "execution",
+            toolSignature: lengthTruncationSignature ?? "length_truncated_tool_call",
+            reason: "The model repeated an output-truncated Tool call without producing an executable bounded action",
+            stalled: consecutiveLengthTruncationSteps >= 3,
+          },
+        });
+      }
+      if (consecutiveLengthTruncationSteps >= 3) {
+        stalled = true;
+        break;
+      }
       await grantCandidateRepairGrace(step, feedback);
       contextAssembler.setRuntimeDirective(lengthTruncationRepairDirective({
         feedback,
         convergenceOnly,
         toolAvailable: modelStepDefinitions.length > 0,
+        repeated: repeatedLengthTruncation,
       }));
       continue;
     }
@@ -2967,9 +3004,10 @@ function parseJsonRecord(value: string): Record<string, unknown> | undefined {
  * deliberately narrower than the older kind/format matching: two Markdown
  * files are not interchangeable user deliveries.
  */
-function deliveryClaimsForCurrentTargetBindings(
+export function deliveryClaimsForCurrentTargetBindings(
   bindings: readonly {
     readonly targetId: string;
+    readonly deliveryTargetId: string;
     readonly path: string;
     readonly versionId: string;
     readonly bytes: number;
@@ -2977,6 +3015,7 @@ function deliveryClaimsForCurrentTargetBindings(
     readonly observedByToolCallId: string;
   }[],
   evidence: readonly AgentLoopToolEvidence[],
+  targets: readonly { readonly targetId: string; readonly deliveryTargetId?: string }[],
 ): NonNullable<RuntimeDeliveryCandidate["deliveryClaims"]> {
   const acceptances = new Map<string, string>();
   for (const item of evidence) {
@@ -2994,7 +3033,8 @@ function deliveryClaimsForCurrentTargetBindings(
     const acceptanceToolCallId = acceptances.get(`${binding.path}\u0000${binding.sha256.toLowerCase()}`);
     if (acceptanceToolCallId === undefined) return [];
     return [{
-      targetId: binding.targetId,
+      targetId: binding.deliveryTargetId,
+      instanceId: binding.targetId,
       evidenceRefs: [binding.observedByToolCallId, acceptanceToolCallId],
       artifact: {
         path: binding.path,
@@ -3008,7 +3048,10 @@ function deliveryClaimsForCurrentTargetBindings(
   });
   const byTarget = new Map<string, typeof accepted>();
   for (const claim of accepted) byTarget.set(claim.targetId, [...(byTarget.get(claim.targetId) ?? []), claim]);
-  return [...byTarget.entries()].map(([targetId, claims]) => ({
+  return [...byTarget.entries()].filter(([targetId, claims]) => {
+    const expected = targets.filter((target) => (target.deliveryTargetId ?? target.targetId) === targetId);
+    return expected.length > 0 && expected.every((target) => claims.some((claim) => claim.instanceId === target.targetId));
+  }).map(([targetId, claims]) => ({
     targetId,
     evidenceRefs: claims.flatMap((claim) => claim.evidenceRefs),
     ...(claims.length === 1 ? { artifact: claims[0]!.artifact } : { artifacts: claims.map((claim) => claim.artifact!) }),
@@ -3492,6 +3535,7 @@ function lengthTruncationRepairDirective(input: {
   readonly feedback: string;
   readonly convergenceOnly: boolean;
   readonly toolAvailable: boolean;
+  readonly repeated?: boolean;
 }): string {
   if (input.convergenceOnly || !input.toolAvailable) {
     return [
@@ -3506,10 +3550,24 @@ function lengthTruncationRepairDirective(input: {
     "Do not continue long reasoning, restate source material, or draft large artifacts in assistant prose.",
     "Use the current Plan step and canonical evidence to take one bounded forward action.",
     "Do not repeat the same oversized native Tool arguments. Select an action whose complete arguments fit within the output budget; for larger deliverables, use the available bounded creation, patch, or generator workflow instead of embedding the full payload in one call.",
+    ...(input.repeated === true ? [
+      "The same Tool call has already been truncated more than once. Change the call shape now; repeating it will stop this Run.",
+      "For computer_write_file, write a bounded chunk with mode=create, then continue with separate mode=append calls using the same path. Keep every chunk within the Tool schema's content limit and do not attempt the full artifact in one call.",
+    ] : []),
     "If the requested artifact is incomplete, call a file-producing Tool with the complete intended content or use a purpose-built materialization Tool; do not publish a partial file as the deliverable.",
     "If the artifact appears complete but lacks acceptance evidence, call the available acceptance or verification Tool.",
     "Use read-only Tools only for one specifically missing fact that is not already available from recent evidence.",
   ].join("\n");
+}
+
+function signatureForLengthTruncatedToolCalls(calls: readonly ModelToolCall[]): string | undefined {
+  if (calls.length === 0) return undefined;
+  return calls.map((call) => {
+    const argumentsValue = typeof call.arguments === "string"
+      ? call.arguments
+      : JSON.stringify(call.arguments) ?? String(call.arguments);
+    return `${call.name}:${typeof call.arguments}:${argumentsValue.length}:${argumentsValue.slice(0, 256)}`;
+  }).join("|");
 }
 
 function humanLoopRequirementFromEvidence(evidence: readonly AgentLoopToolEvidence[]): { toolCallId: string; requirement: Record<string, unknown> } | undefined {

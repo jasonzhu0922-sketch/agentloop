@@ -18,6 +18,7 @@ export interface DesktopOptions {
   readonly webDirectory?: string;
   readonly dataDirectory: string;
   readonly runtimeEnvironmentDirectory?: string;
+  readonly runtimeTurnDefaults?: { readonly planningMaxTurns?: number; readonly stepMaxTurns?: number; readonly webSearch?: { readonly searchProvider?: "baidu" | "bing" | "bocha"; readonly searchEndpoint?: string; readonly searchApiKey?: string } };
   readonly models?: LocalModelProviderPort;
   readonly cloudAuth?: CloudAuthPort;
   readonly port?: number;
@@ -54,6 +55,7 @@ async function assets(webDirectory?: string): Promise<ReadonlyMap<string, Static
     ["/styles.css", "styles.css", "text/css; charset=utf-8"],
     ["/multi-runtime.css", "multi-runtime.css", "text/css; charset=utf-8"],
     ["/assets/xuanwu-mascot-icon.png", "xuanwu-mascot-icon.png", "image/png"],
+    ...["qinglong", "baihu", "zhuque", "qilin", "taotie", "yinglong", "pixiu"].map(key => [`/assets/runtime-${key}.png`, `runtime-${key}.png`, "image/png"]),
     ...["presentation/assistant-message-presentation.js", "projections/assistant-event-projection.js", "projections/execution-detail-projection.js", "ui/scroll-follow.js", "ui/composer-input.js", "ui/message-selection.js"].map(file => [`/reference/${file}`, `reference/${file}`, "text/javascript; charset=utf-8"]),
   ].map(async ([route, file, type]) => [route!, { content: await readFile(webDirectory ? join(webDirectory, file!) : new URL(`../web/${file}`, import.meta.url)), type: type! }] as const));
   if (webDirectory) {
@@ -96,6 +98,7 @@ export async function startDesktop(options: DesktopOptions): Promise<DesktopAppl
     api.origin = new URL(`http://127.0.0.1:${address.port}`).origin;
     const accounts = new DesktopAccountManagers({ dataDirectory: lock.dataDirectory, defaultRuntimeId: DEFAULT_RUNTIME_ID,
       runtimeEnvironmentDirectory: options.runtimeEnvironmentDirectory,
+      runtimeTurnDefaults: options.runtimeTurnDefaults,
       models: options.models, bundledSkillDirectories: options.bundledSkillDirectories,
       runEventLogSink: options.log === undefined ? undefined : (_runtime, line) => options.log!(line),
       connectorModules: options.connectorModules ?? [],

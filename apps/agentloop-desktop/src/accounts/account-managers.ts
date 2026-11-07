@@ -24,10 +24,10 @@ async function directory(path: string): Promise<void> {
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("desktop_account_directory_invalid");
 }
 
-export async function desktopRuntimeEnvironment(dataDirectory: string): Promise<Pick<LocalRuntimeManagerOptions, "webSearch" | "planningMaxTurns" | "stepMaxTurns">> {
+export async function desktopRuntimeEnvironment(dataDirectory: string, defaults: Pick<LocalRuntimeManagerOptions, "webSearch" | "planningMaxTurns" | "stepMaxTurns"> = {}): Promise<Pick<LocalRuntimeManagerOptions, "webSearch" | "planningMaxTurns" | "stepMaxTurns">> {
   let content: string;
   try { content = await readFile(join(dataDirectory, ".env"), "utf8"); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return {}; throw error; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return defaults; throw error; }
   const env = parseEnv(content);
   const limit = (name: string, max: number): number | undefined => {
     const value = env[name];
@@ -36,20 +36,26 @@ export async function desktopRuntimeEnvironment(dataDirectory: string): Promise<
     return Number(value);
   };
   const planningMaxTurns = limit("PLANNING_MAX_TURNS", 64), stepMaxTurns = limit("STEP_MAX_TURNS", 256);
-  let webSearch: LocalRuntimeManagerOptions["webSearch"];
+  let webSearch: LocalRuntimeManagerOptions["webSearch"] = defaults.webSearch;
+  if (env.WEB_SEARCH_DISABLED === "1") webSearch = undefined;
   if (env.WEB_SEARCH_DISABLED === "0") {
     const provider = env.WEB_SEARCH_PROVIDER;
     if (provider !== undefined && provider !== "bocha" && provider !== "baidu" && provider !== "bing") throw new Error("desktop_web_search_provider_invalid");
-    webSearch = { ...(provider === undefined ? {} : { searchProvider: provider }),
+    // A package or development checkout may carry a public endpoint without a
+    // credential. Keep search disabled until the account settings page stores
+    // the key in the encrypted vault instead of failing Desktop startup.
+    if (provider !== "bocha" || (env.WEB_SEARCH_API_KEY && env.WEB_SEARCH_ENDPOINT)) webSearch = { ...(provider === undefined ? {} : { searchProvider: provider }),
       ...(env.WEB_SEARCH_ENDPOINT ? { searchEndpoint: env.WEB_SEARCH_ENDPOINT } : {}),
       ...(env.WEB_SEARCH_API_KEY ? { searchApiKey: env.WEB_SEARCH_API_KEY } : {}) };
   }
-  return { ...(webSearch === undefined ? {} : { webSearch }), ...(planningMaxTurns === undefined ? {} : { planningMaxTurns }), ...(stepMaxTurns === undefined ? {} : { stepMaxTurns }) };
+  const { webSearch: _defaultSearch, ...turnDefaults } = defaults;
+  return { ...turnDefaults, ...(webSearch === undefined ? {} : { webSearch }), ...(planningMaxTurns === undefined ? {} : { planningMaxTurns }), ...(stepMaxTurns === undefined ? {} : { stepMaxTurns }) };
 }
 
 type Options = Pick<LocalRuntimeManagerOptions, "models" | "identity" | "bundledSkillDirectories" | "connectorModules" | "computerCommandEnvironment" | "runEventLogSink"> & {
   readonly dataDirectory: string;
   readonly runtimeEnvironmentDirectory?: string;
+  readonly runtimeTurnDefaults?: Pick<LocalRuntimeManagerOptions, "webSearch" | "planningMaxTurns" | "stepMaxTurns">;
   readonly defaultRuntimeId: string;
 };
 
@@ -163,11 +169,12 @@ export class DesktopAccountManagers {
       readOnlyRoots.push(canonical);
     }
     const manager = await createLocalRuntimeManager({ ...this.options, dataDirectory: root,
-      ...await desktopRuntimeEnvironment(this.options.runtimeEnvironmentDirectory ?? this.options.dataDirectory),
+      ...await desktopRuntimeEnvironment(this.options.runtimeEnvironmentDirectory ?? this.options.dataDirectory, this.options.runtimeTurnDefaults),
       workspaceRoot: join(boundary, "workspace"), uploadStorageRoot: join(boundary, "uploads"), authorizeStorage,
       modelSecrets: new EncryptedLocalRuntimeSecretStore(join(root, "private", "model-secrets")),
       secrets: new EncryptedLocalRuntimeSecretStore(join(root, "private", "mcp-secrets")),
       connectorSecrets: new EncryptedLocalRuntimeSecretStore(join(root, "private", "connector-secrets")),
+      webSearchSecrets: new EncryptedLocalRuntimeSecretStore(join(root, "private", "web-search-secrets")),
       computerCommandSandbox: { mode: "required", readOnlyRoots },
       sharedMcpCatalog: true,
     });

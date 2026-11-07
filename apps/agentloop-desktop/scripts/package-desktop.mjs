@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { build as bundle } from 'esbuild';
-import { packageOptions, copyRuntimeDependencies } from './package-support.mjs';
+import { packageOptions, copyRuntimeDependencies, packagedTurnDefaults, packagedSearchDefaults } from './package-support.mjs';
 import { writeMacInstallerFiles } from './package-macos-installer.mjs';
 import { requiredPythonRoot, packagePython } from './package-python.mjs';
 import { packagedToolEnvironment, verifyPackagedPython } from '../distribution/packaged-tools.mjs';
@@ -17,6 +17,7 @@ const manifest = JSON.parse(await readFile(join(appRoot, 'package.json'), 'utf8'
 const nodeVersion = '26.0.0';
 // Required before building anything; never silently emit a Node-only package.
 const pythonSourceRoot = await requiredPythonRoot();
+const searchDefaults = await packagedSearchDefaults(join(appRoot, '.env'));
 const pythonRequirements = join(repositoryRoot, 'apps/agentloop-multi-runtime/requirements.local-agent.txt');
 const output = join(appRoot, 'release', `${options.channel}-${options.platform}-${options.arch}`);
 const cache = join(appRoot, 'release', 'cache');
@@ -82,7 +83,8 @@ try {
   await cp(join(repositoryRoot, 'LICENSE'), join(backend, 'LICENSE'));
   const git = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repositoryRoot, encoding: 'utf8' });
   const status = spawnSync('git', ['status', '--porcelain'], { cwd: repositoryRoot, encoding: 'utf8' });
-  const config = { schema: 'agentloop.desktop.package/v1', version: manifest.version, ...options, node, python, sourceCommit: git.status === 0 ? git.stdout.trim() : null, sourceDirty: status.status === 0 ? Boolean(status.stdout.trim()) : null, builtAt: new Date().toISOString() };
+  const turnDefaults = await packagedTurnDefaults(join(appRoot, '.env'));
+  const config = { schema: 'agentloop.desktop.package/v1', version: manifest.version, ...options, node, python, turnDefaults, searchDefaults, sourceCommit: git.status === 0 ? git.stdout.trim() : null, sourceDirty: status.status === 0 ? Boolean(status.stdout.trim()) : null, builtAt: new Date().toISOString() };
   await writeFile(join(backend, 'desktop-config.json'), `${JSON.stringify(config, null, 2)}\n`);
   await verifyPackagedPython(backend, config, await packagedToolEnvironment(backend, config));
   const artifactName = `AgentLoop-Desktop-${manifest.version}-${options.channel}-${options.platform}-${options.arch}`;

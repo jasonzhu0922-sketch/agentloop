@@ -41,6 +41,7 @@ export interface LocalRuntime {
   currentHumanLoop(context: LocalExecutionContext, runId: string): ReturnType<RunService["currentHumanLoop"]>;
   respondHumanLoop(context: LocalExecutionContext, runId: string, requestId: string, value: unknown, expectedRevision: number): ReturnType<RunService["respondHumanLoop"]>;
   events(context: LocalExecutionContext, runId: string, afterSeq?: number): ReturnType<RunService["events"]>;
+  roundHistory(context: LocalExecutionContext, runId: string): ReturnType<RunService["roundHistory"]>;
   ensureConversation(context: LocalExecutionContext, conversationId: string, input: string): Promise<void>;
   conversations(context: LocalExecutionContext): Promise<Awaited<ReturnType<RunService["getConversation"]>>["conversation"][]>;
   conversation(context: LocalExecutionContext, conversationId: string): ReturnType<RunService["getConversation"]>;
@@ -111,6 +112,9 @@ export class RuntimeFacade implements LocalRuntime {
   async events(context: LocalExecutionContext, runId: string, afterSeq = 0) {
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new TypeError("event_sequence_invalid");
     return this.#use(async runtime => (await runtime.runs.events(this.#owner(context), runId)).filter(event => event.seq > afterSeq));
+  }
+  roundHistory(context: LocalExecutionContext, runId: string): ReturnType<RunService["roundHistory"]> {
+    return this.#use(runtime => runtime.runs.roundHistory(this.#owner(context), runId));
   }
   ensureConversation(context: LocalExecutionContext, conversationId: string, input: string) {
     return this.#use(runtime => runtime.runs.ensureConversation(this.#owner(context), conversationId, input));

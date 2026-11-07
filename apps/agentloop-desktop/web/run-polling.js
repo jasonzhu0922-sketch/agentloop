@@ -14,6 +14,7 @@ export async function readRunUpdate(api, turn) {
     events.push(...tail.events);
   }
   const { artifacts } = await api(`${path}/artifacts`);
+  const { rounds } = await api(`${path}/rounds`);
   const humanLoop = run.status === 'running' ? await api(`${path}/human-loop/current`) : {};
-  return { run, events, artifacts, humanLoop };
+  return { run, events, artifacts, rounds, humanLoop };
 }

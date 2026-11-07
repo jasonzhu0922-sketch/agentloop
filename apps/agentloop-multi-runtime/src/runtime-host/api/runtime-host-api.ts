@@ -47,6 +47,13 @@ export function createRuntimeHostHttpServer(host: RuntimeHostService, options: {
         }
         return json(response, 200, await host.getRun(decodeURIComponent(runMatch[1])));
       }
+      const roundsMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/rounds$/);
+      if (request.method === "GET" && roundsMatch !== undefined && roundsMatch !== null) {
+        if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) {
+          return json(response, 401, { error: "runtime_dispatch_unauthorized" });
+        }
+        return json(response, 200, { rounds: await host.rounds(decodeURIComponent(roundsMatch[1])) });
+      }
       const humanLoopCurrentMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/human-loop\/current$/);
       if (request.method === "GET" && humanLoopCurrentMatch !== undefined && humanLoopCurrentMatch !== null) {
         if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) return json(response, 401, { error: "runtime_dispatch_unauthorized" });

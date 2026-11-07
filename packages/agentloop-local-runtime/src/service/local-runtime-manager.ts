@@ -7,12 +7,13 @@ import { ConnectorSettings, type ConnectorSettingInput } from "../configuration/
 import type { ConnectorModuleRegistration } from "../connectors/connector-module-loader.ts";
 import type { LocalConnectorConfigurationPort, LocalIdentityPort, LocalModelProviderPort, LocalRuntimeControl, LocalRuntimeHostOptions } from "../contracts/host.ts";
 import { LocalRuntimeSupervisorError } from "../contracts/host.ts";
-import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, type LocalRuntimeMcpServerInput, type LocalRuntimeMemoryConfigurationInput, type LocalRuntimeSecretStore, type ResolvedLocalMemoryConfiguration, type LocalRuntimeDeviceStorageInput, type ResolvedLocalRuntimeDeviceStorage } from "../configuration/local-runtime-configuration-store.ts";
+import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, type LocalRuntimeMcpServerInput, type LocalRuntimeMemoryConfigurationInput, type LocalRuntimeSecretStore, type ResolvedLocalMemoryConfiguration, type LocalRuntimeDeviceStorageInput, type ResolvedLocalRuntimeDeviceStorage, type LocalWebSearchConfigurationInput, type ResolvedLocalWebSearchConfiguration } from "../configuration/local-runtime-configuration-store.ts";
 import { LocalRunAdmissionService } from "./local-run-admission.ts";
 import { LocalRuntimeFactory } from "./local-runtime-factory.ts";
 import { RuntimeFacade, type LocalRuntime } from "./local-runtime.ts";
 import { LocalRuntimeSupervisor, type LocalRuntimeSummary } from "./runtime-supervisor.ts";
 import { LocalModelConfigurationStore, type LocalModelConfigurationInput, type LocalModelConfigurationSnapshot } from "../configuration/local-model-configuration-store.ts";
+import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local-runtime-secret-store.ts";
 
 export interface LocalModelSettings {
   readonly configuration: LocalModelConfigurationInput;
@@ -42,6 +43,7 @@ export interface LocalRuntimeManagerOptions {
   /** Host-approved modules; an empty array enables editable local connection settings without loading modules. */
   readonly connectorModules?: readonly ConnectorModuleRegistration[];
   readonly connectorSecrets?: LocalRuntimeSecretStore;
+  readonly webSearchSecrets?: LocalRuntimeSecretStore;
   readonly bundledSkillDirectories?: readonly string[];
   readonly customSkillDirectories?: readonly string[];
   readonly memory?: LocalRuntimeMemoryConfigurationInput;
@@ -71,6 +73,8 @@ export interface LocalRuntimeManager {
   configureDeviceMemory(input: LocalRuntimeMemoryConfigurationInput): Promise<ResolvedLocalMemoryConfiguration>;
   deviceStorageConfiguration(): Promise<ResolvedLocalRuntimeDeviceStorage>;
   configureDeviceStorage(input: LocalRuntimeDeviceStorageInput): Promise<ResolvedLocalRuntimeDeviceStorage>;
+  webSearchConfiguration(): Promise<ResolvedLocalWebSearchConfiguration>;
+  configureWebSearch(input: LocalWebSearchConfigurationInput): Promise<ResolvedLocalWebSearchConfiguration>;
   runtimes(): Promise<readonly LocalRuntimeSummary[]>;
   createRuntime(displayName: string, configuration?: LocalRuntimeConfigurationInput): Promise<LocalRuntimeSummary>;
   renameRuntime(runtimeId: string, displayName: string): Promise<LocalRuntimeSummary>;
@@ -114,7 +118,8 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
   // Device-level Memory chooses from the same persisted local-model catalog
   // that Runtime startup resolves. Keep that catalog at this boundary so an
   // unavailable model is rejected before the Memory flag becomes durable.
-  const configurations = new LocalRuntimeConfigurationStore(database, options.secrets, options.customSkillDirectories ?? [], library, modelConfigurations, options.additionalSecretReferences, options.sharedMcpCatalog);
+  const webSearchSecrets = options.webSearchSecrets ?? new EncryptedLocalRuntimeSecretStore(join(options.dataDirectory, "private", "web-search-secrets"));
+  const configurations = new LocalRuntimeConfigurationStore(database, options.secrets, options.customSkillDirectories ?? [], library, modelConfigurations, options.additionalSecretReferences, options.sharedMcpCatalog, webSearchSecrets);
   const storage = { value: { workspaceRoot: options.workspaceRoot ?? join(options.dataDirectory, "workspace"), uploadStorageRoot: options.uploadStorageRoot ?? join(options.dataDirectory, "uploads") } };
   const connectors = options.connectorModules === undefined ? undefined : new ConnectorSettings(database,
     options.connectorSecrets ?? new (await import("../persistence/encrypted-local-runtime-secret-store.ts")).EncryptedLocalRuntimeSecretStore(join(options.dataDirectory, "private", "connector-secrets")), options.connectorModules);
@@ -128,7 +133,7 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
     environment: options.bundledSkillDirectories === undefined ? {} : { AGENTLOOP_BUNDLED_SKILL_DIRECTORIES: options.bundledSkillDirectories.join(",") },
   }, modelConfigurations, connectors ?? options.connectors);
   const supervisor = new LocalRuntimeSupervisor(database, (definition, configuration) => factory.create(definition, {
-    ...configuration, integrationEnvironment: { ...configuration.integrationEnvironment, WEB_SEARCH_DISABLED: options.webSearch === undefined ? "1" : "0" },
+    ...configuration, integrationEnvironment: { ...configuration.integrationEnvironment, WEB_SEARCH_DISABLED: configuration.webSearch === undefined ? "1" : "0" },
   }, storage.value.workspaceRoot, storage.value.uploadStorageRoot), async definition => {
     const runtimeRoot = factory.runtimeRootFor(definition);
     if (runtimeRoot !== undefined) await rm(runtimeRoot, { recursive: true, force: true });
@@ -138,6 +143,7 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
     await connectors?.ready();
     await modelConfigurations?.ready();
     await configurations.ready();
+    await configurations.deviceWebSearchConfiguration(options.webSearch);
     storage.value = await configurations.deviceStorageConfiguration(storage.value);
     await options.authorizeStorage?.(storage.value);
     if (options.memory !== undefined) {
@@ -231,6 +237,14 @@ class RuntimeManager implements LocalRuntimeManager {
         await this.#supervisor.reloadRunningInstances().catch(() => undefined); throw error;
       }
       return next;
+    }));
+  }
+  webSearchConfiguration() { return this.guard(() => this.#configurations.deviceWebSearchConfiguration()); }
+  configureWebSearch(input: LocalWebSearchConfigurationInput) {
+    return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
+      const result = await this.#configurations.applyDeviceWebSearch(input);
+      await this.#supervisor.reloadRunningInstances();
+      return result;
     }));
   }
 
@@ -332,6 +346,7 @@ class RuntimeManager implements LocalRuntimeManager {
       currentHumanLoop: (context, runId) => use(facade => facade.currentHumanLoop(context, runId)),
       respondHumanLoop: (context, runId, requestId, value, expectedRevision) => use(facade => facade.respondHumanLoop(context, runId, requestId, value, expectedRevision)),
       events: (context, runId, afterSeq) => use(facade => facade.events(context, runId, afterSeq)),
+      roundHistory: (context, runId) => use(facade => facade.roundHistory(context, runId)),
       ensureConversation: (context, conversationId, input) => use(facade => facade.ensureConversation(context, conversationId, input)),
       conversations: context => use(facade => facade.conversations(context)),
       conversation: (context, conversationId) => use(facade => facade.conversation(context, conversationId)),

@@ -411,6 +411,32 @@ function event(seq: number, type: string, data: Record<string, unknown>): Stored
   return { seq, type, data, createdAt: Date.now() };
 }
 
+test("each member of an accepted plural target projects as a final artifact", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-plural-artifacts-"));
+  try {
+    const state = createCanonicalRunState({ runId: "plural-artifacts", userInput: "split", understanding: understandTask({ objective: "split",
+      resolvedTaskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "create_artifact", requiresExecution: true,
+        deliverables: [{ targetId: "pdf", purpose: "split", action: "create", kind: "document", format: "pdf", expectedArtifactCount: 3, surface: "workspace_artifact" }] } }) });
+    const bindings = await Promise.all([1, 2, 3].map(async (n) => {
+      const path = `part${n}.pdf`;
+      const content = `pdf-${n}`;
+      await fs.writeFile(join(root, path), content);
+      return { path, sha256: createHash("sha256").update(content).digest("hex"), bytes: Buffer.byteLength(content), versionId: `v${n}`,
+        observedByToolCallId: "split", stepId: "produce", declarationId: `d${n}`, boundAt: 1 };
+    }));
+    const artifacts = bindings.map((binding) => ({ ...binding, acceptanceToolCallId: "verify" }));
+    const complete: CanonicalRunState = { ...state, steps: { produce: { stepId: "produce", targetIds: ["pdf"], status: "satisfied", evidenceRefs: [], updatedAt: 1 } },
+      targets: { pdf: { ...state.targets.pdf!, ownerStepIds: ["produce"], status: "accepted", artifactBinding: bindings[0], artifactBindings: bindings,
+        claims: [{ stepId: "produce", assessmentId: "assessed", acceptedAt: 2, evidenceRefs: [], artifacts }] } },
+      terminal: { status: "completed", reasonCode: "done", committedAt: 3 } };
+    const events = bindings.map((binding, index) => event(index + 1, "tool.completed", { toolName: "verify_artifact_acceptance", isError: false,
+      result: JSON.stringify({ schema: "agentloop.artifactAcceptance/v1", artifact: binding, verdict: "accepted" }) }));
+    const projected = await collectProcessArtifacts({ runId: state.runId, workspaceRoot: root, runCreatedAt: 0, events, canonicalState: complete });
+    assert.equal(projected.length, 3);
+    assert.ok(projected.every((artifact) => artifact.role === "final" && artifact.verification?.delivery === "committed"));
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
 test("file checks, semantic acceptance and TerminalCommitter delivery project separately for the same artifact version", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-stage-"));
   try {

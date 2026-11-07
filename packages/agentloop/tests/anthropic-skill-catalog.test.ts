@@ -8,7 +8,6 @@ const EXPECTED_SKILLS = [
   "frontend-design",
   "skill-creator",
   "theme-factory",
-  "webapp-testing",
 ] as const;
 
 test("the standard Anthropic Skill packages are discoverable without source locks", async () => {

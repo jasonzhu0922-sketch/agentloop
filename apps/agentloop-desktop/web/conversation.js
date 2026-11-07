@@ -5,6 +5,8 @@ import { isNearBottom, nextScrollTop } from './reference/ui/scroll-follow.js';
 import { hasSelectedTextWithin } from './reference/ui/message-selection.js';
 import { visibleToolCalls } from './turn-projection.js';
 import { renderHumanLoop, bindHumanLoop } from './human-loop.js';
+const RUNTIME_ICON_ASSETS = Object.freeze({ xuanwu: 'xuanwu-mascot-icon.png', qinglong: 'runtime-qinglong.png', baihu: 'runtime-baihu.png', zhuque: 'runtime-zhuque.png', qilin: 'runtime-qilin.png', taotie: 'runtime-taotie.png', yinglong: 'runtime-yinglong.png', pixiu: 'runtime-pixiu.png' });
+const runtimeIconUrl = key => `/assets/${RUNTIME_ICON_ASSETS[key] || RUNTIME_ICON_ASSETS.xuanwu}`;
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const lines = value => escape(value).replace(/\n/g, '<br>');
@@ -37,12 +39,23 @@ function toolRow(call, latest = false) {
   const result = call.error || (call.status === 'completed' && call.exitCode !== undefined ? `已完成 · 退出码 ${call.exitCode}` : stepLabel(call.status));
   return `<div class="execution-trace-item tool${latest ? ' latest' : ''}"><span class="execution-trace-dot tool"></span><span class="execution-trace-copy"><strong>${escape(title)}</strong><small title="${escape(clip(parameters, 500))}">主要参数：${escape(clip(parameters) || '-')}</small><small class="execution-trace-result">结果：${escape(clip(result))}</small></span><span class="execution-trace-seq">#${call.seq}</span></div>`;
 }
+function renderRoundHistory(rounds) {
+  if (!Array.isArray(rounds) || !rounds.length) return '';
+  const items = rounds.map(round => {
+    const result = round?.result; const kind = result?.decision?.kind;
+    const label = kind === 'complete_goal' ? '本轮完成目标' : kind === 'next_round' ? '本轮完成，继续下一轮' : '处理中';
+    const output = typeof result?.output === 'string' && result.output.trim() ? `<div class="round-history-output">${escape(clip(result.output, 240))}</div>` : '';
+    return `<li><span>第 ${Number(round.roundNumber) || '?'} 轮</span><b>${escape(label)}</b>${output}</li>`;
+  }).join('');
+  return `<details class="round-history"><summary>目标循环 · ${rounds.length} 轮</summary><ol>${items}</ol></details>`;
+}
 export function renderAssistant(turn, ui = {}) {
   const presentation = assistantMessagePresentation(turn.status); const live = presentation.isLive;
   const plan = turn.plan.map(step => ({ ...step, status: terminalAwarePlanStepStatus(step.status, turn.status) }));
   const planId = `plan-${turn.id}`; const traceId = `trace-${turn.id}`;
   const planToggle = plan.length ? `<button class="live-step-toggle" data-toggle="plan" aria-expanded="${Boolean(ui.plan)}" aria-controls="${escape(planId)}">步骤 ${plan.filter(step => step.status === 'completed').length}/${plan.length}<span class="live-step-caret">⌄</span></button>` : '';
   const planPanel = plan.length && ui.plan ? `<ol class="inline-plan-steps" id="${escape(planId)}">${plan.map((step, index) => `<li><span class="step-dot ${step.status === 'completed' ? 'done' : live && step.status === 'running' ? 'running' : step.status === 'failed' ? 'error' : 'pending'}"></span><span><b>${String(index + 1).padStart(2, '0')} ${escape(step.objective || step.id)}</b><small>${escape(!live && step.status === 'running' ? '未完成' : stepLabel(step.status))}</small></span></li>`).join('')}</ol>` : '';
+  const roundHistory = renderRoundHistory(turn.rounds);
   const reasoning = live && turn.reasoning ? `<details class="live-reasoning"${ui.reasoning !== false ? ' open' : ''}><summary>模型思考</summary><div class="reasoning-body">${lines(turn.reasoning)}</div></details>` : '';
   let output;
   if (turn.status === 'failed') output = `<div class="failure-title">${escape(turn.error || presentation.emptyText)}</div>${turn.partialText ? `<div class="partial-result"><strong>执行总结 · 尚非成功交付</strong>${renderMarkdown(turn.partialText)}</div>` : ''}`;
@@ -58,12 +71,13 @@ export function renderAssistant(turn, ui = {}) {
   const eventIndicator = `<span class="live-event-indicator ${live ? 'active' : 'terminal'} ${escape(turn.status)}" data-event-seq="${last?.seq ?? 'pending'}"><i class="live-event-pulse" aria-hidden="true"></i><span class="live-event-number">${last ? `#${last.seq}` : '进行中'}</span><small>${escape(last?.type.replaceAll('.', ' ') || '正在连接 Runtime')}</small></span>`;
   const finished = turn.run.finishedAt; const elapsed = Number.isFinite(finished) ? Math.max(0, (finished - turn.run.createdAt) / 1000) : undefined;
   const timing = finished ? `回答结束于 ${time(finished)} · 耗时 ${formatDuration(elapsed)}` : '';
-  return `<article class="msg assistant ${live ? 'live' : 'final'}${ui.selected ? ' selected' : ''}" data-assistant-message="${escape(turn.id)}" tabindex="0" role="button" aria-label="查看该轮执行详情" aria-pressed="${Boolean(ui.selected)}"><img class="msg-avatar logo-image" src="/assets/xuanwu-mascot-icon.png" alt="玄武"><div class="msg-body"><div class="live-card ${escape(presentation.cardClass)}"><div class="live-head"><span class="assistant-state ${escape(turn.status)}">${presentation.icon || (live ? '<span class="thinking"><i></i><i></i><i></i></span>' : '')}</span><span>AgentLoop · ${turn.humanLoop?.status === 'open' ? '等待你的输入' : escape(presentation.label)}</span><span class="execution-provenance"><span class="execution-provenance-chip location">本机</span><span class="execution-provenance-chip model">${escape(turn.run.modelKey)}</span></span>${planToggle}</div>${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${humanLoop}${trace}${skillMarkup}${renderArtifacts(turn)}<div class="message-footer event-feedback">${eventIndicator}${timing ? `<div class="message-timing">${escape(timing)}</div>` : ''}${copyButton('assistant', !(turn.text || turn.partialText))}</div></div></div></article>`;
+  const runtimeLabel = turn.run.runtimeName || turn.run.runtimeId || '本机 Runtime';
+  return `<article class="msg assistant ${live ? 'live' : 'final'}${ui.selected ? ' selected' : ''}" data-assistant-message="${escape(turn.id)}"><img class="msg-avatar logo-image" src="${runtimeIconUrl(turn.run.runtimeIconKey)}" alt="Runtime"><div class="msg-body"><div class="live-card ${escape(presentation.cardClass)}"><div class="live-head"><span class="assistant-state ${escape(turn.status)}">${presentation.icon || (live ? '<span class="thinking"><i></i><i></i><i></i></span>' : '')}</span><span>AgentLoop · ${turn.humanLoop?.status === 'open' ? '等待你的输入' : escape(presentation.label)}</span><span class="execution-provenance"><span class="execution-provenance-chip location">本机</span><span class="execution-provenance-chip runtime">${escape(runtimeLabel)}</span><span class="execution-provenance-chip model">${escape(turn.run.modelKey)}</span></span>${planToggle}</div>${roundHistory}${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${humanLoop}${trace}${skillMarkup}${renderArtifacts(turn)}<div class="message-footer event-feedback">${eventIndicator}${timing ? `<div class="message-timing">${escape(timing)}</div>` : ''}${copyButton('assistant', !(turn.text || turn.partialText))}</div></div></div></article>`;
 }
 
 // Keyed turn nodes preserve old replies and browser selection. Only an altered
 // assistant card is replaced, and each scroll surface follows independently.
-export function createConversationView({ container, scroll, onSelect, onArtifact, onHumanLoopResponse, status }) {
+export function createConversationView({ container, scroll, onArtifact, onHumanLoopResponse, status }) {
   const mounted = new Map(); let currentTurns = []; let selected; let pending;
   function render(turns = currentTurns, selectedId = selected, forceBottom = false) {
     currentTurns = turns; selected = selectedId;
@@ -116,8 +130,6 @@ export function createConversationView({ container, scroll, onSelect, onArtifact
       for (const button of card.querySelectorAll('[data-artifact-id]')) button.onclick = () => onArtifact(turn.id, button.dataset.artifactId);
       const reasoning = card.querySelector('.live-reasoning'); if (reasoning) reasoning.ontoggle = () => { state.ui.reasoning = reasoning.open; };
       card.querySelector('[data-copy="assistant"]').onclick = event => copy(turn.text || turn.partialText, event.currentTarget);
-      card.onclick = event => { if (event.target.closest('button,a,summary,details,form,input,textarea,label') || hasSelectedTextWithin(window.getSelection(), card)) return; onSelect(turn.id); };
-      card.onkeydown = event => { if (event.target !== card || !['Enter', ' '].includes(event.key)) return; event.preventDefault(); onSelect(turn.id); };
       if (focused) card.querySelector(`[data-toggle="${focused}"]`)?.focus({ preventScroll: true });
     }
     scroll.scrollTop = nextScrollTop(scroll, follow, previousTop);

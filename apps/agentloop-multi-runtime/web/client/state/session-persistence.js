@@ -95,9 +95,33 @@ function compactMessage(message, tier) {
     completedAt: number(value.completedAt),
     planOpen: value.planOpen === true,
     plan: compactPlan(value.plan, tier),
+    rounds: compactRounds(value.rounds),
     events: (Array.isArray(value.events) ? value.events : []).slice(-tier.events).map((event) => compactEvent(event, tier)),
     artifacts: compactArtifacts(value.artifacts, tier),
   };
+}
+
+function compactRounds(rounds) {
+  return (Array.isArray(rounds) ? rounds : []).slice(-12).map((round) => {
+    const result = record(round.result);
+    const decision = record(result.decision);
+    return {
+      roundNumber: number(round.roundNumber),
+      status: string(round.status, 40),
+      ...(result.schema ? { result: {
+        schema: string(result.schema, 80),
+        roundNumber: number(result.roundNumber),
+        planId: string(result.planId, 120),
+        planVersion: number(result.planVersion),
+        output: string(result.output, 400),
+        decision: {
+          kind: string(decision.kind, 40),
+          openGapIds: Array.isArray(decision.openGapIds) ? decision.openGapIds.slice(0, 20).map((item) => string(item, 120)) : [],
+          openTargetIds: Array.isArray(decision.openTargetIds) ? decision.openTargetIds.slice(0, 20).map((item) => string(item, 120)) : [],
+        },
+      } } : {}),
+    };
+  });
 }
 
 function compactPlan(plan, tier) {

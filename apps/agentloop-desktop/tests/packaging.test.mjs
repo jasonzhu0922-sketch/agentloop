@@ -3,7 +3,30 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { packageOptions, copyRuntimeDependencies } from '../scripts/package-support.mjs';
+import { packageOptions, copyRuntimeDependencies, packagedTurnDefaults, packagedSearchDefaults } from '../scripts/package-support.mjs';
+
+test('package accepts optional search defaults and does not accept insecure endpoints', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'desktop-search-defaults-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, '.env');
+  await writeFile(path, 'WEB_SEARCH_DISABLED=0\nWEB_SEARCH_PROVIDER=bocha\nWEB_SEARCH_ENDPOINT=https://search.example/v1\nWEB_SEARCH_API_KEY=example\n');
+  assert.deepEqual(await packagedSearchDefaults(path), { searchProvider: 'bocha', searchEndpoint: 'https://search.example/v1', searchApiKey: 'example' });
+  await writeFile(path, 'WEB_SEARCH_DISABLED=0\nWEB_SEARCH_PROVIDER=bocha\nWEB_SEARCH_ENDPOINT=http://search.example/v1\nWEB_SEARCH_API_KEY=example\n');
+  await assert.rejects(packagedSearchDefaults(path), /HTTPS/);
+  await writeFile(path, 'WEB_SEARCH_DISABLED=0\nWEB_SEARCH_PROVIDER=bocha\n');
+  assert.equal(await packagedSearchDefaults(path), undefined);
+});
+
+test('package snapshots only validated turn limits from Desktop environment', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'desktop-turn-defaults-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, '.env');
+  assert.deepEqual(await packagedTurnDefaults(path), {});
+  await writeFile(path, 'PLANNING_MAX_TURNS=8\nSTEP_MAX_TURNS=64\nWEB_SEARCH_API_KEY=private\n');
+  assert.deepEqual(await packagedTurnDefaults(path), { planningMaxTurns: 8, stepMaxTurns: 64 });
+  await writeFile(path, 'PLANNING_MAX_TURNS=65\n');
+  await assert.rejects(packagedTurnDefaults(path), /planning_max_turns_invalid/);
+});
 
 test('macOS tray starts Node with system trust and preserves a configured CA bundle', async () => {
   const tray = await readFile(new URL('../distribution/macos/DesktopTray.swift', import.meta.url), 'utf8');

@@ -46,6 +46,7 @@ export function projectAssistantEvent(assistant, event) {
       ...(typeof data.actionId === "string" ? { actionId: data.actionId } : {}),
       ...(data.failedBoundary && typeof data.failedBoundary === "object" ? { failedBoundary: data.failedBoundary } : {}),
     };
+    assistant.progress = "模型流中断，当前步骤已保留，等待恢复决策";
   }
   if (event.type === "run.checkpoint_created" && typeof data.checkpointId === "string") {
     assistant.checkpoint = {
@@ -115,6 +116,7 @@ export function liveProgressForEvent(event) {
   if (event.type === "candidate.rejected") return "当前结果尚未通过核验，正在修正";
   if (event.type === "candidate.approved") return "当前结果已通过核验，正在提交";
   if (event.type === "run.waiting_user") return "等待你的确认或补充信息";
+  if (event.type === "run.recovery_required") return "模型流中断，当前步骤已保留，等待恢复决策";
   return undefined;
 }
 

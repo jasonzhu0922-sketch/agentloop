@@ -132,6 +132,7 @@ export class LocalRuntimeFactory {
       ...(this.input.integrationEnvironment ?? {}),
       ...configuration.integrationEnvironment,
     };
+    const activeWebSearch = integrationEnvironment.WEB_SEARCH_DISABLED === "1" ? undefined : configuration.webSearch ?? webToolsOptions;
     const runtimeRoot = this.runtimeRootFor(definition) ?? dirname(this.input.databasePath);
     const databasePath = definition.isDefault ? this.input.databasePath : join(runtimeRoot, "agentloop.db");
     const sourceStorageRoot = this.runtimeUploadRootFor(definition, uploadStorageRoot);
@@ -148,6 +149,7 @@ export class LocalRuntimeFactory {
     let memoryTenantId: string | undefined;
     let settlementWorker: MemorySettlementWorker | undefined;
     let settlementTimer: NodeJS.Timeout | undefined;
+    let planningRecoveryTimer: NodeJS.Timeout | undefined;
     try {
       if (memoryEnabled) {
         const settlementKey = configuration.memory?.settlementModelKey;
@@ -288,7 +290,7 @@ export class LocalRuntimeFactory {
         runToolProvider: connectorRuntimeService,
         runtimeCapabilitySnapshotProvider: () => [configuredMcpCapabilitySnapshot(configuration, mcpIntegration)],
         tools: [
-          ...(integrationEnvironment.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptions)),
+          ...(activeWebSearch === undefined ? [] : createWebTools(activeWebSearch)),
           ...mcpIntegration.tools,
         ],
         computerCommandEnvironment: this.input.computerCommandEnvironment,
@@ -332,10 +334,18 @@ export class LocalRuntimeFactory {
         try { if (shouldRetainRestoredRunActivity(await runs.get(row.owner_user_id, row.remote_run_id), restoredAt)) activeRunIds.add(row.remote_run_id); }
         catch { /* Orphaned ledger rows are not active admissions. */ }
       }
+      await runs.reconcilePlanningRecoveries();
+      planningRecoveryTimer = setInterval(() => {
+        void runs.reconcilePlanningRecoveries().catch((error) => {
+          if (process.env.AGENTLOOP_DEBUG_ERRORS === "1") console.error(error);
+        });
+      }, 10_000);
+      planningRecoveryTimer.unref();
       return { ...definition, database, scopes, runs,
         ...(memory === undefined || memoryTenantId === undefined ? {} : { memory: { store: memory.store, tenantId: memoryTenantId } }),
         close: async () => {
           if (settlementTimer !== undefined) clearInterval(settlementTimer);
+          if (planningRecoveryTimer !== undefined) clearInterval(planningRecoveryTimer);
           try { await memory?.close?.(); }
           finally {
             try { await memoryDatabase?.close(); }
@@ -346,6 +356,7 @@ export class LocalRuntimeFactory {
         get modelKeys() { return currentModels().provider?.modelKeys().map((key) => `local:${key}`) ?? []; }, assertModelAvailable, activeRunIds };
     } catch (error) {
       if (settlementTimer !== undefined) clearInterval(settlementTimer);
+      if (planningRecoveryTimer !== undefined) clearInterval(planningRecoveryTimer);
       await memory?.close?.().catch(() => undefined);
       try { await memoryDatabase?.close(); }
       finally {

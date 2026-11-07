@@ -7,7 +7,7 @@ import { createComposerPreferences } from '../web/composer-preferences.js';
 
 // Run the actual app controller with a small DOM/transport fixture. Rendering
 // dependencies are replaced; the sidebar, click handlers and state are real.
-async function fixture(preferencesStorage = new Map(), running = false) {
+async function fixture(preferencesStorage = new Map(), running = false, runtimeCount = 2) {
   const source = await readFile(new URL('../web/app.js', import.meta.url), 'utf8');
   class Element {
     children = []; value = ''; hidden = false; disabled = false; textContent = ''; attributes = {};
@@ -22,12 +22,13 @@ async function fixture(preferencesStorage = new Map(), running = false) {
   const elements = new Map();
   const element = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
   let records = [{ id: 'first', title: '第一条会话' }, { id: 'second', title: '第二条会话' }];
+  const runtimeRows = Array.from({ length: runtimeCount }, (_, index) => ({ id: `runtime-${String.fromCharCode(97 + index)}`, displayName: `Runtime ${String.fromCharCode(65 + index)}`, status: 'ready' }));
   let confirmed = true; let failure; let clearCount = 0;
   const requests = []; const storage = new Map();
   const noop = () => {};
   const sandbox = {
     document: { getElementById: element, createElement(tag) { const node = new Element(); node.tag = tag; return node; }, querySelectorAll: () => [], addEventListener: noop, documentElement: { dataset: {} } },
-    window: { confirm: () => confirmed }, crypto: { randomUUID },
+    window: { confirm: () => confirmed }, crypto: { randomUUID }, btoa: value => Buffer.from(value, 'binary').toString('base64'),
     sessionStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     localStorage: { getItem: key => preferencesStorage.get(key), setItem: (key, value) => preferencesStorage.set(key, value) }, createComposerPreferences,
     createArtifactWorkspace: () => ({ render: noop, collapse: noop, activate: noop }),
@@ -39,9 +40,10 @@ async function fixture(preferencesStorage = new Map(), running = false) {
     async fetch(path, options) {
       requests.push({ path, ...options }); const url = new URL(path, 'http://fixture'); let data;
       if (url.pathname === '/api/session') data = { csrfToken: 'fixture-csrf', accountId: 'fixture', user: { email: 'test@example.test' } };
-      else if (url.pathname === '/api/runtimes') data = { runtimes: [{ id: 'runtime-a', displayName: 'Runtime', status: 'ready' }] };
+      else if (url.pathname === '/api/runtimes') data = { runtimes: runtimeRows };
       else if (url.pathname === '/api/connectors') data = { connections: [{ id: 'mail', displayName: 'Mail', enabled: true, moduleAvailable: true }] };
       else if (url.pathname === '/api/models') data = { models: ['model-a', 'model-b'] };
+      else if (url.pathname === '/api/sources' && options.method === 'POST') data = { source: { id: 'source-note', originalName: 'note.txt' } };
       else if (url.pathname === '/api/conversations') data = { conversations: records };
       else if (running && url.pathname === '/api/runs' && options.method === 'POST') {
         const payload = JSON.parse(options.body);
@@ -92,6 +94,35 @@ test('a running conversation permits navigation and reconnects when selected aga
   assert.equal(ui.element('message').disabled, false);
   assert.equal(ui.element('cancel').hidden, true);
   assert.equal(ui.requests.filter(request => request.path.startsWith('/api/conversations/first?')).length, 2);
+});
+
+test('clicking a robot removes an empty conversation and starts the selected Runtime', async () => {
+  const ui = await fixture();
+  const initialConversation = ui.element('conversation-title').textContent;
+  await ui.rows()[0].children[0].onclick();
+  assert.doesNotMatch(ui.element('runtime-robots').className, /runtime-arc/);
+  const robots = ui.element('runtime-robots').querySelectorAll('button');
+  robots[1].onclick(); await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(ui.rows().length, 1);
+  assert.equal(ui.rows().length, 1);
+  assert.notEqual(ui.element('conversation-title').textContent, initialConversation);
+  assert.equal(ui.element('status').textContent, '');
+  assert.equal(ui.element('runtime-select').value, 'runtime-b');
+  assert.equal(ui.requests.filter(request => request.path.includes('/remove')).length, 1);
+});
+
+test('more than three Runtimes use the compact arc launcher', async () => {
+  const ui = await fixture(new Map(), false, 4);
+  assert.match(ui.element('runtime-robots').className, /runtime-arc/);
+  assert.equal(ui.element('runtime-robots').querySelectorAll('button').length, 5);
+});
+
+test('uploading an attachment binds the new conversation to its runtime', async () => {
+  const ui = await fixture();
+  const fileInput = ui.element('file');
+  fileInput.files = [{ size: 1, name: 'note.txt', async arrayBuffer() { return new Uint8Array([65]).buffer; } }];
+  await fileInput.onchange({ target: fileInput });
+  assert.equal(ui.element('runtime-select').disabled, true);
 });
 
 test('a new conversation can start a run while another conversation is running', async () => {

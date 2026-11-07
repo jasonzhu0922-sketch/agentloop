@@ -1619,6 +1619,7 @@ async function hydratePersistedAssistant(assistant, tenantId, userId, includeCom
       applyRecoveredRunState(assistant, body?.run);
     }
   } catch {}
+  await refreshRounds(assistant.assignmentId, assistant, tenantId, userId);
   const eventsLoaded = await replayPersistedRunEvents(assistant, tenantId, userId);
   if (!runLoaded && !eventsLoaded) throw new Error("无法读取该轮的 Runtime Run");
   // Artifact projection is independent from terminal Run status: a generated
@@ -1861,7 +1862,7 @@ async function submit() {
   const submittedAt = Date.now();
   const userMessage = { id: createClientId(), role: "user", text: input, attachments, createdAt: submittedAt };
   const assistantMessage = {
-    id: createClientId(), role: "assistant", text: "", reasoning: "", status: "running", events: [], plan: [], createdAt: submittedAt,
+    id: createClientId(), role: "assistant", text: "", reasoning: "", status: "running", events: [], plan: [], rounds: [], createdAt: submittedAt,
     executionLocation: executionTarget,
     requestedModelKey,
     modelKey: requestedModelKey,
@@ -2204,6 +2205,11 @@ function onEvent(event, conversation, assistant) {
     void refreshHumanLoop(assistant.assignmentId, assistant, $("tenant-id").value.trim(), $("user-id").value.trim()).then((changed) => { if (changed) { saveSessions(); render(); } });
     setStatus("等待你的确认或补充信息", "running");
   }
+  if (assistant.assignmentId && ["round.completed", "round.next.started", "round.next.failed"].includes(event.type)) {
+    void refreshRounds(assistant.assignmentId, assistant, $("tenant-id").value.trim(), $("user-id").value.trim()).then((changed) => {
+      if (changed) { saveSessions(); render(); }
+    });
+  }
   if (terminal) {
     releaseTerminalComposerLock(conversation, assistant);
     flushTerminalAssistantUpdate(assistant);
@@ -2224,6 +2230,21 @@ function isArtifactProjectionEvent(event) {
     const result = JSON.parse(typeof event.data?.result === "string" ? event.data.result : "{}");
     return (Array.isArray(result?.fileChanges) && result.fileChanges.some((change) => change?.changeType !== "deleted"))
       || (typeof result?.stdout === "string" && /\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx?|pptx|xlsx)\b/iu.test(result.stdout));
+  } catch {
+    return false;
+  }
+}
+
+async function refreshRounds(assignmentId, assistant, tenantId, userId) {
+  if (!assignmentId || !assistant) return false;
+  try {
+    const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assignmentId)}/rounds`, { headers: { "x-tenant-id": tenantId, "x-user-id": userId } });
+    if (!response.ok) return false;
+    const body = await response.json();
+    const next = Array.isArray(body.rounds) ? body.rounds : [];
+    const changed = JSON.stringify(assistant.rounds || []) !== JSON.stringify(next);
+    assistant.rounds = next;
+    return changed;
   } catch {
     return false;
   }
@@ -2648,9 +2669,21 @@ function renderMessage(message) {
   const planPanelId = `plan-${message.id}`;
   const stepToggle = hasPlan ? `<button type="button" class="live-step-toggle" data-plan-toggle="${message.id}" aria-expanded="${message.planOpen === true}" aria-controls="${planPanelId}">步骤 ${plan.filter((step) => step.status === "completed").length}/${plan.length}<span class="live-step-caret" aria-hidden="true">⌄</span></button>` : "";
   const planPanel = hasPlan && message.planOpen === true ? `<ol class="inline-plan-steps" id="${planPanelId}">${plan.map((step, index) => `<li><span class="step-dot ${step.status === "completed" ? "done" : step.status === "running" ? "running" : step.status === "failed" ? "error" : "pending"}"></span><span><b>${String(index + 1).padStart(2, "0")} ${escapeHtml(step.objective || step.id || "未命名步骤")}</b><small>${planStepLabel(step.status)}</small></span></li>`).join("")}</ol>` : "";
+  const roundHistory = renderRoundHistory(message.rounds);
   const executionTrace = renderExecutionTrace(message);
   const inlineArtifacts = renderInlineArtifacts(message);
-  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><img class="msg-avatar logo-image" src="/assets/xuanwu-mascot-icon.png" alt="玄武" /><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop · ${stateLabel}</span>${provenance}${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${executionTrace}${inlineArtifacts}${responseTiming}</div></div></article>`;
+  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><img class="msg-avatar logo-image" src="/assets/xuanwu-mascot-icon.png" alt="玄武" /><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop · ${stateLabel}</span>${provenance}${stepToggle}</div>${roundHistory}${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${executionTrace}${inlineArtifacts}${responseTiming}</div></div></article>`;
+}
+
+function renderRoundHistory(rounds) {
+  if (!Array.isArray(rounds) || rounds.length === 0) return "";
+  const items = rounds.map((round) => {
+    const result = round?.result;
+    const decision = result?.decision?.kind === "complete_goal" ? "本轮完成目标" : result?.decision?.kind === "next_round" ? "本轮完成，继续下一轮" : "处理中";
+    const output = typeof result?.output === "string" && result.output.trim() ? `<div class="round-history-output">${escapeHtml(result.output.slice(0, 240))}</div>` : "";
+    return `<li><span>第 ${Number(round.roundNumber) || "?"} 轮</span><b>${escapeHtml(decision)}</b>${output}</li>`;
+  }).join("");
+  return `<details class="round-history"><summary>目标循环 · ${rounds.length} 轮</summary><ol>${items}</ol></details>`;
 }
 
 function renderExecutionProvenance(message) {

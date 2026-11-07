@@ -630,6 +630,41 @@
   font-size: 11px;
 }
 
+.round-history {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.round-history summary {
+  cursor: pointer;
+  padding: 7px 10px;
+  color: var(--brand);
+  font-weight: 650;
+}
+
+.round-history ol {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0 10px 5px;
+  list-style: none;
+}
+
+.round-history li {
+  display: grid;
+  gap: 2px;
+  padding: 7px 0;
+  border-top: 1px dashed var(--border);
+}
+
+.round-history li span { color: var(--text-3); }
+.round-history li b { color: var(--text); font-weight: 650; }
+.round-history-output { color: var(--text-3); white-space: pre-wrap; overflow-wrap: anywhere; }
+
 /* Keep the live execution trail attached to its answer without allowing a
    busy Run to push the conversation endlessly downward.  The collapsed row
    always advances to the newest persisted event; the full stream is opt-in. */

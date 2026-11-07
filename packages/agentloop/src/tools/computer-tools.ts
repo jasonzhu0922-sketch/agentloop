@@ -29,6 +29,7 @@ const TABLE_ARTIFACT_SUMMARY_MAX_SAMPLE_RECORDS = 5;
 const TABLE_ARTIFACT_SUMMARY_MAX_TEXT_SAMPLES = 6;
 const TABLE_ARTIFACT_AGGREGATION_MAX_QUERIES = 20;
 const TABLE_ARTIFACT_AGGREGATION_MAX_GROUPS = 500;
+const MAX_WRITE_CONTENT_CHARACTERS = 48_000;
 
 export const DANGEROUS_COMPUTER_TOOL_NAMES = new Set([
   "convert_artifact",
@@ -454,16 +455,16 @@ export function createComputerTools(
       description: [
         "Create, overwrite, or append to a UTF-8 file under the workspace root; requires dangerous-tool consent.",
         "path must be relative to the workspace root; absolute paths are rejected.",
-        "Use only mode for write behavior: create, overwrite, or append; omit mode for create. Append requires an existing file and is intended for a later explicit extension, not a mandatory authoring protocol.",
+        "Use only mode for write behavior: create, overwrite, or append; omit mode for create. Append requires an existing file.",
         "This Tool may write authored HTML/CSS/JS directly, including paginated HTML, HTML-PPT, browser slide decks, custom visual pages, dashboards, apps, and interactions.",
-        "Provide the complete intended content in one call when authoring a new file. Append remains available for intentionally extending an existing file, but the Runtime does not require a create-then-append chunk protocol.",
+        `Keep each content value within the advertised ${MAX_WRITE_CONTENT_CHARACTERS}-character bound. For larger files, use one mode=create call followed by one mode=append call per bounded chunk, keeping the same path; never put the entire large artifact in one model tool call.`,
         "When this write is the final instance of one Runtime-admitted delivery target, pass its deliveryTargetId. This selects an already-admitted target; it never creates a target and is optional for process/support files.",
         "The result includes a Run-scoped revisionId. Use that opaque handle, not a hash, as baseRevisionId when making a subsequent computer_patch_file call.",
         "The result also includes the write mode, final file sha256 as receipt-only evidence, final byte size, Markdown-style outline, and bounded first/last sample ranges as write-after-inspection evidence; cite that receipt before rereading the whole file.",
       ].join(" "),
       inputSchema: objectSchema(["path", "content"], {
         path: { type: "string" },
-        content: { type: "string" },
+        content: { type: "string", maxLength: MAX_WRITE_CONTENT_CHARACTERS },
         mode: { type: "string", enum: ["create", "overwrite", "append"] },
         deliveryTargetId: { type: "string", minLength: 1, maxLength: 128 },
       }),
@@ -489,8 +490,8 @@ export function createComputerTools(
           }
           throw badRequest("content must be a string");
         }
-        if (record.content.length > 1_000_000) {
-          throw badRequest("content must contain at most 1000000 characters");
+        if (record.content.length > MAX_WRITE_CONTENT_CHARACTERS) {
+          throw badRequest(`content must contain at most ${MAX_WRITE_CONTENT_CHARACTERS} characters; use mode=append for subsequent chunks`);
         }
         return {
           path: requireString(record.path, "path", { max: 4_000 }),

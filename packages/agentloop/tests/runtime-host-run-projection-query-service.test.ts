@@ -9,6 +9,7 @@ test("Host Run projection composes durable facts without inferring an Outcome fr
       state: "available", id: "plan-1", version: 2, status: "completed", goal: "deliver",
       selectedSkillIds: [], steps: [], assessmentCount: 1, approvedAssessmentCount: 1,
     }),
+    rounds: async () => [],
     outcome: async () => undefined,
     artifacts: async () => [],
     events: async () => [{ seq: 4, type: "candidate.approved", data: {}, createdAt: 40 }],

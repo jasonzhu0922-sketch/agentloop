@@ -74,11 +74,13 @@ export interface CanonicalDeliveryTarget {
     readonly observedByToolCallId: string;
     readonly boundAt: number;
   };
+  readonly artifactBindings?: readonly NonNullable<CanonicalDeliveryTarget["artifactBinding"]>[];
   readonly claims: readonly {
     readonly stepId: string;
     readonly assessmentId: string;
     readonly evidenceRefs: readonly string[];
     readonly artifact?: RuntimeDeliveryClaim["artifact"];
+    readonly artifacts?: RuntimeDeliveryClaim["artifacts"];
     readonly acceptedAt: number;
   }[];
 }
@@ -273,6 +275,20 @@ export function bindCanonicalPlan(
   }, now);
 }
 
+/** Begins a fresh execution scope while preserving the Run-owned goal and gaps. */
+export function beginCanonicalRound(state: CanonicalRunState, now = Date.now()): CanonicalRunState {
+  assertMutable(state);
+  if (state.phase !== "executing" && state.phase !== "planned") throw conflict("A new Round requires an active completed Plan");
+  return next(state, {
+    phase: "understood",
+    plan: undefined,
+    steps: Object.freeze({}),
+    targets: Object.freeze(Object.fromEntries(Object.entries(state.targets).map(([targetId, target]) => [targetId,
+      target.status === "accepted" ? target : Object.freeze({ ...target, ownerStepIds: Object.freeze([]) }),
+    ]))),
+  }, now);
+}
+
 export function reviseCanonicalPlan(
   state: CanonicalRunState,
   plan: Pick<ExecutionPlan, "id" | "runId" | "version" | "steps">,
@@ -374,6 +390,7 @@ export function recordCanonicalAssessment(
         assessmentId: assessment.id,
         evidenceRefs,
         ...(claim?.artifact === undefined ? {} : { artifact: claim.artifact }),
+        ...(claim?.artifacts === undefined ? {} : { artifacts: claim.artifacts }),
         acceptedAt: now,
       }]),
     })];
@@ -462,13 +479,9 @@ export function reconcileCanonicalDeliveryTargetBindings(
     if (bindings.length === 0) {
       if (target.artifactBinding?.stepId !== input.stepId) return [targetId, target];
       changed = true;
-      return [targetId, Object.freeze({ ...target, status: "open" as const, artifactBinding: undefined })];
+      return [targetId, Object.freeze({ ...target, status: "open" as const, artifactBinding: undefined, artifactBindings: undefined })];
     }
-    // The single field is the current decision projection for a target. The
-    // full target cardinality remains in the candidate's exact artifact list;
-    // this prevents plural outputs from being turned into additional leaves.
-    const binding = bindings[0]!;
-    const nextBinding = {
+    const nextBindings = bindings.map((binding) => ({
       stepId: input.stepId,
       declarationId: binding.declarationId,
       path: binding.path,
@@ -477,18 +490,14 @@ export function reconcileCanonicalDeliveryTargetBindings(
       bytes: binding.bytes,
       observedByToolCallId: binding.observedByToolCallId,
       boundAt: now,
-    };
-    const current = target.artifactBinding;
-    if (current !== undefined
-      && current.stepId === nextBinding.stepId
-      && current.declarationId === nextBinding.declarationId
-      && current.path === nextBinding.path
-      && current.versionId === nextBinding.versionId
-      && current.sha256 === nextBinding.sha256
-      && current.bytes === nextBinding.bytes
-      && current.observedByToolCallId === nextBinding.observedByToolCallId) return [targetId, target];
+    }));
+    const identity = (binding: NonNullable<CanonicalDeliveryTarget["artifactBinding"]>) =>
+      JSON.stringify([binding.stepId, binding.declarationId, binding.path, binding.versionId, binding.sha256, binding.bytes, binding.observedByToolCallId]);
+    const current = target.artifactBindings ?? (target.artifactBinding === undefined ? [] : [target.artifactBinding]);
+    if (current.length === nextBindings.length
+      && current.map(identity).sort().every((value, index) => value === nextBindings.map(identity).sort()[index])) return [targetId, target];
     changed = true;
-    return [targetId, Object.freeze({ ...target, status: "open" as const, artifactBinding: Object.freeze(nextBinding) })];
+    return [targetId, Object.freeze({ ...target, status: "open" as const, artifactBinding: Object.freeze(nextBindings[0]!), artifactBindings: Object.freeze(nextBindings.map((binding) => Object.freeze(binding))) })];
   }));
   if (!changed) return state;
   return next(state, { targets: Object.freeze(targets) }, now);
@@ -552,14 +561,15 @@ function deliveryClaimMatchesCurrentTargetBinding(
   claim: RuntimeDeliveryClaim | undefined,
 ): boolean {
   if (target === undefined || claim === undefined) return false;
-  if (target.artifactBinding === undefined) return true;
+  const bindings = target.artifactBindings ?? (target.artifactBinding === undefined ? [] : [target.artifactBinding]);
+  if (bindings.length === 0) return target.surface !== "workspace_artifact";
   const artifacts = claim.artifacts ?? (claim.artifact === undefined ? [] : [claim.artifact]);
-  if (artifacts.length < target.expectedCount) return false;
-  return artifacts.some((artifact) => artifact.path === target.artifactBinding!.path
-    && artifact.versionId === target.artifactBinding!.versionId
-    && artifact.sha256 === target.artifactBinding!.sha256
-    && artifact.bytes === target.artifactBinding!.bytes
-    && artifact.observedByToolCallId === target.artifactBinding!.observedByToolCallId);
+  if (bindings.length < target.expectedCount || artifacts.length !== bindings.length) return false;
+  return bindings.every((binding) => artifacts.some((artifact) => artifact.path === binding.path
+    && artifact.versionId === binding.versionId
+    && artifact.sha256 === binding.sha256
+    && artifact.bytes === binding.bytes
+    && artifact.observedByToolCallId === binding.observedByToolCallId));
 }
 
 export function commitCanonicalTerminal(

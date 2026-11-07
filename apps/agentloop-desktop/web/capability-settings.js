@@ -1,12 +1,18 @@
 import { installModelSettings } from './model-settings.js';
+const RUNTIME_ICONS = [
+  ['xuanwu', '玄武', '沉稳守护'], ['qinglong', '青龙', '生发探索'], ['baihu', '白虎', '迅捷执行'], ['zhuque', '朱雀', '创意表达'],
+  ['qilin', '麒麟', '温和协作'], ['taotie', '饕餮', '深度吞吐'], ['yinglong', '应龙', '破局开拓'], ['pixiu', '貔貅', '聚势守财'],
+].map(([key, name, description]) => ({ key, name, description }));
+const RUNTIME_ICON_ASSETS = Object.freeze({ xuanwu: 'xuanwu-mascot-icon.png', qinglong: 'runtime-qinglong.png', baihu: 'runtime-baihu.png', zhuque: 'runtime-zhuque.png', qilin: 'runtime-qilin.png', taotie: 'runtime-taotie.png', yinglong: 'runtime-yinglong.png', pixiu: 'runtime-pixiu.png' });
+const runtimeIconUrl = key => `/assets/${RUNTIME_ICON_ASSETS[key] || RUNTIME_ICON_ASSETS.xuanwu}`;
 
 // Desktop-owned presentation and transport. No cloud/Router management client.
 export function installCapabilitySettings({ api, element, refreshModels, status, currentRuntime, refreshCapabilities }) {
   const models = installModelSettings({ api, element, refreshModels, status, managed: true });
   const dialog = element('model-settings'), body = element('capability-body');
   let tab = 'general', target, runtimeDetail, runtimeDetailMode = 'view', dirty = false, working = false, snapshot, runtimeList = [], packages = [], mcpCatalog = [];
-  const labels = { general: ['常规', '管理当前账号的本机存储与 Memory 配置。'], skills: ['Skill 管理', '上传和维护本机 Skill 包；安装后可在各个 Runtime 配置中分别选择。'], mcp: ['MCP 配置', '配置当前账号的 MCP Server，供所有本机 Runtime 使用。'], runtimes: ['子 Runtime 管理', '新增、停止、重启、删除和查看各个本机 Runtime；每个 Runtime 独立选择扩展 Skill，共享当前账号的 MCP。'], connectors: ['Connector 配置', '个人 Connector 只保存在 Desktop；配置凭据不会上传到云端。'] };
-  const errors = { account_storage_outside_scope: '此目录不适用于当前账号，请选择其他目录。', runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_json_invalid: 'JSON 格式无效，请检查引号、括号和逗号。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', mcp_server_key_duplicate: '当前账号的 MCP key 不能重复。', mcp_server_referenced_by_runtime: '该 MCP 已被一个或多个 Runtime 选择，不能删除。请先在对应 Runtime 中解除勾选。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。' };
+  const labels = { general: ['常规', '管理当前账号的本机存储与 Memory 配置。'], 'web-search': ['联网搜索', '配置 websearch 工具使用的端点和凭据；配置按当前账号加密保存在本机。'], skills: ['Skill 管理', '上传和维护本机 Skill 包；安装后可在各个 Runtime 配置中分别选择。'], mcp: ['MCP 配置', '配置当前账号的 MCP Server，供所有本机 Runtime 使用。'], runtimes: ['子 Runtime 管理', '新增、停止、重启、删除和查看各个本机 Runtime；每个 Runtime 独立选择扩展 Skill，共享当前账号的 MCP。'], connectors: ['Connector 配置', '个人 Connector 只保存在 Desktop；配置凭据不会上传到云端。'] };
+  const errors = { account_storage_outside_scope: '此目录不适用于当前账号，请选择其他目录。', runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_json_invalid: 'JSON 格式无效，请检查引号、括号和逗号。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', mcp_server_key_duplicate: '当前账号的 MCP key 不能重复。', mcp_server_referenced_by_runtime: '该 MCP 已被一个或多个 Runtime 选择，不能删除。请先在对应 Runtime 中解除勾选。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。', web_search_api_key_required: 'Bocha 搜索需要 API Key。', web_search_endpoint_required: 'Bocha 搜索需要搜索端点。', web_search_endpoint_invalid: '搜索端点必须为 HTTP 或 HTTPS，且不能包含凭据、查询参数或片段。', web_search_provider_invalid: '搜索服务类型无效。', web_search_credentials_missing: '搜索凭据缺失，请重新填写 API Key。' };
   const connectorBindings = {
     '126-mail': {
       title: '绑定 126 邮箱', displayName: '我的 126 邮箱', scopes: ['email:search', 'email:read'],
@@ -46,6 +52,8 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     if (!runtimeList.some(r => r.id === target)) target = currentRuntime() || runtimeList[0]?.id;
     if (tab === 'general') {
       await renderGeneral();
+    } else if (tab === 'web-search') {
+      await renderWebSearch();
     } else if (tab === 'runtimes') {
       if (runtimeDetail !== undefined && runtimeList.some(runtime => runtime.id === runtimeDetail)) {
         target = runtimeDetail;
@@ -56,7 +64,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     else if (tab === 'mcp') renderDeviceMcp();
     else if (tab === 'runtimes') renderRuntimes();
     else if (tab === 'connectors') await renderConnectors();
-    if (tab !== 'general' && tab !== 'runtimes' && tab !== 'mcp') body.append(button('放弃更改并重新读取', load));
+    if (tab !== 'general' && tab !== 'web-search' && tab !== 'runtimes' && tab !== 'mcp') body.append(button('放弃更改并重新读取', load));
     if (tab === 'runtimes' && runtimeDetail !== undefined) renderRuntimeDetail();
     dirty = false; message(tab === 'general' ? '当前账号配置已读取。' : '配置已读取。凭据不会回显；导入和保存不代表真实执行已验收。');
   }
@@ -119,8 +127,27 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     actions.lastElementChild.classList.add('primary');
     section.append(actions);
   }
+  async function renderWebSearch() {
+    const result = await api('/api/web-search-configuration');
+    const config = result.webSearch;
+    const section = card('联网搜索服务', '保存后会重载当前账号的本机 Runtime；API Key 只写入账号专属的加密 Secret Store，不会回显。'); section.classList.add('web-search-card');
+    const enabled = input('', 'checkbox'); enabled.checked = config.enabled === true;
+    const provider = el('select'); for (const [value, title] of [['bocha', 'Bocha'], ['baidu', 'Baidu'], ['bing', 'Bing']]) { const option = el('option', title); option.value = value; provider.append(option); } provider.value = config.searchProvider ?? 'bocha';
+    const endpoint = input(config.searchEndpoint ?? ''); endpoint.maxLength = 4096; endpoint.placeholder = 'https://api.example.com/v1/web-search'; endpoint.autocomplete = 'url';
+    const key = input('', 'password'); key.maxLength = 4096; key.placeholder = config.credentialConfigured ? '已配置，留空保持不变' : '粘贴搜索 API Key'; key.autocomplete = 'new-password';
+    const update = () => { provider.disabled = endpoint.disabled = key.disabled = !enabled.checked; };
+    enabled.onchange = update; update();
+    const toggle = el('label', undefined, 'web-search-toggle'); const toggleCopy = el('span'); toggleCopy.append(el('strong', '启用联网搜索'), el('small', '允许本机 Runtime 使用 websearch 工具访问公开网页。')); toggle.append(enabled, toggleCopy);
+    const fields = el('div', undefined, 'web-search-fields'); fields.append(field('搜索服务', provider), field('搜索端点', endpoint), field('API Key', key));
+    section.append(toggle, fields, el('p', '端点不能包含账号、密码、查询参数或片段。Bocha 需要 API Key；Baidu/Bing 可使用默认服务端点。保存不代表真实搜索已验收，请发送任务验证。', 'capability-help'));
+    const actions = el('div', undefined, 'capability-actions');
+    actions.append(button('放弃更改', async () => { dirty = false; await load(); }), button('保存搜索配置', async () => {
+      await api('/api/web-search-configuration', { enabled: enabled.checked, searchProvider: provider.value, searchEndpoint: endpoint.value, ...(key.value.trim() ? { searchApiKey: key.value.trim() } : {}) });
+      key.value = ''; dirty = false; await load(); message('联网搜索配置已保存，本机 Runtime 已重载。');
+    })); actions.lastElementChild.classList.add('primary'); section.append(actions);
+  }
   function stopped() { return runtimeList.find(r => r.id === target)?.status === 'stopped'; }
-  function draft() { return { skillPackageIds: snapshot.configuration.skills.map(s => s.packageId), mcpServerIds: [...snapshot.configuration.mcpServerIds] }; }
+  function draft() { return { iconKey: snapshot.configuration.iconKey || 'xuanwu', skillPackageIds: snapshot.configuration.skills.map(s => s.packageId), mcpServerIds: [...snapshot.configuration.mcpServerIds] }; }
   async function save(configuration) { snapshot = await api(`/api/runtimes/${target}/configuration`, { configuration, revision: snapshot.revision }); dirty = false; await load(); await changed(); message('配置已保存。请启动此 Runtime 后执行任务验证。'); }
   async function renderSkills() {
     const zip = input('', 'file'); zip.accept = '.zip'; zip.setAttribute('aria-label', '选择 Skill ZIP');
@@ -160,7 +187,8 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     const list = el('div', undefined, 'runtime-manager-list'); body.append(list);
     for (const runtime of runtimeList) {
       const item = el('section', undefined, `runtime-manager-card${runtime.id === currentRuntime() ? ' selected' : ''}`);
-      const main = el('div', undefined, 'runtime-manager-main'); const title = el('div', undefined, 'runtime-manager-title'); title.append(el('strong', runtime.displayName));
+      const main = el('div', undefined, 'runtime-manager-main'); const title = el('div', undefined, 'runtime-manager-title');
+      const avatar = document.createElement('img'); avatar.className = 'runtime-manager-icon'; avatar.src = runtimeIconUrl(runtime.iconKey); avatar.alt = `${runtime.displayName} 图标`; title.append(avatar, el('strong', runtime.displayName));
       if (runtime.isDefault) title.append(el('span', '默认', 'runtime-tag default'));
       title.append(el('span', runtime.status === 'ready' ? '就绪' : runtime.status === 'stopped' ? '已停止' : runtime.status, `runtime-tag ${runtime.status}`));
       const activity = runtime.activeRunCount ? `当前 ${runtime.activeRunCount} 个活动任务` : '当前无活动任务';
@@ -208,6 +236,17 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     const close = button('×', () => { runtimeDetail = undefined; target = undefined; dirty = false; return load(); }); close.classList.add('runtime-detail-close'); close.setAttribute('aria-label', '关闭 Runtime 详情'); heading.append(title, close); panel.append(heading);
     if (!configuring) { renderRuntimeReadOnly(panel, runtime); return; }
     const tabs = runtimeCapabilityTabs(panel, 'Runtime 扩展配置');
+    const iconCard = cardInto(tabs.skills, 'Runtime 形象', '选择一个中国上古神兽作为这个 Runtime 的身份标识。保存后会同步到会话历史和对话流。');
+    const iconGrid = el('div', undefined, 'runtime-icon-grid');
+    let selectedIcon = RUNTIME_ICONS.some(icon => icon.key === (snapshot.configuration.iconKey || runtime.iconKey)) ? (snapshot.configuration.iconKey || runtime.iconKey) : 'xuanwu';
+    for (const icon of RUNTIME_ICONS) {
+      const option = el('button', undefined, `runtime-icon-option${icon.key === selectedIcon ? ' selected' : ''}`); option.type = 'button'; option.dataset.runtimeIcon = icon.key; option.setAttribute('aria-pressed', String(icon.key === selectedIcon));
+      const image = document.createElement('img'); image.src = runtimeIconUrl(icon.key); image.alt = icon.name;
+      option.append(image, el('span', icon.name), el('small', icon.description));
+      option.onclick = () => { selectedIcon = icon.key; for (const candidate of iconGrid.querySelectorAll('.runtime-icon-option')) { const active = candidate.dataset.runtimeIcon === selectedIcon; candidate.classList.toggle('selected', active); candidate.setAttribute('aria-pressed', String(active)); } markDirty(); };
+      iconGrid.append(option);
+    }
+    iconCard.append(iconGrid);
     const skills = cardInto(tabs.skills, '专属扩展 Skills', '只影响此 Runtime。取消勾选仅解除绑定，不删除当前账号的本机库文件。');
     const choices = []; const skillList = el('div', undefined, 'runtime-skill-options'); skills.append(skillList);
     if (!packages.length) skillList.append(el('p', '暂无可选的 Custom / 上传 Skill；此 Runtime 仍会使用内核 Skills。'));
@@ -219,13 +258,17 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     renderSharedMcp(tabs.mcp);
     const actions = el('footer', undefined, 'runtime-config-actions');
     actions.append(button('取消', () => { runtimeDetail = undefined; target = undefined; dirty = false; return load(); }), button('保存', async () => {
-      const configuration = draft(); configuration.skillPackageIds = choices.filter(([, control]) => control.checked).map(([pkg]) => pkg.packageId);
+      const configuration = draft(); configuration.iconKey = selectedIcon; configuration.skillPackageIds = choices.filter(([, control]) => control.checked).map(([pkg]) => pkg.packageId);
       await api(`/api/runtimes/${target}/configuration`, { configuration, revision: snapshot.revision });
       runtimeDetail = undefined; target = undefined; dirty = false; await changed(); await load(); message('Runtime 配置已保存。');
     })); actions.lastElementChild.classList.add('primary'); panel.append(actions);
   }
   function renderRuntimeReadOnly(panel, runtime) {
     const tabs = runtimeCapabilityTabs(panel, 'Runtime 扩展详情');
+    const iconCard = cardInto(tabs.skills, 'Runtime 形象', '会话历史、输入框入口和对话流都会使用这个标识。');
+    const icon = RUNTIME_ICONS.find(item => item.key === (runtime.iconKey || snapshot.configuration.iconKey)) || RUNTIME_ICONS[0];
+    const image = document.createElement('img'); image.className = 'runtime-detail-icon'; image.src = runtimeIconUrl(icon.key); image.alt = icon.name;
+    iconCard.append(image, el('strong', `${icon.name} · ${icon.description}`));
     const enabledSkillIds = new Set(snapshot.configuration.skills.map(skill => skill.packageId));
     const selectedSkills = packages.filter(pkg => enabledSkillIds.has(pkg.packageId));
     const skills = cardInto(tabs.skills, '已选择的扩展 Skills', '内核 Skills 默认加载；以下为该 Runtime 专属启用的扩展包。');

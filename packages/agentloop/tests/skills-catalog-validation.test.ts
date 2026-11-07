@@ -22,9 +22,9 @@ const EXPECTED_BUILTIN_SKILL_NAMES = [
   "frontend-design",
   "pdf",
   "pptx",
+  "research",
   "skill-creator",
   "theme-factory",
-  "webapp-testing",
   "xlsx",
 ] as const;
 const EXPECTED_CUSTOM_SKILL_NAMES = [

@@ -61,12 +61,20 @@ export async function sandboxCommand(input: {
     }
     const profile = [
       "(version 1)", "(deny default)", "(allow process-exec process-fork)", "(allow sysctl-read)",
-      // No global mach-lookup, network, IPC, home-directory or /tmp grants.
+      // Permit outbound connections and the system resolver without granting global IPC.
+      '(allow network-outbound)',
+      '(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo") (global-name "com.apple.mDNSResponder"))',
+      // The resolver traverses these system symlinks when reading its configuration.
+      '(allow file-read-metadata (literal "/etc") (literal "/var"))',
       '(allow file-read* (literal "/") (literal "/dev/null") (literal "/dev/random") (literal "/dev/urandom") (literal "/private/etc/localtime") (literal "/private/etc/hosts") (literal "/private/etc/resolv.conf"))',
       '(allow file-write* (literal "/dev/null"))',
       // Homebrew Node links OpenSSL, which reads its public startup config.
       // Do not grant the surrounding etc tree (it may contain credentials).
       '(allow file-read* (literal "/opt/homebrew/etc/openssl@3/openssl.cnf") (literal "/usr/local/etc/openssl@3/openssl.cnf"))',
+      // Homebrew OpenSSL resolves cert.pem through ca-certificates; both the
+      // symlink and its public trust bundle must be readable for HTTPS checks.
+      '(allow file-read-metadata (literal "/opt/homebrew/etc") (literal "/opt/homebrew/etc/openssl@3") (literal "/opt/homebrew/etc/ca-certificates") (literal "/usr/local/etc") (literal "/usr/local/etc/openssl@3") (literal "/usr/local/etc/ca-certificates"))',
+      '(allow file-read* (literal "/opt/homebrew/etc/openssl@3/cert.pem") (literal "/opt/homebrew/etc/ca-certificates/cert.pem") (literal "/usr/local/etc/openssl@3/cert.pem") (literal "/usr/local/etc/ca-certificates/cert.pem") (literal "/private/etc/ssl/cert.pem"))',
       ...[...ancestors].map(path => `(allow file-read-metadata (literal ${quote(path)}))`),
       ...systemRoots.map(path => `(allow file-read* (subpath ${quote(path)}))`),
       ...readOnlyRoots.map(path => `(allow file-read* (subpath ${quote(path)}))`),
@@ -76,8 +84,8 @@ export async function sandboxCommand(input: {
   }
   const bwrap = (await Promise.all(["/usr/bin/bwrap", "/bin/bwrap"].map(async path => await executable(path) ? path : undefined))).find(Boolean);
   if (!bwrap) unavailable();
-  const systemRoots = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc/ld.so.cache", "/etc/alternatives", "/etc/fonts"];
-  const args = ["--die-with-parent", "--new-session", "--unshare-all", "--proc", "/proc", "--dev", "/dev"];
+  const systemRoots = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc/ld.so.cache", "/etc/alternatives", "/etc/fonts", "/etc/hosts", "/etc/resolv.conf", "/etc/nsswitch.conf", "/etc/ssl/certs"];
+  const args = ["--die-with-parent", "--new-session", "--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev"];
   for (const path of [...new Set([...systemRoots, ...readOnlyRoots])]) {
     try { await access(path); args.push("--ro-bind", path, path); } catch { /* Optional OS layout. */ }
   }

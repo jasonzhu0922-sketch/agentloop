@@ -332,6 +332,94 @@ test("Runtime migration upgrades an existing kernel database for canonical Run s
   }
 });
 
+test("Runtime Round migration installs idempotently without inventing historical Rounds", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    await migrateRuntimeState(database);
+    await database.exec("DELETE FROM mr_schema_migrations WHERE id = 'runtime/0010_run_rounds'; DROP TABLE run_rounds");
+    await database.prepare("INSERT INTO runs(id, owner_user_id, depth, status, input, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run("historical-run", "owner", 0, "running", "legacy request", 1);
+    await migrateRuntimeState(database);
+    await migrateRuntimeState(database);
+    const rows = await database.prepare("SELECT run_id FROM run_rounds").all();
+    assert.deepEqual(rows, []);
+    const migration = await database.prepare("SELECT checksum FROM mr_schema_migrations WHERE id = 'runtime/0010_run_rounds'")
+      .get<{ checksum: string }>();
+    assert.match(migration?.checksum ?? "", /^[a-f0-9]{64}$/);
+  } finally {
+    await database.close();
+  }
+});
+
+test("Runtime planning budget migration installs idempotently for existing Runs", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    await migrateRuntimeState(database);
+    await database.exec("DELETE FROM mr_schema_migrations WHERE id = 'runtime/0011_planning_budget'; DROP TABLE run_planning_budgets");
+    await migrateRuntimeState(database);
+    await migrateRuntimeState(database);
+    assert.deepEqual(await database.prepare("SELECT run_id FROM run_planning_budgets").all(), []);
+    const migration = await database.prepare("SELECT checksum FROM mr_schema_migrations WHERE id = 'runtime/0011_planning_budget'")
+      .get<{ checksum: string }>();
+    assert.match(migration?.checksum ?? "", /^[a-f0-9]{64}$/);
+  } finally {
+    await database.close();
+  }
+});
+
+test("Runtime intent budget migration upgrades a previously migrated database", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    await migrateRuntimeState(database);
+    await database.exec("DELETE FROM mr_schema_migrations WHERE id = 'runtime/0012_intent_budget'; DROP TABLE run_intent_budgets");
+    await migrateRuntimeState(database);
+    await migrateRuntimeState(database);
+    assert.deepEqual(await database.prepare("SELECT run_id FROM run_intent_budgets").all(), []);
+    const migration = await database.prepare("SELECT checksum FROM mr_schema_migrations WHERE id = 'runtime/0012_intent_budget'")
+      .get<{ checksum: string }>();
+    assert.match(migration?.checksum ?? "", /^[a-f0-9]{64}$/);
+  } finally {
+    await database.close();
+  }
+});
+
+test("Runtime planning recovery migration upgrades an existing database idempotently", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    await migrateRuntimeState(database);
+    await database.exec("DELETE FROM mr_schema_migrations WHERE id = 'runtime/0013_planning_recovery'; DROP TABLE run_planning_recovery");
+    await migrateRuntimeState(database);
+    await migrateRuntimeState(database);
+    assert.deepEqual(await database.prepare("SELECT run_id FROM run_planning_recovery").all(), []);
+    const migration = await database.prepare("SELECT checksum FROM mr_schema_migrations WHERE id = 'runtime/0013_planning_recovery'")
+      .get<{ checksum: string }>();
+    assert.match(migration?.checksum ?? "", /^[a-f0-9]{64}$/);
+  } finally { await database.close(); }
+});
+
+test("Runtime Round result migration installs idempotently without creating historical results", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    await migrateRuntimeState(database);
+    await database.exec("DELETE FROM mr_schema_migrations WHERE id = 'runtime/0014_round_results'; DROP TABLE run_round_results");
+    await migrateRuntimeState(database);
+    await migrateRuntimeState(database);
+    assert.deepEqual(await database.prepare("SELECT run_id FROM run_round_results").all(), []);
+    assert.ok(await database.prepare("SELECT id FROM mr_schema_migrations WHERE id = ?").get("runtime/0014_round_results"));
+  } finally { await database.close(); }
+});
+
+test("Runtime multi-Plan migration records idempotently", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    await migrateRuntimeState(database);
+    await database.exec("DELETE FROM mr_schema_migrations WHERE id = 'runtime/0015_multi_plan_per_run'");
+    await migrateRuntimeState(database);
+    await migrateRuntimeState(database);
+    assert.ok(await database.prepare("SELECT id FROM mr_schema_migrations WHERE id = ?").get("runtime/0015_multi_plan_per_run"));
+  } finally { await database.close(); }
+});
+
 test("role migrations record an immutable checksum and fail closed on history drift", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -2067,6 +2155,36 @@ test("Runtime Host imports resources once and reuses its dispatch key", async ()
   assert.deepEqual(await host.toolArguments("remote-run-1", "command-1"), {
     toolCallId: "command-1", arguments: { command: "python3" }, content: '{"command":"python3"}',
   });
+});
+
+test("Runtime Host and Router expose durable Round history without changing Run status", async () => {
+  const rounds = [{
+    roundNumber: 1, status: "completed", planId: "plan-1", revision: 3,
+    result: {
+      schema: "agentloop.roundResult/v1", runId: "round-run", roundNumber: 1, planId: "plan-1", planVersion: 1,
+      canonicalRevision: 2, output: "stage one", reasonCode: "round_assessed_and_completed",
+      decision: { kind: "next_round", canonicalRevision: 2, openTargetIds: ["target-b"] },
+      steps: [{ stepId: "step-1", result: { schema: "agentloop.resultRef/v1", resultId: "rr_00000000-0000-0000-0000-000000000001" }, assessmentId: "assessment-1" }],
+    },
+  }] as const;
+  const host = new RuntimeHostService({
+    async ensureConversation() {},
+    async startConversation() { return { id: "round-run" } as never; },
+    async get() { return { id: "round-run", status: "running" } as never; },
+    async roundHistory() { return rounds; },
+  }, { async importForRun() { return []; } });
+  await host.dispatch({
+    schema: "agentloop.runtimeDispatch/v1", assignmentId: "round-assignment", dispatchKey: "round-dispatch",
+    subject: { tenantId: "tenant", userId: "user" }, conversationId: "conversation", input: "multi-round", allowDangerousTools: false, resourceRefs: [],
+  });
+  assert.deepEqual(await host.rounds("round-run"), rounds);
+
+  const router = new MultiRuntimeRouter();
+  router.register(runtime("runtime-rounds"), { async dispatch() { return { remoteRunId: "round-run" }; }, async rounds() { return rounds; } });
+  const assignment = await router.submit({
+    tenantId: "tenant", ownerUserId: "user", conversationId: "conversation-2", clientMessageId: "message-rounds", input: "multi-round",
+  });
+  assert.deepEqual((await router.rounds(assignment.id))?.rounds, rounds);
 });
 
 test("Runtime Host keeps generic failed output as execution evidence", async () => {

@@ -206,6 +206,30 @@ export interface RuntimeRunStatus {
   };
 }
 
+export interface RuntimeRoundHistoryEntry {
+  readonly roundNumber: number;
+  readonly status: string;
+  readonly planId?: string;
+  readonly revision: number;
+  readonly result?: {
+    readonly schema: "agentloop.roundResult/v1";
+    readonly runId: string;
+    readonly roundNumber: number;
+    readonly planId: string;
+    readonly planVersion: number;
+    readonly canonicalRevision: number;
+    readonly output: string;
+    readonly reasonCode: string;
+    readonly decision: {
+      readonly kind: "complete_goal" | "next_round";
+      readonly canonicalRevision: number;
+      readonly openGapIds?: readonly string[];
+      readonly openTargetIds?: readonly string[];
+    };
+    readonly steps: readonly { readonly stepId: string; readonly result: { readonly schema: "agentloop.resultRef/v1"; readonly resultId: string }; readonly assessmentId: string }[];
+  };
+}
+
 export interface RuntimeRunEvent {
   readonly seq: number;
   readonly type: string;
@@ -224,6 +248,7 @@ export interface RuntimeControlPort {
   dispatch(envelope: RuntimeDispatchEnvelope): Promise<RuntimeDispatchResult>;
   models?(): Promise<readonly RuntimeModelSummary[]>;
   getRun?(remoteRunId: string): Promise<RuntimeRunStatus>;
+  rounds?(remoteRunId: string): Promise<readonly RuntimeRoundHistoryEntry[]>;
   artifacts?(remoteRunId: string): Promise<readonly RuntimeArtifact[]>;
   readArtifact?(remoteRunId: string, artifactId: string): Promise<{ readonly artifact: RuntimeArtifact; readonly content: Uint8Array }>;
   previewArtifact?(remoteRunId: string, artifactId: string): Promise<RuntimeArtifactPreview>;

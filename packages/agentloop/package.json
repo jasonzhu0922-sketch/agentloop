@@ -29,6 +29,7 @@
   "dependencies": {
     "docx": "^9.7.1",
     "jszip": "^3.10.1",
+    "playwright-core": "^1.62.1",
     "pptxgenjs": "^4.0.1"
   },
   "peerDependencies": {

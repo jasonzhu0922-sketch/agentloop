@@ -5,13 +5,15 @@ import { assertLoopback, assertWriteOrigin, AccountSessions, HttpError, security
 import type { CloudAuthPort } from "../auth/cloud-auth.ts";
 import { modelEndpoint } from "../security/model-endpoint.ts";
 import { LocalManagementError, LocalRuntimeConfigurationStoreError, LocalRuntimeSupervisorError, type ConnectorSettingInput } from "@zhujun/agentloop-local-runtime";
-import { configurationInput, mcpInput, memoryInput, storageInput, record, skillImportInput } from "./settings-input.ts";
+import { configurationInput, mcpInput, memoryInput, storageInput, webSearchInput, record, skillImportInput } from "./settings-input.ts";
 import { DesktopAccountManagers } from "../accounts/account-managers.ts";
 import { localAccountId } from "../auth/cloud-auth.ts";
 import { pickNativeDirectory } from "../platform/directory-picker.ts";
 
 export const DEFAULT_RUNTIME_ID = "desktop-default";
 const MAX_BODY_BYTES = 1_500_000;
+const MAX_SOURCE_BYTES = 4 * 1024 * 1024;
+const MAX_SOURCE_BASE64_LENGTH = Math.ceil(MAX_SOURCE_BYTES / 3) * 4;
 
 function operationRoute(request: IncomingMessage, origin: string): string | undefined {
   let pathname: string;
@@ -37,6 +39,9 @@ function fields(body: Record<string, unknown>, allowed: readonly string[]): void
 function ids(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > 20 || value.some(id => typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,200}$/.test(id))) throw new HttpError(400, "source_ids_invalid");
   return value;
+}
+function withRuntimeIdentity<T extends object>(runtimeId: string, value: T): T & { runtimeId: string } {
+  return { ...value, runtimeId };
 }
 async function readJson(request: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<Record<string, unknown>> {
   const body = await new Promise<Buffer>((resolve, reject) => {
@@ -148,6 +153,20 @@ export class DesktopApi {
       const context = Object.freeze({ ownerUserId: session.ownerUserId });
       const manager = await this.accounts.forOwner(context.ownerUserId);
       if (await this.managementRoute(request, response, url.pathname, context.ownerUserId, manager)) return;
+      if (request.method === "GET" && url.pathname === "/api/conversations") {
+        const summaries = await manager.runtimes();
+        const conversations = (await Promise.all(summaries.map(async summary => {
+          try {
+            return (await manager.runtime(summary.id).conversations(context)).map(conversation => ({
+              ...conversation, runtimeId: summary.id, runtimeName: summary.displayName, runtimeIconKey: summary.iconKey,
+            }));
+          } catch (error) {
+            if (error instanceof LocalRuntimeSupervisorError && error.message === "runtime_not_running") return [];
+            throw error;
+          }
+        }))).flat().sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+        json(response, 200, { conversations }); return;
+      }
       const runtimeId = url.searchParams.get("runtimeId") ?? DEFAULT_RUNTIME_ID;
       if (!/^[a-zA-Z0-9_-]{1,200}$/.test(runtimeId)) throw new HttpError(400, "runtime_id_invalid");
       const runtime = manager.runtime(runtimeId);
@@ -191,8 +210,14 @@ export class DesktopApi {
         const body = await readJson(request); fields(body, ["enabled", "settlementModelKey"]);
         json(response, 200, { memory: await manager.configureDeviceMemory(memoryInput(body)) }); return;
       }
+      if (request.method === "GET" && url.pathname === "/api/web-search-configuration") {
+        json(response, 200, { webSearch: await manager.webSearchConfiguration() }); return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/web-search-configuration") {
+        json(response, 200, { webSearch: await manager.configureWebSearch(webSearchInput(await readJson(request))) }); return;
+      }
       if (request.method === "GET" && url.pathname === "/api/models") { json(response, 200, { models: await runtime.models() }); return; }
-      if (request.method === "GET" && url.pathname === "/api/conversations") { json(response, 200, { conversations: await runtime.conversations(context) }); return; }
+      if (request.method === "GET" && url.pathname === "/api/conversations") { json(response, 200, { conversations: (await runtime.conversations(context)).map(conversation => withRuntimeIdentity(runtimeId, conversation)) }); return; }
       if (request.method === "POST" && url.pathname === "/api/runs") {
         const body = await readJson(request);
         fields(body, ["requestId", "input", "modelKey", "conversationId", "uploadedSourceIds", "connectorConnectionIds"]);
@@ -205,12 +230,12 @@ export class DesktopApi {
           ...(body.conversationId === undefined ? {} : { conversationId: text(body, "conversationId", 200) }),
           uploadedSourceIds: body.uploadedSourceIds === undefined ? [] : ids(body.uploadedSourceIds),
           connectorConnectionIds: connections, allowDangerousTools: true });
-        json(response, 200, { run }); return;
+        json(response, 200, { run: withRuntimeIdentity(runtimeId, run) }); return;
       }
       if (request.method === "POST" && url.pathname === "/api/sources") {
-        const body = await readJson(request); fields(body, ["conversationId", "originalName", "contentBase64"]);
-        const encoded = text(body, "contentBase64", 1_400_000); const content = Buffer.from(encoded, "base64");
-        if (content.length > 1_048_576 || content.toString("base64") !== encoded) throw new HttpError(400, "source_content_invalid");
+        const body = await readJson(request, MAX_SOURCE_BASE64_LENGTH + 64 * 1024); fields(body, ["conversationId", "originalName", "contentBase64"]);
+        const encoded = text(body, "contentBase64", MAX_SOURCE_BASE64_LENGTH); const content = Buffer.from(encoded, "base64");
+        if (content.length > MAX_SOURCE_BYTES || content.toString("base64") !== encoded) throw new HttpError(400, "source_content_invalid");
         const conversationId = text(body, "conversationId", 200); const originalName = text(body, "originalName", 255);
         await runtime.ensureConversation(context, conversationId, `已上传文件：${originalName}`);
         const source = await runtime.upload(context, { conversationId, originalName, content });
@@ -221,7 +246,8 @@ export class DesktopApi {
         if (!/^[a-zA-Z0-9_-]{1,200}$/.test(decoded)) throw new HttpError(400, "path_invalid"); return decoded;
       });
       if (request.method === "GET" && parts.length === 3 && parts[0] === "api" && parts[1] === "conversations") {
-        json(response, 200, await runtime.conversation(context, parts[2]!)); return;
+        const conversation = await runtime.conversation(context, parts[2]!);
+        json(response, 200, { ...conversation, runs: conversation.runs.map(run => withRuntimeIdentity(runtimeId, run)) }); return;
       }
       if (request.method === "POST" && parts.length === 4 && parts[0] === "api" && parts[1] === "conversations" && parts[3] === "remove") {
         fields(await readJson(request), []);
@@ -320,14 +346,17 @@ export class DesktopApi {
       if (!Object.hasOwn(body, "value")) throw new HttpError(400, "value_required");
       json(response, 200, { response: await runtime.respondHumanLoop(context, id, parts[4]!, body.value, body.expectedRevision as number) }); return;
     }
-    if (request.method === "GET" && parts.length === 3) { json(response, 200, { run: await runtime.getRun(context, id) }); return; }
+    if (request.method === "GET" && parts.length === 3) { json(response, 200, { run: withRuntimeIdentity(url.searchParams.get("runtimeId") ?? DEFAULT_RUNTIME_ID, await runtime.getRun(context, id)) }); return; }
     if (request.method === "GET" && parts.length === 4 && parts[3] === "events") {
       const after = url.searchParams.get("afterSeq") ?? "0";
       if (!/^\d{1,15}$/.test(after)) throw new HttpError(400, "event_sequence_invalid");
       json(response, 200, { events: await runtime.events(context, id, Number(after)) }); return;
     }
+    if (request.method === "GET" && parts.length === 4 && parts[3] === "rounds") {
+      json(response, 200, { rounds: await runtime.roundHistory(context, id) }); return;
+    }
     if (request.method === "POST" && parts.length === 4 && parts[3] === "cancel") {
-      fields(await readJson(request), []); json(response, 200, { run: await runtime.cancelRun(context, id) }); return;
+      fields(await readJson(request), []); json(response, 200, { run: withRuntimeIdentity(url.searchParams.get("runtimeId") ?? DEFAULT_RUNTIME_ID, await runtime.cancelRun(context, id)) }); return;
     }
     if (request.method === "GET" && parts.length === 4 && parts[3] === "artifacts") { json(response, 200, { artifacts: await runtime.artifacts(context, id) }); return; }
     if (request.method === "GET" && parts.length === 6 && parts[3] === "artifacts" && parts[5] === "preview") {
