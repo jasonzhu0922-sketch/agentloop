@@ -170,6 +170,51 @@ test("explicitly requested discovered Skills keep conversation turns executable 
   }
 });
 
+test("a question about an available Skill remains a tool-free reply with catalog evidence", async () => {
+  const fixture = await createDirectoryFixture();
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database, { packageStoreRoot: fixture.packageStore, skillDirectory: fixture.skillDirectory });
+    let responseOnly = false;
+    const runs = new RunService({
+      database, skills, workspaceRoot: fixture.root,
+      plannerFactory: () => ({ async plan(task) {
+        responseOnly = task.responseOnly === true;
+        return { goal: "Answer the capability question", selectedSkillIds: [], steps: [{
+          id: "answer", objective: "Answer the question", dependencies: [], skillIds: [], role: "deliver",
+          targetIds: ["answer"], requiredCapabilities: [],
+          successCriteria: [{ id: "answered", description: "Answer the question", source: "planner" }],
+        }] };
+      } }),
+      assessorFactory: () => approvingAssessor(),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, async complete(request) {
+        if (request.runId.startsWith("conversation-turn:")) return { content: "", finishReason: "tool_calls", toolCalls: [{
+          id: "intent", name: "resolve_conversation_turn", arguments: {
+            mode: "reply", relation: "new_goal", inputMode: "none", effectiveGoal: "Answer whether directory-demo is available.",
+            taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "answer", requiresExecution: false,
+              deliverables: [{ targetId: "answer", purpose: "Answer the capability question", expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
+            evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [], memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
+          },
+        }] };
+        assert.equal(request.tools.length, 0);
+        assert.match(request.runtimeContext?.content ?? "", /available_skill_catalog/);
+        assert.match(request.runtimeContext?.content ?? "", /directory-demo/);
+        return { content: "有 directory-demo 技能。", finishReason: "stop", toolCalls: [] };
+      } }),
+    });
+    const run = await runs.executeConversation(testOwner().user.id, "你有 directory-demo 这个技能吗？");
+    assert.equal(run.status, "completed");
+    assert.equal(responseOnly, true);
+    const events = await runs.events(run.ownerUserId, run.id);
+    assert.equal(events.find((event) => event.type === "conversation.turn.resolved")?.data.mode, "reply");
+    assert.equal(events.some((event) => event.type === "tool.completed"), false);
+  } finally {
+    await database.close();
+    await removeSkillPackage(fixture.packageStore).catch(() => undefined);
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("explicit Skill package roots include only the selected package, not its siblings", async () => {
   const fixture = await createDirectoryFixture();
   const sibling = resolve(fixture.skillDirectory, "unselected-sibling");

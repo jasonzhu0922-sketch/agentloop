@@ -37,6 +37,18 @@ test("a source-grounded Chinese investigation exposes research to the planner", 
   assert.deepEqual(selected.map(({ skill: candidate, selection }) => [candidate.id, selection.role]), [[skill.id, "primary_builder"]]);
 });
 
+test("news research and impact analysis exposes the research workflow alongside unrelated providers", async () => {
+  const research = await packageSkill("agentloop-skills/skills/research");
+  const provider = await packageSkill("../apps/agentloop-multi-runtime/custom-skills/hr-report-data");
+  const objective = "搜索美国中期选举（2026年美国中期选举）结果相关的最新新闻，并在此基础上研究分析该选举结果对中国宏观经济的影响。 你帮我搜索美国中期选举结果相关新闻，并研究分析一下对中国宏观经济的影响";
+  const task = understandTask({ objective, userConstraints: ["需检索美国中期选举结果相关新闻", "需在此基础上研究分析对中国宏观经济的影响"], evidenceDemand: "source_grounded", resolvedTaskIntent: {
+    schema: "agentloop.conversationTaskIntent/v1", operation: "analysis", requiresExecution: true,
+    deliverables: [{ targetId: "analysis", purpose: objective, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }],
+  } });
+  const selected = selectPlanningSkillRoles([research, provider], task, []);
+  assert.ok(selected.some(({ skill }) => skill.id === research.id));
+});
+
 test("structured data lookup retains its source provider without nominating general research", async () => {
   const research = await packageSkill("agentloop-skills/skills/research");
   const provider = await packageSkill("../apps/agentloop-multi-runtime/custom-skills/data-platform-query");

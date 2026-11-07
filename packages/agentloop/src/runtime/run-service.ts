@@ -2563,6 +2563,12 @@ export class RunService {
       const initialRuntimePromptAugmentations = [
         ...(responseMemoryProjection === undefined ? [] : [interactionMemoryPromptAugmentation(responseMemoryProjection)]),
         ...(currentTurnMemoryCommit === undefined ? [] : [currentTurnMemoryCommitPromptAugmentation(currentTurnMemoryCommit)]),
+        ...(responseOnly ? [{
+          schema: "agentloop.promptAugmentation/v1" as const,
+          id: "runtime:available-skill-catalog",
+          source: "runtime_skill_catalog",
+          content: `<available_skill_catalog scope="runtime" source="server">\n${JSON.stringify({ skills: privateSkills.map(({ id, name, description }) => ({ id, name, description })), instruction: "This is the Runtime's available Skill metadata for answering capability questions. It does not mean a Skill was invoked and does not grant execution authority." })}\n</available_skill_catalog>`,
+        }] : []),
       ];
       plan = await this.executePlanSteps({
         actorUserId,
@@ -5775,7 +5781,7 @@ export function selectPlanningSkillRoles(
   // not let the requested file type exclude it before Planner can compose
   // the leaves. It still needs concrete semantic affinity; this does not
   // turn every no-artifact Skill into a candidate for every report.
-  const domainAnalysisCandidate = requestsArtifactBuild(artifactSignal) && sourceWorkRequested
+  const domainAnalysisCandidate = sourceWorkRequested
     ? scored
       .filter((entry) => {
         const metadata = entry.skill.agentLoop;
@@ -5812,7 +5818,7 @@ export function selectPlanningSkillRoles(
     ];
     const domainId = domainAnalysisCandidate?.skill.id;
     const outputId = outputArtifactCandidate?.skill.id;
-    selected = selected.filter((entry) => {
+    if (requestsArtifactBuild(artifactSignal)) selected = selected.filter((entry) => {
       if (roleBySkillId.get(entry.skill.id)?.role !== "primary_builder") return true;
       if (entry.skill.id === domainId || entry.skill.id === outputId) return true;
       return matchesRequestedArtifactKind(
@@ -9005,6 +9011,10 @@ function applyConversationTurnExplicitSkillExecutionFloor(
   context: ConversationIntentExternalContext,
 ): ConversationTurnResolution {
   if (resolution.mode === "execute") return resolution;
+  // A reference to a Skill is not an instruction to invoke it. Preserve the
+  // resolver's direct-answer decision for questions about capabilities.
+  if (resolution.mode === "reply" && resolution.taskIntent?.requiresExecution === false
+    && isQuestionAboutDescribedAction(input)) return resolution;
   const skill = explicitlyReferencedAvailableSkill(input, context.availableSkills);
   if (skill === undefined) return resolution;
   const userAuthoredSourceNeed = classifyTaskIntent({ objective: input }).sourceNeed;
