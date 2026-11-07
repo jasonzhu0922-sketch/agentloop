@@ -150,8 +150,8 @@ async function conversations() {
     const row = node('div', `session-wrap${isCurrent ? ' active' : ''}`);
     const button = node('button', `session${isCurrent ? ' active' : ''}`); button.type = 'button'; button.disabled = operationLocked;
     const body = node('span', 'session-body'); body.append(node('span', 'session-title', item.title), node('span', 'session-runtime', item.runtimeName || item.runtimeId || '本机 Runtime'));
-    const avatar = document.createElement('img'); avatar.className = 'session-runtime-icon'; avatar.src = runtimeIconUrl(item.runtimeIconKey || runtimeIcons.get(item.runtimeId)); avatar.alt = `${item.runtimeName || '本机 Runtime'} 图标`;
-    button.append(avatar, body);
+    const dot = node('span', 'session-dot'); dot.setAttribute('aria-hidden', 'true');
+    button.append(dot, body);
     if (isCurrent) element('conversation-title').textContent = item.title;
     button.onclick = () => selectConversation(item.id, item.runtimeId).catch(error => status(error.message, true));
     const remove = node('button', 'session-delete', '×'); remove.type = 'button'; remove.disabled = operationLocked;

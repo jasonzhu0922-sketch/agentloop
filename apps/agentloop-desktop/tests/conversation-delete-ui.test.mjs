@@ -65,6 +65,15 @@ async function fixture(preferencesStorage = new Map(), running = false, runtimeC
     confirm: value => { confirmed = value; }, fail: value => { failure = value; }, clears: () => clearCount };
 }
 
+test('sidebar conversations use a dot and highlight the selected conversation', async () => {
+  const ui = await fixture();
+  assert.equal(ui.rows()[0].children[0].children[0].className, 'session-dot');
+  assert.equal(ui.rows()[0].children[0].children[0].tag, 'span');
+  await ui.rows()[0].children[0].onclick();
+  assert.match(ui.rows()[0].children[0].className, /\bactive\b/);
+  assert.equal(ui.rows()[0].children[0].children[0].className, 'session-dot');
+});
+
 test('sidebar deletion cancellation and failure preserve the selected conversation and draft', async () => {
   const ui = await fixture(); await ui.rows()[0].children[0].onclick();
   ui.element('message').value = '未发送草稿';
