@@ -40,14 +40,18 @@
 .composer-box { position:relative; background:var(--bg-2); }
 .composer-input { min-height:48px; }
 .composer-bar { flex-wrap:wrap; }
-.composer-status { min-height:18px; margin:0 0 8px; color:var(--text-3); font-size:11px; overflow-wrap:anywhere; }
+.composer-context { display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr); align-items:end; gap:12px; margin:0 0 10px; }
+.composer-context-info { min-width:0; align-self:end; }
+.composer-status { min-height:18px; margin:0 0 4px; color:var(--text-3); font-size:11px; overflow-wrap:anywhere; }
 .composer-status.error { color:var(--bad); }
 .desktop-footnote { margin:7px 0 0; color:var(--text-3); font-size:10px; text-align:center; }
-.runtime-dock { position:absolute; z-index:2; left:50%; top:-48px; display:flex; align-items:center; gap:8px; min-height:42px; padding:0; background:transparent; transform:translateX(-50%); }
+.runtime-dock { position:relative; z-index:2; display:flex; justify-content:center; align-items:center; min-height:50px; margin:0; }
+.runtime-dock:has(.runtime-robots:empty) { display:none; }
 .runtime-dock-copy { display:none; }
 .runtime-dock-copy small { color:var(--text-3); font-size:10px; }
-.runtime-robots { display:flex; align-items:center; gap:4px; min-width:0; overflow:visible; padding:1px; }
-.runtime-robot { display:grid; justify-items:center; gap:2px; min-width:46px; padding:2px 4px; border:1px solid transparent; border-radius:9px; background:transparent; color:var(--text-2); cursor:pointer; font-size:9px; font-weight:650; }
+.runtime-robots { display:flex; justify-content:center; align-items:flex-start; gap:12px; min-width:0; max-width:100%; overflow:visible; padding:1px; }
+.runtime-robot { display:grid; justify-items:center; gap:4px; min-width:56px; max-width:112px; padding:3px 4px; border:1px solid transparent; border-radius:9px; background:transparent; color:var(--text-2); cursor:pointer; font-size:10px; font-weight:650; line-height:1.3; }
+.runtime-robot span { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .runtime-robot img { width:30px; height:30px; border-radius:10px; background:var(--bg-2); object-fit:contain; transition:transform .16s ease, filter .16s ease; }
 .runtime-robot:hover img,.runtime-robot:focus-visible img { transform:translateY(-2px); filter:drop-shadow(0 5px 8px rgba(30,45,80,.18)); }
 .runtime-robot.current { border-color:transparent; background:transparent; color:var(--brand); }
@@ -60,7 +64,7 @@
 .runtime-robots.runtime-arc .runtime-robot { position:absolute; left:50%; top:50%; min-width:34px; padding:2px; opacity:0; pointer-events:none; transform:translate(-50%,-50%) translate(0,0) scale(.65); transition:opacity .16s ease, transform .2s ease; }
 .runtime-robots.runtime-arc:hover .runtime-robot,.runtime-robots.runtime-arc:focus-within .runtime-robot { opacity:1; pointer-events:auto; transform:translate(-50%,-50%) translate(var(--arc-x),var(--arc-y)) scale(1); }
 .runtime-robots.runtime-arc .runtime-robot img { width:32px; height:32px; }
-.desktop-run-connectors { display:flex; flex-wrap:wrap; align-items:center; gap:7px; margin:0 0 7px; font-size:11px; }
+.desktop-run-connectors { display:flex; flex-wrap:wrap; align-items:center; gap:7px; margin:0; font-size:11px; }
 .desktop-connector-title { color:var(--text-3); }
 .desktop-connector-choice { display:inline-flex; align-items:center; gap:4px; padding:4px 7px; border:1px solid var(--border); border-radius:999px; background:var(--bg-2); }
 .desktop-connector-choice input { margin:0; }
@@ -101,7 +105,9 @@ button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid va
   .topbar { padding:10px 12px; gap:8px; }
   .status-pill { display:none; }
   .topbar-right { flex:none; }
-  .runtime-dock { top:-44px; }
+  .composer-context { display:flex; flex-direction:column-reverse; align-items:stretch; gap:8px; margin-bottom:8px; }
+  .composer-context-info { align-self:stretch; }
+  .runtime-dock { margin:0; }
   .empty-state { padding:50px 20px 30px; }
   .empty-state h2 { font-size:22px; }
   .composer { padding:10px 14px 12px; }

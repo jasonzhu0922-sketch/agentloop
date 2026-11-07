@@ -14,7 +14,6 @@ let generation = 0; let selectedRunId; let cancelling = false;
 let locked = true; let operationLocked = true; const turns = new Map(); let orderedRunIds = [];
 let PENDING_KEY; let preferences;
 const status = (message, error = false) => { const target = element('status'); target.textContent = message; target.hidden = !message; target.className = `composer-status${error ? ' error' : ''}`; };
-const runState = value => ({ running: '执行中', completed: '已完成', cancelled: '已取消', failed: '执行失败' }[value] ?? value);
 function node(tag, className, text) {
   const result = document.createElement(tag); result.className = className;
   if (text !== undefined) result.textContent = text;
@@ -113,8 +112,8 @@ function renderRuntimeRobots(runtimes) {
     button.replaceChildren(avatar, ...(runtimes.length > 3 ? [] : [node('span', '', runtime.displayName)]));
     if (runtimes.length > 3) {
       const index = runtimes.indexOf(runtime); const angle = runtimes.length === 1 ? -90 : -150 + (120 * index / (runtimes.length - 1));
-      button.style?.setProperty('--arc-x', `${Math.round(Math.cos(angle * Math.PI / 180) * 58)}px`);
-      button.style?.setProperty('--arc-y', `${Math.round(Math.sin(angle * Math.PI / 180) * 42)}px`);
+      button.style?.setProperty('--arc-x', `${Math.round(Math.cos(angle * Math.PI / 180) * 100)}px`);
+      button.style?.setProperty('--arc-y', `${Math.round(Math.sin(angle * Math.PI / 180) * 75)}px`);
       button.title = `单击以使用「${runtime.displayName}」开启新会话`;
     }
     button.onclick = () => void startRuntimeConversation(runtime.id);
@@ -205,7 +204,6 @@ async function watch(id, token) {
       if (token !== generation) return;
       updateTurn(turn, decorateRun(run), events, artifacts, humanLoop, rounds);
       renderTurns(); if (selectedRunId === id) renderDetails();
-      status(`「${turn.run.runtimeName || turn.run.runtimeId || runtimeNames.get(runtimeId) || '本机 Runtime'}」· ${turn.humanLoop?.status === 'open' ? '等待你的输入，请在问题卡片中回答' : runState(run.status)}`);
       if (run.status !== 'running') {
         await conversations(); break;
       }
@@ -238,6 +236,7 @@ async function selectConversation(id, conversationScope) {
     runtimeId = conversationScope; element('runtime-select').value = runtimeId; updateRuntimePicker();
   }
   conversationRuntimeLocked = true; conversationPersisted = true; busy(true); navigation(false);
+  status('');
   const token = ++generation; activeRun = undefined; cancelling = false; conversationId = id; pending = undefined; selectedSources = [];
   sessionStorage.removeItem(PENDING_KEY);
   restoreConnectors();
@@ -246,7 +245,6 @@ async function selectConversation(id, conversationScope) {
     const runs = await transcript(token); if (token !== generation) return; await conversations();
     const last = runs?.at(-1);
     if (last) {
-      status(`「${last.runtimeName || last.runtimeId || runtimeNames.get(runtimeId) || '本机 Runtime'}」· ${runState(last.status)}`);
       if (last.status === 'running') { void watch(last.id, generation); return; }
     }
   } finally { if (!activeRun) busy(false); }
@@ -267,6 +265,7 @@ element('composer').onsubmit = async event => {
     sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending));
     const { run } = await api('/api/runs', { requestId: pending.requestId, ...pending.payload });
     view.submitted();
+    status('');
     sessionStorage.removeItem(PENDING_KEY);
     pending = undefined; conversationId = run.conversationId; conversationRuntimeLocked = true; conversationPersisted = true; selectedSources = []; resetAttachments();
     element('message').value = ''; resetComposerInput(element('message')); generation++;
@@ -341,7 +340,25 @@ element('upload-file').onclick = () => element('file').click();
 element('details-toggle').onclick = () => details(element('details').hidden);
 element('details-close').onclick = () => details(false);
 element('navigation-toggle').onclick = () => navigation(!element('sidebar').classList.contains('navigation-open'));
-element('theme-toggle').onclick = () => { document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; };
+const themeButton = element('theme-toggle');
+const themeKey = 'agentloop.desktop.theme.v1';
+const themes = [{ id: 'light', label: '明亮' }, { id: 'dark', label: '深色' }, { id: 'purple', label: '智慧紫' }];
+let themeIndex = themes.findIndex(theme => theme.id === localStorage.getItem(themeKey));
+if (themeIndex < 0) themeIndex = themes.findIndex(theme => theme.id === 'purple');
+function applyTheme() {
+  const current = themes[themeIndex];
+  const next = themes[(themeIndex + 1) % themes.length];
+  document.documentElement.dataset.theme = current.id;
+  const label = `当前主题：${current.label}；点击切换到${next.label}`;
+  themeButton.title = label;
+  themeButton.setAttribute('aria-label', label);
+}
+applyTheme();
+themeButton.addEventListener('click', () => {
+  themeIndex = (themeIndex + 1) % themes.length;
+  localStorage.setItem(themeKey, themes[themeIndex].id);
+  applyTheme();
+});
 element('logout').onclick = async () => {
   const button = element('logout'); button.disabled = true;
   try {

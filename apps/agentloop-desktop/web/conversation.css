@@ -146,7 +146,7 @@
 }
 
 .assistant-state.completed {
-  color: var(--ok);
+  color: var(--completion-accent, var(--ok));
 }
 
 .assistant-state.failed {
@@ -158,7 +158,7 @@
 }
 
 .live-card.completed {
-  border-color: color-mix(in srgb, var(--ok) 22%, var(--border));
+  border-color: color-mix(in srgb, var(--completion-accent, var(--ok)) 22%, var(--border));
 }
 
 .live-card.failed {
@@ -234,7 +234,7 @@
 }
 
 .event-feedback .live-event-indicator.completed {
-  color: var(--ok);
+  color: var(--completion-accent, var(--ok));
   animation: terminal-event-arrive .52s var(--ease);
 }
 

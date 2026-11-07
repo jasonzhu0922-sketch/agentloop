@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="purple">
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AgentLoop Desktop · 开发预览</title>
@@ -16,7 +16,7 @@
       <div class="sidebar-foot">
         <section class="local-capability" aria-label="本机能力"><div class="local-capability-head"><strong>本机能力</strong><span class="local-agent-state"><i class="online"></i><span>本机运行</span></span><button id="model-settings-open" type="button" aria-haspopup="dialog">设置</button></div><p class="local-agent-hint">当前账号专属 Runtime · 会话按 Runtime 隔离</p></section>
         <div class="identity-actions">
-          <span id="account-identity" class="identity">正在确认云端账号…</span><div class="foot-actions"><button id="theme-toggle" class="icon-btn" type="button" title="切换主题" aria-label="切换主题">◐</button><button id="logout" class="icon-btn" type="button" title="退出登录" aria-label="退出登录">⇥</button></div>
+          <span id="account-identity" class="identity">正在确认云端账号…</span><div class="foot-actions"><button id="theme-toggle" class="icon-btn theme-toggle" type="button" title="当前主题：智慧紫；点击切换到明亮" aria-label="当前主题：智慧紫；点击切换到明亮">◐</button><button id="logout" class="icon-btn" type="button" title="退出登录" aria-label="退出登录">⇥</button></div>
         </div>
       </div>
     </aside>
@@ -29,11 +29,11 @@
             <div id="transcript" class="messages" aria-label="对话记录"></div>
           </div>
           <form id="composer" class="composer">
-            <p id="status" class="composer-status" role="status" aria-live="polite">正在连接本地服务…</p>
+            <div class="composer-context"><div class="composer-context-info"><p id="status" class="composer-status" role="status" aria-live="polite">正在连接本地服务…</p>
             <div id="run-connectors" class="desktop-run-connectors" aria-label="本轮授权 Connector"></div>
-            <div class="composer-box"><div id="runtime-dock" class="runtime-dock" aria-label="Runtime 会话入口"><div class="runtime-dock-copy"><strong>选择一个机器人开始</strong><small id="runtime-lock-hint">单击机器人开始新会话</small></div><div id="runtime-robots" class="runtime-robots"></div><label class="sr-only" for="runtime-select">当前执行 Runtime</label><select id="runtime-select" hidden disabled aria-hidden="true"></select></div><div id="attachments" class="source-row" aria-label="本次附件" hidden></div><label class="sr-only" for="message">消息</label><textarea class="composer-input" id="message" rows="2" placeholder="" required></textarea>
+            </div><div id="runtime-dock" class="runtime-dock" aria-label="Runtime 会话入口"><div class="runtime-dock-copy"><strong>选择一个机器人开始</strong><small id="runtime-lock-hint">单击机器人开始新会话</small></div><div id="runtime-robots" class="runtime-robots"></div><label class="sr-only" for="runtime-select">当前执行 Runtime</label><select id="runtime-select" hidden disabled aria-hidden="true"></select></div></div><div class="composer-box"><div id="attachments" class="source-row" aria-label="本次附件" hidden></div><label class="sr-only" for="message">消息</label><textarea class="composer-input" id="message" rows="2" placeholder="" required></textarea>
               <div class="composer-tools"><div class="composer-bar"><input id="file" type="file" hidden disabled><button id="upload-file" class="dir-picker-btn" type="button" disabled title="添加本机附件（单个 ≤ 4 MiB）">▤ 上传文件</button><label class="chip">模型<select id="model" aria-label="执行模型" required><option value="">请选择模型</option></select></label><span class="composer-hint">⌘/Ctrl + Enter 发送</span><span class="composer-spacer"></span><button id="cancel" class="composer-action is-stop" type="button" aria-label="取消执行" title="取消执行" hidden disabled>■</button><button id="send" class="composer-action" type="submit" aria-label="发送" title="发送任务">↑</button></div></div>
-            </div><p id="upload-hint" class="desktop-footnote">开发预览 · 可在发送前添加本机附件（单个 ≤ 4 MiB）</p>
+            </div>
           </form>
         </section>
         <aside id="details" class="details artifact-workspace" aria-label="产物与事件" hidden>

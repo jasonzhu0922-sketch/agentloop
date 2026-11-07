@@ -19,19 +19,19 @@
 .brand-icon-image,
 .empty-logo-image {
   object-fit: contain;
-  border: 1px solid rgba(39, 78, 68, 0.18);
-  box-shadow: 0 5px 14px rgba(39, 78, 68, 0.16);
+  border: 1px solid var(--mascot-border, rgba(39, 78, 68, 0.18));
+  box-shadow: 0 5px 14px var(--mascot-shadow, rgba(39, 78, 68, 0.16));
 }
 
 .logo-image,
 .brand-icon-image {
   padding: 3px;
-  background: radial-gradient(circle at 50% 28%, #f5fff9 0%, #d7eee4 72%, #c7e3d8 100%) !important;
+  background: var(--mascot-background, radial-gradient(circle at 50% 28%, #f5fff9 0%, #d7eee4 72%, #c7e3d8 100%));
 }
 
 .empty-logo-image {
   padding: 7px;
-  background: radial-gradient(circle at 50% 28%, #f5fff9 0%, #d7eee4 72%, #c7e3d8 100%) !important;
+  background: var(--mascot-background, radial-gradient(circle at 50% 28%, #f5fff9 0%, #d7eee4 72%, #c7e3d8 100%));
 }
 
 .msg-avatar.logo-image {
@@ -140,3 +140,10 @@
 .artifact-empty-icon { display: grid; place-items: center; width: 42px; height: 42px; border: 1px solid var(--border); border-radius: 12px; background: var(--brand-soft); color: var(--brand); font-size: 22px; }
 .artifact-empty strong { color: var(--text-2); font-size: 13px; }
 .artifact-empty p { max-width: 220px; margin: 0; color: var(--text-3); font-size: 11px; line-height: 1.6; }
+
+/* 智慧紫：参考智慧治理平台的浅紫背景与强调色。 */
+:root[data-theme="purple"]{color-scheme:light;--bg:#f0edff;--bg-2:#fff;--bg-3:#ebe4ff;--border:#ded7f3;--border-2:#cbbce9;--text:#29263d;--text-2:#64647b;--text-3:#7b7d92;--brand:#895cf6;--brand-hover:#7549df;--brand-soft:#f1ecff;--ok:#0f9f6e;--bad:#e05270}
+:root[data-theme="purple"]{--completion-accent:var(--brand);--mascot-border:color-mix(in srgb,var(--brand) 28%,transparent);--mascot-shadow:color-mix(in srgb,var(--brand) 18%,transparent);--mascot-background:radial-gradient(circle at 50% 28%,#faf8ff 0%,#eee7ff 72%,#ded1ff 100%)}
+:root[data-theme="purple"] .logo:not(.logo-image),:root[data-theme="purple"] .empty-logo:not(.empty-logo-image),:root[data-theme="purple"] .msg-avatar:not(.logo-image){background:linear-gradient(135deg,#a987ff,#895cf6);box-shadow:0 6px 18px rgba(92,72,160,.18)}
+.theme-toggle:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+:root[data-theme="purple"] .theme-toggle{color:var(--brand);background:var(--brand-soft)}

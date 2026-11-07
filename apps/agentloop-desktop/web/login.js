@@ -2,7 +2,6 @@ const element = id => document.getElementById(id);
 const registering = location.pathname === '/register';
 document.title = registering ? '创建 AgentLoop 账号' : '登录 AgentLoop';
 element('auth-title').textContent = registering ? '创建账号' : '欢迎回来';
-element('auth-subtitle').textContent = registering ? '使用统一云端账号，对话和文件保存在本机。' : '登录你的云端账号，继续使用这台设备上的工作区。';
 element('auth-submit').textContent = registering ? '创建账号' : '登录';
 element('auth-switch-copy').textContent = registering ? '已有账号？' : '还没有账号？';
 element('auth-mode-toggle').textContent = registering ? '登录' : '创建账号';

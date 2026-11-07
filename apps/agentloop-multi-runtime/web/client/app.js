@@ -121,8 +121,25 @@ window.fetch = (input, init = {}) => {
 
 void bootstrapAuthenticatedApp();
 document.querySelectorAll("[data-suggest]").forEach((button) => button.addEventListener("click", () => { $("input").value = button.dataset.suggest || ""; autoResizeComposerInput($("input")); $("input").focus(); }));
-$("theme-toggle")?.addEventListener("click", () => { document.documentElement.dataset.theme = document.documentElement.dataset.theme === "dark" ? "" : "dark"; });
-
+const themeButton = $("theme-toggle");
+const themeKey = 'agentloop.multi-runtime.theme.v1';
+const themes = [{ id: 'light', label: '明亮' }, { id: 'dark', label: '深色' }, { id: 'purple', label: '智慧紫' }];
+let themeIndex = themes.findIndex(theme => theme.id === localStorage.getItem(themeKey));
+if (themeIndex < 0) themeIndex = themes.findIndex(theme => theme.id === 'purple');
+function applyTheme() {
+  const current = themes[themeIndex];
+  const next = themes[(themeIndex + 1) % themes.length];
+  document.documentElement.dataset.theme = current.id;
+  const label = `当前主题：${current.label}；点击切换到${next.label}`;
+  themeButton.title = label;
+  themeButton.setAttribute('aria-label', label);
+}
+applyTheme();
+themeButton.addEventListener('click', () => {
+  themeIndex = (themeIndex + 1) % themes.length;
+  localStorage.setItem(themeKey, themes[themeIndex].id);
+  applyTheme();
+});
 $("new-chat").addEventListener("click", () => { conversationState.activeId = newConversation().id; resetArtifactWorkspace(); updateLocalControls(); render(); $("input").focus(); });
 $("composer").addEventListener("submit", (event) => { event.preventDefault(); void runComposerAction(); });
 $("submit").addEventListener("click", () => void runComposerAction());
