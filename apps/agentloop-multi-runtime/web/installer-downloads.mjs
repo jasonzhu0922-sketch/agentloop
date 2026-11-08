@@ -1,7 +1,7 @@
 import { open, realpath } from "node:fs/promises";
 import { resolve, sep, basename } from "node:path";
 
-export async function serveInstaller(request, response, pathname, directory) {
+export async function serveInstaller(request, response, pathname, directory, prefix = '/downloads/local-agent/', filePattern = /^[a-zA-Z0-9_./-]+\.(pkg|msi)$/) {
   const finish = (status, message) => { response.statusCode = status; response.end(message); };
   if (request.method !== "GET" && request.method !== "HEAD") {
     response.setHeader("allow", "GET, HEAD"); return finish(405, "Method not allowed");
@@ -9,14 +9,20 @@ export async function serveInstaller(request, response, pathname, directory) {
   if (!directory) return finish(404, "Installer not published");
   let file;
   try {
-    const relative = decodeURIComponent(pathname.slice("/downloads/local-agent/".length));
-    if (!/^[a-zA-Z0-9_./-]+\.(pkg|msi)$/.test(relative) || relative.split("/").some(part => part === "" || part === "." || part === "..")) return finish(404, "Not found");
+    const relative = decodeURIComponent(pathname.slice(prefix.length));
+    if (!filePattern.test(relative) || relative.split("/").some(part => part === "" || part === "." || part === "..")) return finish(404, "Not found");
     const root = await realpath(directory);
     const target = await realpath(resolve(root, relative));
     if (!target.startsWith(root + sep)) return finish(404, "Not found");
     file = await open(target, "r");
     const info = await file.stat();
     if (!info.isFile()) { await file.close(); return finish(404, "Not found"); }
+    if (info.size === 0) {
+      await file.close();
+      if (request.headers.range) { response.setHeader('content-range', 'bytes */0'); return finish(416, 'Invalid range'); }
+      response.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': '0', 'accept-ranges': 'bytes', 'x-content-type-options': 'nosniff', 'cache-control': 'public, max-age=31536000, immutable' });
+      response.end(); return;
+    }
     let start = 0;
     let end = info.size - 1;
     if (request.headers.range) {

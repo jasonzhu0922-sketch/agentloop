@@ -41,6 +41,8 @@ try {
   desktop = await startDesktop({
     computerCommandEnvironment,
     mode: 'packaged', dataDirectory: process.env.AGENTLOOP_DESKTOP_DATA_DIR,
+    // stdout is reserved for the tray protocol; the native host persists stderr.
+    log: entry => process.stderr.write(`[AgentLoop Desktop] ${new Date().toISOString()} ${entry}\n`),
     runtimeTurnDefaults: { ...config.turnDefaults, webSearch: config.searchDefaults },
     webDirectory: join(root, 'web'), openBrowser: false,
     cloudAuth: new CloudAccountAuth(config.accountServiceUrl),
@@ -51,6 +53,7 @@ try {
     ].map(([name, exportName]) => ({ modulePath: fileURLToPath(import.meta.resolve(name)), exportName })),
   });
   if (desktop.existing) throw new Error('desktop_backend_already_owned');
+  process.stderr.write(`[AgentLoop Desktop] ${new Date().toISOString()} 本地服务已就绪\n`);
   notify({ type: 'ready', origin: desktop.origin });
 } catch {
   notify({ type: 'startup-error' });

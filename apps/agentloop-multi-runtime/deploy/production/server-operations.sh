@@ -407,6 +407,9 @@ if old.is_dir():
 PY
   template_dir=$source_dir/apps/agentloop-multi-runtime/deploy/centos7
   ensure_mcp_configuration_file
+  # The Web bind mount must exist before Compose starts, including upgrades
+  # from deployments created before Desktop update hosting existed.
+  install -d -m 755 "$root/downloads/desktop"
   compose_file=$(render_topology "$template_dir" "$root/.env")
   idle
   umask 077

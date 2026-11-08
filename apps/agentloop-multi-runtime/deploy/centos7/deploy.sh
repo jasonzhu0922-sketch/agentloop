@@ -110,7 +110,7 @@ init() {
   public_host="${AGENTLOOP_PUBLIC_HOST:-SERVER_IP}"
   umask 077
   mkdir -p "$DEPLOY_ROOT/config" "$DEPLOY_ROOT/data/workspace" "$DEPLOY_ROOT/secrets" "$DEPLOY_ROOT/backups"
-  mkdir -p "$DEPLOY_ROOT/downloads/catalog" "$DEPLOY_ROOT/downloads/installers"
+  mkdir -p "$DEPLOY_ROOT/downloads/catalog" "$DEPLOY_ROOT/downloads/installers" "$DEPLOY_ROOT/downloads/desktop"
   if [ ! -f "$DEPLOY_ROOT/downloads/catalog/releases.json" ]; then
     cp "$APP_ROOT/config/local-agent-releases.example.json" "$DEPLOY_ROOT/downloads/catalog/releases.json"
   fi

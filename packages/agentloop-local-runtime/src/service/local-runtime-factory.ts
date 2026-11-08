@@ -326,7 +326,10 @@ export class LocalRuntimeFactory {
       }
       const activeRunIds = new Set<string>();
       const admitted = await database.prepare(`SELECT a.run_id FROM local_run_admissions a
-        JOIN runs r ON r.id = a.run_id AND r.owner_user_id = a.owner_user_id WHERE r.status = 'running'`).all() as Array<{ run_id: string }>;
+        JOIN runs r ON r.id = a.run_id AND r.owner_user_id = a.owner_user_id
+        LEFT JOIN run_recovery_states recovery ON recovery.run_id = r.id
+        WHERE r.status = 'running' AND (recovery.state IS NULL OR recovery.state NOT IN ('waiting_recovery', 'waiting_user')
+          OR recovery.planning_token IS NOT NULL OR recovery.resume_token IS NOT NULL)`).all() as Array<{ run_id: string }>;
       for (const row of admitted) activeRunIds.add(row.run_id);
       const dispatched = await database.prepare("SELECT owner_user_id, remote_run_id FROM local_runtime_dispatches").all() as Array<{ owner_user_id: string; remote_run_id: string }>;
       const restoredAt = Date.now();

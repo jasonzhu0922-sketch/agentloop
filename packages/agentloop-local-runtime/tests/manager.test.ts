@@ -226,6 +226,37 @@ test("restored running admissions retain capacity regardless of age and never re
   assert.equal(invocations, beforeReopen);
 });
 
+test("a durable recovery pause releases capacity and permits close without changing the Run", async (t) => {
+  const { root, manager, reopen } = await fixture(t, modelPort(), 1);
+  await manager.close();
+  const now = Date.now();
+  audit(join(root, "runtime.db"), db => {
+    db.prepare("INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+      .run("paused-conversation", owner.ownerUserId, "paused", now, now);
+    db.prepare("INSERT INTO runs(id, owner_user_id, conversation_id, depth, status, input, created_at) VALUES (?, ?, ?, 0, 'running', ?, ?)")
+      .run("paused-run", owner.ownerUserId, "paused-conversation", "paused", now);
+    db.prepare("INSERT INTO local_run_admissions(owner_user_id, request_id, fingerprint, reservation_id, run_id, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(owner.ownerUserId, "paused-request", "fingerprint", "reservation", "paused-run", now);
+    db.prepare(`INSERT INTO runtime_actions(id, run_id, kind, state, attempt, max_attempts, replay_policy, fence, revision, metadata_json, created_at, updated_at)
+      VALUES (?, ?, 'recovery_review', 'recovery_required', 1, 1, 'safe', 0, 0, '{}', ?, ?)`)
+      .run("paused-action", "paused-run", now, now);
+    db.prepare("INSERT INTO run_recovery_states(run_id, state, action_id, updated_at) VALUES (?, 'waiting_recovery', ?, ?)")
+      .run("paused-run", "paused-action", now);
+  }, false);
+  const restored = await reopen();
+  assert.equal((await restored.runtimes())[0]?.activeRunCount, 0);
+  audit(join(root, "runtime.db"), db => db.prepare("UPDATE run_recovery_states SET planning_token = ? WHERE run_id = ?").run("in-progress", "paused-run"), false);
+  assert.equal((await restored.runtimes())[0]?.activeRunCount, 1);
+  await assert.rejects(restored.close(), /runtime_active_runs_prevent_close/);
+  audit(join(root, "runtime.db"), db => db.prepare("UPDATE run_recovery_states SET planning_token = NULL WHERE run_id = ?").run("paused-run"), false);
+  assert.equal((await restored.runtimes())[0]?.activeRunCount, 0);
+  await restored.close();
+  audit(join(root, "runtime.db"), db => {
+    assert.equal((db.prepare("SELECT status FROM runs WHERE id = ?").get("paused-run") as { status: string }).status, "running");
+    assert.equal((db.prepare("SELECT state FROM run_recovery_states WHERE run_id = ?").get("paused-run") as { state: string }).state, "waiting_recovery");
+  });
+});
+
 test("cancelled status does not permit teardown while the model execution is still unwinding", async (t) => {
   const entered = deferred(); const release = deferred(); const base = greetingModel();
   const models = modelPort({ ...base, async complete(input, signal) {

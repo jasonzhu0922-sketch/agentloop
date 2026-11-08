@@ -104,6 +104,35 @@ test("Web serves versioned installers with HEAD/range support and confines files
   } finally { await close(server); await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
 });
 
+test("Desktop update hosting serves fresh feed and immutable ranged installer inside its mount", async () => {
+  const root = await mkdtemp(join(tmpdir(), "desktop-update-host-"));
+  const outside = await mkdtemp(join(tmpdir(), "desktop-update-outside-"));
+  await mkdir(join(root, "42"));
+  await writeFile(join(root, "42", "desktop.pkg"), "0123456789");
+  await mkdir(join(root, 'objects'));
+  await writeFile(join(root, 'objects', 'a'.repeat(64)), 'module-object');
+  await writeFile(join(root, 'objects', 'b'.repeat(64)), '');
+  await writeFile(join(root, "production-arm64.json"), '{"payload":"one"}');
+  await writeFile(join(outside, "secret"), 'secret');
+  await symlink(join(outside, "secret"), join(root, "local-arm64.json"));
+  const server = createWebServer({ desktopUpdateDirectory: root });
+  try {
+    const base = await listen(server);
+    const feed = await fetch(`${base}/desktop-updates/production-arm64.json`);
+    assert.equal(await feed.text(), '{"payload":"one"}'); assert.equal(feed.headers.get('cache-control'), 'no-store');
+    await writeFile(join(root, "production-arm64.json"), '{"payload":"two"}');
+    assert.equal(await (await fetch(`${base}/desktop-updates/production-arm64.json`)).text(), '{"payload":"two"}');
+    assert.equal((await fetch(`${base}/desktop-updates/local-arm64.json`)).status, 404);
+    assert.equal((await fetch(`${base}/desktop-updates/production-arm64.json`, { method: 'POST' })).status, 405);
+    const range = await fetch(`${base}/downloads/desktop/42/desktop.pkg`, { headers: { range: 'bytes=2-5' } });
+    assert.equal(range.status, 206); assert.equal(await range.text(), '2345');
+    const object = await fetch(`${base}/desktop-updates/objects/${'a'.repeat(64)}`);
+    assert.equal(await object.text(), 'module-object'); assert.match(object.headers.get('cache-control')!, /immutable/);
+    const empty = await fetch(`${base}/desktop-updates/objects/${'b'.repeat(64)}`); assert.equal(empty.status, 200); assert.equal(await empty.text(), '');
+    assert.equal((await fetch(`${base}/desktop-updates/objects/production-arm64.json`)).status, 404);
+  } finally { await close(server); await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+});
+
 test("publisher appends immutable versions, rejects replacement and refuses archive files", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-publisher-"));
   try {

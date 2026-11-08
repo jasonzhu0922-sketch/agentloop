@@ -185,13 +185,17 @@ export class LocalRunAdmissionService {
       const error = this.settlementError; this.settlementError = undefined;
       throw error;
     }
-    const rows = await this.runtime.database.prepare(`SELECT a.owner_user_id, a.run_id, a.run_deleted, r.status FROM local_run_admissions a
-      LEFT JOIN runs r ON r.id = a.run_id AND r.owner_user_id = a.owner_user_id WHERE a.run_id IS NOT NULL`)
-      .all() as Array<{ owner_user_id: string; run_id: string; run_deleted: number; status: string | null }>;
+    const rows = await this.runtime.database.prepare(`SELECT a.owner_user_id, a.run_id, a.run_deleted, r.status,
+      recovery.state AS recovery_state, recovery.planning_token, recovery.resume_token FROM local_run_admissions a
+      LEFT JOIN runs r ON r.id = a.run_id AND r.owner_user_id = a.owner_user_id
+      LEFT JOIN run_recovery_states recovery ON recovery.run_id = r.id WHERE a.run_id IS NOT NULL`)
+      .all() as Array<{ owner_user_id: string; run_id: string; run_deleted: number; status: string | null; recovery_state: string | null; planning_token: string | null; resume_token: string | null }>;
     const settled: string[] = [];
     for (const row of rows) {
       if (row.status === null && !row.run_deleted) throw conflict("admission_run_missing");
-      if (row.status === "running" || this.runtime.runs.isRunExecuting(row.run_id)) this.runtime.activeRunIds.add(row.run_id);
+      const paused = (row.recovery_state === "waiting_recovery" || row.recovery_state === "waiting_user")
+        && row.planning_token === null && row.resume_token === null;
+      if ((row.status === "running" && !paused) || this.runtime.runs.isRunExecuting(row.run_id)) this.runtime.activeRunIds.add(row.run_id);
       else if (this.runtime.activeRunIds.delete(row.run_id)) settled.push(row.run_id);
     }
     for (const runId of settled) await this.hooks.settled?.(runId);

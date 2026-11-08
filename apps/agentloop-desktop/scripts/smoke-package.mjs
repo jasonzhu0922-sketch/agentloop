@@ -19,14 +19,16 @@ try {
   const toolsWorkspace = join(directory, 'workspace'); await mkdir(toolsWorkspace);
   execFileSync(node, [join(resourceRoot, 'probe-tools.mjs')], { cwd: toolsWorkspace, env: { ...process.env, PATH: process.platform === 'win32' ? process.env.SystemRoot + '\\System32' : '/usr/bin:/bin', NODE_PATH: '', NODE_OPTIONS: '', PYTHONHOME: '/nonexistent-host-python', PYTHONPATH: '/nonexistent-host-site' }, stdio: 'inherit', timeout: 120000 });
   for (let iteration = 0; iteration < 2; iteration++) {
-    const child = spawn(node, [join(resourceRoot, 'backend.mjs')], {
+    const entry = process.platform === 'darwin' ? 'module-supervisor.mjs' : 'backend.mjs';
+    const child = spawn(node, [join(resourceRoot, entry)], {
       cwd: directory, env: { ...process.env, PATH: process.platform === 'win32' ? process.env.SystemRoot + '\\System32' : '/usr/bin:/bin', PYTHONHOME: '/nonexistent-host-python', PYTHONPATH: '/nonexistent-host-site', NODE_PATH: '', NODE_OPTIONS: '', AGENTLOOP_DESKTOP_DATA_DIR: join(directory, 'data') },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    const exited = once(child, 'exit');
+    const exited = once(child, 'close');
     const lines = createInterface({ input: child.stdout });
     const messages = []; const listeners = [];
-    child.stderr.on('data', () => {}); // Native-library warnings are not protocol data.
+    let stderr = '';
+    child.stderr.on('data', data => { stderr += data; if (stderr.length > 16384) stderr = stderr.slice(-16384); });
     lines.on('line', line => {
       if (!line.startsWith('AGENTLOOP_DESKTOP:')) return;
       const message = JSON.parse(line.slice('AGENTLOOP_DESKTOP:'.length)); messages.push(message);
@@ -36,7 +38,7 @@ try {
     try {
       const ready = await Promise.race([
         (async () => { while (!messages.length) await new Promise(resolve => listeners.push(resolve)); return messages.shift(); })(),
-        exited.then(() => { throw new Error('Packaged backend exited before ready'); }),
+        exited.then(() => { throw new Error(`Packaged backend exited before ready: ${stderr}`); }),
         new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Packaged backend startup timeout')), 30000); }),
       ]);
       clearTimeout(timeout);

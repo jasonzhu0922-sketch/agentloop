@@ -1,14 +1,15 @@
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile, chmod, symlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { build as bundle } from 'esbuild';
-import { packageOptions, copyRuntimeDependencies, packagedTurnDefaults, packagedSearchDefaults } from './package-support.mjs';
+import { packageOptions, copyRuntimeDependencies, packagedTurnDefaults, packagedSearchDefaults, packagedUpdateConfig } from './package-support.mjs';
 import { writeMacInstallerFiles } from './package-macos-installer.mjs';
 import { requiredPythonRoot, packagePython } from './package-python.mjs';
 import { packagedToolEnvironment, verifyPackagedPython } from '../distribution/packaged-tools.mjs';
+import { inventoryDesktopModules } from './desktop-modules.mjs';
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repositoryRoot = resolve(appRoot, '../..');
@@ -18,8 +19,13 @@ const nodeVersion = '26.0.0';
 // Required before building anything; never silently emit a Node-only package.
 const pythonSourceRoot = await requiredPythonRoot();
 const searchDefaults = await packagedSearchDefaults(join(appRoot, '.env'));
+const update = await packagedUpdateConfig();
 const pythonRequirements = join(repositoryRoot, 'apps/agentloop-multi-runtime/requirements.local-agent.txt');
-const output = join(appRoot, 'release', `${options.channel}-${options.platform}-${options.arch}`);
+const customOutput = process.env.AGENTLOOP_DESKTOP_PACKAGE_OUTPUT;
+if (customOutput && (!isAbsolute(customOutput) || existsSync(customOutput))) throw new Error('Desktop custom output must be a new absolute directory');
+const output = customOutput
+  ? resolve(customOutput)
+  : join(appRoot, 'release', `${options.channel}-${options.platform}-${options.arch}`);
 const cache = join(appRoot, 'release', 'cache');
 await mkdir(output, { recursive: true });
 await mkdir(cache, { recursive: true });
@@ -71,6 +77,11 @@ try {
   await mkdir(backend);
   await cp(join(appRoot, 'distribution/backend.mjs'), join(backend, 'backend.mjs'));
   await cp(join(appRoot, 'distribution/packaged-tools.mjs'), join(backend, 'packaged-tools.mjs'));
+  await cp(join(appRoot, 'distribution/module-staging.mjs'), join(backend, 'module-staging.mjs'));
+  await cp(join(appRoot, 'distribution/module-release.mjs'), join(backend, 'module-release.mjs'));
+  await cp(join(appRoot, 'distribution/module-update-client.mjs'), join(backend, 'module-update-client.mjs'));
+  await cp(join(appRoot, 'distribution/module-state.mjs'), join(backend, 'module-state.mjs'));
+  await cp(join(appRoot, 'distribution/module-supervisor.mjs'), join(backend, 'module-supervisor.mjs'));
   await writeFile(join(backend, 'package.json'), '{"private":true,"type":"module"}\n');
   await cp(join(appRoot, 'dist'), join(backend, 'dist'), { recursive: true });
   await cp(join(appRoot, 'web'), join(backend, 'web'), { recursive: true });
@@ -84,7 +95,7 @@ try {
   const git = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repositoryRoot, encoding: 'utf8' });
   const status = spawnSync('git', ['status', '--porcelain'], { cwd: repositoryRoot, encoding: 'utf8' });
   const turnDefaults = await packagedTurnDefaults(join(appRoot, '.env'));
-  const config = { schema: 'agentloop.desktop.package/v1', version: manifest.version, ...options, node, python, turnDefaults, searchDefaults, sourceCommit: git.status === 0 ? git.stdout.trim() : null, sourceDirty: status.status === 0 ? Boolean(status.stdout.trim()) : null, builtAt: new Date().toISOString() };
+  const config = { schema: 'agentloop.desktop.package/v1', version: manifest.version, ...options, node, python, turnDefaults, searchDefaults, ...(update ? { update: { ...update, platform: options.platform, arch: options.arch, channel: options.channel } } : {}), sourceCommit: git.status === 0 ? git.stdout.trim() : null, sourceDirty: status.status === 0 ? Boolean(status.stdout.trim()) : null, builtAt: new Date().toISOString() };
   await writeFile(join(backend, 'desktop-config.json'), `${JSON.stringify(config, null, 2)}\n`);
   await verifyPackagedPython(backend, config, await packagedToolEnvironment(backend, config));
   const artifactName = `AgentLoop-Desktop-${manifest.version}-${options.channel}-${options.platform}-${options.arch}`;
@@ -95,14 +106,20 @@ try {
     await cp(backend, join(contents, 'Resources'), { recursive: true });
     await cp(join(appRoot, 'web/xuanwu-mascot-icon.png'), join(contents, 'Resources/icon.png'));
     await cp(join(appRoot, 'distribution/macos/icon.icns'), join(contents, 'Resources/icon.icns'));
+    await cp(join(appRoot, 'distribution/macos/status-icon.png'), join(contents, 'Resources/status-icon.png'));
+    for (const locale of ['en', 'zh-Hans']) {
+      const localized = join(contents, 'Resources', `${locale}.lproj`);
+      await mkdir(localized, { recursive: true });
+      await writeFile(join(localized, 'InfoPlist.strings'), `"CFBundleDisplayName" = "${options.displayName}";\n"CFBundleName" = "${options.displayName}";\n`);
+    }
     run('/usr/bin/swiftc', ['-parse-as-library', '-O', '-module-cache-path', join(cache, 'swift-modules'), '-target', `${options.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macosx14.0`, join(appRoot, 'distribution/macos/DesktopTray.swift'), '-framework', 'AppKit', '-o', join(contents, 'MacOS/AgentLoop Desktop')]);
     await writeFile(join(contents, 'Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>AgentLoop Desktop</string>
 <key>CFBundleIdentifier</key><string>${options.appId}</string>
-<key>CFBundleName</key><string>${options.productName}</string>
-<key>CFBundleDisplayName</key><string>${options.productName}</string>
+<key>CFBundleName</key><string>${options.displayName}</string>
+<key>CFBundleDisplayName</key><string>${options.displayName}</string>
 <key>CFBundleVersion</key><string>${manifest.version}</string>
 <key>CFBundleShortVersionString</key><string>${manifest.version}</string>
 <key>CFBundlePackageType</key><string>APPL</string>
@@ -112,6 +129,9 @@ try {
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>\n`);
     run('/usr/bin/codesign', ['--force', '--sign', '-', join(contents, 'Resources/runtime/bin/node')]);
+    // The Node signature changes executable bytes; capture the baseline only
+    // after signing Node and before signing the outer bundle.
+    await writeFile(join(contents, 'Resources/desktop-modules.json'), `${JSON.stringify(await inventoryDesktopModules(join(contents, 'Resources')))}\n`);
     run('/usr/bin/codesign', ['--force', '--sign', '-', application]);
     run('/usr/bin/codesign', ['--verify', '--deep', '--strict', application]);
     const finalApp = join(output, `${options.productName}.app`);
@@ -130,6 +150,7 @@ try {
       run('/usr/bin/hdiutil', ['create', '-volname', options.productName, '-srcfolder', imageRoot, '-ov', '-format', 'UDZO', join(output, `${artifactName}.dmg`)]);
     } else if (options.target === 'zip') run('/usr/bin/ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', application, join(output, `${artifactName}.zip`)]);
   } else {
+    await writeFile(join(backend, 'desktop-modules.json'), `${JSON.stringify(await inventoryDesktopModules(backend))}\n`);
     const source = join(staging, 'tray-source');
     const payload = join(staging, options.productName);
     await cp(join(appRoot, 'distribution/windows'), source, { recursive: true });

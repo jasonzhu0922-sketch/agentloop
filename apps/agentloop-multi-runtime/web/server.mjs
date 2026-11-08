@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { resolve, sep } from "node:path";
@@ -47,6 +47,7 @@ export function staticFilePath(pathname) {
 }
 
 export function createWebServer({ installerDirectory = process.env.LOCAL_AGENT_DOWNLOADS_DIR,
+  desktopUpdateDirectory = process.env.DESKTOP_UPDATE_DIR,
   runtimeControlSocket = process.env.RUNTIME_CONTROL_SOCKET,
   runtimeControlDevMode = process.env.RUNTIME_CONTROL_DEV_MODE === "1",
   runtimeControlDevRoot = process.env.RUNTIME_CONTROL_DEV_ROOT ?? "./data/local/cloud-skills",
@@ -72,6 +73,28 @@ export function createWebServer({ installerDirectory = process.env.LOCAL_AGENT_D
     }
     if (pathname.startsWith("/downloads/local-agent/")) {
       await serveInstaller(request, response, pathname, installerDirectory);
+      return;
+    }
+    if (pathname.startsWith('/downloads/desktop/')) {
+      await serveInstaller(request, response, pathname, desktopUpdateDirectory, '/downloads/desktop/');
+      return;
+    }
+    if (pathname.startsWith('/desktop-updates/objects/')) {
+      await serveInstaller(request, response, pathname, desktopUpdateDirectory && resolve(desktopUpdateDirectory, 'objects'), '/desktop-updates/objects/', /^[a-f0-9]{64}$/);
+      return;
+    }
+    if (pathname.startsWith('/desktop-updates/') && /^\/desktop-updates\/(local|production)-(arm64|x64)\.json$/.test(pathname)) {
+      if (request.method !== 'GET' && request.method !== 'HEAD') { response.writeHead(405, { allow: 'GET, HEAD' }); response.end(); return; }
+      try {
+        if (!desktopUpdateDirectory) throw new Error('not configured');
+        const directory = await realpath(desktopUpdateDirectory);
+        const file = await realpath(resolve(directory, pathname.slice('/desktop-updates/'.length)));
+        if (!file.startsWith(directory + sep)) throw new Error('feed outside update directory');
+        const content = await readFile(file);
+        if (content.length > 8 * 1024 * 1024) throw new Error('feed too large');
+        response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+        response.end(request.method === 'HEAD' ? undefined : content);
+      } catch { response.writeHead(404); response.end(); }
       return;
     }
     if (pathname === "/api" || pathname.startsWith("/api/")) {

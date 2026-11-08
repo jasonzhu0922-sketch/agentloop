@@ -3,7 +3,19 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { packageOptions, copyRuntimeDependencies, packagedTurnDefaults, packagedSearchDefaults } from '../scripts/package-support.mjs';
+import { packageOptions, copyRuntimeDependencies, packagedTurnDefaults, packagedSearchDefaults, packagedUpdateConfig } from '../scripts/package-support.mjs';
+import { generateKeyPairSync } from 'node:crypto';
+
+test('update package configuration requires a separately supplied Ed25519 trust root', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'desktop-update-config-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const { publicKey } = generateKeyPairSync('ed25519', { publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+  const key = join(root, 'public.pem'); await writeFile(key, publicKey);
+  const env = { AGENTLOOP_DESKTOP_UPDATE_URL: 'https://example.com/feed', AGENTLOOP_DESKTOP_UPDATE_PUBLIC_KEY_FILE: key, AGENTLOOP_DESKTOP_UPDATE_SEQUENCE: '7' };
+  assert.equal((await packagedUpdateConfig(env)).sequence, 7);
+  assert.equal(await packagedUpdateConfig({}), undefined);
+  await assert.rejects(packagedUpdateConfig({ ...env, AGENTLOOP_DESKTOP_UPDATE_URL: 'http://example.com/feed' }), /HTTPS/);
+  await assert.rejects(packagedUpdateConfig({ ...env, AGENTLOOP_DESKTOP_UPDATE_SEQUENCE: '0' }), /positive sequence/);
+});
 
 test('package accepts optional search defaults and does not accept insecure endpoints', async t => {
   const root = await mkdtemp(join(tmpdir(), 'desktop-search-defaults-'));
@@ -34,6 +46,8 @@ test('macOS tray starts Node with system trust and preserves a configured CA bun
   assert.match(tray, /isReadableFile\(atPath: "\/etc\/ssl\/cert\.pem"\)/);
   assert.match(tray, /environment\["NODE_EXTRA_CA_CERTS"\] = "\/etc\/ssl\/cert\.pem"/);
   assert.match(tray, /child\.arguments = \["--use-system-ca",/);
+  assert.match(tray, /status-icon\.png/);
+  assert.match(tray, /image\.isTemplate = true/);
 });
 
 test('local and production packages keep endpoints and identities distinct', () => {
@@ -43,6 +57,10 @@ test('local and production packages keep endpoints and identities distinct', () 
   assert.equal(local.accountServiceUrl, 'http://127.0.0.1:8795');
   const production = packageOptions(['--platform', 'win', '--account-service', 'https://accounts.example.com'], 'win32', 'x64');
   assert.notEqual(local.appId, production.appId);
+  assert.equal(production.displayName, '玄武');
+  assert.equal(production.dataDirectoryName, 'AgentLoop Desktop');
+  assert.equal(production.productName, 'AgentLoop Desktop'); // Windows package identity is unchanged.
+  assert.equal(packageOptions(['--account-service', 'https://accounts.example.com'], 'darwin', 'arm64').productName, '玄武');
   assert.notEqual(local.dataDirectoryName, production.dataDirectoryName);
   assert.equal(production.target, 'zip');
   for (const url of ['http://accounts.example.com', 'http://127.0.0.1:8795', 'https://127.0.0.1:8795', 'https://user:pass@example.com', 'https://example.com?token=secret']) {

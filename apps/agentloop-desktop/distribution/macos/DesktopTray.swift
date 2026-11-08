@@ -31,16 +31,17 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
     // LaunchServices normally reuses an existing .app. Also guard direct executable launches.
     if let id = Bundle.main.bundleIdentifier, NSRunningApplication.runningApplications(withBundleIdentifier: id).contains(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) { NSApplication.shared.terminate(nil); return }
     item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    if let image = NSImage(contentsOf: resources.appendingPathComponent("icon.png")) {
-      image.size = NSSize(width: 18, height: 18); item.button?.image = image
-    } else { item.button?.title = "AgentLoop" }
-    item.button?.toolTip = config["productName"] as? String
+    if let image = NSImage(contentsOf: resources.appendingPathComponent("status-icon.png")) {
+      image.size = NSSize(width: 18, height: 18); image.isTemplate = true; item.button?.image = image
+    } else { item.button?.title = "玄武" }
+    item.button?.toolTip = config["displayName"] as? String
     let menu = NSMenu()
     stateItem = NSMenuItem(title: "Desktop · 正在启动", action: nil, keyEquivalent: "")
     menu.addItem(stateItem)
     menu.addItem(action("启动本地服务", #selector(startBackend)))
     menu.addItem(action("在 Chrome 中打开", #selector(openChrome)))
     menu.addItem(action("查看日志", #selector(openLogs)))
+    menu.addItem(action("检查更新", #selector(checkUpdate)))
     menu.addItem(.separator())
     menu.addItem(action("退出 Desktop", #selector(quit)))
     item.menu = menu
@@ -71,7 +72,7 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
       }
       environment["AGENTLOOP_DESKTOP_DATA_DIR"] = dataRoot.appendingPathComponent("runtime-data").path
       child.executableURL = resources.appendingPathComponent("runtime/bin/node")
-      child.arguments = ["--use-system-ca", resources.appendingPathComponent("backend.mjs").path]
+      child.arguments = ["--use-system-ca", resources.appendingPathComponent("module-supervisor.mjs").path]
       child.currentDirectoryURL = resources; child.environment = environment
       child.standardInput = stdin; child.standardOutput = stdout; child.standardError = log
       buffer = Data(); origin = nil; quitting = false
@@ -91,7 +92,7 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
       }
       process = child; input = stdin; output = stdout
       try child.run(); stateItem.title = "Desktop · 正在启动"
-      DispatchQueue.main.asyncAfter(deadline: .now() + 45) { [weak self, weak child] in
+      DispatchQueue.main.asyncAfter(deadline: .now() + 120) { [weak self, weak child] in
         guard let self, let child, self.process === child, child.isRunning, self.origin == nil else { return }
         child.terminate(); self.alert("本地服务启动超时，请查看日志后重试。")
       }
@@ -112,6 +113,21 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
         quitting = false; NSApplication.shared.reply(toApplicationShouldTerminate: false)
         alert("仍有运行中的任务或请求，请等待完成或取消任务后退出。")
       case "startup-error": alert("本地服务启动失败，请查看日志或检查已有实例。")
+      case "update-available":
+        let version = message["version"] as? String ?? "新版本"
+        let dialog = NSAlert(); dialog.messageText = "发现玄武 \(version)"; dialog.informativeText = "下载完成后可选择重启应用。运行中的任务会阻止切换。"; dialog.addButton(withTitle: "下载更新"); dialog.addButton(withTitle: "稍后")
+        if dialog.runModal() == .alertFirstButtonReturn { input?.fileHandleForWriting.write(Data("download-update\n".utf8)) }
+      case "update-current": alert("当前已是最新版本。")
+      case "update-unavailable": alert("此安装包尚未配置更新服务。")
+      case "update-downloading": stateItem.title = "Desktop · 正在下载更新"
+      case "update-error": stateItem.title = "Desktop · 更新失败"; alert("更新检查或下载失败，请稍后重试并检查更新服务配置。")
+      case "update-staged":
+        stateItem.title = "Desktop · 更新已下载"
+        let dialog = NSAlert(); dialog.messageText = "更新已准备好"; dialog.informativeText = "现在重启玄武以应用更新。运行中的任务会阻止重启。"; dialog.addButton(withTitle: "重启并更新"); dialog.addButton(withTitle: "稍后")
+        if dialog.runModal() == .alertFirstButtonReturn { input?.fileHandleForWriting.write(Data("apply-update\n".utf8)) }
+      case "update-busy": stateItem.title = "Desktop · 运行中"; alert("仍有运行中的任务或请求，请完成或取消后重新检查更新。")
+      case "update-installed": alert("玄武已更新至 \(message["version"] as? String ?? "新版本")。")
+      case "update-rolled-back": alert("新版本启动失败，正在恢复之前的版本。")
       default: break
       }
     }
@@ -126,11 +142,15 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
   }
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { openChrome(); return false }
   @objc private func openLogs() { NSWorkspace.shared.open(dataRoot.appendingPathComponent("logs")) }
+  @objc private func checkUpdate() {
+    guard process?.isRunning == true else { alert("请先启动本地服务。"); return }
+    input?.fileHandleForWriting.write(Data("check-update\n".utf8))
+  }
   @objc private func quit() { NSApplication.shared.terminate(nil) }
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
     guard process?.isRunning == true else { return .terminateNow }
     if !quitting { quitting = true; input?.fileHandleForWriting.write(Data("close\n".utf8)) }
     return .terminateLater
   }
-  private func alert(_ message: String) { let alert = NSAlert(); alert.messageText = "AgentLoop Desktop"; alert.informativeText = message; alert.runModal() }
+  private func alert(_ message: String) { let alert = NSAlert(); alert.messageText = config["displayName"] as? String ?? "玄武"; alert.informativeText = message; alert.runModal() }
 }

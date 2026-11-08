@@ -1,6 +1,20 @@
 import { cp, mkdir, readFile, readdir, realpath, writeFile, access } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { parseEnv } from 'node:util';
+import { createPublicKey } from 'node:crypto';
+
+export async function packagedUpdateConfig(environment = process.env) {
+  const url = environment.AGENTLOOP_DESKTOP_UPDATE_URL;
+  const keyFile = environment.AGENTLOOP_DESKTOP_UPDATE_PUBLIC_KEY_FILE;
+  const sequence = environment.AGENTLOOP_DESKTOP_UPDATE_SEQUENCE;
+  if (!url && !keyFile && !sequence) return undefined;
+  if (!url || !keyFile || !sequence || !/^[1-9]\d*$/.test(sequence) || !Number.isSafeInteger(Number(sequence))) throw new Error('Desktop update URL, public key file and positive sequence are required together');
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash || parsed.search) throw new Error('Desktop update feed must use a credential-free HTTPS URL');
+  const publicKey = await readFile(keyFile, 'utf8');
+  if (createPublicKey(publicKey).asymmetricKeyType !== 'ed25519') throw new Error('Desktop update key must be Ed25519');
+  return { feedUrl: parsed.href, publicKey, sequence: Number(sequence) };
+}
 
 export async function packagedTurnDefaults(path) {
   let content;
@@ -55,7 +69,8 @@ export function packageOptions(args, platform = process.platform, arch = process
   const target = values['--target'] ?? (targetPlatform === 'mac' ? 'pkg' : 'zip');
   if (!(targetPlatform === 'mac' ? ['pkg', 'dmg', 'zip', 'dir'] : ['zip', 'dir']).includes(target)) throw new Error('Unsupported package target.');
   return { platform: targetPlatform, arch: targetArch, channel, accountServiceUrl: url.href.replace(/\/+$/, ''), target,
-    productName: channel === 'local' ? 'AgentLoop Desktop Local' : 'AgentLoop Desktop',
+    productName: targetPlatform === 'mac' ? (channel === 'local' ? '玄武（本地）' : '玄武') : (channel === 'local' ? 'AgentLoop Desktop Local' : 'AgentLoop Desktop'),
+    displayName: channel === 'local' ? '玄武（本地）' : '玄武',
     dataDirectoryName: channel === 'local' ? 'AgentLoop Desktop Local' : 'AgentLoop Desktop',
     appId: channel === 'local' ? 'com.agentloop.desktop.local' : 'com.agentloop.desktop' };
 }

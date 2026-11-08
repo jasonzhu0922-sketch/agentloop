@@ -150,6 +150,52 @@ npm run test:local-runtime
 
 ## 原生托盘打包（macOS / Windows）
 
+### macOS 在线更新（需配置发布信任）
+
+macOS 托盘由安装包内固定的监督进程启动，启动后及每 6 小时检查一次，也可从菜单选择「检查更新」。客户端验证签名、渠道、架构、版本序号及模块清单后，复用本机内容，只下载缺少的文件；用户确认后请求本地服务正常关闭。活动 Run 或请求阻止关闭时，不会切换。新版在报告就绪之前失败时恢复旧版；就绪后确认切换，不自动回滚之后产生的用户数据。Windows 当前发行物是 ZIP，尚未接入在线更新。
+
+更新包必须在打包时配置固定的 HTTPS feed、公钥及当前安装包的单调递增序号；三项缺一即报错。未配置时安装包不会检查更新。公钥只能来自可信的发行配置；私钥不得放进仓库、安装包、服务端下载目录或日志。首次部署需要生成受控的 Ed25519 密钥并安全分发公钥，例如：
+
+```sh
+export AGENTLOOP_DESKTOP_UPDATE_URL=https://updates.example.com/desktop-updates/production-arm64.json
+export AGENTLOOP_DESKTOP_UPDATE_PUBLIC_KEY_FILE=/secure/path/desktop-update-public.pem
+export AGENTLOOP_DESKTOP_UPDATE_SEQUENCE=1
+npm run package:desktop:mac -- --account-service https://accounts.example.com
+```
+
+每个渠道、架构使用独立 feed 与递增序号；同一个序号不得重复用于不同版本。以最终构建的 Resources 为发布输入，生成内容对象及签名模块清单。发布人必须审查数据库迁移是否允许旧版读取；`backward-compatible` 是发行声明，不自动证明迁移安全。
+
+```sh
+node apps/agentloop-desktop/scripts/publish-desktop-modules.mjs \
+  /secure/build/玄武.app/Contents/Resources /secure/build/objects
+node apps/agentloop-desktop/scripts/create-module-release.mjs \
+  --resources /secure/build/玄武.app/Contents/Resources \
+  --private-key /secure/path/desktop-update-private.pem \
+  --public-key /secure/path/desktop-update-public.pem \
+  --object-base-url https://updates.example.com/desktop-updates/objects/ \
+  --minimum-bootstrap 1 --data-compatibility backward-compatible \
+  --expires-at 2027-02-01T00:00:00Z --output /secure/build/production-arm64.json
+```
+
+将对象、签名 feed 和可信公钥复制到生产机私有暂存目录后执行。生产宿主机可能没有 Node，以下使用已部署的应用镜像，`/opt/agentloop/releases/<SHA>/source` 应指向包含本工具的已发布源码：
+
+```sh
+docker run --rm --network none \
+  -v /opt/agentloop/releases/<SHA>/source:/source:ro \
+  -v /opt/agentloop/desktop-updates:/publish \
+  -v /secure/staging:/staging:ro \
+  <deployed-image> node /source/apps/agentloop-desktop/scripts/install-module-release.mjs \
+  --root /publish --feed /staging/production-arm64.json \
+  --objects /staging/objects --bootstrap 1 \
+  --public-key /staging/desktop-update-public.pem --base-url https://updates.example.com
+```
+
+该命令先验签并核对每个对象，禁止降低序号或覆盖同序号的不同内容，先发布不可变对象，再原子替换 feed。相同版本可重新签发 feed 以延长有效期；并发发布由目录锁拒绝。异常中断遗留 `.publish-lock` 时须核实没有其他发布进程再由运维清理。生产 Nginx 的独立只读路由由 `deploy/production/install-desktop-update-nginx.sh` 配置，发布后验证外网 HTTPS 和 Range。服务器不需要签名私钥。
+
+客户端持久化见过的最高序号以拒绝回放；每次启动已下载版本前重新验签并逐文件校验。就绪只证明本机宿主启动，不证明账号登录或真实模型任务。安装包本身仍需独立完成 Apple 开发者签名、公证和原生升级验收，feed 签名不替代平台签名。
+
+已有的未配置公钥和 feed 的 Desktop 不能自动获得这项能力，需要先通过可信渠道安装一次配置好的新包。更换签名公钥也需要重新安装带新公钥的包；当前没有在线密钥轮换机制。
+
 Desktop 是 **macOS 菜单栏 / Windows 系统托盘应用**，由原生托盘管理本地 Node 服务，使用 Google Chrome 打开本地界面。没有内嵌浏览器。托盘支持启动服务、打开 Chrome、查看日志和退出；退出前会等待本地资源关闭，活动 Run 未结束时拒绝退出。
 
 ```sh
@@ -166,12 +212,12 @@ npm run package:desktop:mac -- --account-service https://accounts.example.com
 npm run package:desktop:win -- --account-service https://accounts.example.com
 ```
 
-- macOS 需 Xcode Command Line Tools，默认输出 `.app` 和 `.pkg`，支持 macOS 14 及以上。PKG 固定安装到 `/Applications/AgentLoop Desktop Local.app`（正式 channel 为 `AgentLoop Desktop.app`），禁用 bundle relocation。应用使用 ad-hoc 签名；PKG 未签名、未做 Developer ID 公证。
+- macOS 需 Xcode Command Line Tools，默认输出 `.app` 和 `.pkg`，支持 macOS 14 及以上。PKG 固定安装到 `/Applications/玄武（本地）.app`（正式 channel 为 `/Applications/玄武.app`），禁用 bundle relocation。旧版安装升级时会先正常停止旧进程，新版启动成功后将旧 `.app` 移入 `/Applications` 下隐藏的备份目录；账号数据目录仍沿用 `AgentLoop Desktop` 或 `AgentLoop Desktop Local`。应用使用 ad-hoc 签名；PKG 未签名、未做 Developer ID 公证。
 - Windows 输出含自包含 .NET 托盘与 Node 的便携 ZIP，解压后双击 `AgentLoop Desktop.exe`；目标机器不需要安装 Node、Python 或 .NET。当前提供原生 Windows 构建脚本；须在 Windows 上构建并验收。
 - 安装并保留 Google Chrome。首次启动自动打开界面，关闭 Chrome 标签页不会停止托盘服务。此版本不注册开机启动。
 - `--channel local` 固定连接 `http://127.0.0.1:8795`，也可传 `--account-service` 指定本地服务。账号服务独立运行，使用 `npm run restart:accounts` 启动仓库中的本地服务；客户端不会把账号数据库装进包内。
 - 默认 channel 为 `production`，必须指定 HTTPS 账号地址；local / production 使用不同的应用标识及数据目录。开发预览仍使用原来的 Development 目录和端口 8796，托盘包分配空闲 loopback 端口，避免与其冲突。
-- macOS 数据位于 `~/Library/Application Support/AgentLoop Desktop Local/runtime-data`；Windows 位于 `%LOCALAPPDATA%\AgentLoop Desktop Local\runtime-data`。正式包去掉 ` Local`。日志位于同级 `logs`。
+- macOS 数据位于 `~/Library/Application Support/AgentLoop Desktop Local/runtime-data`；Windows 位于 `%LOCALAPPDATA%\AgentLoop Desktop Local\runtime-data`。正式包去掉 ` Local`。运行摘要和错误写入同级 `logs/backend.log`，也可通过托盘菜单“查看日志”打开目录；日志不写入应用安装目录。日志在启动时超过 5 MiB 会轮转保留上一份。
 - 构建输出位于 `release/<channel>-<mac|win>-<arch>/`，macOS 可显式选择 `--target dmg`、`--target zip` 或 `--target dir`；Windows 默认仍为 ZIP。PKG 升级先请求目标安装路径下的后端正常退出，再停止托盘；若任务仍在运行且后端拒绝退出，会中止安装，不强杀任务。只管理同一 channel 的安装路径，不操作 Local Agent、源码预览或其他 channel，也不修改用户数据。安装后以当前登录用户启动托盘；没有登录用户或安装到其他卷时不自动启动。后置脚本只确认托盘与后端进程已启动，不代表真实登录或模型 Run 验收。通过 DMG/ZIP 或构建产物目录启动的其他副本须先手动退出，以免占用同一 channel 的单实例锁。
 - macOS 与 Windows 默认强制包含官方 Node 26.0.0、可重定位 Python 3.12、生产 Node 依赖、内置 Skill、三个 Connector 和预构建界面。Python 复用 Local Agent 的 `preparePackagedPythonRuntime` 和 `requirements.local-agent.txt`，包含 markitdown 0.1.7、pandas、openpyxl、pypdf、reportlab、Pillow 等同一套依赖基线；构建时没有 Python 输入即失败，不会生成缺 Python 的精简包。包内不含模型密钥、账号数据、自定义 Skill 或开发配置。LibreOffice、Poppler、Tesseract 可执行程序、FFmpeg 等外部工具与 Local Agent 一样不属于此默认依赖包。
 - `desktop-config.json` 记录账号地址、源码提交、工作区是否含未提交改动、Node 校验和、Python 版本与依赖基线校验和及构建时间；`runtime-python/packages.json` 记录实际 Python 包版本。工具执行使用宿主传入的包内 PATH / NODE_PATH / Python 配置，已禁用用户 site-packages，并隔离继承的 PYTHONHOME、PYTHONPATH。打包使用当前工作区，包含尚未提交的源代码修改。
@@ -180,7 +226,7 @@ npm run package:desktop:win -- --account-service https://accounts.example.com
 
 ```sh
 npm run test:packaging --workspace agentloop-desktop
-node apps/agentloop-desktop/scripts/smoke-package.mjs "apps/agentloop-desktop/release/local-mac-arm64/AgentLoop Desktop Local.app/Contents/Resources" --probe-account-service
+node apps/agentloop-desktop/scripts/smoke-package.mjs "apps/agentloop-desktop/release/local-mac-arm64/玄武（本地）.app/Contents/Resources" --probe-account-service
 ```
 
 烟测将整个 Resources 复制到仓库外的临时目录，移除宿主 Node/Python 搜索路径，并注入错误的宿主 Python 配置。它通过真实 ComputerExecutor 调用随包 python / python3 / node，执行 Python 模块导入、XLSX/PDF/DOCX/PPTX 生成和 markitdown 转换，然后使用独立临时数据启动后端，检查预构建静态资源、账号服务配置、未登录隔离、真实账号服务对无效凭据的拒绝、退出和重启。它不等价于真实账号登录或真实模型 Run 验收。
