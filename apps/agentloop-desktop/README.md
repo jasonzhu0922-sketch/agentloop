@@ -173,20 +173,20 @@ node apps/agentloop-desktop/scripts/create-module-release.mjs \
   --private-key /secure/path/desktop-update-private.pem \
   --public-key /secure/path/desktop-update-public.pem \
   --object-base-url https://updates.example.com/desktop-updates/objects/ \
-  --minimum-bootstrap 1 --data-compatibility backward-compatible \
+  --minimum-bootstrap 2 --data-compatibility backward-compatible \
   --expires-at 2027-02-01T00:00:00Z --output /secure/build/production-arm64.json
 ```
 
-将对象、签名 feed 和可信公钥复制到生产机私有暂存目录后执行。生产宿主机可能没有 Node，以下使用已部署的应用镜像，`/opt/agentloop/releases/<SHA>/source` 应指向包含本工具的已发布源码：
+将对象、签名 feed 和可信公钥复制到生产机私有暂存目录后执行。生产宿主机可能没有 Node，以下使用已部署的应用镜像及生产机固定的只读发布工具：
 
 ```sh
 docker run --rm --network none \
-  -v /opt/agentloop/releases/<SHA>/source:/source:ro \
+  -v /opt/agentloop/desktop-update-tools/v1:/source:ro \
   -v /opt/agentloop/desktop-updates:/publish \
   -v /secure/staging:/staging:ro \
   <deployed-image> node /source/apps/agentloop-desktop/scripts/install-module-release.mjs \
   --root /publish --feed /staging/production-arm64.json \
-  --objects /staging/objects --bootstrap 1 \
+  --objects /staging/objects --bootstrap 2 \
   --public-key /staging/desktop-update-public.pem --base-url https://updates.example.com
 ```
 

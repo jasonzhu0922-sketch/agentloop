@@ -19,11 +19,11 @@ export async function startModuleSupervisor({ resources, dataRoot, emit = messag
   // The Runtime claims an empty dataRoot on first start. Update bookkeeping is
   // a sibling, so it never changes the ownership check or the account data.
   const updateRoot = join(dirname(dataRoot), 'desktop-updates'), releases = join(updateRoot, 'releases');
-  const target = enabled ? { platform: update.platform, arch: update.arch, channel: update.channel, bootstrap: 1 } : undefined;
+  const target = enabled ? { platform: update.platform, arch: update.arch, channel: update.channel, bootstrap: 2 } : undefined;
   const state = enabled ? await openModuleState(updateRoot, update.sequence) : undefined;
   if (enabled) await mkdir(releases, { recursive: true, mode: 0o700 });
   const baselineManifest = enabled ? JSON.parse(await readFile(join(resources, 'desktop-modules.json'), 'utf8')) : undefined;
-  let activeRoot = resources, activeManifest = baselineManifest, child, ready = false, ending = false, pendingClose = null, busy = false, available, staged, timer;
+  let activeRoot = resources, activeManifest = baselineManifest, child, ready = false, ending = false, pendingClose = null, closeAcknowledged = false, busy = false, available, staged, timer;
 
   function releaseConfig(release) {
     return { ...baseConfig, ...release.runtimeConfig, version: release.version, update: { ...baseConfig.update, sequence: release.sequence } };
@@ -99,6 +99,7 @@ export async function startModuleSupervisor({ resources, dataRoot, emit = messag
     const args = process.platform === 'darwin' ? ['--use-system-ca', join(root, 'backend.mjs')] : [join(root, 'backend.mjs')];
     const next = spawnProcess(executable, args, { cwd: root, env: { ...process.env, AGENTLOOP_DESKTOP_DATA_DIR: dataRoot, AGENTLOOP_DESKTOP_SUPERVISED: '1' }, stdio: ['pipe', 'pipe', 'inherit'] });
     child = next;
+    next.stdin.on('error', error => { console.error('Desktop backend command failed:', error.message); });
     const messages = createInterface({ input: next.stdout });
     let handling = Promise.resolve();
     messages.on('line', line => {
@@ -109,18 +110,21 @@ export async function startModuleSupervisor({ resources, dataRoot, emit = messag
           if (candidate) { await state.commit(candidate.sequence); activeRoot = root; activeManifest = candidate.modules; staged = undefined; }
           ready = true; clearTimeout(timer); emit(message);
           if (candidate) notify('update-installed', { version: candidate.version });
-        } else if (message.type === 'close-refused' && pendingClose === 'update') { pendingClose = null; notify('update-busy'); }
+        } else if (message.type === 'closed' && pendingClose) { closeAcknowledged = true; emit(message); }
+        else if (message.type === 'close-refused' && pendingClose === 'update') { pendingClose = null; closeAcknowledged = false; notify('update-busy'); }
         else if (message.type === 'close-refused' && pendingClose === 'quit') { ending = false; pendingClose = null; emit(message); }
         else emit(message);
       }).catch(error => { console.error('Desktop update supervisor failed:', error.message); next.kill('SIGTERM'); });
     });
     if (candidate) timer = setTimeout(() => { if (!ready) next.kill('SIGTERM'); }, 60000);
     next.once('error', error => console.error('Desktop backend launch failed:', error.message));
-    next.once('close', () => { void handling.then(async () => {
+    next.once('close', code => { void handling.then(async () => {
       clearTimeout(timer); messages.close(); if (child !== next) return; child = undefined;
       if (ending) { notify('supervisor-closed'); return; }
       if (pendingClose === 'update') {
         pendingClose = null;
+        if (!closeAcknowledged || code !== 0) { closeAcknowledged = false; notify('update-error'); await launch(activeRoot); return; }
+        closeAcknowledged = false;
         try { const nextRelease = await loadRelease(staged); await state.begin(staged); await launch(nextRelease.root, nextRelease.release); }
         catch (error) { console.error('Desktop activation failed:', error.message); if (state.value.pending) await state.abort(state.value.pending.sequence); notify('update-error'); await launch(activeRoot); }
       } else if (candidate && !ready) {
@@ -131,8 +135,8 @@ export async function startModuleSupervisor({ resources, dataRoot, emit = messag
   await launch(activeRoot);
   return {
     check, download,
-    apply() { if (!staged || busy || pendingClose || !child || !ready) return; pendingClose = 'update'; child.stdin.write('close\n'); },
-    close() { if (ending) return; if (!child) { notify('supervisor-closed'); return; } ending = true; pendingClose = 'quit'; child.stdin.write('close\n'); },
+    apply() { if (!staged || busy || pendingClose || !child || !ready) return; closeAcknowledged = false; pendingClose = 'update'; child.stdin.write('close\n'); },
+    close() { if (ending) return; if (!child) { notify('supervisor-closed'); return; } closeAcknowledged = false; ending = true; pendingClose = 'quit'; child.stdin.write('close\n'); },
     get state() { return state?.value; },
     get child() { return child; },
   };

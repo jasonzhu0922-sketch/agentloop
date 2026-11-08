@@ -43,6 +43,7 @@ test('trusted supervisor stages only changed content, waits for busy Runs and co
     p.stdin = new Writable({ write(_data, _encoding, done) {
       closeAttempts++;
       if (closeAttempts === 1) send({ type: 'close-refused' });
+      else if (closeAttempts === 2) { p.stdout.end(); setImmediate(() => p.emit('close', 1)); }
       else { send({ type: 'closed' }); setImmediate(() => { p.stdout.end(); p.emit('close', 0); }); }
       done();
     } });
@@ -60,10 +61,12 @@ test('trusted supervisor stages only changed content, waits for busy Runs and co
   await supervisor.download(); assert.equal(downloads, 1); assert.ok(events.some(e => e.type === 'update-staged'));
   supervisor.apply(); await waitFor(() => events.some(e => e.type === 'update-busy'));
   assert.equal(supervisor.state.active.sequence, 1); assert.equal(roots.length, 1);
-  supervisor.apply(); await waitFor(() => events.some(e => e.type === 'update-rolled-back') && events.filter(e => e.type === 'ready').length === 2);
-  assert.equal(supervisor.state.active.sequence, 1); assert.equal(roots.length, 3);
+  supervisor.apply(); await waitFor(() => events.some(e => e.type === 'update-error') && events.filter(e => e.type === 'ready').length === 2);
+  assert.equal(supervisor.state.active.sequence, 1); assert.equal(roots.length, 2);
+  supervisor.apply(); await waitFor(() => events.some(e => e.type === 'update-rolled-back') && events.filter(e => e.type === 'ready').length === 3);
+  assert.equal(supervisor.state.active.sequence, 1); assert.equal(roots.length, 4);
   supervisor.apply(); await waitFor(() => events.some(e => e.type === 'update-installed'));
-  assert.equal(supervisor.state.active.sequence, 2); assert.equal(roots.length, 4);
-  assert.equal(await readFile(join(roots[3], 'app.js'), 'utf8'), 'new version');
+  assert.equal(supervisor.state.active.sequence, 2); assert.equal(roots.length, 5);
+  assert.equal(await readFile(join(roots[4], 'app.js'), 'utf8'), 'new version');
   supervisor.close(); await waitFor(() => events.some(e => e.type === 'supervisor-closed'));
 });
