@@ -45,3 +45,16 @@ test("Memory reader preserves observed methods, failures and true artifact check
   await assert.rejects(reader.read({ tenantId: "device", ownerUserId: "alice", runId: "r", terminalCommitRef: "different" }), /terminal_commit_mismatch/);
   assert.equal(await reader.read({ tenantId: "device", ownerUserId: "bob", runId: "r", terminalCommitRef: "outcome" }), undefined);
 });
+
+test("Memory reader recognizes only owner-scoped durable deletion marks", async (t) => {
+  const db = new AppDatabase(":memory:");
+  t.after(() => db.close());
+  await db.ready();
+  await db.exec("CREATE TABLE local_run_admissions (owner_user_id TEXT, run_id TEXT, run_deleted INTEGER)");
+  await db.prepare("INSERT INTO local_run_admissions VALUES ('alice', 'removed', 1), ('alice', 'live', 0)").run();
+  const reader = new LocalMemorySettlementReader(db, "device");
+  assert.equal(await reader.isDeleted({ tenantId: "device", ownerUserId: "alice", runId: "removed" }), true);
+  assert.equal(await reader.isDeleted({ tenantId: "device", ownerUserId: "bob", runId: "removed" }), false);
+  assert.equal(await reader.isDeleted({ tenantId: "device", ownerUserId: "alice", runId: "live" }), false);
+  assert.equal(await reader.isDeleted({ tenantId: "device", ownerUserId: "alice", runId: "unknown" }), false);
+});

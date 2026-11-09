@@ -351,6 +351,7 @@ export interface MemorySettlementWorkerOptions {
 
 export interface MemorySettlementReaderLike {
   read(input: { readonly tenantId: string; readonly ownerUserId: string; readonly runId: string; readonly terminalCommitRef: string }): Promise<MemorySettlementEvidence | undefined>;
+  isDeleted?(input: { readonly tenantId: string; readonly ownerUserId: string; readonly runId: string }): Promise<boolean>;
 }
 
 export interface MemorySettlementRunResult {
@@ -403,7 +404,13 @@ export class MemorySettlementWorker {
         runId: job.runId,
         terminalCommitRef: job.terminalCommitRef,
       });
-      if (evidence === undefined) throw new Error("settlement_evidence_not_available");
+      if (evidence === undefined) {
+        if (await this.reader.isDeleted?.(job)) {
+          await this.store.discardSettlement(job);
+          return { status: "succeeded", settlementJobId: job.settlementJobId, reason: "deleted_run_discarded" };
+        }
+        throw new Error("settlement_evidence_not_available");
+      }
       assertJobEvidenceScope(job, evidence);
       if (this.settlementPromptSchemaVersion === SETTLEMENT_V2 && this.settlementModel !== undefined) {
         const result = await settleV2({ store: this.store, job, model: this.settlementModel, evidence,
@@ -474,12 +481,21 @@ export class MemorySettlementWorker {
       ...(this.allowedRunIds === undefined ? {} : { allowedRunIds: this.allowedRunIds }),
       ...(this.allowedSettlementJobIds === undefined ? {} : { allowedSettlementJobIds: this.allowedSettlementJobIds }),
     });
-    if (jobs.length < this.experienceBatchSize) return { status: "empty", reason: "waiting_for_experience_batch" };
+    if (jobs.length < this.experienceBatchSize) {
+      for (const job of jobs) await this.store.releaseSettlement(job);
+      return { status: "empty", reason: "waiting_for_experience_batch" };
+    }
     try {
       const evidences: MemorySettlementEvidence[] = [];
       for (const job of jobs) {
         const evidence = await this.reader.read({ tenantId: job.tenantId, ownerUserId: job.ownerUserId, runId: job.runId, terminalCommitRef: job.terminalCommitRef });
-        if (evidence === undefined) throw new Error(`settlement_evidence_not_available:${job.runId}`);
+        if (evidence === undefined) {
+          const deleted = await this.reader.isDeleted?.(job) === true;
+          if (deleted) await this.store.discardSettlement(job);
+          else await this.store.finishSettlement({ job, now: this.now(), maxAttempts: this.maxAttempts, outcome: "failed", error: `settlement_evidence_not_available:${job.runId}` });
+          for (const other of jobs) if (other !== job) await this.store.releaseSettlement(other);
+          return { status: deleted ? "succeeded" : job.attempts >= this.maxAttempts ? "dead_letter" : "retrying", settlementJobId: job.settlementJobId, reason: deleted ? "deleted_run_discarded" : `settlement_evidence_not_available:${job.runId}` };
+        }
         assertJobEvidenceScope(job, evidence);
         evidences.push(evidence);
       }

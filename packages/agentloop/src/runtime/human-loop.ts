@@ -95,7 +95,7 @@ export class HumanLoopRepository {
       await this.database.prepare("INSERT INTO human_loop_responses(id, request_id, run_id, request_revision, response_json, actor_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .run(id, input.requestId, input.runId, input.expectedRevision, JSON.stringify(input.value), input.actorUserId, now);
       await appendEvent(this.database, input.runId, "human_loop.answered", { requestId: input.requestId, requestRevision: input.expectedRevision, value: input.value }, now);
-      if (request.responseSchema.type === "select" && Array.isArray(input.value)) {
+      if (request.responseSchema.type === "select" && Array.isArray(input.value) && input.value.length > 0) {
         const byId = new Map(request.responseSchema.options.map((option) => [option.id, option] as const));
         const selectedOptions = input.value.flatMap((id) => {
           const option = byId.get(typeof id === "string" ? id : "");

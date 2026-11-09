@@ -57,10 +57,18 @@ function renderRoundHistory(rounds, open = false) {
 }
 // Streaming content is a cumulative snapshot until it is committed. Keep each
 // committed segment in event order instead of replacing it with the next one.
-function renderProcess(turn, openTools = {}) {
+function renderProcess(turn, openTools = {}, openProtocol = {}, processOpen = true) {
   const items = []; const tools = new Map(); let segment; let previousContent = ''; let segmentPrefix = '';
+  const messages = new Map((turn.inputMessages || []).map(message => [message.id, message]));
+  const shownMessages = new Set();
   for (const event of turn.events) {
     const data = event.data || {};
+    if (event.type === 'run.input.accepted' && data.message) {
+      segment = undefined; segmentPrefix = previousContent;
+      items.push({ kind: 'steer', message: messages.get(data.message.id) || data.message });
+      shownMessages.add(data.message.id);
+      continue;
+    }
     if (data.responseVisibility === 'internal') continue;
     if (event.type === 'assistant.streaming' || event.type === 'assistant.committed') {
       if (typeof data.content === 'string') {
@@ -68,7 +76,7 @@ function renderProcess(turn, openTools = {}) {
         if (!content.startsWith(segmentPrefix)) segmentPrefix = '';
         const visible = content.slice(segmentPrefix.length);
         if (visible.trim()) {
-          if (!segment) { segment = { kind: 'text', text: '' }; items.push(segment); }
+          if (!segment) { segment = { kind: 'text', text: '', seq: event.seq }; items.push(segment); }
           segment.text = visible;
         }
         previousContent = content;
@@ -94,24 +102,37 @@ function renderProcess(turn, openTools = {}) {
     // Consecutive progress events describe the same stretch of work. Show its
     // latest state in place while retaining every event in the Run history.
     const last = items.at(-1);
-    if (last?.kind === 'progress') { last.text = label; last.seq = event.seq; }
-    else items.push({ kind: 'progress', text: label, seq: event.seq });
+    const toolContinuation = event.type === 'model.request.started' && data.purpose !== 'conversation_turn_resolver' && !['planning', 'assessment'].includes(data.phase);
+    if (last?.kind === 'progress') { last.text = label; last.seq = event.seq; last.toolContinuation = toolContinuation; }
+    else items.push({ kind: 'progress', text: label, seq: event.seq, toolContinuation });
   }
+  // A submit acknowledgement can arrive before its persisted event is polled.
+  for (const message of messages.values()) if (!shownMessages.has(message.id)) items.push({ kind: 'steer', message });
   if (!items.length && turn.text && turn.status === 'running') items.push({ kind: 'text', text: turn.text });
   const groups = [];
-  for (const item of items) {
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index];
     const last = groups.at(-1);
-    if (item.kind === 'tool' && last?.kind === 'tools') last.calls.push(item.call);
-    else if (item.kind === 'tool') groups.push({ kind: 'tools', calls: [item.call] });
+    if (item.kind === 'progress' && item.toolContinuation && last?.kind === 'tools' && items[index + 1]?.kind === 'tool') last.entries.push(item);
+    else if (item.kind === 'tool' && last?.kind === 'tools') { last.calls.push(item.call); last.entries.push(item); }
+    else if (item.kind === 'tool') groups.push({ kind: 'tools', calls: [item.call], entries: [item] });
     else groups.push(item);
   }
   return groups.map(item => {
-    if (item.kind === 'text') return `<div class="process-text">${lines(item.text)}</div>`;
-    if (item.kind === 'progress') return `<div class="process-progress">${escape(item.text)}</div>`;
+    if (item.kind === 'steer') return renderSteerMessages([item.message]);
+    const hidden = processOpen ? '' : ' hidden';
+    if (item.kind === 'text') {
+      // Preserve protocol-shaped model text as evidence, without presenting it
+      // as either user-facing prose or an actual structured tool invocation.
+      const normalized = item.text.replaceAll('＜', '<').replaceAll('＞', '>').replaceAll('｜', '|');
+      const protocol = /<\s*\|+\s*[\w-]+\s*\|+\s*(?:parameter|invoke|calls)\b|<\/?(?:tool_response|tool_calls?)\b/i.test(normalized);
+      return protocol ? `<details class="process-protocol" data-protocol-seq="${escape(item.seq)}"${openProtocol[item.seq] ? ' open' : ''}${hidden}><summary>模型输出包含工具协议文本</summary><div class="process-protocol-text">${lines(item.text)}</div></details>` : `<div class="process-text"${hidden}>${lines(item.text)}</div>`;
+    }
+    if (item.kind === 'progress') return `<div class="process-progress"${hidden}>${escape(item.text)}</div>`;
     const first = item.calls[0]; const last = item.calls.at(-1);
     const count = new Set(item.calls.map(call => call.id)).size;
     const status = last.error || (last.status === 'completed' && last.exitCode !== undefined ? `已完成 · 退出码 ${last.exitCode}` : stepLabel(last.status));
-    return `<details class="process-tool-group" data-tool-group="${escape(first.seq)}"${openTools[first.seq] ? ' open' : ''}><summary><span class="process-tool-icon" aria-hidden="true">↗</span><span>工具调用 · ${count} 次</span><small>${escape(clip(last.name, 60))} · ${escape(clip(status, 80))}</small></summary><div class="process-tool-list">${item.calls.map(call => toolRow(call)).join('')}</div></details>`;
+    return `<details class="process-tool-group" data-tool-group="${escape(first.seq)}"${openTools[first.seq] ? ' open' : ''}${hidden}><summary><span class="process-tool-icon" aria-hidden="true">↗</span><span>工具调用 · ${count} 次</span><small>${escape(clip(last.name, 60))} · ${escape(clip(status, 80))}</small></summary><div class="process-tool-list">${item.entries.map(entry => entry.kind === 'tool' ? toolRow(entry.call) : `<div class="process-progress">${escape(entry.text)}</div>`).join('')}</div></details>`;
   }).join('');
 }
 export function renderAssistant(turn, ui = {}) {
@@ -135,8 +156,8 @@ export function renderAssistant(turn, ui = {}) {
   const heading = turn.humanLoop?.status === 'open' ? '等待你的输入' : live ? escape(presentation.label) : elapsed !== undefined ? `${escape(presentation.label)} · 耗时 ${formatDuration(elapsed)}` : escape(presentation.label);
   const runtimeLabel = turn.run.runtimeName || turn.run.runtimeId || '本机 Runtime';
   const processOpen = ui.process === undefined ? live : Boolean(ui.process);
-  const process = renderProcess(turn, ui.tools);
-  return `<article class="msg assistant ${live ? 'live' : 'final'}${ui.selected ? ' selected' : ''}" data-assistant-message="${escape(turn.id)}"><img class="msg-avatar logo-image" src="${runtimeIconUrl(turn.run.runtimeIconKey)}" alt="Runtime"><div class="msg-body"><div class="live-card ${escape(presentation.cardClass)}"><div class="live-head"><span class="assistant-state ${escape(turn.status)}">${presentation.icon || (live ? '<span class="thinking"><i></i><i></i><i></i></span>' : '')}</span><button type="button" class="process-toggle" data-toggle="process" aria-expanded="${processOpen}" aria-controls="process-${escape(turn.id)}">${heading}<span aria-hidden="true">${processOpen ? '⌄' : '›'}</span></button><span class="execution-provenance"><span class="execution-provenance-chip runtime">${escape(runtimeLabel)}</span><span class="execution-provenance-chip model">${escape(turn.run.modelKey)}</span></span></div><div class="execution-process" id="process-${escape(turn.id)}"${processOpen ? '' : ' hidden'}>${reasoning}${process || (live ? `<div class="live-progress" role="status">${escape(turn.progress || '正在连接本机 Runtime')}</div>` : '')}${planning}</div>${live ? '' : `<div class="live-output-text md">${output}</div>`}${humanLoop}${renderArtifacts(turn)}<div class="message-footer event-feedback">${eventIndicator}${timing ? `<div class="message-timing">${escape(timing)}</div>` : ''}${copyButton('assistant', !(turn.text || turn.partialText))}</div></div></div></article>`;
+  const process = renderProcess(turn, ui.tools, ui.protocol, processOpen);
+  return `<article class="msg assistant ${live ? 'live' : 'final'}${ui.selected ? ' selected' : ''}" data-assistant-message="${escape(turn.id)}"><img class="msg-avatar logo-image" src="${runtimeIconUrl(turn.run.runtimeIconKey)}" alt="Runtime"><div class="msg-body"><div class="live-card ${escape(presentation.cardClass)}"><div class="live-head"><span class="assistant-state ${escape(turn.status)}">${presentation.icon || (live ? '<span class="thinking"><i></i><i></i><i></i></span>' : '')}</span><button type="button" class="process-toggle" data-toggle="process" aria-expanded="${processOpen}" aria-controls="process-${escape(turn.id)}">${heading}<span aria-hidden="true">${processOpen ? '⌄' : '›'}</span></button><span class="execution-provenance"><span class="execution-provenance-chip runtime">${escape(runtimeLabel)}</span><span class="execution-provenance-chip model">${escape(turn.run.modelKey)}</span></span></div><div class="execution-process" id="process-${escape(turn.id)}"${!processOpen && !(turn.inputMessages || []).length && !turn.events.some(event => event.type === 'run.input.accepted') ? ' hidden' : ''}>${reasoning ? `<div${processOpen ? '' : ' hidden'}>${reasoning}</div>` : ''}${process || (live ? `<div class="live-progress" role="status">${escape(turn.progress || '正在连接本机 Runtime')}</div>` : '')}${planning ? `<div${processOpen ? '' : ' hidden'}>${planning}</div>` : ''}</div>${live ? '' : `<div class="live-output-text md">${output}</div>`}${humanLoop}${renderArtifacts(turn)}<div class="message-footer event-feedback">${eventIndicator}${timing ? `<div class="message-timing">${escape(timing)}</div>` : ''}${copyButton('assistant', !(turn.text || turn.partialText))}</div></div></div></article>`;
 }
 
 // Keyed turn nodes preserve old replies and browser selection. Only an altered
@@ -168,10 +189,6 @@ export function createConversationView({ container, scroll, onArtifact, onHumanL
         state.userMarkup = user;
         state.wrapper.querySelector('[data-copy="user"]').onclick = () => copy(turn.run.input, state.wrapper.querySelector('[data-copy="user"]'));
       }
-      let inputs = state.wrapper.querySelector('.run-inputs');
-      if (!inputs) { inputs = document.createElement('div'); inputs.className = 'run-inputs'; state.wrapper.querySelector('.msg.user').after(inputs); }
-      const inputMarkup = renderSteerMessages(turn.inputMessages);
-      if (inputs.innerHTML !== inputMarkup) inputs.innerHTML = inputMarkup;
       const ui = { ...state.ui, selected: turn.id === selectedId };
       const markup = renderAssistant(turn, ui); const old = state.wrapper.querySelector('.msg.assistant');
       if (old && hasSelectedTextWithin(window.getSelection(), old)) continue;
@@ -203,6 +220,7 @@ export function createConversationView({ container, scroll, onArtifact, onHumanL
       const reasoning = card.querySelector('.live-reasoning'); if (reasoning) reasoning.ontoggle = () => { state.ui.reasoning = reasoning.open; };
       const rounds = card.querySelector('.round-history'); if (rounds) rounds.ontoggle = () => { state.ui.roundHistory = rounds.open; };
       for (const details of card.querySelectorAll('[data-tool-group]')) details.ontoggle = () => { state.ui.tools ||= {}; state.ui.tools[details.dataset.toolGroup] = details.open; };
+      for (const details of card.querySelectorAll('[data-protocol-seq]')) details.ontoggle = () => { state.ui.protocol ||= {}; state.ui.protocol[details.dataset.protocolSeq] = details.open; };
       card.querySelector('[data-copy="assistant"]').onclick = event => copy(turn.text || turn.partialText, event.currentTarget);
       if (focused) card.querySelector(`[data-toggle="${focused}"]`)?.focus({ preventScroll: true });
     }

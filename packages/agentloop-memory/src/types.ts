@@ -140,6 +140,8 @@ export interface MemoryStore {
   settlementBatchCandidates(input: { readonly minimum: number; readonly maxAttempts: number }): Promise<readonly { readonly scope: MemoryScope; readonly count: number }[]>;
   claimSettlementBatch(input: { readonly scope: MemoryScope; readonly now: number; readonly maxAttempts: number; readonly limit: number; readonly allowedRunIds?: readonly string[]; readonly allowedSettlementJobIds?: readonly string[] }): Promise<readonly MemorySettlementJob[]>;
   claimSettlement(input: { readonly now: number; readonly maxAttempts: number; readonly allowedRunIds?: readonly string[]; readonly allowedSettlementJobIds?: readonly string[] }): Promise<MemorySettlementJob | undefined>;
+  discardSettlement(job: MemorySettlementJob): Promise<void>;
+  releaseSettlement(job: MemorySettlementJob): Promise<void>;
   finishSettlement(input: {
     readonly job: MemorySettlementJob;
     readonly now: number;

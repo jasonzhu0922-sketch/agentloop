@@ -53,6 +53,17 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
     this.tenantId = tenantId;
   }
 
+  async isDeleted(input: { tenantId: string; ownerUserId: string; runId: string }): Promise<boolean> {
+    if (input.tenantId !== this.tenantId) throw new Error("settlement_tenant_mismatch");
+    for (const database of this.databases()) {
+      const table = await database.prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'local_run_admissions'").get();
+      if (table === undefined) continue;
+      const row = await database.prepare("SELECT run_deleted FROM local_run_admissions WHERE owner_user_id = ? AND run_id = ?").get<{ run_deleted: number }>(input.ownerUserId, input.runId);
+      if (row?.run_deleted === 1) return true;
+    }
+    return false;
+  }
+
   async read(input: { tenantId: string; ownerUserId: string; runId: string; terminalCommitRef: string }): Promise<MemorySettlementEvidence | undefined> {
     if (input.tenantId !== this.tenantId) throw new Error("settlement_tenant_mismatch");
     let row: OutcomeRow | undefined;

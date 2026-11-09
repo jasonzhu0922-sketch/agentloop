@@ -68,9 +68,9 @@ export async function sandboxCommand(input: {
       '(allow file-read-metadata (literal "/etc") (literal "/var"))',
       '(allow file-read* (literal "/") (literal "/dev/null") (literal "/dev/random") (literal "/dev/urandom") (literal "/private/etc/localtime") (literal "/private/etc/hosts") (literal "/private/etc/resolv.conf"))',
       '(allow file-write* (literal "/dev/null"))',
-      // Homebrew Node links OpenSSL, which reads its public startup config.
+      // System curl and Homebrew Node read their public TLS startup configs.
       // Do not grant the surrounding etc tree (it may contain credentials).
-      '(allow file-read* (literal "/opt/homebrew/etc/openssl@3/openssl.cnf") (literal "/usr/local/etc/openssl@3/openssl.cnf"))',
+      '(allow file-read* (literal "/private/etc/ssl/openssl.cnf") (literal "/opt/homebrew/etc/openssl@3/openssl.cnf") (literal "/usr/local/etc/openssl@3/openssl.cnf"))',
       // Homebrew OpenSSL resolves cert.pem through ca-certificates; both the
       // symlink and its public trust bundle must be readable for HTTPS checks.
       '(allow file-read-metadata (literal "/opt/homebrew/etc") (literal "/opt/homebrew/etc/openssl@3") (literal "/opt/homebrew/etc/ca-certificates") (literal "/usr/local/etc") (literal "/usr/local/etc/openssl@3") (literal "/usr/local/etc/ca-certificates"))',

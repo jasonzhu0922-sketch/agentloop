@@ -244,4 +244,17 @@ export class InMemoryMemoryStore implements MemoryStore {
     this.settlementJobStore.set(key, updated);
     return updated;
   }
+
+  async discardSettlement(job: MemorySettlementJob): Promise<void> {
+    const key = `${job.tenantId}\u0000${job.ownerUserId}\u0000${job.runId}\u0000${job.terminalCommitRef}`;
+    if (this.settlementJobStore.get(key)?.status === "processing") this.settlementJobStore.delete(key);
+  }
+
+  async releaseSettlement(job: MemorySettlementJob): Promise<void> {
+    const key = `${job.tenantId}\u0000${job.ownerUserId}\u0000${job.runId}\u0000${job.terminalCommitRef}`;
+    const current = this.settlementJobStore.get(key);
+    if (current?.status === "processing" && current.attempts === job.attempts) {
+      this.settlementJobStore.set(key, { ...current, status: "queued", attempts: Math.max(0, current.attempts - 1) });
+    }
+  }
 }

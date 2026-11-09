@@ -354,6 +354,18 @@ export class SqliteMemoryStore implements MemoryStore {
     };
   }
 
+  async discardSettlement(job: MemorySettlementJob): Promise<void> {
+    await this.migrated;
+    await this.connection.prepare(`DELETE FROM local_memory_settlement_jobs WHERE tenant_id = ? AND owner_user_id = ? AND run_id = ? AND terminal_commit_ref = ? AND status = 'processing' AND attempts = ?`)
+      .run(job.tenantId, job.ownerUserId, job.runId, job.terminalCommitRef, job.attempts);
+  }
+
+  async releaseSettlement(job: MemorySettlementJob): Promise<void> {
+    await this.migrated;
+    await this.connection.prepare(`UPDATE local_memory_settlement_jobs SET status = 'queued', attempts = attempts - 1 WHERE tenant_id = ? AND owner_user_id = ? AND run_id = ? AND terminal_commit_ref = ? AND status = 'processing' AND attempts = ?`)
+      .run(job.tenantId, job.ownerUserId, job.runId, job.terminalCommitRef, job.attempts);
+  }
+
   private async migrate(): Promise<void> {
     await this.connection.exec(`
       CREATE TABLE IF NOT EXISTS local_memory_items (

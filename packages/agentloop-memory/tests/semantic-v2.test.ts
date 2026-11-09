@@ -120,6 +120,35 @@ test("experience cases wait for the configured batch size and use one fusion cal
   assert.equal((await store.active(scope)).filter(({ item }) => item.subtype === "experience.task_group").length, 1);
 });
 
+for (const kind of ["memory", "sqlite"] as const) test(`${kind}: deleted Run is discarded without consuming other batch attempts`, async () => {
+  const database = kind === "sqlite" ? new AppDatabase(":memory:") : undefined;
+  const store = database ? new SqliteMemoryStore(database) : new InMemoryMemoryStore();
+  try {
+    const values = ["good-a", "deleted", "good-b", "good-c"].map(evidence);
+    for (const value of values.slice(0, 3)) await store.enqueueSettlement({ scope: value.scope, runId: value.runId, terminalCommitRef: value.terminalCommitRef, now: 1000 });
+    const worker = new MemorySettlementWorker({ store, experienceBatchSize: 3, now: () => 1000, settlementModel: model(),
+      reader: { read: async ({ runId }) => runId === "deleted" ? undefined : values.find(value => value.runId === runId), isDeleted: async ({ runId }) => runId === "deleted" } });
+    assert.equal((await worker.runOnce()).reason, "deleted_run_discarded");
+    assert.equal((await store.settlementBatchCandidates({ minimum: 1, maxAttempts: 3 }))[0]?.count, 2);
+    await store.enqueueSettlement({ scope, runId: values[3]!.runId, terminalCommitRef: values[3]!.terminalCommitRef, now: 1000 });
+    const result = await worker.runOnce();
+    assert.equal(result.status, "succeeded", result.reason);
+    assert.equal((await store.active(scope)).filter(({ item }) => item.subtype === "experience.episode").length, 3);
+  } finally { await database?.close(); }
+});
+
+test("unconfirmed missing evidence is retried separately and does not consume other jobs", async () => {
+  const store = new InMemoryMemoryStore();
+  const values = ["good", "unknown", "other"].map(evidence);
+  for (const value of values) await store.enqueueSettlement({ scope, runId: value.runId, terminalCommitRef: value.terminalCommitRef, now: 1000 });
+  const worker = new MemorySettlementWorker({ store, experienceBatchSize: 3, now: () => 1000,
+    reader: { read: async ({ runId }) => runId === "unknown" ? undefined : values.find(value => value.runId === runId), isDeleted: async () => false } });
+  assert.match((await worker.runOnce()).reason!, /settlement_evidence_not_available:unknown/);
+  const jobs = await store.claimSettlementBatch({ scope, now: 1000, maxAttempts: 3, limit: 3 });
+  assert.deepEqual(jobs.map(job => [job.runId, job.attempts]), [["good", 1], ["other", 1]]);
+  for (const job of jobs) await store.releaseSettlement(job);
+});
+
 test("concurrent Task Group fusion cannot silently overwrite a newer revision", async () => {
   const database = new AppDatabase(":memory:");
   try {

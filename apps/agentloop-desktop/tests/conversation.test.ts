@@ -84,6 +84,47 @@ test('adjacent tool events form collapsed, expandable groups without crossing vi
   assert.match(renderAssistant(turn, { tools: { 1: true } }), /data-tool-group="1" open>/);
 });
 
+test('accepted steer stays at its event position and remains visible when the process is collapsed', () => {
+  const turn = createTurn(run());
+  const accepted = { id: 'steer-1', seq: 1, text: '补充范围', status: 'accepted' };
+  const decided = { ...accepted, status: 'answered', decision: { explanation: '已了解' } };
+  updateTurn(turn, run(), [event(1, 'assistant.committed', { content: '先查询' }), event(2, 'run.input.accepted', { message: accepted }), event(3, 'assistant.committed', { content: '继续分析' }), event(4, 'run.input.decided', { message: decided })]);
+  const html = renderAssistant(turn, { process: true });
+  assert.ok(html.indexOf('先查询') < html.indexOf('补充范围') && html.indexOf('补充范围') < html.indexOf('继续分析'));
+  assert.equal((html.match(/data-steer-message="steer-1"/g) || []).length, 1);
+  assert.match(html, /已了解/);
+  const collapsed = renderAssistant(turn, { process: false });
+  assert.match(collapsed, /class="process-text" hidden>先查询/);
+  assert.match(collapsed, /data-steer-message="steer-1"/);
+  const pending = createTurn(run());
+  updateTurn(pending, run(), [], undefined, undefined, undefined, [accepted]);
+  assert.match(renderAssistant(pending), /data-steer-message="steer-1"/);
+});
+
+test('routine execution updates between tool calls stay inside one ordered group', () => {
+  const turn = createTurn(run());
+  updateTurn(turn, run(), [event(1, 'assistant.committed', { content: '先检查资料' }), event(2, 'tool.completed', { toolCallId: 'a', toolName: 'read_file' }), event(3, 'model.request.started', { phase: 'execution' }), event(4, 'tool.completed', { toolCallId: 'b', toolName: 'read_result' }), event(5, 'model.request.started', { phase: 'execution' }), event(6, 'tool.completed', { toolCallId: 'c', toolName: 'write_file' }), event(7, 'assistant.committed', { content: '检查完成' }), event(8, 'tool.completed', { toolCallId: 'd', toolName: 'search' }), event(9, 'model.request.started', { phase: 'assessment' }), event(10, 'tool.completed', { toolCallId: 'e', toolName: 'read_file' })]);
+  const html = renderAssistant(turn);
+  assert.equal((html.match(/class="process-tool-group"/g) || []).length, 3);
+  assert.match(html, /工具调用 · 3 次/);
+  const first = html.slice(html.indexOf('data-tool-group="2"'), html.indexOf('检查完成'));
+  assert.ok(first.indexOf('read_file') < first.indexOf('正在执行当前步骤') && first.indexOf('正在执行当前步骤') < first.indexOf('read_result'));
+  assert.match(html, /正在核验当前结果/);
+  assert.equal(turn.events.length, 10);
+});
+
+test('protocol-shaped model text remains inspectable as model output rather than a tool call', () => {
+  const turn = createTurn(run());
+  updateTurn(turn, run(), [event(1, 'assistant.streaming', { content: '<｜DSML｜ parameter name="tool_call_id">call_123</tool_call_id>\n<tool_response>示例</tool_response>' })]);
+  const html = renderAssistant(turn);
+  assert.match(html, /<details class="process-protocol" data-protocol-seq="1"><summary>模型输出包含工具协议文本/);
+  assert.match(html, /&lt;tool_response&gt;示例&lt;\/tool_response&gt;/);
+  assert.doesNotMatch(html, /class="process-tool-group"/);
+  assert.match(renderAssistant(turn, { protocol: { 1: true } }), /data-protocol-seq="1" open/);
+  const normal = createTurn(run()); updateTurn(normal, run(), [event(1, 'assistant.streaming', { content: '工具协议可以用于调用。' })]);
+  assert.match(renderAssistant(normal), /class="process-text">工具协议可以用于调用/);
+});
+
 test('assistant cards identify the Runtime that handled the Run', () => {
   const turn = createTurn({ ...run(), runtimeId: 'runtime-a', runtimeName: '写作 Runtime' });
   assert.match(renderAssistant(turn), /execution-provenance-chip runtime">写作 Runtime<\/span>/);

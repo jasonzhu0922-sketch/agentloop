@@ -221,6 +221,20 @@ test("HumanLoopRepository persists a typed request and accepts exactly one schem
   } finally { database.close(); }
 });
 
+test("an empty optional selection does not create an exact decision", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    await new RunRepository(database).insertRun({ id: "run-empty-selection", ownerUserId: "user-hil", allowDangerousTools: false, input: "choose", createdAt: Date.now() });
+    const loops = new HumanLoopRepository(database);
+    const request = await loops.create({ runId: "run-empty-selection", origin: "tool", kind: "selection", title: "Choose", prompt: "Choose or leave empty", rationale: "Partial options", evidenceRefs: [],
+      responseSchema: { type: "select", minSelections: 0, maxSelections: 1, options: [{ id: "a", label: "A", identityRefs: ["identity-a"] }] }, resume: { mode: "continue_step" } });
+    await loops.respond({ requestId: request.id, runId: "run-empty-selection", actorUserId: "user-hil", expectedRevision: request.revision, value: [] });
+    const decision = await database.prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND type = 'decision.committed'").get("run-empty-selection");
+    assert.equal(decision, undefined);
+    assert.equal(await loops.current("run-empty-selection"), undefined);
+  } finally { database.close(); }
+});
+
 test("generic request_human_loop Tool stops the loop before a completion candidate", async () => {
   const grant = createCapabilityGrant({ actorUserId: "user-hil", runId: "run-hil-tool", depth: 0, allowedToolNames: [HUMAN_LOOP_TOOL_NAME], allowedSkillIds: [] });
   await assert.rejects(() => runAgentLoop({

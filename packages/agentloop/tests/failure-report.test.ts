@@ -32,6 +32,8 @@ for (const stop of ["budget", "no_progress"] as const) {
           assert.deepEqual(request.tools, []);
           assert.match(JSON.stringify(request.messages), /3540/);
           assert.match(request.runtimeContext?.content ?? "", /original user goal/);
+          assert.match(request.runtimeContext?.content ?? "", /assessment feedback and the last draft as unverified interpretations/);
+          assert.match(request.runtimeContext?.content ?? "", /configured timeout is a maximum, not an elapsed duration/);
           return { content: "当前记录从 3540 到 3590，但覆盖不完整，尚不能完成全区间走势分析。", finishReason: "stop", toolCalls: [] };
         }
         return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `read-${calls}`, name: "read", arguments: { valid: stop === "budget" || calls === 1 } }] };

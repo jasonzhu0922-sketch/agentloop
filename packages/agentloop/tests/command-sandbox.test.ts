@@ -3,9 +3,24 @@ import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
 import test from "node:test";
 import { ComputerExecutor } from "../src/computer/computer-executor.ts";
 import { sandboxCommand } from "../src/computer/command-sandbox.ts";
+
+test("sandboxed system curl can initialize TLS and make a request", { skip: process.platform !== "darwin" }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "agentloop-curl-sandbox-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const server = createHttpServer((_request, response) => response.end("ok"));
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const executor = new ComputerExecutor(root, { commandSandbox: { mode: "required" },
+    executableAliases: { curl: "/usr/bin/curl" } });
+  const result = await executor.runCommand({ command: "curl", args: ["--silent", "--show-error", `http://127.0.0.1:${address.port}/`], cwd: ".", timeoutMs: 10_000 });
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.equal(result.stdout, "ok");
+});
 
 test("required command sandbox blocks sibling reads/writes and children while retaining workspace output", { skip: process.platform !== "darwin" }, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "agentloop-os-sandbox-")));

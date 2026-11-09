@@ -71,6 +71,10 @@
 .process-tool-group summary small { min-width:0; overflow:hidden; color:var(--text-3); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
 .process-tool-icon { color:var(--text-3); }
 .process-tool-list { display:grid; gap:6px; padding:6px 0 2px 22px; }
+.process-protocol { color:var(--text-2); font-size:13px; }
+.process-protocol summary { width:fit-content; cursor:pointer; color:var(--text-3); }
+.process-protocol summary:hover { color:var(--text); }
+.process-protocol-text { margin-top:8px; padding:10px 12px; border-radius:8px; background:var(--bg-3); color:var(--text-2); font:12px/1.6 var(--mono); overflow-wrap:anywhere; }
 .planning-overview { display:grid; gap:8px; min-width:0; }
 .msg.assistant.live .planning-overview { border-top:1px solid var(--border); padding-top:10px; }
 .planning-overview-head { display:flex; align-items:flex-start; gap:10px; min-width:0; }
