@@ -38,9 +38,13 @@ export class AgentLoopRuntimeRunPort implements RuntimeHostRunPort {
     return await this.runs.get(actorUserId, runId);
   }
 
+  submitInput(actorUserId: string, runId: string, input: { requestId: string; text: string }) { return this.runs.submitInput(actorUserId, runId, input); }
+  inputMessages(actorUserId: string, runId: string) { return this.runs.inputMessages(actorUserId, runId); }
+
   async roundHistory(actorUserId: string, runId: string): Promise<readonly RuntimeRoundHistoryEntry[]> {
     const history = await this.runs.roundHistory(actorUserId, runId);
     return history.map((round) => ({
+      ...(round.roundScope === undefined ? {} : { roundScope: round.roundScope }),
       roundNumber: round.roundNumber,
       status: round.status,
       ...(round.planId === undefined ? {} : { planId: round.planId }),

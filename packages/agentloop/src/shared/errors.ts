@@ -4,6 +4,7 @@ export type ErrorCode =
   | "FORBIDDEN"
   | "NOT_FOUND"
   | "CONFLICT"
+  | "STEER_PENDING"
   | "CANCELLED"
   | "RUN_LIMIT_EXCEEDED"
   | "ROUND_BUDGET_EXHAUSTED"

@@ -9,6 +9,7 @@ import {
 } from "../src/runtime/runtime-result.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { AppDatabase } from "../src/storage/database.ts";
+import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
 import { createResultTool } from "../src/tools/result-tool.ts";
 
 test("a pure continuation binds every published Step Result from its failed target Run", () => {
@@ -62,6 +63,72 @@ test("a pure continuation binds every published Step Result from its failed targ
     },
     resultCards,
   }), []);
+});
+
+test("a later Round can read only its bound, committed earlier Round Result without a conversation", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const result = createRuntimeResult({
+      kind: "step", producer: { runId: "round-run", planId: "first-plan", stepId: "research" },
+      value: "Evidence from the research Round", publication: { status: "published", assessmentRef: "assessment", decision: "approved" },
+    });
+    await insertCurrentPlan(database, { runId: "round-run", planId: "second-plan", stepId: "produce", owner: "owner", conversationId: null, resultId: result.ref.resultId, now: 1 });
+    await database.prepare(`INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, input_bindings_json, status, created_at, updated_at)
+      VALUES ('first-plan', 'round-run', 1, 'research', '[]', '[]', 'completed', 1, 1)`).run();
+    await database.prepare(`INSERT INTO plan_steps(plan_id, step_id, kind, position, objective, dependencies_json, refinement_state, required_facts_json,
+      skill_ids_json, required_capabilities_json, recommended_tool_names_json, execution_binding_json, success_criteria_json, status, evidence_json)
+      VALUES ('first-plan', 'research', 'leaf', 0, 'research', '[]', 'not_refinable', '[]', '[]', '[]', '[]', '{}', '[]', 'completed', ?)`)
+      .run(JSON.stringify({ publishedResult: result }));
+    await database.prepare(`INSERT INTO run_rounds(run_id, round_number, status, plan_id, revision, created_at, updated_at)
+      VALUES ('round-run', 1, 'completed', 'first-plan', 1, 1, 1), ('round-run', 2, 'executing', 'second-plan', 1, 1, 1)`).run();
+    const round = { schema: "agentloop.roundResult/v1", runId: "round-run", planId: "first-plan",
+      steps: [{ stepId: "research", result: result.ref, assessmentId: "assessment" }] };
+    const repository = new RuntimeResultRepository(database);
+    const read = (actorUserId = "owner") => repository.readAuthorized({ runId: "round-run", planId: "second-plan", stepId: "produce", resultId: result.ref.resultId, actorUserId });
+    assert.equal(await read(), undefined, "an uncommitted Round must not authorize the result");
+    await database.prepare("INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at) VALUES ('round-conversation', 'owner', 'Round', 1, 1)").run();
+    await database.prepare("UPDATE runs SET conversation_id = 'round-conversation' WHERE id = 'round-run'").run();
+    assert.equal(await repository.readAuthorized({ runId: "round-run", planId: "second-plan", stepId: "produce",
+      resultId: result.ref.resultId, actorUserId: "owner", conversationId: "round-conversation" }), undefined,
+      "a conversation must not bypass the Round commit boundary");
+    await database.prepare(`INSERT INTO run_round_results(run_id, round_number, plan_id, canonical_revision, result_json, created_at)
+      VALUES ('round-run', 1, 'first-plan', 1, ?, 1)`).run(JSON.stringify(round));
+    assert.equal((await read())?.payload.content, result.payload.content);
+    const tool = createResultTool(repository);
+    const grant = createCapabilityGrant({ actorUserId: "owner", runId: "round-run", planId: "second-plan", stepId: "produce",
+      depth: 0, allowedToolNames: [tool.name], allowedSkillIds: [] });
+    const toolResult = await tool.execute({ grant }, tool.parse({ resultId: result.ref.resultId })) as { content: string };
+    assert.equal(toolResult.content, result.payload.content);
+    assert.equal(await read("other-owner"), undefined);
+    await database.prepare("UPDATE run_round_results SET result_json = ? WHERE run_id = 'round-run'")
+      .run(JSON.stringify({ ...round, steps: [{ ...round.steps[0], assessmentId: "other-assessment" }] }));
+    assert.equal(await read(), undefined, "the Round Result must reference the assessment that published the result");
+    await database.prepare("UPDATE run_round_results SET result_json = ? WHERE run_id = 'round-run'").run(JSON.stringify(round));
+    await database.prepare("UPDATE plans SET input_bindings_json = '[]' WHERE id = 'second-plan'").run();
+    assert.equal(await read(), undefined, "a committed result still needs an explicit binding");
+  } finally { await database.close(); }
+});
+
+test("Steer can reuse an explicitly bound published fact from an archived completed contract", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const result = createRuntimeResult({ kind: "step", producer: { runId: "r", planId: "p", stepId: "old" }, value: "confirmed fact",
+      publication: { status: "published", assessmentRef: "assessment", decision: "approved" } });
+    await insertCurrentPlan(database, { runId: "r", planId: "p", stepId: "new", owner: "owner", conversationId: null, resultId: result.ref.resultId, now: 1 });
+    await database.prepare(`INSERT INTO plan_steps(plan_id, step_id, kind, position, objective, dependencies_json, refinement_state, required_facts_json,
+      skill_ids_json, required_capabilities_json, recommended_tool_names_json, execution_binding_json, success_criteria_json, status, evidence_json)
+      VALUES ('p', 'old', 'leaf', 1, 'old contract', '[]', 'not_refinable', '[]', '[]', '[]', '[]', '{}', '[]', 'completed', ?)`)
+      .run(JSON.stringify({ publishedResult: result }));
+    const repository = new RuntimeResultRepository(database);
+    const read = (actorUserId = "owner") => repository.readAuthorized({ runId: "r", planId: "p", stepId: "new", resultId: result.ref.resultId, actorUserId });
+    assert.equal(await read(), undefined);
+    await new RuntimeActionRepository(database).execute({ runId: "r", planId: "p", kind: "planning", replayPolicy: "safe", deadlineMs: 1000,
+      onDispatched: async action => { await database.prepare("INSERT INTO plan_step_retirements(plan_id, step_id, action_id, reason, retired_at) VALUES ('p', 'old', ?, 'steer', 2)").run(action.id); } }, async () => undefined);
+    assert.equal((await read())?.payload.content, "confirmed fact");
+    assert.equal(await read("other"), undefined);
+    await database.prepare("UPDATE plans SET input_bindings_json = '[]' WHERE id = 'p'").run();
+    assert.equal(await read(), undefined);
+  } finally { await database.close(); }
 });
 
 test("read_result reads only an explicitly bound completed Outcome in the same conversation", async () => {
@@ -327,7 +394,7 @@ async function insertCurrentPlan(database: AppDatabase, input: {
   planId: string;
   stepId: string;
   owner: string;
-  conversationId: string;
+  conversationId: string | null;
   resultId: string;
   now: number;
 }): Promise<void> {

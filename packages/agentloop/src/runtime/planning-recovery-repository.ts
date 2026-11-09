@@ -67,6 +67,14 @@ export class PlanningRecoveryRepository {
       WHERE run_id = ? AND state IN ('prepared', 'waiting', 'resuming')`).run(state, now, runId);
   }
 
+  async resumeInput(runId: string, requestId: string, now: number): Promise<void> {
+    const result = await this.database.prepare(`UPDATE run_planning_recovery
+      SET state = 'resuming', revision = revision + 1, updated_at = ?
+      WHERE run_id = ? AND state = 'waiting' AND request_id = ? AND error_code = 'RUN_INPUT_CLARIFICATION'`)
+      .run(now, runId, requestId);
+    if (result.changes !== 1) throw new AppError("CONFLICT", "Input clarification is no longer actionable", 409);
+  }
+
   async acquireLease(runId: string, token: string, now: number, duration: number): Promise<boolean> {
     const result = await this.database.prepare(`UPDATE run_planning_recovery
       SET lease_token = ?, lease_until = ?, revision = revision + 1, updated_at = ?

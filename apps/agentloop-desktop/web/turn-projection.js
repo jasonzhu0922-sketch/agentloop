@@ -1,11 +1,13 @@
 import { projectAssistantEvent } from './reference/projections/assistant-event-projection.js';
 
+export const artifactsVisible = turn => ['completed', 'failed', 'cancelled'].includes(turn?.status);
+
 // Adapt public local Run/event records, never Router Assignments. Every durable
 // event is projected before display limits are applied; cursors are per Run.
 export function createTurn(run) {
   return { id: run.id, run, revision: 0, text: '', reasoning: '', plan: [], rounds: [], events: [], artifacts: [], lastSeq: 0, status: run.status };
 }
-export function updateTurn(turn, run, incoming = [], artifacts, humanLoop, rounds) {
+export function updateTurn(turn, run, incoming = [], artifacts, humanLoop, rounds, messages) {
   let changed = ['status', 'output', 'finishedAt', 'errorCode', 'modelKey'].some(key => turn.run[key] !== run[key]);
   // Keep stable cards/previews on unchanged polls, but also render artifact-only
   // changes (including an updated file or a process-to-final transition).
@@ -17,9 +19,14 @@ export function updateTurn(turn, run, incoming = [], artifacts, humanLoop, round
     if (!Number.isSafeInteger(event.seq) || event.seq <= turn.lastSeq) continue;
     changed = true;
     turn.lastSeq = event.seq; turn.events.push(event);
+    if (['run.input.accepted', 'run.input.decided'].includes(event.type) && event.data?.message) {
+      const message = event.data.message;
+      turn.inputMessages = [...(turn.inputMessages || []).filter(item => item.id !== message.id), message].sort((a, b) => a.seq - b.seq);
+    }
     // Never expose internal assessment/planning response bodies as a reply.
     if (event.data?.responseVisibility !== 'internal') projectAssistantEvent(turn, event);
   }
+  if (messages !== undefined && JSON.stringify(turn.inputMessages) !== JSON.stringify(messages)) { turn.inputMessages = messages; changed = true; }
   turn.run = run; turn.status = run.status;
   // Current persisted request is authoritative over a replayed waiting event.
   if (humanLoop !== undefined && JSON.stringify(turn.humanLoop) !== JSON.stringify(humanLoop.request)) {

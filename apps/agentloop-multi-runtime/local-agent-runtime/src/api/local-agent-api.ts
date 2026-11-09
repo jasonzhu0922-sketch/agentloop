@@ -223,6 +223,13 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
       }
       const strictRun = url.pathname.match(/^\/v1\/strict-local-runs\/([^/]+)\/([^/]+)$/);
       if (request.method === "GET" && strictRun !== null) return json(response, 200, await service.strictLocalRun(await session(request, service), decodeURIComponent(strictRun[1]), decodeURIComponent(strictRun[2])));
+      const strictMessages = url.pathname.match(/^\/v1\/strict-local-runs\/([^/]+)\/([^/]+)\/messages$/);
+      if (strictMessages && request.method === "GET") return json(response, 200, await service.strictLocalInputMessages(await session(request, service), decodeURIComponent(strictMessages[1]), decodeURIComponent(strictMessages[2])));
+      if (strictMessages && request.method === "POST") {
+        const localSession = await session(request, service), input = await body(request);
+        if (Object.keys(input).some(key => !["requestId", "text"].includes(key))) throw new TypeError("invalid input message");
+        return json(response, 200, await service.submitStrictLocalInput(localSession, decodeURIComponent(strictMessages[1]), decodeURIComponent(strictMessages[2]), { requestId: stringValue(input.requestId, "requestId"), text: stringValue(input.text, "text") }));
+      }
       const strictEvents = url.pathname.match(/^\/v1\/strict-local-runs\/([^/]+)\/([^/]+)\/events$/);
       if (request.method === "GET" && strictEvents !== null) return json(response, 200, await service.strictLocalEvents(await session(request, service), decodeURIComponent(strictEvents[1]), decodeURIComponent(strictEvents[2]), Number(url.searchParams.get("afterSeq") ?? 0)));
       const strictCancel = url.pathname.match(/^\/v1\/strict-local-runs\/([^/]+)\/([^/]+)\/cancel$/);

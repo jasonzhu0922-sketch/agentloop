@@ -47,6 +47,15 @@ export function createRuntimeHostHttpServer(host: RuntimeHostService, options: {
         }
         return json(response, 200, await host.getRun(decodeURIComponent(runMatch[1])));
       }
+      const messagesMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/messages$/);
+      if (messagesMatch && (request.method === "GET" || request.method === "POST")) {
+        if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) return json(response, 401, { error: "runtime_dispatch_unauthorized" });
+        const id = decodeURIComponent(messagesMatch[1]);
+        if (request.method === "GET") return json(response, 200, { messages: await host.inputMessages(id) });
+        const input = readRecord(await readJson(request));
+        if (typeof input.requestId !== "string" || typeof input.text !== "string" || Object.keys(input).some(key => !["requestId", "text"].includes(key))) throw new TypeError("invalid input message");
+        return json(response, 200, { message: await host.submitInput(id, { requestId: input.requestId, text: input.text }) });
+      }
       const roundsMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/rounds$/);
       if (request.method === "GET" && roundsMatch !== undefined && roundsMatch !== null) {
         if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) {
@@ -154,7 +163,8 @@ export function createRuntimeHostHttpServer(host: RuntimeHostService, options: {
       const result = await host.dispatch(envelope);
       return json(response, 202, result);
     } catch (error) {
-      return json(response, 400, { error: error instanceof Error ? error.message : String(error) });
+      const status = error !== null && typeof error === "object" && "status" in error && typeof error.status === "number" && [400, 403, 404, 409, 422].includes(error.status) ? error.status : 400;
+      return json(response, status, { error: error instanceof Error ? error.message : String(error) });
     }
   });
 }

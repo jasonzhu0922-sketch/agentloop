@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { RuntimeEventQueryService } from "../src/runtime/runtime-event-query-service.ts";
+import { RuntimeEventQueryService, publicRunEvent } from "../src/runtime/runtime-event-query-service.ts";
 
 test("public event reads authorize first and remove provider-private reasoning", async () => {
   const authorizations: Array<[string, string]> = [];
@@ -22,6 +22,20 @@ test("public event reads authorize first and remove provider-private reasoning",
 
   const storedEvents = await queries.storedForRun("run-1");
   assert.equal(storedEvents[0]?.data.privateReasoningContent, "provider-state");
+});
+
+test("public snapshots omit echoed runtime evidence and provider delimiters while preserving the durable event", () => {
+  const record = '<runtime_evidence_record source="server" kind="committed_tool_history" encoding="json">\n{"secret":"internal"}\n</runtime_evidence_record>';
+  for (const type of ["assistant.streaming", "assistant.committed"]) {
+    const content = `进展<｜begin▁of▁sentence｜>继续${record}完成`;
+    const event = { seq: 1, type, data: { content }, createdAt: 1 };
+    assert.equal(publicRunEvent(event).data.content, "进展继续完成");
+    assert.equal(event.data.content, content);
+    assert.equal(publicRunEvent({ ...event, data: { content: `进展${record.slice(0, -15)}` } }).data.content, "进展");
+    assert.equal(publicRunEvent({ ...event, data: { content: "进展<runtime_evid" } }).data.content, "进展");
+    assert.equal(publicRunEvent({ ...event, data: { content: "进展<｜begin▁of" } }).data.content, "进展");
+    assert.equal(publicRunEvent({ ...event, data: { content: "普通 <b>HTML</b>" } }).data.content, "普通 <b>HTML</b>");
+  }
 });
 
 test("latest event reads one durable row without requesting the full ledger", async () => {

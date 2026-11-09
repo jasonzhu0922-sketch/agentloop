@@ -173,6 +173,11 @@ export interface TaskSpec {
   readonly memoryProjection?: MemoryProjection;
   /** Server-owned Results handed from the immediately completed Round. */
   readonly roundResultBindings?: readonly RuntimeResultBinding[];
+  /** Server-verified source provenance of bound, assessed earlier Round results. */
+  readonly reusableRoundEvidence?: {
+    readonly kinds: readonly EvidenceKind[];
+    readonly toolSourceIds: readonly string[];
+  };
   /** Server-owned summary of the immediately completed Round. It is context, not completion authority. */
   readonly priorRoundResult?: RoundResultCard;
   /** Canonical delivery targets this Round is allowed to own. */
@@ -543,6 +548,16 @@ export interface PlanProposal {
   readonly selectedSkillRoles?: readonly SelectedSkillRole[];
   readonly selectedSkillIds: readonly string[];
   readonly steps: readonly PlanStepProposal[];
+  /** Explicit current-Round boundary; omission means the full requested target scope. */
+  readonly roundScope?: RoundScope;
+}
+
+export interface RoundScope {
+  readonly kind: "delivery" | "prerequisite";
+  readonly targetIds: readonly string[];
+  readonly purpose: string;
+  readonly completionBoundary: string;
+  readonly continuation: string;
 }
 
 export interface PlanStep extends PlanStepProposal {
@@ -572,6 +587,7 @@ export interface ExecutionPlan {
   readonly canonicalStateRef: CanonicalRunStateRef;
   /** Explicit, persisted Runtime Result inputs selected for this Plan. */
   readonly resultBindings?: readonly RuntimeResultBinding[];
+  readonly roundScope?: RoundScope;
   readonly status: PlanStatus;
   readonly steps: readonly PlanStep[];
   readonly createdAt: number;

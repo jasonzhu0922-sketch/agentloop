@@ -1,3 +1,4 @@
+import type { RuntimeRunInputMessage } from "../../shared/contracts.ts";
 import type { RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRoundHistoryEntry, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments } from "../../shared/contracts.ts";
 import { RuntimeDispatchOutcomeUnknownError } from "../ports/control-plane-contracts.ts";
 import type { ModelInvocation, ModelResponse } from "@zhujun/agentloop";
@@ -52,6 +53,23 @@ export class HttpRuntimeControl implements RuntimeControlPort {
     const body = await response.json() as RuntimeRunStatus & { error?: string };
     if (!response.ok || typeof body.remoteRunId !== "string") throw new Error(body.error ?? `runtime status failed with HTTP ${response.status}`);
     return body;
+  }
+
+  async inputMessages(remoteRunId: string): Promise<readonly RuntimeRunInputMessage[]> {
+    const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/messages`, `${this.endpoint.replace(/\/$/, "")}/`), {
+      headers: this.authorization === undefined ? {} : { authorization: this.authorization },
+    });
+    const body = await response.json() as { messages?: RuntimeRunInputMessage[]; error?: string };
+    if (!response.ok || !Array.isArray(body.messages)) throw Object.assign(new Error(body.error ?? "runtime_input_query_failed"), { statusCode: response.status });
+    return body.messages;
+  }
+  async submitInput(remoteRunId: string, input: { requestId: string; text: string }): Promise<RuntimeRunInputMessage> {
+    const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/messages`, `${this.endpoint.replace(/\/$/, "")}/`), {
+      method: "POST", headers: { "content-type": "application/json", ...(this.authorization === undefined ? {} : { authorization: this.authorization }) }, body: JSON.stringify(input),
+    });
+    const body = await response.json() as { message?: RuntimeRunInputMessage; error?: string };
+    if (!response.ok || body.message === undefined) throw Object.assign(new Error(body.error ?? "runtime_input_rejected"), { statusCode: response.status });
+    return body.message;
   }
 
   async rounds(remoteRunId: string): Promise<readonly RuntimeRoundHistoryEntry[]> {

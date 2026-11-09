@@ -30,6 +30,7 @@ import { runtimeResultBindingsForConversationTurn, type RuntimeResultBinding } f
 import { assertCanonicalDeliveryTargetInventory } from "../runtime/canonical-run-state.ts";
 import { MODEL_CRITERION_BASIS_SCHEMA, goalCriterionBasis, parseModelCriterionBasis } from "./criterion-basis.ts";
 import { EVIDENCE_KINDS } from "./contracts.ts";
+import { ROUND_SCOPE_SCHEMA, parseRoundScope, validateRoundScope } from "./round-scope.ts";
 
 const EVIDENCE_KIND_VALUES = [
   "source_summary",
@@ -89,7 +90,7 @@ const CAVEAT_POLICY_VALUES = [
 // authority that validates it before a model is invoked.
 export const DEFAULT_MAX_PLANNING_TURNS = 4;
 export const MAX_SUPPORTED_PLANNING_TURNS = 64;
-const TARGET_OWNERSHIP_GUIDANCE = "requestedTargets is Runtime-owned and immutable. Bind every canonical delivery target exactly once across leaves, on the leaf that produces or adopts it. Every leaf must include targetIds; use [] for a prerequisite that delivers no user-visible target. Do not invent IDs or rewrite purpose, surface, kind, or format.";
+const TARGET_OWNERSHIP_GUIDANCE = "requestedTargets is Runtime-owned and immutable. With roundScope=null, bind every target in the current allowed scope exactly once across leaves. An explicit delivery roundScope owns only its targetIds. An explicit prerequisite roundScope supports its targetIds without owning any delivery: use fact_acquisition leaves with targetIds: [], source evidence and a concrete completion boundary. Preserve all other global targets as open. Do not invent IDs or rewrite target contracts.";
 const REQUIRED_FACT_TARGET_GUIDANCE = "requiredFacts[].basis.targetIds records which canonical targets a fact supports, not delivery ownership. It may reference targets owned by this leaf or by downstream leaves that depend on it, directly or transitively. A prerequisite with targetIds: [] can reference downstream targets in its facts' basis; do not copy those references into the prerequisite's targetIds.";
 const OUTCOME_LEAF_SCHEMA = {
   type: "object",
@@ -183,10 +184,11 @@ const SUBMIT_OUTCOME_PLAN_TOOL = {
   inputSchema: {
     type: "object",
     additionalProperties: false,
-    required: ["schema", "goal", "shape", "selectedSkillRoles", "leaves"],
+    required: ["schema", "goal", "shape", "selectedSkillRoles", "leaves", "roundScope"],
     properties: {
       schema: { type: "string", enum: ["agentloop.outcomePlan/v2"] },
       goal: { type: "string" },
+      roundScope: ROUND_SCOPE_SCHEMA,
       shape: { type: "string", enum: ["single_leaf", "fact_then_produce", "multi_deliverable", "pipeline", "recovery_patch"] },
       selectedSkillRoles: {
         type: "array",
@@ -339,13 +341,13 @@ export class ModelPlanner implements Planner {
       ],
       contractLines: [
         "Fill the smallest Outcome Plan using agentloop.outcomePlan/v2 so Runtime can start useful work.",
-        "Use the supplied TaskProfile shape as the default shape; only choose a narrower valid shape when the user request is simpler and no required planTopology applies. A supplied planTopology is mandatory and takes precedence over general leaf-count guidance.",
+        "Use the supplied TaskProfile shape as the default. When further planning depends on source facts not yet available, explicitly scope a prerequisite Round with purpose, supported canonical targetIds, completionBoundary and continuation. Plan only assessable source work for this Round; later Rounds will plan from its committed results. Otherwise use roundScope=null or an explicit delivery scope. A required planTopology applies within delivery Rounds.",
         "Use one leaf for ordinary answers/artifacts; split only for reusable source facts.",
-        "When a conversation TaskProfile has shape single_leaf, submit exactly one deliver leaf that owns every conversation target. Gather source evidence inside that leaf; do not create a fact_acquisition-to-deliver pair merely to rewrite the same findings.",
+        "When a conversation TaskProfile has shape single_leaf and no prerequisite Round is necessary, submit exactly one deliver leaf for its owned targets. Gather source evidence inside that leaf; do not split merely to rewrite the same findings.",
         "Plan source work by coverage of each requested fact, not by the first available Tool or Skill. Before selecting capabilities, identify what must be answered and compare it with each source's declared scope and freshness. For multi-fact web research, decompose the goal into claim units such as identity, relationship, date/status, and disputed-claim correction; each unit must have exact entities/aliases and a complete query direction, never a placeholder like 'keywords' or a single token. For lookups, identification, explanations and comparisons alike, bind complementary acquisition when the provider does not establish a requested fact; include that acquisition and the final synthesis in the leaf objective. Do not replace a missing requested fact with a related provider field or a caveat. Keep complementary acquisition in the same conversation deliver leaf, and omit redundant sources when one source covers the request.",
         "In requiredFacts, enumerate the concrete factual answers explicitly required by the user, with their exact concepts, scope and time, before selecting source capabilities. These are answer obligations, not acquisition actions or receipt labels. Use [] when no concrete source-backed facts are requested. Artifact edit instructions and requested output properties are covered by requested_goal acceptance, not new source-backed facts. Every requiredFacts item must include all four fields: id, description, evidenceKinds (a non-empty array of allowed evidence kinds), and basis. A source with narrower scope can provide leads, but cannot redefine a required fact. Choose capabilities that can obtain every required fact; do not plan to satisfy an answer obligation merely by reporting that the first provider lacks its field.",
         "For an open-ended analysis, distinguish the requested analysis from possible research leads. Do not promote inferred background fields, examples, complete inventories, dates, legal identity or corroboration into explicitly requested facts merely because they might enrich the answer. Base a bounded conclusion on relevant available materials; pursue further sources only for a material gap, contradiction, source constraint, freshness, or an explicit verification request.",
-        "Every requiredFact must carry basis metadata referencing canonicalRunState.intent.id, related canonical targetIds, and a rationale. requirement is Runtime-owned: do not submit it; Runtime binds the complete canonicalRunState.intent.userInput after parsing. Resolver userConstraints, Plan paraphrases, and Skill instructions cannot provide provenance.",
+        "Every requiredFact must carry basis metadata with related canonical targetIds and a rationale. intentId and requirement are Runtime-owned: do not submit them; Runtime binds them from canonicalRunState.intent after parsing. Resolver userConstraints, Plan paraphrases, and Skill instructions cannot provide provenance.",
         "Use user_requirement for explicitly requested answers; necessary_condition must explain why the requested result would be invalid without it. Research references, implementation preferences, Skill workflow steps, and receipt labels are execution methods, not new factual answer obligations. They must not expand the user's acceptance conditions.",
         REQUIRED_FACT_TARGET_GUIDANCE,
         "Preserve every fact, role, measure, scope and time requested by the user. Source-provider fields and related concepts are not substitutes for the requested concepts. If a provider does not cover one requested fact, plan the complementary acquisition needed for that fact instead of redefining the deliverable to fit the provider; mark genuinely unavailable facts as gaps without claiming they were answered.",
@@ -456,16 +458,15 @@ export class ModelPlanner implements Planner {
           }),
           ...(planningTask.sources === undefined ? {} : { availableUploadedSourceIds: planningTask.sources.map((source) => source.id) }),
           ...(planningTask.visibleDirectories === undefined ? {} : { availableVisibleDirectoryIds: planningTask.visibleDirectories.map((directory) => directory.id) }),
-          reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(
+          reusableEvidenceKinds: [...(planningTask.reusableRoundEvidence?.kinds ?? []), ...reusableSourceEvidenceKindsForTurn(
             planningTask.conversationWorkingSet,
             canonicalTurnResolution(planningTask),
-          ),
+          )],
+          reusableToolSourceIds: planningTask.reusableRoundEvidence?.toolSourceIds,
           resultBindings: runtimeResultBindingsForPlanningTask(planningTask),
           ...(planningTask.targetScopeIds !== undefined
             ? { targetScopeIds: planningTask.targetScopeIds }
-            : Object.keys(planningTask.canonicalState.targets).length > 1
-              ? { targetScopeIds: [...new Set(proposal.steps.flatMap((step) => step.targetIds ?? []))] }
-              : {}),
+            : {}),
           canonicalState: planningTask.canonicalState,
         });
         await emit?.({
@@ -1049,7 +1050,7 @@ function plannerOutcomePlanAdmissionDirective(
     "Every dependsOn entry must name a leaf id present in the current submit_outcome_plan.leaves array. Do not reference leaf ids from earlier rejected attempts.",
     TARGET_OWNERSHIP_GUIDANCE,
     REQUIRED_FACT_TARGET_GUIDANCE,
-    "Every requiredFact must retain id, description, evidenceKinds, and basis when correcting the plan. Do not submit basis.requirement: Runtime binds it to the complete canonicalRunState.intent.userInput. Resolver userConstraints, Plan paraphrases, and Skill instructions are not provenance. Explain any necessary preservation condition in basis.rationale using kind necessary_condition.",
+    "Every requiredFact must retain id, description, evidenceKinds, and basis when correcting the plan. Do not submit basis.intentId or basis.requirement: Runtime binds them from canonicalRunState.intent. Resolver userConstraints, Plan paraphrases, and Skill instructions are not provenance. Explain any necessary preservation condition in basis.rationale using kind necessary_condition.",
     "A terminal leaf that only proposes options or waits for Human-in-the-Loop cannot satisfy a requested artifact. Keep the artifact-producing obligation in the same resumed leaf or add a dependent production leaf with observable artifact evidence.",
     "If a Skill is only a style/reference fallback and is not needed for execution, omit it from selectedSkillRoles instead of selecting it as support.",
     "Keep QA, verification, readback, and local acceptance inside the producing leaf unless TaskProfile.planShape is recovery_patch.",
@@ -1062,7 +1063,7 @@ function plannerOutcomePlanArgumentsDirective(call: ModelToolCall, planningError
       "Your previous submit_outcome_plan call violated the tool's argument schema before Runtime Admission.",
       `Validation error: ${summarizePlanningError(planningError.message)}.`,
       "Submit exactly one corrected submit_outcome_plan call for the same user goal, preserving all required fields in the tool schema.",
-      "Each requiredFacts item must include id, description, evidenceKinds (a non-empty array of allowed evidence kinds), and basis (kind, intentId, targetIds, rationale). requirement is omitted because Runtime binds it. Do not remove sibling fields when repairing basis.",
+      "Each requiredFacts item must include id, description, evidenceKinds (a non-empty array of allowed evidence kinds), and basis (kind, targetIds, rationale). intentId and requirement are omitted because Runtime binds them. Do not remove sibling fields when repairing basis.",
       TARGET_OWNERSHIP_GUIDANCE,
       REQUIRED_FACT_TARGET_GUIDANCE,
       "Use requiredFacts: [] only when the request contains no concrete source-backed factual answers; requested artifact properties remain covered by requested_goal acceptance. Do not remove genuine requested facts to bypass validation.",
@@ -1462,7 +1463,7 @@ function planningRuntimeContext(
 function submitOutcomePlanToolForTask(task: TaskSpec): ModelInvocation["tools"][number] {
   const taskProfile = planningTaskProfile(task);
   const singleConversationDelivery = taskProfile.planShape === "single_leaf"
-    && planningTaskIntent(task).deliverySurface === "conversation";
+    && planningTaskIntent(task).deliverySurface === "conversation" && task.responseOnly === true;
   const allowedCapabilityIds = planningCapabilitiesForTask(task).map((capability) => capability.id).sort();
   const allowedArtifactTargetIds = Object.keys(task.canonicalState.targets).sort();
   const leafSchema = {
@@ -1824,9 +1825,22 @@ function summarizePlanningError(message: string): string {
   return message.replace(/\s+/g, " ").trim().slice(0, 220);
 }
 
+function roundScopeProposal(value: unknown): Pick<PlanProposal, "roundScope"> {
+  const roundScope = parseRoundScope(value);
+  return roundScope === undefined ? {} : { roundScope };
+}
+
 function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): void {
   const taskIntent = planningTaskIntent(task);
-  assertRequiredPlanTopology(proposal, planningTaskProfile(task).planTopology);
+  const scope = validateRoundScope(proposal, task.canonicalState, task.targetScopeIds);
+  if (scope?.kind === "prerequisite") {
+    if (task.responseOnly === true || conversationResultInput(task) !== undefined
+      || isUploadedArtifactTransformationTask(task, taskIntent) || conversationArtifactTransformationTarget(task) !== undefined) {
+      throw new AppError("PLANNING_ERROR", "This task consumes a bound result or edits an existing artifact; a research-only Round cannot replace that work", 422);
+    }
+    return;
+  }
+  if (scope === undefined) assertRequiredPlanTopology(proposal, planningTaskProfile(task).planTopology);
   const priorResultMaterialization = conversationResultInput(task) !== undefined
     && taskIntent.deliverySurface === "workspace_artifact";
   if (priorResultMaterialization && proposal.steps.some((step) => step.role === "fact_acquisition")) {
@@ -1838,6 +1852,7 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
   }
   if (
     taskIntent.deliverySurface === "workspace_artifact"
+    && (scope === undefined || scope.targetIds.some(id => task.canonicalState.targets[id]?.surface === "workspace_artifact"))
     && proposal.steps.every((step) => !stepCanProduceObservableArtifact(step))
   ) {
     throw new AppError(
@@ -1979,6 +1994,9 @@ function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): P
     );
     const semanticEvidenceNormalized = normalizeModelEvidenceGates(sourceMaterializationNormalized, task);
     const sourcePolicyNormalized = normalizeProgressiveSourceContract(semanticEvidenceNormalized, taskProfile, task);
+    if (proposal.roundScope?.kind === "prerequisite") {
+      return normalizeResultSuccessCriteria(sourcePolicyNormalized, task, taskProfile);
+    }
     const deliveryNormalized = normalizeConversationOnlyTerminalStep(sourcePolicyNormalized, terminalStepIds, taskProfile, task);
     const artifactNormalized = normalizeWorkspaceArtifactTerminalStep(deliveryNormalized, terminalStepIds, taskProfile, task);
     return normalizeResultSuccessCriteria(artifactNormalized, task, taskProfile);
@@ -2662,6 +2680,7 @@ function parseOutcomePlanProposal(call: ModelToolCall, task: TaskSpec): PlanProp
       goal: requireString(value.goal, "goal", { max: 20_000 }),
       shape,
       selectedSkillRoles,
+      ...roundScopeProposal(value.roundScope),
       selectedSkillIds: [...new Set(selectedSkillRoles.map((selection) => selection.skillId))],
       steps: value.leaves.map((item, index) => parseOutcomeLeaf(item, index, task)),
     };

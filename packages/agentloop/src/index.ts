@@ -367,3 +367,6 @@ export {
   requireString,
   requireStringArray,
 } from "./shared/validation.ts";
+
+export { RunInputRepository } from "./runtime/run-input-repository.ts";
+export type { RunInputMessage, RunInputStatus } from "./runtime/run-input-repository.ts";

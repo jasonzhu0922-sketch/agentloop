@@ -571,3 +571,21 @@
 .human-loop fieldset:disabled { opacity: .65; }
 .human-loop-feedback { margin-bottom: 0; font-size: 13px; }
 .human-loop-feedback:empty { display: none; }
+
+/* Drafts stay adjacent to the composer; accepted inputs live in the transcript. */
+.steer-queue { display: grid; gap: 5px; margin: 0 0 8px; width: 100%; min-width: 0; max-height: 180px; overflow-y: auto; }
+.steer-queue[hidden] { display: none; }
+.steer-queue-label { padding: 0 3px; color: var(--text-3); font-size: 11px; }
+.steer-queue-item { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-2); color: var(--text); }
+.steer-queue-item textarea { display: block; width: 100%; min-width: 0; box-sizing: border-box; resize: none; border: 0; padding: 3px 2px; background: transparent; color: inherit; font: inherit; font-size: 13px; line-height: 20px; }
+.steer-queue-item.is-editing { grid-template-columns: minmax(0,1fr); }
+.steer-queue-item.is-editing textarea { resize: vertical; }
+.steer-queue-actions { display: flex; justify-content: flex-end; align-items: center; gap: 4px; }
+.steer-queue-actions button { border: 0; border-radius: 5px; padding: 5px 7px; background: transparent; color: var(--text-2); font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.steer-queue-actions button:hover:not(:disabled) { background: var(--bg-3); }
+.steer-queue-actions button:first-child { color: var(--brand); background: var(--brand-soft); font-weight: 600; }
+.steer-queue-actions button:disabled { opacity: .5; cursor: default; }
+.steer-message { margin: 8px 0; padding: 8px 10px; border-left: 2px solid var(--brand); background: var(--bg-2); border-radius: 7px; font-size: 13px; overflow-wrap: anywhere; }
+.steer-message-user, .steer-message-decision { white-space: pre-wrap; }
+.steer-message small { display: block; color: var(--text-3); font-size: 11px; margin-top: 3px; }
+.steer-message-decision { margin-top: 5px; }

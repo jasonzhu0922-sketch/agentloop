@@ -12,6 +12,7 @@ import {
 import type { ArtifactTarget, ConversationTurnResolution, ConversationWorkingSet, EvidenceContract, EvidenceKind, ExecutionPlan, PlanProposal, PlanStep, PlanningCapability, PlanningToolSummary, RefinementState, RequiredFact, StepExecutionBinding, SuccessCriterion } from "./contracts.ts";
 import { parseRuntimeResultBinding, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
 import { admitCriterionBasis, assertCriterionBasis } from "./criterion-basis.ts";
+import { validateRoundScope } from "./round-scope.ts";
 import {
   createStepExecutionBinding,
   unknownUploadedSourceIds,
@@ -89,6 +90,7 @@ export function admitPlan(input: {
   availableVisibleDirectoryIds?: readonly string[];
   /** Accepted evidence canonically bound to the resolved prior Run. */
   reusableEvidenceKinds?: readonly EvidenceKind[];
+  reusableToolSourceIds?: readonly string[];
   /** Server-validated Runtime Result inputs for this new Plan. */
   resultBindings?: readonly RuntimeResultBinding[];
   /** Delivery targets owned by this Round. Omit for the initial whole-goal Plan. */
@@ -101,10 +103,13 @@ export function admitPlan(input: {
   assertCanonicalDeliveryTargetInventory(input.canonicalState);
   const taskSemantics = input.canonicalState.intent.understanding;
   const allCanonicalTargets = Object.values(input.canonicalState.targets);
-  const targetScope = input.targetScopeIds === undefined
+  const roundScope = validateRoundScope(input.proposal, input.canonicalState, input.targetScopeIds);
+  const ownedTargetIds = roundScope === undefined ? input.targetScopeIds
+    : roundScope.kind === "prerequisite" ? [] : roundScope.targetIds;
+  const targetScope = ownedTargetIds === undefined
     ? allCanonicalTargets
-    : allCanonicalTargets.filter((target) => input.targetScopeIds!.includes(target.targetId));
-  if (input.targetScopeIds !== undefined && targetScope.length !== new Set(input.targetScopeIds).size) {
+    : allCanonicalTargets.filter((target) => ownedTargetIds.includes(target.targetId));
+  if (ownedTargetIds !== undefined && targetScope.length !== new Set(ownedTargetIds).size) {
     reject("Plan target scope contains unknown canonical delivery target(s)");
   }
   const canonicalTargets = targetScope;
@@ -210,7 +215,7 @@ export function admitPlan(input: {
       );
     }
     const targetIds = normalizeTargetIdsForStep(step, canonicalTargets);
-    const relatedTargetIds = [...new Set([ ...targetIds, ...proposal.steps
+    const relatedTargetIds = [...new Set([ ...targetIds, ...(roundScope?.kind === "prerequisite" ? roundScope.targetIds : []), ...proposal.steps
       .filter((candidate) => dependsOnStep(candidate.id, step.id, proposal.steps))
       .flatMap((candidate) => normalizeTargetIdsForStep(candidate, canonicalTargets)) ])];
     for (const fact of requiredFacts) {
@@ -261,10 +266,14 @@ export function admitPlan(input: {
       stepTaskIntent,
       fileProducingStep && artifactAcceptanceAvailable,
     );
-    const completionCriteria = ensureArtifactDeliverySuccessCriteria(
+    const completionCriteria = [...ensureArtifactDeliverySuccessCriteria(
       normalizeCompletionSuccessCriteria(step.role, step.successCriteria, stepTaskIntent),
       completionEvidenceContract,
-    );
+    )];
+    if (roundScope?.kind === "prerequisite") completionCriteria.push({
+      id: "round_completion", description: `${roundScope.purpose}: ${roundScope.completionBoundary}. Preserve sources and unresolved questions for ${roundScope.continuation}.`,
+      source: "planner", verification: "model_judged", blocking: true,
+    });
     const targetCriteria = deliveryTargetSuccessCriteria(targetIds, canonicalTargets);
     normalizeCompletionCapabilities(step.role, requiredCapabilities, stepTaskIntent);
     const criteria: SuccessCriterion[] = [...completionCriteria, ...targetCriteria].map((criterion) => {
@@ -380,9 +389,9 @@ export function admitPlan(input: {
 
   const admittedSteps = normalizeDependencyEvidenceReuse(steps);
   assertDeliveryTargetCoverage(admittedSteps, canonicalTargets);
-  assertArtifactTargetCoverage(admittedSteps, taskSemantics, input.targetScopeIds);
+  assertArtifactTargetCoverage(admittedSteps, taskSemantics, ownedTargetIds);
   assertStructuredCapabilitiesMatchTaskSemantics(admittedSteps, taskSemantics);
-  assertTerminalArtifactDelivery(admittedSteps, taskIntent);
+  if (roundScope?.kind !== "prerequisite" && canonicalTargets.some(target => target.surface === "workspace_artifact")) assertTerminalArtifactDelivery(admittedSteps, taskIntent);
   assertRequiredSourceGrounding(
     admittedSteps,
     { evidenceDemand: taskIntent.sourceNeed },
@@ -413,7 +422,7 @@ export function admitPlan(input: {
   }
   const requiredToolSourceIds = new Set(canonicalRequiredToolSourceIds);
   if (requiredToolSourceIds.size > 0) {
-    const boundToolSourceIds = new Set(admittedSteps.flatMap((step) => step.executionBinding.requiredToolSourceIds ?? []));
+    const boundToolSourceIds = new Set([...admittedSteps.flatMap((step) => step.executionBinding.requiredToolSourceIds ?? []), ...(input.reusableToolSourceIds ?? [])]);
     const missingToolSourceIds = [...requiredToolSourceIds].filter((sourceId) => !boundToolSourceIds.has(sourceId));
     if (missingToolSourceIds.length > 0) {
       reject(`Plan does not bind user-required ToolSource(s): ${missingToolSourceIds.join(", ")}`);
@@ -428,6 +437,7 @@ export function admitPlan(input: {
     version: 1,
     goal: proposal.goal,
     selectedSkillIds,
+    ...(roundScope === undefined ? {} : { roundScope }),
     canonicalStateRef: canonicalRunStateRef(input.canonicalState),
     ...(input.resultBindings === undefined || input.resultBindings.length === 0 ? {} : { resultBindings: input.resultBindings }),
     status: "admitted",

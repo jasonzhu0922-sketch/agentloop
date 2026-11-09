@@ -1424,6 +1424,41 @@ test("failed compaction preserves the accepted summary, epoch, and newly acquire
   assert.equal(new Set(requestIds).size, requestIds.length);
 });
 
+test("replacement compaction budgets the new summary without double counting the old summary", async () => {
+  const events: RuntimeEvent[] = [];
+  let calls = 0;
+  const assembler = new ContextAssembler({
+    runId: "replacement-summary-budget",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "authority" },
+    policy: { outputReserveTokens: 2_000, safetyMarginTokens: 1_000 },
+    model: {
+      limits: { contextWindowTokens: 20_000, maxOutputTokens: 4_000 },
+      estimateInputTokens: (request) => {
+        const context = request.runtimeContext?.content ?? "";
+        const base = context.includes("PRESSURE") ? 14_500 : 100;
+        const summary = context.includes("OLD_SUMMARY") ? 2_500 : context.includes("NEW_SUMMARY") ? 300 : 0;
+        return base + summary + request.messages.length * 3_000;
+      },
+      complete: async (request) => {
+        calls += 1;
+        if (calls === 2) assert.match(request.messages[0].content, /OLD_SUMMARY/);
+        return { content: structuredSummary(calls === 1 ? "OLD_SUMMARY" : "NEW_SUMMARY"), toolCalls: [], finishReason: "stop" };
+      },
+    },
+    emit: (event) => { events.push(event); },
+  });
+  const messages: ModelMessage[] = [{ role: "user", content: "original evidence" }];
+  assert.equal(await assembler.forceCompactForCompletionRepair(messages, []), true);
+  assembler.setRuntimeDirective("PRESSURE");
+  messages.push({ role: "assistant", content: "new evidence" });
+  assert.equal(await assembler.forceCompactForCompletionRepair(messages, []), true);
+  assert.match(assembler.contextSummary!, /NEW_SUMMARY/);
+  const started = events.filter((event) => event.type === "context.compaction.started");
+  assert.equal(started[1].data.retainedTokens, 14_500);
+  assert.equal((await assembler.assemble(messages, [])).contextEpoch, 2);
+});
+
 test("compaction rejects a summary whose actual projected invocation exceeds the budget without committing it", async () => {
   const events: RuntimeEvent[] = [];
   const assembler = new ContextAssembler({
@@ -1432,7 +1467,7 @@ test("compaction rejects a summary whose actual projected invocation exceeds the
     runtimeContext: { phase: "execution", content: "authority" },
     model: {
       limits: { contextWindowTokens: 128_000, maxOutputTokens: 16_384 },
-      estimateInputTokens: (request) => request.runtimeContext?.content.includes("<structured_summary>")
+      estimateInputTokens: (request) => request.runtimeContext?.content.includes("complete summary")
         ? 120_000 : 100 + request.messages.reduce((total, message) => total + estimateTextTokens(message.content), 0),
       complete: async () => ({ content: structuredSummary("complete summary"), toolCalls: [], finishReason: "stop" }),
     },

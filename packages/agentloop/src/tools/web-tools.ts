@@ -530,7 +530,8 @@ async function searchViaEndpoint(
       signal: controller.signal,
     });
     if (!response.ok) {
-      throw badRequest(`Search endpoint returned HTTP ${response.status}`);
+      const reason = await searchEndpointErrorReason(response, options.searchApiKey);
+      throw badRequest(`Search endpoint returned HTTP ${response.status}${reason === undefined ? "" : `: ${reason}`}`);
     }
     const { bytes, truncated } = await readBoundedBytes(response, MAX_FETCH_BYTES);
     if (truncated) throw new AppError("TOOL_EXECUTION_ERROR", "Search response exceeded the readable byte limit", 422);
@@ -547,6 +548,31 @@ async function searchViaEndpoint(
     );
   } finally {
     clearTimeout(timer);
+  }
+}
+
+async function searchEndpointErrorReason(response: Response, apiKey: string | undefined): Promise<string | undefined> {
+  try {
+    const { bytes, truncated } = await readBoundedBytes(response, 8_192);
+    if (truncated) return undefined;
+    const decoded = decodeWebText(bytes, response.headers.get("content-type") ?? undefined);
+    if (decoded.decoding.lossy) return undefined;
+    const payload: unknown = JSON.parse(decoded.text);
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+    const record = payload as Record<string, unknown>;
+    const nested = record.error !== null && typeof record.error === "object" && !Array.isArray(record.error)
+      ? record.error as Record<string, unknown> : undefined;
+    const message = [record.message, nested?.message, typeof record.error === "string" ? record.error : undefined]
+      .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+    if (message === undefined) return undefined;
+    const redacted = (apiKey ? message.split(apiKey).join("[REDACTED]") : message)
+      .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
+      .replace(/https?:\/\/[^\s]+/gi, "[URL]")
+      .replace(/[\u0000-\u001f\u007f]+/g, " ")
+      .trim();
+    return redacted.length === 0 ? undefined : redacted.slice(0, 500);
+  } catch {
+    return undefined;
   }
 }
 

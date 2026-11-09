@@ -21,7 +21,7 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
   return {
     name: RESULT_READER_NAME,
     description: [
-      "Read exact values from a committed Tool result, an assessed dependency Step result, or an explicitly bound completed Run result through one opaque Runtime result ref.",
+      "Read exact values from a committed Tool result, an assessed dependency Step result, an explicitly bound earlier Round result, or an explicitly bound completed Run result through one opaque Runtime result ref.",
       "Pass resultId from agentloop.resultRef/v1; never supply a filesystem path or digest.",
       "For JSON results, use a pointer rooted in the persisted result envelope and optional array offset/limit. For agentloop.jsonRead/v1, use the returned resultPointer such as /queries/0/value; the displayed sourcePointer belongs to the original file and must not be passed to read_result. Omit pointer for a bounded serialized character window. If a pointer is accidentally sent for a text result, Runtime returns the exact text window with pointerApplied=false and a repair diagnostic; do not retry another pointer.",
     ].join(" "),

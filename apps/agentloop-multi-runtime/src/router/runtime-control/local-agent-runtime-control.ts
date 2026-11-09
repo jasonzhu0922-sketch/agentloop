@@ -58,6 +58,9 @@ export class LocalAgentRuntimeControl {
     return {
       dispatch: (envelope) => rpc("dispatch", envelope),
       models: () => rpc("models", {}),
+      submitInput: (remoteRunId, input) => rpc("submitInput", { remoteRunId, input }),
+      inputMessages: (remoteRunId) => this.rpcRead(runtimeId, "inputMessages", { remoteRunId }),
+      rounds: (remoteRunId) => this.rpcRead(runtimeId, "rounds", { remoteRunId }),
       getRun: (remoteRunId) => rpc("getRun", { remoteRunId }),
       events: (remoteRunId, afterSeq) => rpc("events", { remoteRunId, afterSeq }),
       latestEvent: (remoteRunId) => rpc("latestEvent", { remoteRunId }),
@@ -122,7 +125,7 @@ export class LocalAgentRuntimeControl {
       clearTimeout(pending.timer);
       state.pending.delete(message.messageId as string);
       if (message.ok === true) pending.resolve(message.result);
-      else pending.reject(new Error(typeof message.error === "string" ? message.error : "local_runtime_rpc_failed"));
+      else pending.reject(Object.assign(new Error(typeof message.error === "string" ? message.error : "local_runtime_rpc_failed"), { statusCode: typeof message.statusCode === "number" ? message.statusCode : 400 }));
       return;
     }
     if (message.type === "agent.hello") {

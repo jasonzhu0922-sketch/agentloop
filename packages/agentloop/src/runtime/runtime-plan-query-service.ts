@@ -16,6 +16,7 @@ export interface RuntimePlanProjection {
 }
 
 export interface RuntimeHostPlanProjection {
+  readonly roundScope?: ExecutionPlan["roundScope"];
   readonly state: RuntimePlanProjection["state"];
   readonly id: string;
   readonly version: number;
@@ -91,6 +92,7 @@ export class RuntimePlanQueryService {
     const detail = await this.read(actorUserId, runId);
     return {
       state: detail.state, id: detail.plan.id, version: detail.plan.version, status: detail.plan.status,
+      ...(detail.plan.roundScope === undefined ? {} : { roundScope: detail.plan.roundScope }),
       goal: detail.plan.goal, selectedSkillIds: detail.plan.selectedSkillIds,
       steps: detail.plan.steps.filter((step) => step.retiredAt === undefined).map((step) => ({
         id: step.id, status: step.status, objective: step.objective, dependencies: step.dependencies,

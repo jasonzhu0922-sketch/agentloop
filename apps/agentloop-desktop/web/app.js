@@ -1,7 +1,8 @@
+import { createSteerDrafts, createSteerQueueView } from './reference/ui/steer-queue.js';
 import { createComposerPreferences } from './composer-preferences.js';
 import { createArtifactWorkspace } from './artifact-workspace.js';
 import { installCapabilitySettings } from './capability-settings.js';
-import { createTurn, updateTurn } from './turn-projection.js';
+import { artifactsVisible, createTurn, updateTurn } from './turn-projection.js';
 import { readRunUpdate } from './run-polling.js';
 import { createConversationView } from './conversation.js';
 import { autoResizeComposerInput, resetComposerInput, shouldSubmitComposerOnKeydown } from './reference/ui/composer-input.js';
@@ -12,7 +13,7 @@ let csrf; let conversationId; let activeRun; let pending; let selectedSources = 
 let conversationRuntimeLocked = false; let conversationPersisted = false;
 let generation = 0; let selectedRunId; let cancelling = false;
 let locked = true; let operationLocked = true; const turns = new Map(); let orderedRunIds = [];
-let PENDING_KEY; let preferences;
+let PENDING_KEY; let ACTIVE_KEY; let preferences; let steerAccount; let steerQueue; let steerScope;
 const status = (message, error = false) => { const target = element('status'); target.textContent = message; target.hidden = !message; target.className = `composer-status${error ? ' error' : ''}`; };
 function node(tag, className, text) {
   const result = document.createElement(tag); result.className = className;
@@ -30,7 +31,7 @@ function renderTurns(forceBottom = false) {
 function renderDetails() {
   const turn = turns.get(selectedRunId);
   element('events').textContent = turn?.events.slice(-200).map(event => `${event.seq} ${event.type} ${JSON.stringify(event.data)}`).join('\n') || '尚无事件';
-  artifactWorkspace.render(turn, runtimeId || 'desktop-default');
+  artifactWorkspace.render(turn && !artifactsVisible(turn) ? { ...turn, artifacts: [] } : turn, runtimeId || 'desktop-default');
 }
 function details(open) {
   element('details').hidden = !open; element('workspace').classList.toggle('artifact-open', open);
@@ -55,13 +56,29 @@ async function api(path, body) {
   }
   return data;
 }
+function renderSteerQueue() {
+  if (!steerAccount || !conversationId) return;
+  const scope = [steerAccount, runtimeId || 'desktop-default', conversationId];
+  const key = JSON.stringify(scope);
+  if (key !== steerScope) {
+    steerScope = key;
+    steerQueue = createSteerQueueView({ container: element('steer-queue'), drafts: createSteerDrafts(localStorage, scope),
+      getRunId: () => activeRun,
+      submit: async (id, input) => (await api(`/api/runs/${encodeURIComponent(id)}/messages`, input)).message,
+      read: async id => (await api(`/api/runs/${encodeURIComponent(id)}/messages`)).messages,
+      onAccepted: messages => { for (const message of messages) { const turn = turns.get(message.runId); if (turn) { turn.inputMessages = [...(turn.inputMessages || []).filter(item => item.id !== message.id), message].sort((a, b) => a.seq - b.seq); turn.revision++; } } renderTurns(true); },
+      onMoveToComposer: text => { element('message').value = text; autoResizeComposerInput(element('message')); element('message').focus(); },
+      onError: error => status(`Steer 未确认：${error.message}。消息保留在队列中。`, true),
+    });
+  } else steerQueue.render();
+}
 function busy(value) {
   operationLocked = value; locked = value || Boolean(activeRun);
-  element('send').disabled = locked; element('message').disabled = locked; element('model').disabled = locked;
-  element('cancel').disabled = !activeRun || cancelling; element('cancel').hidden = !activeRun; element('send').hidden = Boolean(activeRun);
+  element('send').disabled = value; element('message').disabled = value; element('model').disabled = locked;
+  element('cancel').disabled = !activeRun || cancelling; element('cancel').hidden = !activeRun; element('send').hidden = false; element('send').title = activeRun ? '加入待处理队列' : '发送';
   element('file').disabled = locked; element('upload-file').disabled = locked;
   element('new-conversation').disabled = value;
-  updateRuntimePicker();
+  updateRuntimePicker(); renderSteerQueue();
   for (const checkbox of element('run-connectors').querySelectorAll('input')) checkbox.disabled = locked;
   for (const button of element('conversations').querySelectorAll('button')) button.disabled = value;
 }
@@ -183,11 +200,11 @@ async function transcript(token = generation) {
   // projector handles reconnect, history, and incremental running updates.
   const hydrated = await Promise.all(runs.map(async run => {
     const turn = createTurn(decorateRun(run));
-    const [{ events }, { artifacts }, { rounds }] = await Promise.all([
-      api(`/api/runs/${encodeURIComponent(run.id)}/events`), api(`/api/runs/${encodeURIComponent(run.id)}/artifacts`), api(`/api/runs/${encodeURIComponent(run.id)}/rounds`),
+    const [{ events }, { artifacts }, { rounds }, { messages }] = await Promise.all([
+      api(`/api/runs/${encodeURIComponent(run.id)}/events`), api(`/api/runs/${encodeURIComponent(run.id)}/artifacts`), api(`/api/runs/${encodeURIComponent(run.id)}/rounds`), api(`/api/runs/${encodeURIComponent(run.id)}/messages`),
     ]);
     const humanLoop = run.status === 'running' ? await api(`/api/runs/${encodeURIComponent(run.id)}/human-loop/current`) : {};
-    return updateTurn(turn, decorateRun(run), events, artifacts, humanLoop, rounds);
+    return updateTurn(turn, decorateRun(run), events, artifacts, humanLoop, rounds, messages);
   }));
   if (token !== generation) return;
   turns.clear(); for (const turn of hydrated) turns.set(turn.id, turn);
@@ -200,9 +217,10 @@ async function watch(id, token) {
   try {
     while (token === generation) {
       const turn = turns.get(id); if (!turn) break;
-      const { run, events, artifacts, rounds, humanLoop } = await readRunUpdate(api, turn);
+      const { run, events, artifacts, rounds, humanLoop, messages } = await readRunUpdate(api, turn);
       if (token !== generation) return;
-      updateTurn(turn, decorateRun(run), events, artifacts, humanLoop, rounds);
+      updateTurn(turn, decorateRun(run), events, artifacts, humanLoop, rounds, messages);
+      steerQueue?.reconcile(turn.inputMessages || []);
       renderTurns(); if (selectedRunId === id) renderDetails();
       if (run.status !== 'running') {
         await conversations(); break;
@@ -239,6 +257,7 @@ async function selectConversation(id, conversationScope) {
   status('');
   const token = ++generation; activeRun = undefined; cancelling = false; conversationId = id; pending = undefined; selectedSources = [];
   sessionStorage.removeItem(PENDING_KEY);
+  sessionStorage.setItem(ACTIVE_KEY, JSON.stringify({ conversationId: id, runtimeId }));
   restoreConnectors();
   resetAttachments(); turns.clear(); orderedRunIds = []; selectedRunId = undefined; view.clear(); renderDetails();
   try {
@@ -251,8 +270,13 @@ async function selectConversation(id, conversationScope) {
 }
 element('composer').onsubmit = async event => {
   event.preventDefault();
-  if (locked) return;
-  const input = element('message').value; const modelKey = element('model').value;
+  if (operationLocked) return;
+  const input = element('message').value;
+  if (activeRun) {
+    if (!input.trim()) return;
+    try { renderSteerQueue(); steerQueue.add(input); element('message').value = ''; resetComposerInput(element('message')); status('已加入队列；点击 Steer 后提交给当前任务。'); } catch (error) { status(error.message, true); }
+    return;
+  } const modelKey = element('model').value;
   if (!input.trim() || !modelKey) { status('请输入消息，并显式选择执行模型。', true); return; }
   const connectorConnectionIds = [...element('run-connectors').querySelectorAll('input:checked')].map(input => input.value);
   const payload = { input, modelKey, ...(conversationId ? { conversationId } : {}), uploadedSourceIds: [...selectedSources], connectorConnectionIds };
@@ -267,7 +291,7 @@ element('composer').onsubmit = async event => {
     view.submitted();
     status('');
     sessionStorage.removeItem(PENDING_KEY);
-    pending = undefined; conversationId = run.conversationId; conversationRuntimeLocked = true; conversationPersisted = true; selectedSources = []; resetAttachments();
+    pending = undefined; conversationId = run.conversationId; sessionStorage.setItem(ACTIVE_KEY, JSON.stringify({ conversationId, runtimeId })); conversationRuntimeLocked = true; conversationPersisted = true; selectedSources = []; resetAttachments();
     element('message').value = ''; resetComposerInput(element('message')); generation++;
     const decoratedRun = decorateRun(run);
     turns.set(run.id, updateTurn(createTurn(decoratedRun), decoratedRun)); if (!orderedRunIds.includes(run.id)) orderedRunIds.push(run.id);
@@ -286,6 +310,7 @@ element('cancel').onclick = async () => {
   catch (error) { if (token === generation) { cancelling = false; busy(operationLocked); status(error.message, true); } }
 };
 function resetConversation() {
+  sessionStorage.removeItem(ACTIVE_KEY);
   generation++; activeRun = undefined; cancelling = false; conversationRuntimeLocked = false; conversationPersisted = false; conversationId = crypto.randomUUID(); pending = undefined; selectedSources = [];
   sessionStorage.removeItem(PENDING_KEY);
   restoreConnectors();
@@ -373,7 +398,7 @@ element('logout').onclick = async () => {
   } catch (error) { status(`退出结果未确认：${error.message}`, true); button.disabled = false; }
 };
 element('message').onkeydown = event => {
-  if (shouldSubmitComposerOnKeydown(event) && !locked) { event.preventDefault(); element('composer').requestSubmit(); }
+  if (shouldSubmitComposerOnKeydown(event) && !operationLocked) { event.preventDefault(); element('composer').requestSubmit(); }
 };
 element('message').oninput = () => autoResizeComposerInput(element('message'));
 for (const button of document.querySelectorAll('.suggestion')) button.onclick = () => { if (!locked) { element('message').value = button.textContent; autoResizeComposerInput(element('message')); element('message').focus(); } };
@@ -390,6 +415,8 @@ busy(true);
 try {
   const session = await api('/api/session'); csrf = session.csrfToken;
   PENDING_KEY = `agentloop-desktop-pending:${session.accountId}`;
+  ACTIVE_KEY = `agentloop-desktop-active:${session.accountId}`;
+  steerAccount = session.accountId;
   preferences = createComposerPreferences(localStorage, session.accountId);
   conversationId = crypto.randomUUID();
   element('account-identity').textContent = session.user.email;
@@ -411,6 +438,10 @@ try {
     status('已恢复一条未确认的发送。保持消息和模型不变，点击发送将复用原请求 ID。');
   }
   busy(false);
+  if (!saved) {
+    const active = JSON.parse(sessionStorage.getItem(ACTIVE_KEY) || 'null');
+    if (typeof active?.conversationId === 'string' && typeof active?.runtimeId === 'string') await selectConversation(active.conversationId, active.runtimeId);
+  }
 } catch (error) {
   busy(true);
   element('account-identity').textContent = '云端账号确认失败';

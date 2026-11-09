@@ -1,3 +1,4 @@
+import { RunInputRepository } from "./run-input-repository.ts";
 import type { SqlConnection } from "../storage/connection.ts";
 import { upsertSql } from "../storage/dialect-sql.ts";
 import { appendRunEvent } from "../storage/repositories/run-event-sequencer.ts";
@@ -159,6 +160,7 @@ export class RuntimeActionRepository {
     const deadlineAt = now + input.deadlineMs;
     const metadata = input.metadata ?? {};
     await this.database.transaction(async () => {
+      if (input.kind === "tool_call") await new RunInputRepository(this.database).assertDrained(input.runId);
       const run = await this.database.prepare("SELECT status FROM runs WHERE id = ?").get(input.runId) as { status: string } | undefined;
       if (run === undefined || run.status !== "running") {
         throw new AppError("CONFLICT", "Cannot dispatch an Action for a terminal Run", 409);

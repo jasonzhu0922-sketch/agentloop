@@ -1,3 +1,5 @@
+import { parseRoundScope } from "../planning/round-scope.ts";
+import type { RoundScope } from "../planning/contracts.ts";
 import { AppError } from "../shared/errors.ts";
 import type { SqlConnection } from "../storage/connection.ts";
 import type { RuntimeResultRef } from "./runtime-result.ts";
@@ -9,6 +11,8 @@ export interface RoundResult {
   readonly planId: string;
   readonly planVersion: number;
   readonly canonicalRevision: number;
+  readonly roundScope?: RoundScope;
+  readonly evidenceFingerprints?: readonly string[];
   readonly output: string;
   readonly reasonCode: string;
   readonly decision: { readonly kind: "complete_goal" | "next_round"; readonly canonicalRevision: number; readonly openGapIds?: readonly string[]; readonly openTargetIds?: readonly string[] };
@@ -16,6 +20,7 @@ export interface RoundResult {
 }
 
 export interface RoundHistoryEntry {
+  readonly roundScope?: RoundScope;
   readonly roundNumber: number;
   readonly status: string;
   readonly planId?: string;
@@ -88,18 +93,21 @@ export class RunRoundRepository {
 
   async history(runId: string): Promise<RoundHistoryEntry[]> {
     const rows = await this.database.prepare(`SELECT r.round_number, r.status, r.plan_id, r.revision,
-        rr.result_json
+        rr.result_json, scopes.scope_json
       FROM run_rounds r
+      LEFT JOIN plans p ON p.id = r.plan_id
+      LEFT JOIN plan_round_scopes scopes ON scopes.plan_id = p.id AND scopes.plan_version = p.version
       LEFT JOIN run_round_results rr
         ON rr.run_id = r.run_id AND rr.round_number = r.round_number
       WHERE r.run_id = ? ORDER BY r.round_number`).all(runId) as unknown as Array<{
-        round_number: number; status: string; plan_id: string | null; revision: number; result_json: string | null;
+        round_number: number; status: string; plan_id: string | null; revision: number; result_json: string | null; scope_json: string | null;
       }>;
     return rows.map((row) => ({
       roundNumber: row.round_number,
       status: row.status,
       ...(row.plan_id === null ? {} : { planId: row.plan_id }),
       revision: row.revision,
+      ...(row.scope_json === null ? {} : { roundScope: parseRoundScope(JSON.parse(row.scope_json)) }),
       ...(row.result_json === null ? {} : { result: JSON.parse(row.result_json) as RoundResult }),
     }));
   }
@@ -121,7 +129,7 @@ export class RunRoundRepository {
     const previousKey = JSON.stringify({
       openGapIds: [...(result.decision.openGapIds ?? [])].sort(),
       openTargetIds: [...(result.decision.openTargetIds ?? [])].sort(),
-      resultIds: result.steps.map((step) => step.result.resultId).sort(),
+      evidenceFingerprints: [...(result.evidenceFingerprints ?? [])].sort(),
     });
     if (previousKey === input.progressKey) {
       throw new AppError("ROUND_NO_PROGRESS", "The next Round would repeat the same unresolved state", 422, {

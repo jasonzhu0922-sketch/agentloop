@@ -28,9 +28,77 @@ test('cumulative public streaming replaces rather than duplicates text; replay i
   assert.equal(other.text, '另一轮'); assert.equal(turn.lastSeq, 3);
 });
 
+test('process preserves ordered cumulative messages and tools, then collapses behind the durable final answer', () => {
+  const turn = createTurn(run());
+  const events = [event(1, 'assistant.streaming', { content: '开始' }), event(2, 'assistant.streaming', { content: '开始检查' }), event(3, 'assistant.committed', { content: '开始检查' }), event(4, 'tool.dispatched', { toolCallId: 'read', toolName: 'read_file' }), event(5, 'tool.completed', { toolCallId: 'read' }), event(6, 'assistant.streaming', { content: '发现问题' }), event(7, 'assistant.committed', { content: '发现问题' }), event(8, 'assistant.committed', { content: '内部内容', responseVisibility: 'internal' })];
+  updateTurn(turn, run(), events);
+  const live = renderAssistant(turn);
+  assert.match(live, /data-toggle="process" aria-expanded="true"/);
+  assert.ok(live.indexOf('开始检查') < live.indexOf('read_file') && live.indexOf('read_file') < live.indexOf('发现问题'));
+  assert.equal((live.match(/开始检查/g) || []).length, 1);
+  assert.doesNotMatch(live, /内部内容/);
+  updateTurn(turn, run('completed', '**最终结果**'), [event(9, 'run.completed', { output: '**最终结果**' })]);
+  const final = renderAssistant(turn);
+  assert.match(final, /data-toggle="process" aria-expanded="false"/);
+  assert.match(final, /class="execution-process" id="process-run-a" hidden/);
+  assert.match(final, /<strong>最终结果<\/strong>/);
+  assert.match(renderAssistant(turn, { process: true }), /class="execution-process" id="process-run-a">/);
+  const replay = createTurn(run('completed', '**最终结果**'));
+  updateTurn(replay, replay.run, [...events, event(9, 'run.completed', { output: '**最终结果**' })]);
+  assert.equal(renderAssistant(replay), final);
+});
+
+test('readable progress and tool changes stay ordered while technical events update the footer', () => {
+  const turn = createTurn(run());
+  updateTurn(turn, run(), [event(1, 'assistant.streaming', { content: '先检查' }), event(2, 'tool.dispatched', { toolCallId: 'a', toolName: 'read_file' }), event(3, 'assistant.streaming', { content: '先检查再分析' }), event(4, 'model.request.started', { purpose: 'conversation_turn_resolver' }), event(5, 'tool.completed', { toolCallId: 'a' }), event(6, 'assistant.committed', { content: '先检查再分析' }), event(7, 'runtime.capability_snapshot.created')]);
+  const html = renderAssistant(turn);
+  const positions = ['先检查', '结果：执行中', '再分析', '正在理解本轮需求', '结果：已完成'].map(text => html.indexOf(text));
+  assert.ok(positions.every(position => position >= 0));
+  assert.deepEqual(positions, [...positions].sort((a, b) => a - b));
+  assert.equal((html.match(/先检查/g) || []).length, 1);
+  assert.equal((html.match(/再分析/g) || []).length, 1);
+  assert.doesNotMatch(html.split('<div class="message-footer event-feedback">')[0], /capability_snapshot/);
+  assert.match(html, /data-event-seq="7"[^>]*>[\s\S]*#7[\s\S]*runtime capability_snapshot created/);
+});
+
+test('consecutive progress events share one line and stay separated by visible content', () => {
+  const turn = createTurn(run());
+  const events = [event(1, 'model.request.started', { purpose: 'conversation_turn_resolver' }), event(2, 'runtime.capability_snapshot.created'), event(3, 'planning.started'), event(4, 'plan.admitted'), event(5, 'plan.step.started'), event(6, 'assistant.committed', { content: '开始检查' }), event(7, 'model.request.started'), event(8, 'model.request.started', { phase: 'assessment' }), event(9, 'tool.dispatched', { toolCallId: 'a', toolName: 'read_file' }), event(10, 'model.request.started')];
+  updateTurn(turn, run(), events);
+  const html = renderAssistant(turn);
+  const progress = [...html.matchAll(/<div class="process-progress">([^<]*)<\/div>/g)].map(match => match[1]);
+  assert.deepEqual(progress, ['正在执行当前步骤', '正在核验当前结果', '正在执行当前步骤']);
+  assert.ok(html.indexOf(progress[0]!) < html.indexOf('开始检查'));
+  assert.ok(html.indexOf('开始检查') < html.indexOf(progress[1]!) && html.indexOf(progress[1]!) < html.indexOf('read_file'));
+  assert.equal(turn.events.length, events.length);
+});
+
+test('adjacent tool events form collapsed, expandable groups without crossing visible text', () => {
+  const turn = createTurn(run());
+  updateTurn(turn, run(), [event(1, 'tool.dispatched', { toolCallId: 'a', toolName: 'search' }), event(2, 'tool.dispatched', { toolCallId: 'b', toolName: 'read' }), event(3, 'runtime.capability_snapshot.created'), event(4, 'tool.completed', { toolCallId: 'a' }), event(5, 'assistant.committed', { content: '继续分析' }), event(6, 'tool.dispatched', { toolCallId: 'c', toolName: 'write' })]);
+  const html = renderAssistant(turn);
+  assert.equal((html.match(/class="process-tool-group"/g) || []).length, 2);
+  assert.match(html, /data-tool-group="1"><summary>[\s\S]*?工具调用 · 2 次/);
+  assert.match(html, /data-tool-group="6"><summary>/);
+  assert.ok(html.indexOf('结果：已完成') < html.indexOf('继续分析'));
+  assert.match(renderAssistant(turn, { tools: { 1: true } }), /data-tool-group="1" open>/);
+});
+
 test('assistant cards identify the Runtime that handled the Run', () => {
   const turn = createTurn({ ...run(), runtimeId: 'runtime-a', runtimeName: '写作 Runtime' });
   assert.match(renderAssistant(turn), /execution-provenance-chip runtime">写作 Runtime<\/span>/);
+});
+
+test('plan steps appear beside goal rounds and remain available without round history', () => {
+  const turn = createTurn(run());
+  turn.plan = [{ id: 'step', objective: '分析', status: 'running' }];
+  turn.rounds = [{ roundNumber: 1 }];
+  const html = renderAssistant(turn, { plan: true, roundHistory: true });
+  assert.doesNotMatch(html.split('<div class="execution-process"')[0], /data-toggle="plan"/);
+  assert.match(html, /class="planning-overview-head"><details class="round-history" open>[\s\S]*?<\/details><button class="live-step-toggle"/);
+  assert.match(html, /class="inline-plan-steps"/);
+  turn.rounds = [];
+  assert.match(renderAssistant(turn), /class="planning-overview-head"><button class="live-step-toggle"/);
 });
 
 test('complete event replay retains early Plan state beyond the diagnostic display limit', () => {
@@ -82,7 +150,18 @@ test('terminal reconciliation clears stale waiting state and keeps every artifac
   assert.doesNotMatch(renderAssistant(turn), /data-toggle="artifacts"/);
 });
 
-test('polling exposes artifacts before completion, even without new events, and reconciles final delivery', async () => {
+test('many stage artifacts remain accessible in their own bounded list', async () => {
+  const turn = createTurn(run('completed'));
+  turn.artifacts = Array.from({ length: 20 }, (_, index) => ({ id: `file-${index}`, name: `file-${index}.txt`, role: 'process', bytes: 1 }));
+  const html = renderAssistant(turn);
+  assert.match(html, /class="desktop-artifact-list stage-artifact-list" role="region" aria-label="阶段产物列表" tabindex="0"/);
+  assert.equal((html.match(/class="desktop-artifact-row"/g) || []).length, 20);
+  assert.match(html, /20 个文件/);
+  const css = await readFile(new URL('../web/styles.css', import.meta.url), 'utf8');
+  assert.match(css, /\.stage-artifact-list\s*\{[^}]*max-height:\s*200px;[^}]*overflow-y:\s*auto/s);
+});
+
+test('polling retains artifacts during execution and shows them on completion', async () => {
   const turn = createTurn(run());
   const file = { id: 'report', name: 'report.html', role: 'process', bytes: 100, sha256: 'draft' };
   let artifacts: typeof file[] = []; let currentRun = run();
@@ -101,18 +180,28 @@ test('polling exposes artifacts before completion, even without new events, and 
   await poll(); assert.doesNotMatch(renderAssistant(turn), /data-artifact-id=/);
   events = []; artifacts = [file]; await poll();
   assert.equal(turn.status, 'running'); assert.equal(turn.lastSeq, 1);
-  assert.match(renderAssistant(turn), /data-artifact-id="report"/);
-  assert.match(renderAssistant(turn), /阶段产物/); assert.doesNotMatch(renderAssistant(turn), /最终产物/);
+  assert.doesNotMatch(renderAssistant(turn), /data-artifact-id="report"|本轮产物/);
   const revision = turn.revision; const previous = turn.artifacts;
   await poll(); assert.equal(turn.revision, revision); assert.equal(turn.artifacts, previous);
   artifacts = [{ ...file, bytes: 200, sha256: 'revised' }]; await poll();
-  assert.equal(turn.revision, revision + 1); assert.match(renderAssistant(turn), /200 字节/);
+  assert.equal(turn.revision, revision + 1); assert.doesNotMatch(renderAssistant(turn), /200 字节/);
   currentRun = run('completed'); events = [event(2, 'run.completed')];
   artifacts = [{ ...file, role: 'final' }, { ...file, id: 'draft', name: 'draft.html' }]; await poll();
   const html = renderAssistant(turn);
   assert.match(html, /最终产物/); assert.match(html, /draft.html/);
   assert.equal((html.match(/data-artifact-id="report"/g) || []).length, 1);
   assert.equal(requests.filter(path => path.endsWith('/artifacts')).length, 5);
+});
+
+test('failed and cancelled runs expose retained artifacts without claiming delivery', () => {
+  for (const state of ['failed', 'cancelled']) {
+    const turn = createTurn(run(state));
+    turn.artifacts = [{ id: 'partial', name: 'partial.txt', role: 'process', bytes: 5 }];
+    const html = renderAssistant(turn);
+    assert.match(html, /partial.txt/);
+    assert.match(html, /尚非成功交付/);
+    assert.doesNotMatch(html, /最终产物/);
+  }
 });
 
 test('polling drains a racing terminal commit and does not mutate a turn before its scope is checked', async () => {
@@ -126,7 +215,7 @@ test('polling drains a racing terminal commit and does not mutate a turn before 
     return { run: run('failed') };
   }, turn);
   assert.equal(JSON.stringify(turn), snapshot, 'a stale response can be discarded without touching the old conversation');
-  assert.equal(paths.length, 5);
+  assert.equal(paths.length, 6);
   updateTurn(turn, update.run, update.events, update.artifacts);
   assert.ok(hasTerminalEvent(turn)); assert.equal(turn.lastSeq, 2);
   assert.match(renderAssistant(turn), /partial.txt/); assert.doesNotMatch(renderAssistant(turn), /最终产物/);
@@ -151,7 +240,7 @@ test('scroll follow and composer shortcuts match Multi Runtime boundaries', () =
 });
 
 test('pure presentation snapshots remain exactly aligned with Multi Runtime, not its transport', async () => {
-  for (const file of ['presentation/assistant-message-presentation.js', 'projections/assistant-event-projection.js', 'projections/execution-detail-projection.js', 'ui/scroll-follow.js', 'ui/composer-input.js', 'ui/message-selection.js']) {
+  for (const file of ['presentation/assistant-message-presentation.js', 'projections/assistant-event-projection.js', 'projections/execution-detail-projection.js', 'ui/scroll-follow.js', 'ui/composer-input.js', 'ui/message-selection.js', 'ui/steer-queue.js']) {
     const copied = await readFile(new URL(`../web/reference/${file}`, import.meta.url), 'utf8');
     const original = await readFile(new URL(`../../agentloop-multi-runtime/web/client/${file}`, import.meta.url), 'utf8');
     assert.equal(copied.slice(copied.indexOf('\n') + 1), original, file);
@@ -159,13 +248,16 @@ test('pure presentation snapshots remain exactly aligned with Multi Runtime, not
 });
 
 
-test('artifact cards select the right artifact for preview instead of navigating to a download', () => {
+test('artifact cards offer independent preview and scoped download actions', () => {
   const turn = createTurn(run('completed'));
   turn.artifacts = [{ id: 'file"<unsafe>', name: '周报.html', role: 'final', bytes: 100 }];
   const html = renderAssistant(turn);
   assert.match(html, /<button type="button" class="desktop-artifact" data-artifact-id="file&quot;&lt;unsafe&gt;">/);
   assert.match(html, /· 预览/);
-  assert.doesNotMatch(html, / download|\/download|· 下载/);
+  assert.match(html, /href="\/api\/runs\/run-a\/artifacts\/file%22%3Cunsafe%3E\/download\?runtimeId=desktop-default" download="周报.html"/);
+  assert.match(html, /aria-label="下载 周报.html"/);
+  turn.run.runtimeId = 'runtime-a';
+  assert.match(renderAssistant(turn), /download\?runtimeId=runtime-a/);
   assert.match(html, /^<article class="msg assistant [^"]+" data-assistant-message="run-a">/);
   assert.doesNotMatch(html, /aria-label="查看该轮执行详情"|aria-pressed=/);
 });

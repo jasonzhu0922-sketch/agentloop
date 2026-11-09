@@ -20,7 +20,7 @@ export interface HumanLoopRequirement {
   readonly rationale: string;
   readonly evidenceRefs: readonly string[];
   readonly responseSchema: HumanLoopResponseSchema;
-  readonly resume: { readonly mode: "continue_step" | "replan_step" | "recovery_review"; readonly targetStepId?: string };
+  readonly resume: { readonly mode: "continue_step" | "replan_step" | "recovery_review" | "run_input"; readonly targetStepId?: string };
 }
 
 export interface HumanLoopRequest extends HumanLoopRequirement {
@@ -167,7 +167,7 @@ function validateRequirement(value: HumanLoopRequirement): void {
   if (schema.type === "form" && (!Array.isArray(schema.fields) || schema.fields.length === 0 || schema.fields.some((field) => !field || typeof field.id !== "string" || !field.id || typeof field.label !== "string" || !field.label || typeof field.required !== "boolean" || !["text", "textarea", "date", "number", "file_ref"].includes(field.valueType)))) throw badRequest("Human-in-the-Loop form schema is invalid");
   if (schema.type === "confirm" && (!schema.acceptLabel || !schema.rejectLabel)) throw badRequest("Human-in-the-Loop confirm schema is invalid");
   const resume = value.resume;
-  if (!resume || !["continue_step", "replan_step", "recovery_review"].includes(resume.mode) || (resume.targetStepId !== undefined && (typeof resume.targetStepId !== "string" || !resume.targetStepId))) throw badRequest("Human-in-the-Loop resume is invalid");
+  if (!resume || !["continue_step", "replan_step", "recovery_review", "run_input"].includes(resume.mode) || (resume.targetStepId !== undefined && (typeof resume.targetStepId !== "string" || !resume.targetStepId))) throw badRequest("Human-in-the-Loop resume is invalid");
 }
 function validateResponse(schema: HumanLoopResponseSchema, value: unknown): void { if (schema.type === "select") { if (!Array.isArray(value) || value.length < schema.minSelections || value.length > schema.maxSelections || value.some((x) => typeof x !== "string") || new Set(value).size !== value.length || value.some((x) => !schema.options.some((option) => option.id === x))) throw badRequest("Human-in-the-Loop selection is invalid"); return; } if (schema.type === "confirm") { if (value === true) return; if (value && typeof value === "object" && !Array.isArray(value) && (value as { accepted?: unknown }).accepted === false) {
   const reason = (value as { reason?: unknown }).reason;

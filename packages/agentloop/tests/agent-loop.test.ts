@@ -5981,7 +5981,10 @@ test("a converged Kimi-style text tool invocation gets one no-tool repair before
   assert.equal(events.some((event) => event.type === "candidate.approved"), true);
 });
 
-test("a no-tool candidate with embedded provider tool protocol is rejected before assessment", async () => {
+for (const textInvocation of [
+  '我需要重新生成。<|tool_calls_section_begin|><|tool_call_begin|>functions.web_research:0<|tool_call_argument_begin|>{"query":"test"}<|tool_call_end|><|tool_calls_section_end|>',
+  '<｜DSML｜ calls>\n<｜DSML｜ invoke name="computer_run_command">\n<｜DSML｜ parameter name="command">node</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>',
+]) test("a no-tool candidate with embedded provider tool protocol is rejected before assessment", async () => {
   let assessments = 0;
   const events: RuntimeEvent[] = [];
   const grant = makeGrant([]);
@@ -5990,9 +5993,7 @@ test("a no-tool candidate with embedded provider tool protocol is rejected befor
       runId: grant.runId,
       systemPrompt: "Answer directly.",
       input: "regenerate the artifact",
-      model: new TextToolInvocationOnlyModel(
-        '我需要重新生成。<|tool_calls_section_begin|><|tool_call_begin|>functions.web_research:0<|tool_call_argument_begin|>{"query":"test"}<|tool_call_end|><|tool_calls_section_end|>',
-      ),
+      model: new TextToolInvocationOnlyModel(textInvocation),
       tools: new ToolRegistry([]),
       grant,
       maxSteps: 1,

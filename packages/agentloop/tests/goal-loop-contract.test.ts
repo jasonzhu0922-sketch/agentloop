@@ -249,7 +249,8 @@ test("two delivery targets execute in separate Rounds and final Result aggregate
           sawPriorRoundBinding = true;
         }
         const targetId = task.targetScopeIds?.[0] ?? "target-a";
-        return { goal, shape: "multi_deliverable", selectedSkillIds: [], steps: [{
+        return { goal, shape: "multi_deliverable", selectedSkillIds: [],
+          roundScope: { kind: "delivery", targetIds: [targetId], purpose: `Fulfill ${targetId}`, completionBoundary: `Deliver ${targetId}`, continuation: "Complete remaining targets after this delivery." }, steps: [{
           id: `round-${planningCalls}-deliver`, objective: `Fulfill ${targetId}`,
           dependencies: [], role: "deliver", skillIds: [], requiredCapabilities: ["conversation_delivery"], targetIds: [targetId],
           successCriteria: [{ id: `deliver-${targetId}`, description: `Deliver ${targetId}`, source: "task" }],
@@ -324,7 +325,8 @@ test("next-Round planning failure waits and resumes the same Run", async () => {
           throw new AppError("PLANNING_ERROR", "next-round plan failed", 422);
         }
         const targetId = task.targetScopeIds?.[0] ?? "target-a";
-        return { goal, shape: "multi_deliverable", selectedSkillIds: [], steps: [{
+        return { goal, shape: "multi_deliverable", selectedSkillIds: [],
+          roundScope: { kind: "delivery", targetIds: [targetId], purpose: `Fulfill ${targetId}`, completionBoundary: `Deliver ${targetId}`, continuation: "Complete remaining targets after this delivery." }, steps: [{
           id: `round-${planningCalls}-deliver`, objective: `Fulfill ${targetId}`,
           dependencies: [], role: "deliver", skillIds: [], requiredCapabilities: ["conversation_delivery"], targetIds: [targetId],
           successCriteria: [{ id: `deliver-${targetId}`, description: `Deliver ${targetId}`, source: "task" }],
@@ -742,7 +744,7 @@ function fixture() {
 function recoveryModelCriteria(criteria: readonly import("../src/planning/contracts.ts").SuccessCriterion[]) {
   return recoveryProposalSuccessCriteria(criteria).map((criterion) => {
     if (criterion.basis === undefined) return criterion;
-    const { requirement: _requirement, ...basis } = criterion.basis;
+    const { requirement: _requirement, intentId: _intentId, ...basis } = criterion.basis;
     return { ...criterion, basis };
   });
 }
@@ -851,7 +853,7 @@ for (const duplicate of [false, true]) {
 
 test("Recovery parsing preserves result criteria, original source identities and user provenance", () => {
   const { state, proposal, basis } = fixture();
-  const { requirement: _requirement, ...basisMetadata } = basis;
+  const { requirement: _requirement, intentId: _intentId, ...basisMetadata } = basis;
   const sourceConstraint = { requiredToolSourceIds: ["records"], requiredUploadedSourceIds: [], requiredVisibleDirectoryIds: [] };
   const step = { ...proposal.steps[0], role: "repair", targetIds: [], sourceConstraint,
     requiredFacts: [{ id: "totals", description: "The two recorded totals", evidenceKinds: ["source_summary"], basis }] };

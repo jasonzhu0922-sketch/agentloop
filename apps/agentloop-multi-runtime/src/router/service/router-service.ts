@@ -190,6 +190,21 @@ export class RouterService {
     return { assignment, artifacts: await this.captureArtifacts(assignment, artifacts) };
   }
 
+  async inputMessages(id: string) {
+    const assignment = await this.store.assignment(id);
+    if (assignment === undefined || !assignment.remoteRunId) throw new RangeError("assignment_not_found");
+    const endpoint = this.endpointFactory(assignment.runtimeEndpoint);
+    if (endpoint.inputMessages === undefined) throw new TypeError("runtime_input_not_available");
+    return await endpoint.inputMessages(assignment.remoteRunId);
+  }
+  async submitInput(id: string, input: { requestId: string; text: string }) {
+    const assignment = await this.store.assignment(id);
+    if (assignment === undefined || !assignment.remoteRunId) throw new RangeError("assignment_not_found");
+    const endpoint = this.endpointFactory(assignment.runtimeEndpoint);
+    if (endpoint.submitInput === undefined) throw new TypeError("runtime_input_not_available");
+    return await endpoint.submitInput(assignment.remoteRunId, input);
+  }
+
   async rounds(id: string): Promise<{ readonly assignment: StoredAssignment; readonly rounds: readonly RuntimeRoundHistoryEntry[] } | undefined> {
     const assignment = await this.store.assignment(id);
     if (assignment === undefined) return undefined;

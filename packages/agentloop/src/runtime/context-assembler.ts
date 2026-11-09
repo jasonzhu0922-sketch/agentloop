@@ -835,7 +835,11 @@ export class ContextAssembler {
     assertClosedToolProtocol(retainedProjection);
     // The desired summary size is not an admission limit. Admission uses the
     // actual fixed context and protected tail, with bounded summary headroom.
-    const retainedTokens = this.estimateInvocationTokens(tools, runtimeContext, retainedProjection);
+    // The accepted summary is an input to the summarizer, but the resulting
+    // summary replaces it in the next invocation. Count the summary envelope
+    // here, not both the old and replacement summary bodies.
+    const replacementContext = this.currentRuntimeContext({ summary: "", epoch: this.contextEpoch + 1 });
+    const retainedTokens = this.estimateInvocationTokens(tools, replacementContext, retainedProjection);
     const maxTokens = Math.floor(Math.min(
       this.policy.summaryMaxOutputTokens,
       usableInputTokens * 0.2,
@@ -922,7 +926,8 @@ export class ContextAssembler {
     const usable = this.policy.contextWindowTokens
       - this.policy.outputReserveTokens
       - this.policy.safetyMarginTokens;
-    const baseInputTokens = this.estimateInvocationTokens(tools, runtimeContext, []);
+    const replacementContext = this.currentRuntimeContext({ summary: "", epoch: this.contextEpoch + 1 });
+    const baseInputTokens = this.estimateInvocationTokens(tools, replacementContext, []);
     const anchorTokens = baseInputTokens
       + this.policy.summaryMaxOutputTokens
       + 256;
@@ -951,7 +956,7 @@ export class ContextAssembler {
     const originalTokens = this.estimateInvocationTokens(tools, runtimeContext, this.buildProjection(canonicalMessages)) - baseInputTokens;
     for (const index of candidates) {
       const tail = this.buildProjectionFrom(canonicalMessages, index);
-      const tailTokens = this.estimateInvocationTokens(tools, runtimeContext, tail) - baseInputTokens;
+      const tailTokens = this.estimateInvocationTokens(tools, replacementContext, tail) - baseInputTokens;
       if (tailTokens <= tailBudget && tailTokens + this.policy.summaryTargetTokens + 256 < originalTokens) return index;
     }
     return candidates.at(-1);

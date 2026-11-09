@@ -1,4 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
+import { RunInputRepository, type RunInputMessage } from "./run-input-repository.ts";
+import { decideRunInput } from "./run-input-decision.ts";
+import { EVIDENCE_KINDS as importedEvidenceKinds } from "../planning/contracts.ts";
+import { setTimeout as waitForInputOwner } from "node:timers/promises";
 import { promises as fs } from "node:fs";
 import { basename, isAbsolute, resolve } from "node:path";
 import { ComputerExecutor } from "../computer/computer-executor.ts";
@@ -175,6 +179,7 @@ import { RuntimeHostRunProjectionQueryService, type RuntimeHostRunProjection } f
 import { ToolArgumentsReferenceStore, type ToolArgumentsContent } from "./tool-arguments-reference-store.ts";
 import { executionOperationProfile } from "./operation-profiles.ts";
 import {
+  amendCanonicalIntent,
   bindCanonicalPlan,
   beginCanonicalRound,
   canonicalRunStateRef,
@@ -751,6 +756,22 @@ export class RunService {
     return this.toRunRecordWithSources(row);
   }
 
+  async submitInput(actorUserId: string, runId: string, input: { requestId: string; text: string }): Promise<RunInputMessage> {
+    await this.get(actorUserId, runId);
+    const message = await new RunInputRepository(this.database).accept(actorUserId, runId, input);
+    if (!this.isRunExecuting(runId)) void this.drainPausedInputs(actorUserId, runId).catch(async error => {
+      if (error instanceof AppError && error.code === "CANCELLED") await this.cancel(actorUserId, runId);
+      else await this.appendRunEvent(runId, { type: "run.input.processing_failed", data: { messageId: message.id, code: error instanceof AppError ? error.code : "INTERNAL_ERROR" } });
+    });
+    return message;
+  }
+
+  async inputMessages(actorUserId: string, runId: string, afterSeq = 0): Promise<RunInputMessage[]> {
+    await this.get(actorUserId, runId);
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new AppError("BAD_REQUEST", "Invalid message cursor", 400);
+    return await new RunInputRepository(this.database).list(runId, afterSeq);
+  }
+
   async checkpointForRun(actorUserId: string, runId: string): Promise<RunCheckpointRecord | undefined> {
     await this.get(actorUserId, runId);
     return this.checkpoints.getByRun(runId);
@@ -814,6 +835,26 @@ export class RunService {
     if (revision === undefined) throw new AppError("BAD_REQUEST", "expectedRevision is required", 400);
     const request = await this.humanLoops.current(runId);
     if (request?.id !== requestId) throw new AppError("CONFLICT", "Human-in-the-Loop request is no longer open", 409);
+    if (request.resume.mode === "run_input") {
+      let response!: HumanLoopResponse;
+      await this.database.transaction(async () => {
+        response = await this.humanLoops.respond({ requestId, runId, actorUserId, expectedRevision: revision, value });
+        const original = (await new RunInputRepository(this.database).list(runId)).find(message => request.evidenceRefs.includes(message.id));
+        if (original === undefined) throw new AppError("CONFLICT", "Input clarification lost its message reference", 409);
+        await new RunInputRepository(this.database).accept(actorUserId, runId, { requestId: `hil_${response.id}`,
+          text: String(optionalRecord(response.value).clarification) });
+        if (request.planId === undefined) await this.planningRecovery.resumeInput(runId, requestId, this.clock());
+      });
+      void this.resumeInputClarification(actorUserId, runId, request.planId).catch(async error => {
+        if (error instanceof AppError && error.code === "HUMAN_LOOP_REQUIRED") return;
+        if (error instanceof AppError && error.code === "CANCELLED") await this.cancel(actorUserId, runId);
+        else {
+          await this.terminal.commitStopped({ runId, ...(request.planId === undefined ? {} : { planId: request.planId }), status: "failed", reasonCode: error instanceof AppError ? error.code : "INTERNAL_ERROR" });
+          await this.appendRunEvent(runId, { type: "run.failed", data: { runId, code: error instanceof AppError ? error.code : "INTERNAL_ERROR" } });
+        }
+      });
+      return response;
+    }
     if (request.origin === "planner") {
       let response!: HumanLoopResponse;
       await this.database.transaction(async () => {
@@ -1473,8 +1514,12 @@ export class RunService {
         },
         onStepChanged: (stepId) => { actionScope.stepId = stepId; },
       });
-      const output = finalPlanOutput(resumedPlan);
-      const reasonCode = await commitCompletedPlan(this.terminal, await this.plans.assessments(resumedPlan.id), resumedPlan, runId, output);
+      const completion = await this.finishPlanAfterInputs(actorUserId, runId, resumedPlan, emit);
+      if (completion.nextRound) {
+        if (action.kind === "recovery_review") await this.actions.resolveRecoveryReview(action.id);
+        return this.get(actorUserId, runId);
+      }
+      const { output, reasonCode } = completion;
       // The answered HIL and its recovery review describe the same completed
       // continuation. Close the review before projecting completion so no
       // stale recovery state can be mistaken for an outstanding HIL.
@@ -1749,6 +1794,27 @@ export class RunService {
         },
       });
       reconciled += 1;
+    }
+    return reconciled + await this.reconcileRunInputs(scopedRunIds);
+  }
+
+  async reconcileRunInputs(runIds?: readonly string[]): Promise<number> {
+    const scopedRunIds = runIds === undefined ? undefined : [...new Set(runIds)];
+    if (scopedRunIds?.length === 0) return 0;
+    let reconciled = 0;
+    const pendingScope = scopedRunIds === undefined ? "" : ` AND runs.id IN (${scopedRunIds.map(() => "?").join(", ")})`;
+    const pending = await this.database.prepare(`SELECT runs.id, runs.owner_user_id FROM runs
+      JOIN run_input_controls controls ON controls.run_id = runs.id
+      WHERE runs.status = 'running' AND controls.received_seq > controls.consumed_seq
+        AND (controls.lease_until IS NULL OR controls.lease_until <= ?) ${pendingScope}`)
+      .all<{ id: string; owner_user_id: string }>(Date.now(), ...(scopedRunIds ?? []));
+    for (const run of pending) {
+      if (this.isRunExecuting(run.id) || !await this.humanLoops.hasOpen(run.id)) continue;
+      try { await this.drainPausedInputs(run.owner_user_id, run.id); reconciled++; }
+      catch (error) {
+        if (error instanceof AppError && error.code === "CANCELLED") await this.cancel(run.owner_user_id, run.id);
+        else await this.appendRunEvent(run.id, { type: "run.input.processing_failed", data: { code: error instanceof AppError ? error.code : "INTERNAL_ERROR" } });
+      }
     }
     return reconciled;
   }
@@ -2386,10 +2452,13 @@ export class RunService {
         });
       }
       const planningWorkspace = await planningWorkspaceFacts(runWorkspaceRoot, planningVisibleDirectories, conversationId, availableSources);
+      const reusableRoundEvidence = await this.priorRoundEvidenceForPlanning(runId, resumePlanning?.context.roundResultBindings ?? []);
+      ({ state: canonicalState } = await this.processRunInputs({ actorUserId, runId, model, canonicalState, privateSkills, rootGrant, visibleDirectories, sources: availableSources, signal: runController.signal }));
       const planningTask: TaskSpec = {
         runId,
         canonicalState,
         availableSkills: planningSkills,
+        reusableRoundEvidence,
         selectedSkillRoles: planningSkillRoles.map((item) => item.selection),
         ...(continuationSkillIds.length === 0 ? {} : { continuationSkillIds }),
         availableToolNames: planningAllowedToolNames,
@@ -2438,6 +2507,12 @@ export class RunService {
         privateSkills,
       );
       let proposalSource = planningExtensionResolution.proposalSource;
+      while ((await new RunInputRepository(this.database).list(runId)).some(message => message.status === "accepted" || message.status === "processing")) {
+        ({ state: canonicalState } = await this.processRunInputs({ actorUserId, runId, model, canonicalState, privateSkills, rootGrant, visibleDirectories, sources: availableSources, signal: runController.signal }));
+        Object.assign(planningTask, { canonicalState });
+        proposal = bindRequiredSkillCompanions(await proposalFromPlanner(), privateSkills);
+        proposalSource = undefined;
+      }
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       await emit({
         type: "plan.proposed",
@@ -2457,10 +2532,8 @@ export class RunService {
         resultCards: conversationWorkingSet?.resultCards,
       });
       const roundResultBindings = resumePlanning?.context.roundResultBindings ?? [];
-      const openTargetScopeIds = Object.values(canonicalState.targets)
-        .filter((target) => target.status !== "accepted")
-        .map((target) => target.targetId);
       const admitProposedPlan = async (candidate: PlanProposal, source: PlanningExtensionProposalSource | undefined): Promise<ExecutionPlan> => {
+        const openTargetScopeIds = Object.values(canonicalState.targets).filter(target => target.status !== "accepted").map(target => target.targetId);
         try {
           return admitPlan({
             runId,
@@ -2471,13 +2544,12 @@ export class RunService {
             availableCapabilities: planningCapabilitiesForAdmittedProposal(candidate, privateSkills, allowedToolSummaries, availableSources),
             availableUploadedSourceIds: availableSources.map((source) => source.id),
             availableVisibleDirectoryIds: planningVisibleDirectories.map((directory) => directory.id),
-            reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution),
+            reusableEvidenceKinds: [...reusableRoundEvidence.kinds, ...reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution)],
+            reusableToolSourceIds: reusableRoundEvidence.toolSourceIds,
             ...(resultBindings.length === 0 && roundResultBindings.length === 0 ? {} : { resultBindings: [...roundResultBindings, ...resultBindings] }),
             ...(resumePlanning?.context.targetScopeIds !== undefined
               ? { targetScopeIds: resumePlanning.context.targetScopeIds }
-              : Object.keys(canonicalState.targets).length > 1
-                ? { targetScopeIds: [...new Set(candidate.steps.flatMap((step) => step.targetIds ?? []))] }
-                : (openTargetScopeIds.length === Object.keys(canonicalState.targets).length ? {} : { targetScopeIds: openTargetScopeIds })),
+              : (openTargetScopeIds.length === Object.keys(canonicalState.targets).length ? {} : { targetScopeIds: openTargetScopeIds })),
             canonicalState,
           });
         } catch (error) {
@@ -2492,55 +2564,67 @@ export class RunService {
           throw error;
         }
       };
-      try {
-        plan = await admitProposedPlan(proposal, proposalSource);
-      } catch (error) {
-        await this.notifyPlanningExtensionsAfterAdmission({
-          runId,
-          proposal,
-          admitted: false,
-          ...(proposalSource === undefined ? {} : {
-            source: proposalSource,
-          }),
-          errorCode: error instanceof AppError ? error.code : "PLAN_NOT_ADMITTED",
-          errorMessage: error instanceof Error ? error.message : "Plan was not admitted",
-        }, emit);
-        if (planningExtensionResolution.proposal === undefined) throw error;
-        await emit({
-          type: "planning.extension.plan_admission_failed",
-          data: {
-            source: planningExtensionResolution.proposalSource,
-            message: error instanceof Error ? error.message : "Plan was not admitted",
-          },
-        });
-        proposal = bindRequiredSkillCompanions(await proposalFromPlanner(), privateSkills);
-        proposalSource = undefined;
-        await throwIfRunCancelled(this.runs, runId, runController.signal);
-        await emit({
-          type: "plan.proposed",
-          data: { goal: proposal.goal, selectedSkillIds: proposal.selectedSkillIds, stepCount: proposal.steps.length },
-        });
-        plan = await admitProposedPlan(proposal, undefined);
-      }
-      const planBoundState = bindCanonicalPlan(canonicalState, plan);
-      await this.database.transaction(async () => {
-        if (resumePlanning !== undefined) await this.planningRecovery.guardLease(runId, resumePlanning.leaseToken, Date.now());
-        plan = await this.plans.create(plan);
-        canonicalState = await this.canonicalStates.commit({
-          expectedRevision: canonicalState.revision,
-          state: planBoundState,
-          reason: "plan_admitted",
-        });
-        await this.rounds.bindPlan(runId, plan.id, this.clock());
-        if (resumePlanning === undefined) {
-          await this.planningRecovery.finish(runId, "completed", this.clock());
-        } else {
-          await this.planningRecovery.finishLease(runId, resumePlanning.leaseToken, Date.now());
-          const recoveryAction = (await this.actions.list(runId)).find((action) => action.kind === "recovery_review" && action.state === "recovery_required");
-          if (recoveryAction !== undefined) await this.actions.resolveRecoveryReview(recoveryAction.id);
-          await this.database.prepare("DELETE FROM run_recovery_states WHERE run_id = ?").run(runId);
+      for (;;) {
+        try {
+          try {
+            plan = await admitProposedPlan(proposal, proposalSource);
+          } catch (error) {
+            await this.notifyPlanningExtensionsAfterAdmission({
+              runId,
+              proposal,
+              admitted: false,
+              ...(proposalSource === undefined ? {} : {
+                source: proposalSource,
+              }),
+              errorCode: error instanceof AppError ? error.code : "PLAN_NOT_ADMITTED",
+              errorMessage: error instanceof Error ? error.message : "Plan was not admitted",
+            }, emit);
+            if (planningExtensionResolution.proposal === undefined) throw error;
+            await emit({
+              type: "planning.extension.plan_admission_failed",
+              data: {
+                source: planningExtensionResolution.proposalSource,
+                message: error instanceof Error ? error.message : "Plan was not admitted",
+              },
+            });
+            proposal = bindRequiredSkillCompanions(await proposalFromPlanner(), privateSkills);
+            proposalSource = undefined;
+            await throwIfRunCancelled(this.runs, runId, runController.signal);
+            await emit({
+              type: "plan.proposed",
+              data: { goal: proposal.goal, selectedSkillIds: proposal.selectedSkillIds, stepCount: proposal.steps.length },
+            });
+            plan = await admitProposedPlan(proposal, undefined);
+          }
+          const planBoundState = bindCanonicalPlan(canonicalState, plan);
+          await this.database.transaction(async () => {
+            await new RunInputRepository(this.database).assertDrained(runId);
+            if (resumePlanning !== undefined) await this.planningRecovery.guardLease(runId, resumePlanning.leaseToken, Date.now());
+            plan = await this.plans.create(plan);
+            canonicalState = await this.canonicalStates.commit({
+              expectedRevision: canonicalState.revision,
+              state: planBoundState,
+              reason: "plan_admitted",
+            });
+            await this.rounds.bindPlan(runId, plan.id, this.clock());
+            if (resumePlanning === undefined) {
+              await this.planningRecovery.finish(runId, "completed", this.clock());
+            } else {
+              await this.planningRecovery.finishLease(runId, resumePlanning.leaseToken, Date.now());
+              const recoveryAction = (await this.actions.list(runId)).find((action) => action.kind === "recovery_review" && action.state === "recovery_required");
+              if (recoveryAction !== undefined) await this.actions.resolveRecoveryReview(recoveryAction.id);
+              await this.database.prepare("DELETE FROM run_recovery_states WHERE run_id = ?").run(runId);
+            }
+          });
+          break;
+        } catch (error) {
+          if (!(error instanceof AppError) || error.code !== "STEER_PENDING") throw error;
+          ({ state: canonicalState } = await this.processRunInputs({ actorUserId, runId, model, canonicalState, privateSkills, rootGrant, visibleDirectories, sources: availableSources, signal: runController.signal }));
+          Object.assign(planningTask, { canonicalState });
+          proposal = bindRequiredSkillCompanions(await proposalFromPlanner(), privateSkills);
+          proposalSource = undefined;
         }
-      });
+      }
       planId = plan.id;
       actionScope.planId = plan.id;
       admittedPlanSource = proposalSource;
@@ -2570,125 +2654,84 @@ export class RunService {
           content: `<available_skill_catalog scope="runtime" source="server">\n${JSON.stringify({ skills: privateSkills.map(({ id, name, description }) => ({ id, name, description })), instruction: "This is the Runtime's available Skill metadata for answering capability questions. It does not mean a Skill was invoked and does not grant execution authority." })}\n</available_skill_catalog>`,
         }] : []),
       ];
-      plan = await this.executePlanSteps({
-        actorUserId,
-        runId,
-        privateSkills,
-        rootGrant,
-        plan,
-        canonicalState,
-        model,
-        assessor,
-        defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
-        registry,
-        emit,
-        visibleDirectories,
-        sources: availableSources,
-        ...(conversationHistory === undefined ? {} : { conversationHistory }),
-        ...(conversationWorkingSet === undefined ? {} : { conversationWorkingSet }),
-        ...(initialRuntimePromptAugmentations.length === 0 ? {} : { initialRuntimePromptAugmentations }),
-        ...(responseMemoryProjection === undefined
-          ? {}
-          : { confirmedResponseMemory: responseMemoryProjection }),
-        ...(currentTurnMemoryCommit === undefined ? {} : { currentTurnMemoryCommit }),
-        ...(replyNeedsCapabilityInventory ? {
-          ...(runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot }),
-          runtimeCapabilityInventory,
-        } : {}),
-        signal: runController.signal,
-        onStepChanged: (stepId) => {
-          runningStepId = stepId;
-          actionScope.stepId = stepId;
-        },
-      });
-
-      const output = finalPlanOutput(plan);
-      await throwIfRunCancelled(this.runs, runId, runController.signal);
-      const currentCanonicalState = await this.canonicalStates.get(runId);
-      const progress = decideRoundProgress(plan, currentCanonicalState);
-      if (progress.kind === "next_round") {
-        const roundNumber = await this.rounds.roundForPlan(runId, plan.id);
-        const recovery = await this.planningRecovery.get(runId);
-        if (recovery === undefined) throw new AppError("CONFLICT", "Planning context is missing before next Round", 409);
-        const context = JSON.parse(recovery.context_json) as PlanningRecoveryContext;
-        const nextContext: PlanningRecoveryContext = {
-          ...context,
-          roundResultBindings: plan.steps.filter((step) => step.retiredAt === undefined && step.evidence?.publishedResult !== undefined).map((step) => ({
-            schema: "agentloop.resultBinding/v1" as const,
-            result: step.evidence!.publishedResult!.ref,
-            relation: "continue_prior" as const,
-          })),
-          targetScopeIds: progress.openTargetIds,
-          priorRoundResult: {
-            schema: "agentloop.roundResultCard/v1",
-            roundNumber,
-            planId: plan.id,
-            planVersion: plan.version,
-            outputSummary: output.slice(0, 8_000),
-            decision: {
-              kind: "next_round",
-              openGapIds: progress.openGapIds,
-              openTargetIds: progress.openTargetIds,
-            },
-            resultRefs: plan.steps.flatMap((step) => step.retiredAt === undefined && step.evidence?.publishedResult !== undefined
-              ? [step.evidence.publishedResult.ref] : []),
-          },
-        };
-        const nextCanonicalState = beginCanonicalRound(currentCanonicalState, Date.now());
+      for (;;) {
         try {
-          await this.terminal.commitRound(runId, plan.id, output, progress, nextCanonicalState, nextContext);
-        } catch (error) {
-          await emit({ type: "round.next.failed", data: {
-            runId,
-            roundNumber: roundNumber + 1,
-            code: error instanceof AppError ? error.code : "INTERNAL_ERROR",
-          } });
-          throw error;
-        }
-        const leaseToken = randomUUID();
-        if (!await this.planningRecovery.acquireLease(runId, leaseToken, Date.now(), 60_000)) {
-          throw new AppError("CONFLICT", "Next Round planning lease could not be acquired", 409);
-        }
-        await emit({ type: "round.completed", data: { runId, planId: plan.id, roundNumber, decision: progress } });
-        void this.resumePlanningRun(actorUserId, runId, leaseToken).catch(async (error) => {
-          await this.appendRunEvent(runId, { type: "round.next.failed", data: { runId, code: error instanceof AppError ? error.code : "INTERNAL_ERROR" } });
-        });
-        await emit({ type: "round.next.started", data: { runId, roundNumber: roundNumber + 1, targetScopeIds: progress.openTargetIds } });
-        return this.get(actorUserId, runId);
-      }
-      const reasonCode = await commitCompletedPlan(this.terminal, await this.plans.assessments(plan.id), plan, runId, output);
-      await this.enqueueMemorySettlement(runId, emit);
-      await this.notifyPlanningExtensionsAfterOutcome({
-        runId,
-        status: "completed",
-        planId: plan.id,
-        output,
-        reasonCode,
-        ...(admittedPlanSource === undefined ? {} : { source: admittedPlanSource }),
-      }, emit);
-      await emit({
-        type: "terminal.delivery_committed",
-        data: { runId, planId: plan.id, output, reasonCode },
-      });
-      if (
-        turnResolution?.targetRunId !== undefined
-        && (
-          turnResolution.relation === "correct_prior"
-          || turnResolution.relation === "refine_prior"
-          || turnResolution.relation === "challenge_prior"
-        )
-      ) {
-        await emit({
-          type: "conversation.outcome.superseded",
-          data: {
-            runId,
-            targetRunId: turnResolution.targetRunId,
-            relation: turnResolution.relation,
+        plan = await this.executePlanSteps({
+          actorUserId,
+          runId,
+          privateSkills,
+          rootGrant,
+          plan,
+          canonicalState,
+          model,
+          assessor,
+          defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
+          registry,
+          emit,
+          visibleDirectories,
+          sources: availableSources,
+          ...(conversationHistory === undefined ? {} : { conversationHistory }),
+          ...(conversationWorkingSet === undefined ? {} : { conversationWorkingSet }),
+          ...(initialRuntimePromptAugmentations.length === 0 ? {} : { initialRuntimePromptAugmentations }),
+          ...(responseMemoryProjection === undefined
+            ? {}
+            : { confirmedResponseMemory: responseMemoryProjection }),
+          ...(currentTurnMemoryCommit === undefined ? {} : { currentTurnMemoryCommit }),
+          ...(replyNeedsCapabilityInventory ? {
+            ...(runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot }),
+            runtimeCapabilityInventory,
+          } : {}),
+          signal: runController.signal,
+          onStepChanged: (stepId) => {
+            runningStepId = stepId;
+            actionScope.stepId = stepId;
           },
         });
+
+        let output = finalPlanOutput(plan);
+        await throwIfRunCancelled(this.runs, runId, runController.signal);
+        const completion = await this.finishPlanAfterInputs(actorUserId, runId, plan, emit);
+        if (completion.nextRound) return this.get(actorUserId, runId);
+        plan = completion.plan; output = completion.output;
+        const reasonCode = completion.reasonCode;
+        await this.enqueueMemorySettlement(runId, emit);
+        await this.notifyPlanningExtensionsAfterOutcome({
+          runId,
+          status: "completed",
+          planId: plan.id,
+          output,
+          reasonCode,
+          ...(admittedPlanSource === undefined ? {} : { source: admittedPlanSource }),
+        }, emit);
+        await emit({
+          type: "terminal.delivery_committed",
+          data: { runId, planId: plan.id, output, reasonCode },
+        });
+        if (
+          turnResolution?.targetRunId !== undefined
+          && (
+            turnResolution.relation === "correct_prior"
+            || turnResolution.relation === "refine_prior"
+            || turnResolution.relation === "challenge_prior"
+          )
+        ) {
+          await emit({
+            type: "conversation.outcome.superseded",
+            data: {
+              runId,
+              targetRunId: turnResolution.targetRunId,
+              relation: turnResolution.relation,
+            },
+          });
+        }
+        await emit({ type: "run.completed", data: { runId, planId: plan.id, output } });
+        return this.get(actorUserId, runId);
+        } catch (error) {
+          if (!(error instanceof AppError) || error.code !== "STEER_PENDING") throw error;
+          canonicalState = await this.canonicalStates.get(runId);
+          plan = await this.plans.get(plan.id);
+        }
       }
-      await emit({ type: "run.completed", data: { runId, planId: plan.id, output } });
-      return this.get(actorUserId, runId);
     } catch (error) {
       if (process.env.AGENTLOOP_DEBUG_ERRORS === "1") console.error(error);
       const appError = error instanceof AppError
@@ -2701,6 +2744,7 @@ export class RunService {
         }
       }
       if ((await this.runs.get(runId))?.status === "running") {
+        if (appError.code === "HUMAN_LOOP_REQUIRED" && appError.details?.inputMessageId !== undefined) return this.get(actorUserId, runId);
         const isNextRoundPlanning = resumePlanning?.context.priorRoundResult !== undefined;
         if (planId === undefined && (appError.code === "PLANNING_ERROR" || appError.code === "PLAN_NOT_ADMITTED")
           && (resumePlanning === undefined || isNextRoundPlanning)) {
@@ -2793,6 +2837,118 @@ export class RunService {
         this.activeRunControllers.delete(runId);
       }
     }
+  }
+
+  /** Every completion entrance shares the same input fence, including recovery and HIL. */
+  private async finishPlanAfterInputs(actorUserId: string, runId: string, initialPlan: ExecutionPlan,
+    emit: (event: RuntimeEvent) => Promise<void>): Promise<{ plan: ExecutionPlan; output: string; reasonCode: string; nextRound: boolean }> {
+    let plan = initialPlan;
+    for (;;) {
+      const output = finalPlanOutput(plan);
+      try {
+        await new RunInputRepository(this.database).checkpoint(runId);
+        if (await this.advanceRoundIfNeeded(actorUserId, runId, plan, output, emit)) return { plan, output, reasonCode: "next_round", nextRound: true };
+        const reasonCode = await commitCompletedPlan(this.terminal, await this.plans.assessments(plan.id), plan, runId, output);
+        return { plan, output, reasonCode, nextRound: false };
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== "STEER_PENDING") throw error;
+        const run = await this.get(actorUserId, runId);
+        const state = await this.canonicalStates.get(runId);
+        const contextRow = await this.planningRecovery.get(runId);
+        if (contextRow === undefined) throw new AppError("CONFLICT", "Steer continuation requires the admitted Run context", 409);
+        const context = JSON.parse(contextRow.context_json) as PlanningRecoveryContext;
+        const visibleDirectories = await this.runs.visibleDirectoriesForRun(runId);
+        const sources = (await this.sources.listByRun(runId)).map(sourceSummary);
+        const privateSkills = (await this.skills.resolveForConversation(actorUserId)).filter(skill => context.allowedSkillIds?.includes(skill.id));
+        const allTools = composeRunTools({ coreTools: this.coreTools, sourceRepository: this.sources, privateSkills, visibleDirectories, uploadedSources: sources,
+          additionalTools: await this.connectorToolsForRun({ runId, actorUserId, conversationId: run.conversationId, connectionIds: context.connectorConnectionIds }) });
+        const workspaceRoot = run.conversationId === undefined ? await this.workspace.ensureOwnerWorkspace(actorUserId)
+          : await this.workspace.ensureConversationWorkspace(actorUserId, run.conversationId);
+        const rootGrant = createCapabilityGrant({ actorUserId, runId, ...(run.conversationId === undefined ? {} : { conversationId: run.conversationId }),
+          depth: run.depth, workspaceRoot, visibleDirectories, uploadedSources: sources, allowedToolNames: context.allowedToolNames ?? [], allowedSkillIds: privateSkills.map(skill => skill.id) });
+        const scope: { planId?: string; stepId?: string } = { planId: plan.id };
+        const model = new ActionTrackedModel(this.modelFactory(this.retryReporter(runId), run.modelKey), this.actions, runId, () => scope,
+          state.intent.runtimeClock, state.intent.turnResolution?.temporalScope);
+        plan = await this.executePlanSteps({ actorUserId, runId, privateSkills, rootGrant, plan: await this.plans.get(plan.id), canonicalState: state,
+          model, assessor: this.assessorFactory(model), defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
+          registry: new ToolRegistry(allTools, { plugins: this.toolExecutionPlugins }), visibleDirectories, sources, emit,
+          signal: this.activeRunControllers.get(runId)?.signal,
+          onStepChanged: stepId => { scope.stepId = stepId; } });
+      }
+    }
+  }
+
+  private async advanceRoundIfNeeded(actorUserId: string, runId: string, plan: ExecutionPlan, output: string,
+    emit: (event: RuntimeEvent) => Promise<void>): Promise<boolean> {
+      const currentCanonicalState = await this.canonicalStates.get(runId);
+      const progress = decideRoundProgress(plan, currentCanonicalState);
+      if (progress.kind === "next_round") {
+        const roundNumber = await this.rounds.roundForPlan(runId, plan.id);
+        const recovery = await this.planningRecovery.get(runId);
+        if (recovery === undefined) throw new AppError("CONFLICT", "Planning context is missing before next Round", 409);
+        const context = JSON.parse(recovery.context_json) as PlanningRecoveryContext;
+        const nextContext: PlanningRecoveryContext = {
+          ...context,
+          roundResultBindings: [...(context.roundResultBindings ?? []), ...plan.steps.filter((step) => step.retiredAt === undefined && step.evidence?.publishedResult !== undefined).map((step) => ({
+            schema: "agentloop.resultBinding/v1" as const,
+            result: step.evidence!.publishedResult!.ref,
+            relation: "continue_prior" as const,
+          }))],
+          targetScopeIds: progress.openTargetIds,
+          priorRoundResult: {
+            schema: "agentloop.roundResultCard/v1",
+            roundNumber,
+            planId: plan.id,
+            planVersion: plan.version,
+            outputSummary: output.slice(0, 8_000),
+            decision: {
+              kind: "next_round",
+              openGapIds: progress.openGapIds,
+              openTargetIds: progress.openTargetIds,
+            },
+            resultRefs: plan.steps.flatMap((step) => step.retiredAt === undefined && step.evidence?.publishedResult !== undefined
+              ? [step.evidence.publishedResult.ref] : []),
+          },
+        };
+        const nextCanonicalState = beginCanonicalRound(currentCanonicalState, Date.now());
+        try {
+          await this.terminal.commitRound(runId, plan.id, output, progress, nextCanonicalState, nextContext);
+        } catch (error) {
+          await emit({ type: "round.next.failed", data: {
+            runId,
+            roundNumber: roundNumber + 1,
+            code: error instanceof AppError ? error.code : "INTERNAL_ERROR",
+          } });
+          throw error;
+        }
+        const leaseToken = randomUUID();
+        if (!await this.planningRecovery.acquireLease(runId, leaseToken, Date.now(), 60_000)) {
+          throw new AppError("CONFLICT", "Next Round planning lease could not be acquired", 409);
+        }
+        await emit({ type: "round.completed", data: { runId, planId: plan.id, roundNumber, decision: progress } });
+        void this.resumePlanningRun(actorUserId, runId, leaseToken).catch(async (error) => {
+          await this.appendRunEvent(runId, { type: "round.next.failed", data: { runId, code: error instanceof AppError ? error.code : "INTERNAL_ERROR" } });
+        });
+        await emit({ type: "round.next.started", data: { runId, roundNumber: roundNumber + 1, targetScopeIds: progress.openTargetIds } });
+        return true;
+      }
+      return false;
+  }
+
+  private async priorRoundEvidenceForPlanning(runId: string, bindings: readonly import("./runtime-result.ts").RuntimeResultBinding[]): Promise<NonNullable<TaskSpec["reusableRoundEvidence"]>> {
+    if (bindings.length === 0) return { kinds: [], toolSourceIds: [] };
+    const boundIds = new Set(bindings.map(binding => binding.result.resultId));
+    const committedIds = new Set((await this.rounds.history(runId)).flatMap(round => round.result?.steps.map(step => step.result.resultId) ?? []));
+    const kinds = new Set<import("../planning/contracts.ts").EvidenceKind>();
+    const sources = new Set<string>();
+    for (const plan of await this.plans.listByRun(runId)) for (const step of plan.steps) {
+      const result = step.evidence?.publishedResult;
+      if (step.status !== "completed" || result === undefined || !boundIds.has(result.ref.resultId) || !committedIds.has(result.ref.resultId)) continue;
+      const observed = step.evidence!.toolCalls.filter(call => !call.isError).flatMap(call => call.admittedEvidenceKinds ?? []);
+      for (const kind of observed) if ((importedEvidenceKinds as readonly string[]).includes(kind)) kinds.add(kind as import("../planning/contracts.ts").EvidenceKind);
+      if (observed.length > 0) for (const id of step.executionBinding.requiredToolSourceIds ?? []) sources.add(id);
+    }
+    return { kinds: [...kinds], toolSourceIds: [...sources] };
   }
 
   private async resolvePlanningExtensions(input: {
@@ -2906,7 +3062,226 @@ export class RunService {
     }
   }
 
-  private async executePlanSteps(input: {
+  private async drainPausedInputs(actorUserId: string, runId: string): Promise<void> {
+    if (this.isRunExecuting(runId) || !await this.humanLoops.hasOpen(runId)) return;
+    const run = await this.get(actorUserId, runId);
+    if (run.status !== "running") return;
+    const state = await this.canonicalStates.getOptional(runId);
+    if (state === undefined) return;
+    const privateSkills = await this.skills.resolveForConversation(actorUserId);
+    const visibleDirectories = await this.runs.visibleDirectoriesForRun(runId);
+    const sources = (await this.sources.listByRun(runId)).map(sourceSummary);
+    const contextRow = await this.planningRecovery.get(runId);
+    const context = contextRow === undefined ? undefined : JSON.parse(contextRow.context_json) as PlanningRecoveryContext;
+    const workspaceRoot = run.conversationId === undefined ? await this.workspace.ensureOwnerWorkspace(actorUserId)
+      : await this.workspace.ensureConversationWorkspace(actorUserId, run.conversationId);
+    const rootGrant = createCapabilityGrant({ actorUserId, runId, ...(run.conversationId === undefined ? {} : { conversationId: run.conversationId }),
+      depth: run.depth, workspaceRoot, visibleDirectories, uploadedSources: sources,
+      allowedToolNames: context?.allowedToolNames ?? [], allowedSkillIds: context?.allowedSkillIds ?? [] });
+    const model = new ActionTrackedModel(this.modelFactory(this.retryReporter(runId), run.modelKey), this.actions, runId, () => ({}),
+      state.intent.runtimeClock, state.intent.turnResolution?.temporalScope);
+    const plan = await optionalPlanByRun(this.plans, runId);
+    if (this.isRunExecuting(runId)) return;
+    const controller = new AbortController();
+    this.activeRunControllers.set(runId, controller);
+    let release!: () => void;
+    this.executionIdle.set(runId, new Promise<void>(resolve => { release = resolve; }));
+    try {
+      await this.processRunInputs({ actorUserId, runId, model, canonicalState: state, privateSkills, rootGrant, visibleDirectories, sources,
+        plan, signal: controller.signal });
+    } finally {
+      if (this.activeRunControllers.get(runId) === controller) this.activeRunControllers.delete(runId);
+      this.executionIdle.delete(runId); release();
+    }
+  }
+
+  private async resumeInputClarification(actorUserId: string, runId: string, planId?: string): Promise<void> {
+    await this.whenRunIdle(runId);
+    if (planId === undefined) return this.resumePlanningRun(actorUserId, runId);
+    if (this.isRunExecuting(runId)) throw new AppError("CONFLICT", "Run is already executing", 409);
+    const controller = new AbortController();
+    this.activeRunControllers.set(runId, controller);
+    let release!: () => void;
+    this.executionIdle.set(runId, new Promise<void>(resolve => { release = resolve; }));
+    try {
+      const emit = (event: RuntimeEvent) => this.appendRunEvent(runId, event);
+      const completion = await this.finishPlanAfterInputs(actorUserId, runId, await this.plans.get(planId), emit);
+      if (!completion.nextRound) {
+        await emit({ type: "terminal.delivery_committed", data: { runId, planId, output: completion.output, reasonCode: completion.reasonCode } });
+        await emit({ type: "run.completed", data: { runId, planId, output: completion.output } });
+      }
+    } finally {
+      if (this.activeRunControllers.get(runId) === controller) this.activeRunControllers.delete(runId);
+      this.executionIdle.delete(runId); release();
+    }
+  }
+
+  private async processRunInputs(input: {
+    actorUserId: string; runId: string; model: ModelAdapter; canonicalState: CanonicalRunState;
+    privateSkills: readonly PrivateSkill[]; rootGrant: CapabilityGrant;
+    visibleDirectories: readonly VisibleDirectoryGrant[]; sources: readonly UploadedSourceSummary[];
+    plan?: ExecutionPlan; signal?: AbortSignal;
+  }): Promise<{ state: CanonicalRunState; plan?: ExecutionPlan }> {
+    const queue = new RunInputRepository(this.database), token = randomUUID();
+    let state = await this.canonicalStates.get(input.runId), plan = input.plan;
+    for (;;) {
+      let message: RunInputMessage | undefined;
+      try { message = await queue.claim(input.runId, token); }
+      catch (error) {
+        if (!(error instanceof AppError) || error.code !== "CONFLICT") throw error;
+        throwIfAbortSignal(input.signal);
+        await waitForInputOwner(100, undefined, { signal: input.signal });
+        continue;
+      }
+      if (message === undefined) return { state, ...(plan === undefined ? {} : { plan }) };
+      const heartbeat = setInterval(() => { void queue.renew(input.runId, token).catch(() => undefined); }, 30_000);
+      heartbeat.unref();
+      try {
+        state = await this.canonicalStates.get(input.runId);
+        const baseState = state, basePlan = plan;
+        const events = await this.runtimeEvents(input.runId);
+        const actions = await this.actions.list(input.runId);
+        const humanLoop = await this.humanLoops.current(input.runId);
+        const clarification = message.requestId.startsWith("hil_")
+          ? await this.database.prepare(`SELECT requests.prompt, requests.evidence_refs_json FROM human_loop_responses responses
+              JOIN human_loop_requests requests ON requests.id = responses.request_id
+              WHERE responses.id = ? AND responses.run_id = ? AND requests.status = 'answered'`)
+              .get<{ prompt: string; evidence_refs_json: string }>(message.requestId.slice(4), input.runId) : undefined;
+        const clarificationSource = clarification === undefined ? undefined : {
+          question: clarification.prompt,
+          originalMessages: (await queue.list(input.runId)).filter(prior => (JSON.parse(clarification.evidence_refs_json) as string[]).includes(prior.id)),
+        };
+        let actionId = "";
+        await this.actions.execute({ runId: input.runId, ...(plan === undefined ? {} : { planId: plan.id }),
+          kind: "planning", replayPolicy: "safe", deadlineMs: 900_000,
+          metadata: { purpose: "steer", messageId: message.id, canonicalRevision: state.revision }, onDispatched: action => { actionId = action.id; },
+        }, async () => {
+          let decision = await decideRunInput({ model: input.model, message, state,
+            evidence: { plan: plan === undefined ? undefined : { id: plan.id, version: plan.version, goal: plan.goal,
+              steps: plan.steps.filter(step => step.retiredAt === undefined).map(step => ({ id: step.id, objective: step.objective, status: step.status,
+                result: step.evidence?.publishedResult === undefined ? undefined : { ref: step.evidence.publishedResult.ref, content: step.evidence.publishedResult.payload.content.slice(0, 2400) } })) },
+              actions: actions.slice(-80).map(action => ({ id: action.id, stepId: action.stepId, kind: action.kind, state: action.state, effectState: action.effectState,
+                toolName: action.metadata.toolName, errorCode: action.errorCode })), humanLoop, clarificationSource,
+              recentEvents: events.slice(-40).map(event => ({ seq: event.seq, type: event.type })) }, signal: input.signal });
+          if (humanLoop !== undefined && decision.kind !== "answer" && decision.kind !== "cancel") decision = {
+            kind: "clarify", explanation: `已有待回答问题，请通过该问题的回答入口处理。${decision.explanation}`,
+          };
+          if (decision.kind === "cancel") {
+            await queue.finish(message, token, "applied", { kind: "cancel", explanation: decision.explanation, canonicalRevision: state.revision });
+            throw new AppError("CANCELLED", "User requested cancellation through Steer", 409);
+          }
+          if (decision.kind !== "amend") {
+            let request: HumanLoopRequest | undefined;
+            await queue.finish(message, token, decision.kind === "answer" ? "answered" : "needs_clarification",
+              { kind: decision.kind, explanation: decision.explanation, canonicalRevision: state.revision }, async () => {
+                if (decision.kind !== "clarify" || humanLoop !== undefined) return;
+                request = await this.humanLoops.create({ runId: input.runId, ...(plan === undefined ? {} : { planId: plan.id }),
+                  origin: "assessor", kind: "input", title: "需要澄清补充要求", prompt: decision.explanation,
+                  rationale: "执行将在确认补充要求后继续。补充消息不会扩大原有授权。", evidenceRefs: [message.id],
+                  responseSchema: { type: "form", fields: [{ id: "clarification", label: "补充说明", valueType: "textarea", required: true, maxLength: 4000 }] },
+                  resume: { mode: "run_input" } });
+                if (plan === undefined) await this.planningRecovery.wait(input.runId, "plan", "RUN_INPUT_CLARIFICATION", request.id, this.clock());
+              });
+            if (request !== undefined) {
+              await this.appendRunEvent(input.runId, { type: "run.waiting_user", data: { runId: input.runId, requestId: request.id, kind: request.kind, request } });
+              throw new AppError("HUMAN_LOOP_REQUIRED", decision.explanation, 409, { inputMessageId: message.id });
+            }
+            return;
+          }
+          const intentRecord = optionalRecord(decision.taskIntent);
+          const intent = parseConversationTaskIntent({ ...intentRecord,
+            deliverables: Array.isArray(intentRecord.deliverables) ? intentRecord.deliverables.map(item => {
+              const value = optionalRecord(item); return value.format === null ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== "format")) : value;
+            }) : intentRecord.deliverables,
+          });
+          if (intent === undefined || intent.deliverables.length === 0) throw new AppError("PLANNING_ERROR", "Steer must preserve a valid complete delivery inventory", 422);
+          const understanding = understandTask({ objective: decision.effectiveGoal!, userConstraints: decision.userConstraints,
+            evidenceDemand: state.intent.understanding.evidence.need, resolvedTaskIntent: intent });
+          const turnResolution = state.intent.turnResolution === undefined ? undefined : { ...state.intent.turnResolution,
+            effectiveGoal: decision.effectiveGoal!, taskIntent: intent, userConstraints: decision.userConstraints! };
+          const amended = amendCanonicalIntent(state, { messageId: message.id, seq: message.seq, text: message.text,
+            explanation: decision.explanation, understanding, ...(turnResolution === undefined ? {} : { turnResolution }) });
+          let admitted: ExecutionPlan | undefined;
+          let retiredStepIds: string[] = [];
+          if (basePlan !== undefined) {
+            const allTools = composeRunTools({ coreTools: this.coreTools, sourceRepository: this.sources, privateSkills: input.privateSkills,
+              visibleDirectories: input.visibleDirectories, uploadedSources: input.sources,
+              additionalTools: await this.connectorToolsForRun({ runId: input.runId, actorUserId: input.actorUserId,
+                conversationId: input.rootGrant.conversationId, connectionIds: this.connectorConnectionIdsByRunId.get(input.runId) ?? [] }),
+            });
+            const tools = toolSummaries(allTools, input.rootGrant.allowedToolNames);
+            const completed = basePlan.steps.filter(step => step.status === "completed" && step.evidence?.publishedResult !== undefined);
+            const bindings = [...(basePlan.resultBindings ?? []), ...completed.map(step => ({ schema: "agentloop.resultBinding/v1" as const,
+              result: step.evidence!.publishedResult!.ref, relation: "continue_prior" as const }))];
+            const toolSourceIds = [...new Set(completed.flatMap(step => (step.executionBinding.requiredToolSourceIds ?? [])))];
+            const kinds = [...new Set(completed.flatMap(step => step.evidence!.toolCalls.filter(call => !call.isError).flatMap(call => call.admittedEvidenceKinds ?? [])))].filter((kind): kind is import("../planning/contracts.ts").EvidenceKind => (importedEvidenceKinds as readonly string[]).includes(kind));
+            const proposal = await this.plannerFactory(input.model).plan({ runId: input.runId, canonicalState: amended,
+              availableSkills: input.privateSkills, availableToolNames: [...input.rootGrant.allowedToolNames], availableTools: tools,
+              availableCapabilities: [...planningCapabilitiesFromTools(tools, input.sources), ...planningCapabilitiesFromSkills(input.privateSkills)],
+              visibleDirectories: input.visibleDirectories, sources: input.sources, roundResultBindings: bindings,
+              reusableRoundEvidence: { kinds, toolSourceIds }, planningExtensionContexts: [{ schema: "agentloop.planningExtensionContext/v1",
+                extensionName: "runtime-input", kind: "steer", content: { message, previousPlan: basePlan,
+                  actions, instruction: "Plan only the remaining work under the amended intent. Previous Steps are archived; reuse their published Results and recorded Tool receipts. Never repeat a confirmed external action or assume an unknown action succeeded." } }],
+            }, input.signal, event => this.appendRunEvent(input.runId, event));
+            // New contracts have new identities. Archived completed facts remain readable through explicit bindings.
+            const prefix = `steer${message.seq}.`;
+            const namespaced = { ...proposal, steps: proposal.steps.map(step => ({ ...step, id: prefix + step.id,
+              ...(step.parentId === undefined ? {} : { parentId: prefix + step.parentId }), dependencies: step.dependencies.map(id => prefix + id) })) };
+            admitted = admitPlan({ runId: input.runId, proposal: bindRequiredSkillCompanions(namespaced, input.privateSkills), canonicalState: amended,
+              availableSkills: input.privateSkills, availableToolNames: input.rootGrant.allowedToolNames, availableTools: tools,
+              availableCapabilities: planningCapabilitiesForAdmittedProposal(namespaced, input.privateSkills, tools, input.sources),
+              availableUploadedSourceIds: input.sources.map(source => source.id), availableVisibleDirectoryIds: input.visibleDirectories.map(directory => directory.id),
+              resultBindings: bindings, reusableEvidenceKinds: kinds, reusableToolSourceIds: toolSourceIds,
+            });
+            retiredStepIds = basePlan.steps.filter(step => step.retiredAt === undefined).map(step => step.id);
+            const assessment = await this.planRevisionAssessorFactory(input.model).assess({ runId: input.runId, userInput: amended.intent.userInput,
+              canonicalState: amended, currentPlan: basePlan, proposal: namespaced, retiredStepIds,
+              recoveryAction: { id: actionId, kind: "planning", replayPolicy: "safe", metadata: { reason: "steer", messageId: message.id,
+                unresolvedActionEffects: await this.unresolvedUnsafeEffects(input.runId, basePlan.id) } } });
+            if (!assessment.approved) throw new AppError("PLAN_NOT_ADMITTED", "Steer Plan revision was not approved", 422);
+          }
+          await queue.finish(message, token, "applied", { kind: "amend", explanation: decision.explanation,
+            basedOnCanonicalRevision: baseState.revision, intentRevision: amended.intent.revision,
+            ...(basePlan === undefined ? {} : { planId: basePlan.id, planVersion: basePlan.version + 1 }) }, async () => {
+            state = await this.canonicalStates.commit({ expectedRevision: baseState.revision, state: amended, reason: `steer:${message.id}` });
+            if (basePlan !== undefined && admitted !== undefined) {
+              plan = await this.plans.revise({ planId: basePlan.id, proposal: admitted, retiredStepIds,
+                reason: decision.explanation, actionId, steerMessageId: message.id });
+              state = await this.canonicalStates.commit({ expectedRevision: state.revision,
+                state: reviseCanonicalPlan(state, plan, Date.now(), state.gaps.filter(gap => gap.status === "open" && gap.targetId === undefined && gap.stepId !== undefined).map(gap => ({ gapId: gap.id, replacementStepIds: plan!.steps.filter(step => step.retiredAt === undefined && step.kind === "leaf").map(step => step.id) }))), reason: `steer_plan:${message.id}` });
+            }
+          });
+        });
+      } finally { clearInterval(heartbeat); await queue.release(input.runId, token); }
+    }
+  }
+
+  private async executePlanSteps(input: Parameters<RunService["executePlanStepsOnce"]>[0]): Promise<ExecutionPlan> {
+    let current = input;
+    for (;;) {
+      try {
+        await new RunInputRepository(this.database).checkpoint(input.runId);
+        return await this.executePlanStepsOnce(current);
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== "STEER_PENDING") throw error;
+        const result = await this.processRunInputs({ ...current, plan: await this.plans.get(current.plan.id) });
+        const events = await this.resolveToolArgumentReferences(await this.runtimeEvents(input.runId));
+        const transcripts = result.plan!.steps.filter(step => step.retiredAt !== undefined || step.status === "running").map(step =>
+          reconstructRecoveryTranscript({ userInput: result.state.intent.userInput, stepId: step.id, events }));
+        const toolEvidence = [...new Map(transcripts.flatMap(item => item.toolEvidence).map(item => [item.toolCallId, item])).values()];
+        current = { ...current, plan: result.plan!, canonicalState: result.state,
+          initialRecovery: {
+            stepIds: result.plan!.steps.filter(step => step.retiredAt === undefined && step.status !== "completed").map(step => step.id),
+            ...(result.plan!.steps.find(step => step.retiredAt === undefined && step.status === "running") === undefined ? {} : { resumeStepId: result.plan!.steps.find(step => step.retiredAt === undefined && step.status === "running")!.id }),
+            messages: [{ role: "user" as const, content: result.state.intent.userInput }, ...transcripts.flatMap(item => item.messages.slice(1))],
+            toolEvidence, facts: { inputRevision: result.state.intent.revision },
+          },
+        };
+      }
+    }
+  }
+
+  private async executePlanStepsOnce(input: {
     actorUserId: string;
     runId: string;
     privateSkills: readonly PrivateSkill[];
@@ -2958,6 +3333,7 @@ export class RunService {
     }
     let forcedStepId = input.initialRecovery?.resumeStepId;
     while (!isPlanLeafComplete(plan)) {
+      await new RunInputRepository(this.database).checkpoint(input.runId);
       if (forcedStepId === undefined) this.scheduler.assertProgressPossible(plan);
       const step = forcedStepId === undefined
         ? this.scheduler.nextReady(plan)
@@ -3302,11 +3678,13 @@ export class RunService {
             };
           },
         }),
+        checkpoint: () => new RunInputRepository(this.database).checkpoint(input.runId),
         model: input.model,
         tools: input.registry,
         grant: stepGrant,
         availableSkills: stepSkills.map((skill) => ({ id: skill.id, name: skill.name, contentHash: skill.contentHash })),
         maxSteps: this.maxSteps,
+        initialModelSteps: (await this.actions.list(input.runId)).filter(action => action.kind === "model_turn" && action.planId === plan.id && action.stepId === activeStep.id).length,
         ...(this.stepExecutionStrategy === undefined ? {} : { stepExecutionStrategy: this.stepExecutionStrategy }),
         ...(lookupEvidenceStep ? {
           toolCallLimits: {
@@ -3381,6 +3759,7 @@ export class RunService {
         },
         deferFailureReport: true,
         evaluateCandidate: async (candidate) => {
+          await new RunInputRepository(this.database).checkpoint(input.runId);
           assessmentAttempt += 1;
           const unreadDependencyResultIds = unreadDependencyResultIdsForCandidate(activeStep, plan, candidate.toolEvidence);
           if (unreadDependencyResultIds.length > 0) {
@@ -3543,6 +3922,7 @@ export class RunService {
               metadata: { phase: "assessment", assessmentProfile, assessmentMethod: "rule" },
             }, assess)
             : await assess();
+          await new RunInputRepository(this.database).checkpoint(input.runId);
           const admittedAssessment = enforceAdmittedAssessment(assessmentInput, assessed);
           const assessment = assessDecisionBindings({ assessment: admittedAssessment, planId: plan.id, stepId: activeStep.id, ledger: decisionLedger, evidence: evidence.toolCalls });
           assessedCandidates.set(assessmentSignature, assessment);
@@ -3622,6 +4002,7 @@ export class RunService {
         },
       });
     }
+    await new RunInputRepository(this.database).checkpoint(input.runId);
     return plan;
   }
 
@@ -3665,11 +4046,12 @@ export class RunService {
     // while changing its definition. Convert that narrow case into the
     // immutable replacement-leaf shape before admission; PlanRepository then
     // remains the final guard for every other attempted mutation.
-    const planRevision = normalizeRecoveryPlanRevision(
+    const normalizedRevision = normalizeRecoveryPlanRevision(
       input.currentPlan,
       input.decision.planRevision,
       failedBoundary?.stepId,
     );
+    const planRevision = { ...normalizedRevision, ...(normalizedRevision.roundScope !== undefined ? {} : input.currentPlan.roundScope === undefined ? {} : { roundScope: input.currentPlan.roundScope }) };
     const gapId = stringField(input.action.metadata, "canonicalGapId");
     const repairGap = canonicalState.gaps.find((gap) => gap.id === gapId && gap.status === "open");
     if (gapId !== undefined && repairGap === undefined) throw new AppError("CONFLICT", "Recovery revision has no open canonical Gap", 409);
@@ -3776,8 +4158,9 @@ export class RunService {
     await this.recovery.admit(input.decision.id);
     if (input.action.kind === "recovery_review") await this.actions.resolveRecoveryReview(input.action.id);
     if (isEffectivelyComplete(revised)) {
-      const output = finalPlanOutput(revised);
-      const reasonCode = await commitCompletedPlan(this.terminal, await this.plans.assessments(revised.id), revised, input.run.id, output);
+      const completion = await this.finishPlanAfterInputs(input.actorUserId, input.run.id, revised, event => this.appendRunEvent(input.run.id, event));
+      if (completion.nextRound) return;
+      const { output, reasonCode } = completion;
       await this.enqueueMemorySettlement(input.run.id);
       await this.appendRunEvent(input.run.id, {
         type: "terminal.delivery_committed",
@@ -3859,8 +4242,9 @@ export class RunService {
           input.setActionStep?.(stepId);
         },
       });
-      const output = finalPlanOutput(completed);
-      const reasonCode = await commitCompletedPlan(this.terminal, await this.plans.assessments(completed.id), completed, input.run.id, output);
+      const completion = await this.finishPlanAfterInputs(input.actorUserId, input.run.id, completed, event => this.appendRunEvent(input.run.id, event));
+      if (completion.nextRound) return;
+      const { output, reasonCode } = completion;
       await this.appendRunEvent(input.run.id, {
         type: "terminal.delivery_committed",
         data: { runId: input.run.id, planId: completed.id, output, reasonCode, recovered: true },

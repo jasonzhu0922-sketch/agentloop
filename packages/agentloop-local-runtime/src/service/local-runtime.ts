@@ -37,6 +37,8 @@ export interface LocalRuntime {
   models(): readonly string[];
   startRun(context: LocalExecutionContext, input: LocalRunInput): ReturnType<RunService["startConversation"]>;
   getRun(context: LocalExecutionContext, runId: string): ReturnType<RunService["get"]>;
+  submitInput(context: LocalExecutionContext, runId: string, input: { requestId: string; text: string }): ReturnType<RunService["submitInput"]>;
+  inputMessages(context: LocalExecutionContext, runId: string, afterSeq?: number): ReturnType<RunService["inputMessages"]>;
   cancelRun(context: LocalExecutionContext, runId: string): ReturnType<RunService["cancel"]>;
   currentHumanLoop(context: LocalExecutionContext, runId: string): ReturnType<RunService["currentHumanLoop"]>;
   respondHumanLoop(context: LocalExecutionContext, runId: string, requestId: string, value: unknown, expectedRevision: number): ReturnType<RunService["respondHumanLoop"]>;
@@ -104,6 +106,8 @@ export class RuntimeFacade implements LocalRuntime {
   async getRun(context: LocalExecutionContext, runId: string) {
     return this.#use(runtime => runtime.runs.get(this.#owner(context), runId));
   }
+  submitInput(context: LocalExecutionContext, runId: string, input: { requestId: string; text: string }) { return this.#use(runtime => runtime.runs.submitInput(this.#owner(context), runId, input)); }
+  inputMessages(context: LocalExecutionContext, runId: string, afterSeq = 0) { return this.#use(runtime => runtime.runs.inputMessages(this.#owner(context), runId, afterSeq)); }
   cancelRun(context: LocalExecutionContext, runId: string) { return this.#use(runtime => runtime.runs.cancel(this.#owner(context), runId)); }
   currentHumanLoop(context: LocalExecutionContext, runId: string) { return this.#use(runtime => runtime.runs.currentHumanLoop(this.#owner(context), runId)); }
   respondHumanLoop(context: LocalExecutionContext, runId: string, requestId: string, value: unknown, expectedRevision: number) {

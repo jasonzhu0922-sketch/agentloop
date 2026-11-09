@@ -9,5 +9,5 @@ export function isTextToolInvocation(content: string): boolean {
     .replaceAll("＞", ">")
     .replaceAll("｜", "|")
     .toLowerCase();
-  return /<(?:antml:)?(?:invoke|parameter)\b|<tool_calls?\b|<\|*(?:dsml\|*)?(?:tool_calls?(?:_section_begin)?|tool_call_begin|invoke|function_call)\b/.test(normalized);
+  return /<(?:antml:)?(?:invoke|parameter)\b|<tool_calls?\b|<\|*(?:dsml\|*)?(?:tool_calls?(?:_section_begin)?|tool_call_begin|invoke|function_call)\b|<\|+dsml\|+\s*(?:calls|invoke|parameter)\b/.test(normalized);
 }

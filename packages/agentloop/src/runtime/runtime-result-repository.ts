@@ -117,10 +117,61 @@ export class RuntimeResultRepository {
         ) return result;
       }
     }
-    if (input.actorUserId === undefined || input.conversationId === undefined) return undefined;
     const plan = await this.database.prepare("SELECT input_bindings_json FROM plans WHERE id = ? AND run_id = ?")
       .get(input.planId, input.runId) as { input_bindings_json: string } | undefined;
     if (!hasBoundResult(plan?.input_bindings_json, input.resultId)) return undefined;
+    const archived = await this.database.prepare(`SELECT steps.step_id, steps.evidence_json FROM plan_steps AS steps
+      JOIN plan_step_retirements AS retired ON retired.plan_id = steps.plan_id AND retired.step_id = steps.step_id
+      JOIN runtime_actions AS decision ON decision.id = retired.action_id
+      JOIN runs ON runs.id = decision.run_id
+      WHERE steps.plan_id = ? AND steps.status = 'completed' AND decision.run_id = ?
+        ${input.actorUserId === undefined ? "" : "AND runs.owner_user_id = ?"}`)
+      .all<StepResultRow>(...(input.actorUserId === undefined ? [input.planId, input.runId] : [input.planId, input.runId, input.actorUserId]));
+    for (const step of archived) {
+      const result = resultFromEvidence(step.evidence_json);
+      if (result?.kind === "step" && result.publication.status === "published" && result.publication.assessmentRef !== undefined
+        && result.ref.resultId === input.resultId && result.producer.runId === input.runId
+        && result.producer.planId === input.planId && result.producer.stepId === step.step_id) return result;
+    }
+    // A Round can consume an explicitly bound, assessed result from an earlier
+    // Round of this very Run, even when the Run is not attached to a conversation.
+    // The Round Result is the durable publication boundary, not merely the
+    // presence of a completed step in an unrelated or unfinished Plan.
+    const previousRounds = await this.database.prepare(`
+      SELECT previous.plan_id, result.result_json, steps.step_id, steps.evidence_json
+      FROM run_rounds AS current_round
+      JOIN run_rounds AS previous ON previous.run_id = current_round.run_id
+        AND previous.round_number < current_round.round_number AND previous.status = 'completed'
+      JOIN run_round_results AS result ON result.run_id = previous.run_id
+        AND result.round_number = previous.round_number AND result.plan_id = previous.plan_id
+      JOIN plan_steps AS steps ON steps.plan_id = previous.plan_id AND steps.status = 'completed'
+      JOIN runs ON runs.id = current_round.run_id
+      WHERE current_round.run_id = ? AND current_round.plan_id = ?
+        ${input.actorUserId === undefined ? "" : "AND runs.owner_user_id = ?"}
+    `).all(...(input.actorUserId === undefined
+      ? [input.runId, input.planId] : [input.runId, input.planId, input.actorUserId])) as unknown as Array<{
+      plan_id: string; result_json: string; step_id: string; evidence_json: string | null;
+    }>;
+    for (const candidate of previousRounds) {
+      const round = parseRecord(candidate.result_json);
+      const result = resultFromEvidence(candidate.evidence_json);
+      if (
+        round?.schema !== "agentloop.roundResult/v1" || round.runId !== input.runId || round.planId !== candidate.plan_id
+        || !Array.isArray(round.steps)
+        || !round.steps.some((entry: unknown) => {
+          const item = parseRecord(entry);
+          const ref = parseRecord(item?.result);
+          return item?.stepId === candidate.step_id && ref?.resultId === input.resultId
+            && typeof item.assessmentId === "string" && item.assessmentId === result?.publication.assessmentRef;
+        })
+        || result?.ref.resultId !== input.resultId || result.kind !== "step"
+        || result.publication.status !== "published"
+        || result.producer.runId !== input.runId || result.producer.planId !== candidate.plan_id
+        || result.producer.stepId !== candidate.step_id
+      ) continue;
+      return result;
+    }
+    if (input.actorUserId === undefined || input.conversationId === undefined) return undefined;
     const outcome = await this.database.prepare(`
       SELECT outcomes.result_json
       FROM run_outcomes AS outcomes
@@ -143,7 +194,8 @@ export class RuntimeResultRepository {
       WHERE steps.status = 'completed'
         AND runs.owner_user_id = ?
         AND runs.conversation_id = ?
-    `).all(input.actorUserId, input.conversationId) as unknown as BoundStepResultRow[];
+        AND runs.id <> ?
+    `).all(input.actorUserId, input.conversationId, input.runId) as unknown as BoundStepResultRow[];
     for (const candidate of stepCandidates) {
       const stepResult = resultFromEvidence(candidate.evidence_json);
       if (

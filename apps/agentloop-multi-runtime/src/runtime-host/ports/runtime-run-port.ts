@@ -1,4 +1,5 @@
 import type {
+  RuntimeRunInputMessage,
   RuntimeArtifact,
   RuntimeArtifactPreview,
   RuntimeCommandOutput,
@@ -28,6 +29,8 @@ export interface RuntimeHostRunPort {
     readonly modelKey?: string;
   }): Promise<RuntimeHostRun>;
   get(actorUserId: string, runId: string): Promise<RuntimeHostRun>;
+  submitInput?(actorUserId: string, runId: string, input: { readonly requestId: string; readonly text: string }): Promise<RuntimeRunInputMessage>;
+  inputMessages?(actorUserId: string, runId: string): Promise<readonly RuntimeRunInputMessage[]>;
   roundHistory?(actorUserId: string, runId: string): Promise<readonly RuntimeRoundHistoryEntry[]>;
   cancel?(actorUserId: string, runId: string): Promise<RuntimeHostRun>;
   events?(actorUserId: string, runId: string): Promise<readonly RuntimeRunEvent[]>;

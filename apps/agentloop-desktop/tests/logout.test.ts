@@ -25,6 +25,7 @@ for (const statusCode of [200, 401]) {
       section("element('logout').onclick =", "element('message').onkeydown ="),
     ].join("\n"), {
       element: (id: string) => controls.get(id) ?? null,
+      conversationRuntimeLocked: false, runtimeNames: new Map(), runtimeId: "desktop-default", steerAccount: undefined, conversationId: undefined,
       csrf: "synthetic", generation: 0, locked: false, activeRun: undefined, cancelling: false,
       PENDING_KEY: "test-pending", sessionStorage: { removeItem() {} },
       location: { replace: (url: string) => navigations.push(url) },

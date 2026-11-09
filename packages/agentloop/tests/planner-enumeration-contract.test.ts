@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ModelPlanner } from "../src/planning/planner.ts";
 import type { ModelAdapter, ModelResponse } from "../src/runtime/contracts.ts";
-import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
+import { beginCanonicalRound, bindCanonicalPlan, createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
 import { admitPlan } from "../src/planning/admission.ts";
 import { PlanRepository } from "../src/planning/plan-repository.ts";
@@ -23,7 +23,7 @@ function factRepairFixture() {
     } }),
   });
   const fact = { id: "current-chairman", description: "示例公司现任董事长的姓名", evidenceKinds: ["source_summary"],
-    basis: { kind: "user_requirement", intentId: canonicalState.intent.id, targetIds: ["answer"],
+    basis: { kind: "user_requirement", targetIds: ["answer"],
       rationale: "The user explicitly requests the current holder of this role." } };
   return {
     fact,
@@ -38,6 +38,33 @@ function factRepairFixture() {
     },
   };
 }
+
+test("next Round binds fact provenance to the existing canonical intent without asking the model to copy its ID", async () => {
+  const fixture = factRepairFixture();
+  const firstProposal = await new ModelPlanner({ limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
+    complete: async () => fixture.response(fixture.fact) }).plan(fixture.task);
+  const firstPlan = admitPlan({ ...fixture.task, proposal: firstProposal, availableToolNames: new Set(fixture.task.availableToolNames) });
+  const canonicalState = beginCanonicalRound(bindCanonicalPlan(fixture.task.canonicalState, firstPlan, 2), 3);
+  let calls = 0;
+  const planned = await new ModelPlanner({
+    limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
+    async complete(request) {
+      calls++;
+      const schema = (request.tools[0]!.inputSchema as any).properties.leaves.items.properties.requiredFacts.items.properties.basis;
+      assert.equal(Object.hasOwn(schema.properties, "intentId"), false);
+      assert.equal(Object.hasOwn(schema.properties, "requirement"), false);
+      return fixture.response(fixture.fact);
+    },
+  }).plan({ ...fixture.task, canonicalState, targetScopeIds: ["answer"] });
+  assert.equal(calls, 1);
+  const admitted = admitPlan({ ...fixture.task, canonicalState, proposal: planned,
+    availableToolNames: new Set(fixture.task.availableToolNames), targetScopeIds: ["answer"] });
+  assert.equal(admitted.steps[0]!.requiredFacts[0]!.basis!.intentId, canonicalState.intent.id);
+  assert.equal(admitted.steps[0]!.requiredFacts[0]!.basis!.requirement, canonicalState.intent.userInput);
+  assert.throws(() => admitPlan({ ...fixture.task, canonicalState, availableToolNames: new Set(fixture.task.availableToolNames),
+    proposal: { ...planned, steps: planned.steps.map(step => ({ ...step, requiredFacts: step.requiredFacts!.map(fact => ({ ...fact,
+      basis: { ...fact.basis!, targetIds: ["foreign-target"] } })) })) } }), /canonical targets/i);
+});
 
 test("a forbidden requirement followed by missing fact fields gets bounded repairs without losing the requested fact", async () => {
   const fixture = factRepairFixture();
@@ -67,7 +94,7 @@ test("a forbidden requirement followed by missing fact fields gets bounded repai
   assert.match(failures[0]!, /requirement is Runtime-owned and must not be submitted/);
   assert.equal(failures[1], "leaves[0].requiredFacts[0] is missing required fields: id, evidenceKinds");
   assert.deepEqual(proposal.steps[0]!.requiredFacts, [{ ...fixture.fact,
-    basis: { ...fixture.fact.basis, requirement: fixture.task.canonicalState.intent.userInput } }]);
+    basis: { ...fixture.fact.basis, intentId: fixture.task.canonicalState.intent.id, requirement: fixture.task.canonicalState.intent.userInput } }]);
   assert.equal(proposal.steps[0]!.successCriteria.find((criterion) => criterion.id === "required_fact:current-chairman")?.blocking, true);
   assert.equal(proposal.steps[0]!.successCriteria.some((criterion) => criterion.id === "requested_enumeration"), false);
 });
@@ -236,7 +263,7 @@ test("requested facts survive model planning, persisted admission, execution and
     { id: "chairman", description: "示例公司现任董事长的姓名", evidenceKinds: ["source_summary"] },
     { id: "president", description: "示例公司现任总裁的姓名，不能以登记总经理代替", evidenceKinds: ["source_summary"] },
   ].map((fact) => ({ ...fact, basis: {
-    kind: "user_requirement" as const, intentId: canonicalState.intent.id, targetIds: ["answer"],
+    kind: "user_requirement" as const, targetIds: ["answer"],
     rationale: "The user explicitly requests the current holder of this role.",
   } }));
   const proposal = await new ModelPlanner({
@@ -263,7 +290,7 @@ test("requested facts survive model planning, persisted admission, execution and
     const plan = await repository.getByRun(runId);
     assert.ok(plan);
     const step = plan.steps[0]!;
-    assert.deepEqual(step.requiredFacts, facts.map((fact) => ({ ...fact, basis: { ...fact.basis, requirement: objective } })));
+    assert.deepEqual(step.requiredFacts, facts.map((fact) => ({ ...fact, basis: { ...fact.basis, intentId: canonicalState.intent.id, requirement: objective } })));
     for (const fact of facts) {
       const criterion = step.successCriteria.find((item) => item.id === `required_fact:${fact.id}`);
       assert.ok(criterion?.blocking);

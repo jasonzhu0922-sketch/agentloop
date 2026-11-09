@@ -1,3 +1,5 @@
+import { roundEvidenceFingerprints } from "./round-evidence.ts";
+import { RunInputRepository } from "./run-input-repository.ts";
 import { AppError } from "../shared/errors.ts";
 import type { PlanRepository } from "../planning/plan-repository.ts";
 import { activeLeafSteps } from "../planning/plan-utils.ts";
@@ -58,6 +60,7 @@ export class TerminalCommitter {
     }
     const result = runResult(plan, output, await new RunRoundRepository(this.connection).priorResultRefs(runId, planId));
     await this.connection.transaction(async () => {
+      await new RunInputRepository(this.connection).assertDrained(runId);
       const state = await this.commitRoundResult(plan, assessments, output, "plan_assessed_and_completed");
       await this.commitCanonicalCompletion(state, "plan_assessed_and_completed");
       await this.outcomes.commitCompleted({ runId, planId, result });
@@ -99,10 +102,7 @@ export class TerminalCommitter {
     const progressKey = JSON.stringify({
       openGapIds: [...progress.openGapIds].sort(),
       openTargetIds: [...progress.openTargetIds].sort(),
-      resultIds: plan.steps
-        .filter((step) => step.retiredAt === undefined && step.evidence?.publishedResult !== undefined)
-        .map((step) => step.evidence!.publishedResult!.ref.resultId)
-        .sort(),
+      evidenceFingerprints: roundEvidenceFingerprints(plan),
     });
     await rounds.assertNextAllowed({ runId, roundNumber, maxRounds: this.maxRounds, progressKey });
     if (nextCanonicalState.runId !== runId || nextCanonicalState.revision !== state.revision + 1
@@ -110,6 +110,7 @@ export class TerminalCommitter {
       throw new AppError("CONFLICT", "Next Round Canonical State is invalid", 409);
     }
     await this.connection.transaction(async () => {
+      await new RunInputRepository(this.connection).assertDrained(runId);
       await this.commitRoundResult(plan, assessments, output, reasonCode, progress);
       // Round result is the boundary; the global Goal remains mutable and the
       // Run stays running for a future Round.
@@ -158,6 +159,7 @@ export class TerminalCommitter {
     }
     const result = runResult(plan, output, await new RunRoundRepository(this.connection).priorResultRefs(runId, planId));
     await this.connection.transaction(async () => {
+      await new RunInputRepository(this.connection).assertDrained(runId);
       const state = await this.commitRoundResult(plan, assessments, output, reasonCode);
       await this.commitCanonicalCompletion(state, reasonCode);
       await this.outcomes.commitCompletedWithCaveats({ runId, planId, result, reasonCode });
@@ -174,6 +176,7 @@ export class TerminalCommitter {
     output?: string;
   }): Promise<void> {
     await this.connection.transaction(async () => {
+      await new RunInputRepository(this.connection).stop(input.runId, input.reasonCode);
       const state = await this.canonicalStates.getOptional(input.runId);
       if (state !== undefined && state.terminal === undefined) {
         const terminal = commitCanonicalTerminal(state, { status: input.status, reasonCode: input.reasonCode });
@@ -226,7 +229,8 @@ export class TerminalCommitter {
     await new RunRoundRepository(this.connection).commitResult({
       schema: "agentloop.roundResult/v1", runId: plan.runId, roundNumber,
       planId: plan.id, planVersion: plan.version, canonicalRevision: state.revision,
-      output, reasonCode, steps, decision: { ...progress, canonicalRevision: state.revision },
+      ...(plan.roundScope === undefined ? {} : { roundScope: plan.roundScope }),
+      output, reasonCode, steps, evidenceFingerprints: roundEvidenceFingerprints(plan), decision: { ...progress, canonicalRevision: state.revision },
     }, Date.now());
     return state;
   }

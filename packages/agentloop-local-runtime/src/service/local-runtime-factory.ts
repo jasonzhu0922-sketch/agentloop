@@ -338,8 +338,9 @@ export class LocalRuntimeFactory {
         catch { /* Orphaned ledger rows are not active admissions. */ }
       }
       await runs.reconcilePlanningRecoveries();
+      await runs.reconcileRunInputs();
       planningRecoveryTimer = setInterval(() => {
-        void runs.reconcilePlanningRecoveries().catch((error) => {
+        void runs.reconcilePlanningRecoveries().then(() => runs.reconcileRunInputs()).catch((error) => {
           if (process.env.AGENTLOOP_DEBUG_ERRORS === "1") console.error(error);
         });
       }, 10_000);

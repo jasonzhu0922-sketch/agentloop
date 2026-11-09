@@ -46,9 +46,38 @@ export class RuntimeEventQueryService {
 }
 
 export function publicRunEvent(event: StoredRunEvent): StoredRunEvent {
-  if (!("privateReasoningContent" in event.data)) return event;
   const { privateReasoningContent: _privateReasoningContent, ...data } = event.data;
+  if ((event.type === "assistant.streaming" || event.type === "assistant.committed") && typeof data.content === "string") {
+    return { ...event, data: { ...data, content: publicAssistantContent(data.content) } };
+  }
   return { ...event, data };
+}
+
+// Model output can echo server-owned evidence or provider framing. These are
+// not assistant prose. Streaming events are cumulative snapshots, so withhold
+// an incomplete opening marker and an unfinished record until the next one.
+function publicAssistantContent(content: string): string {
+  const open = "<runtime_evidence_record";
+  const close = "</runtime_evidence_record>";
+  let result = content;
+  for (;;) {
+    const start = result.toLowerCase().indexOf(open);
+    if (start < 0) break;
+    const end = result.toLowerCase().indexOf(close, start + open.length);
+    result = result.slice(0, start) + (end < 0 ? "" : result.slice(end + close.length));
+    if (end < 0) break;
+  }
+  const controls = ["<|begin_of_sentence|>", "<｜begin▁of▁sentence｜>"];
+  for (const control of controls) result = result.split(control).join("");
+  for (const marker of [open, ...controls]) {
+    for (let length = Math.min(marker.length - 1, result.length); length > 0; length--) {
+      if (result.slice(-length).toLowerCase() === marker.slice(0, length).toLowerCase()) {
+        result = result.slice(0, -length);
+        break;
+      }
+    }
+  }
+  return result;
 }
 
 function eventsFromRows(rows: readonly RunEventRow[]): StoredRunEvent[] {

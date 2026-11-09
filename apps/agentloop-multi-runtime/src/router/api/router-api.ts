@@ -1,3 +1,4 @@
+import type { RuntimeRunInputMessage } from "../../shared/contracts.ts";
 import { createServer, type Server } from "node:http";
 import { assertUploadedSourceContent } from "@zhujun/agentloop";
 import type { RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRoundHistoryEntry, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
@@ -14,6 +15,9 @@ interface LocalAgentControlPlane {
 }
 
 interface RouterTaskApi {
+  inputMessages?(id: string): Promise<readonly RuntimeRunInputMessage[]>;
+  submitInput?(id: string, input: { requestId: string; text: string }): Promise<RuntimeRunInputMessage>;
+
   submit(task: SubmitConversationTask): Promise<{ readonly id: string; readonly tenantId: string; readonly ownerUserId: string }>;
   models?(tenantId?: string, ownerUserId?: string): Promise<readonly RuntimeModelSummary[]>;
   cloudModels?(tenantId: string, ownerUserId: string): Promise<readonly RuntimeModelSummary[]>;
@@ -403,6 +407,21 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
         const projection = await router.artifacts(decodeURIComponent(artifactListMatch[1]));
         if (projection === undefined || projection.assignment.tenantId !== identity.tenantId || projection.assignment.ownerUserId !== identity.ownerUserId) return json(response, 404, { error: "assignment_not_found" });
         return json(response, 200, { artifacts: projection.artifacts });
+      }
+      const messagesMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/messages$/);
+      if (messagesMatch && (request.method === "GET" || request.method === "POST")) {
+        const id = decodeURIComponent(messagesMatch[1]);
+        const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
+        const projection = await router.assignment(id);
+        if (projection === undefined || projection.assignment.tenantId !== identity.tenantId || projection.assignment.ownerUserId !== identity.ownerUserId) return json(response, 404, { error: "assignment_not_found" });
+        if (request.method === "GET") {
+          if (router.inputMessages === undefined) return json(response, 501, { error: "runtime_input_not_available" });
+          return json(response, 200, { messages: await router.inputMessages(id) });
+        }
+        if (router.submitInput === undefined) return json(response, 501, { error: "runtime_input_not_available" });
+        const input = await readJson(request) as Record<string, unknown>;
+        if (!input || typeof input.requestId !== "string" || typeof input.text !== "string" || Object.keys(input).some(key => !["requestId", "text"].includes(key))) return json(response, 400, { error: "invalid_input_message" });
+        return json(response, 200, { message: await router.submitInput(id, { requestId: input.requestId, text: input.text }) });
       }
       const roundListMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/rounds$/);
       if (request.method === "GET" && roundListMatch !== null) {

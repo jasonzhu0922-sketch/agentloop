@@ -67,6 +67,17 @@ export class RuntimeHostService implements RuntimeControlPort {
     return await this.runs.processArtifacts(ownerUserId, remoteRunId);
   }
 
+  async submitInput(remoteRunId: string, input: { requestId: string; text: string }) {
+    const owner = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
+    if (owner === undefined || this.runs.submitInput === undefined) throw new TypeError("runtime input is not available");
+    return await this.runs.submitInput(owner, remoteRunId, input);
+  }
+  async inputMessages(remoteRunId: string) {
+    const owner = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
+    if (owner === undefined || this.runs.inputMessages === undefined) throw new TypeError("runtime input is not available");
+    return await this.runs.inputMessages(owner, remoteRunId);
+  }
+
   async rounds(remoteRunId: string): Promise<readonly RuntimeRoundHistoryEntry[]> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");

@@ -108,7 +108,7 @@ test("exhausted assessment adds exactly one tool-free report without reassessmen
   assert.equal(events.some((event) => event.type === "loop.completed" || event.type === "candidate.approved"), false);
 });
 
-for (const mode of ["empty", "tool", "length", "provider_error", "cancelled"] as const) {
+for (const mode of ["empty", "tool", "dsml_text", "length", "provider_error", "cancelled"] as const) {
   test(`failure reporting handles ${mode} without exposing rejected drafts or claiming success`, async () => {
     const controller = new AbortController();
     let calls = 0;
@@ -122,7 +122,9 @@ for (const mode of ["empty", "tool", "length", "provider_error", "cancelled"] as
         if (mode === "provider_error") throw new Error("PROVIDER_SECRET");
         if (mode === "cancelled") controller.abort();
         return {
-          content: mode === "empty" ? "" : "UNSAFE_PARTIAL",
+          content: mode === "empty" ? "" : mode === "dsml_text"
+            ? '<｜DSML｜ calls>\n<｜DSML｜ invoke name="computer_run_command">\n<｜DSML｜ parameter name="command">node</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>'
+            : "UNSAFE_PARTIAL",
           finishReason: mode === "length" ? "length" : "stop",
           toolCalls: mode === "tool" ? [{ id: "never-dispatched", name: "write", arguments: {} }] : [],
         } satisfies ModelResponse;
@@ -136,7 +138,7 @@ for (const mode of ["empty", "tool", "length", "provider_error", "cancelled"] as
       } else {
         assert.equal(error.code, "STEP_NOT_COMPLETED");
         assert.match(String(error.details?.partialOutput), /最后一次结果整理未成功/);
-        assert.doesNotMatch(String(error.details?.partialOutput), /UNVERIFIED_DRAFT|UNSAFE_PARTIAL|PROVIDER_SECRET/);
+        assert.doesNotMatch(String(error.details?.partialOutput), /UNVERIFIED_DRAFT|UNSAFE_PARTIAL|PROVIDER_SECRET|DSML/);
       }
       return true;
     });

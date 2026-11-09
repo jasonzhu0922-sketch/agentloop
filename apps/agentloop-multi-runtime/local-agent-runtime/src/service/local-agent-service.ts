@@ -532,6 +532,13 @@ export class LocalAgentService {
     });
   }
 
+  async strictLocalInputMessages(session: LocalSession, runtimeId: string, runId: string): Promise<unknown> {
+    return this.supervisor.withRuntimeUse(runtimeId, async runtime => ({ messages: await runtime.runs.inputMessages(session.ownerUserId, runId) }));
+  }
+  async submitStrictLocalInput(session: LocalSession, runtimeId: string, runId: string, input: { requestId: string; text: string }): Promise<unknown> {
+    return this.supervisor.withRuntimeUse(runtimeId, async runtime => ({ message: await runtime.runs.submitInput(session.ownerUserId, runId, input) }));
+  }
+
   async strictLocalEvents(session: LocalSession, runtimeId: string, runId: string, afterSeq: number): Promise<unknown> {
     return this.supervisor.withRuntimeUse(runtimeId, async runtime => ({ events: (await runtime.runs.events(session.ownerUserId, runId)).filter((event) => event.seq > afterSeq) }));
   }

@@ -247,6 +247,26 @@ test("Bocha search uses its request contract and preserves backend provenance", 
   } finally { await close(server); }
 });
 
+test("search endpoint errors retain the provider reason without exposing credentials", async () => {
+  const originalFetch = globalThis.fetch;
+  const responses = [
+    new Response(JSON.stringify({ code: "403", message: "You do not have enough money or package quota" }), { status: 403 }),
+    new Response(JSON.stringify({ error: { message: "Invalid key bocha-test-key; Bearer another-secret at https://example.test/?token=secret" } }), { status: 401 }),
+    new Response("<html>private diagnostic page</html>", { status: 502 }),
+  ];
+  globalThis.fetch = (async () => responses.shift() as Response) as typeof fetch;
+  try {
+    const allowed = new ToolRegistry(createWebTools({ searchEndpoint: "https://example.test/search", searchProvider: "bocha", searchApiKey: "bocha-test-key" })).materialize(grant(["websearch"]));
+    const prepared = allowed.prepare({ id: "provider-error", name: "websearch", arguments: { query: "provider error regression" } });
+    const execute = () => prepared.tool.execute(grantContext(["websearch"]), prepared.input);
+    await assert.rejects(execute(), /HTTP 403: You do not have enough money or package quota/);
+    await assert.rejects(execute(), (error: unknown) => error instanceof Error
+      && /HTTP 401: Invalid key \[REDACTED\]/.test(error.message)
+      && !/bocha-test-key|another-secret|token=secret/.test(error.message));
+    await assert.rejects(execute(), (error: unknown) => error instanceof Error && error.message === "Search endpoint returned HTTP 502");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("extractRedirectTarget detects JavaScript and meta-refresh redirects", () => {
   assert.equal(
     extractRedirectTarget(`<script>window.location.replace("https://www.cehome.com/news/1.shtml")</script>`),

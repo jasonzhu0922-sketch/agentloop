@@ -10,6 +10,17 @@ import { PlanningBudgetRepository } from "../src/runtime/planning-budget-reposit
 import { PlanningRecoveryRepository } from "../src/runtime/planning-recovery-repository.ts";
 import { PlanRepository } from "../src/planning/plan-repository.ts";
 import { installMultiPlanSchema } from "../src/storage/multi-plan-schema.ts";
+import { roundEvidenceFingerprints } from "../src/runtime/round-evidence.ts";
+import type { ExecutionPlan } from "../src/planning/contracts.ts";
+
+test("new Result identities cannot make identical assessed facts count as Round progress", () => {
+  const plan = (resultId: string, content: string) => ({ steps: [{ id: resultId, kind: "leaf", evidence: {
+    publishedResult: { ref: { resultId }, publication: { status: "published" }, payload: { content } },
+    toolCalls: [{ toolName: "read_result", result: JSON.stringify({ resultId }), isError: false }],
+  } }] }) as unknown as ExecutionPlan;
+  assert.deepEqual(roundEvidenceFingerprints(plan("old", "same verified fact")), roundEvidenceFingerprints(plan("new", "same verified fact")));
+  assert.notDeepEqual(roundEvidenceFingerprints(plan("old", "same verified fact")), roundEvidenceFingerprints(plan("new", "new verified fact")));
+});
 
 test("initial Round survives reopening and cannot admit a Plan after cancellation", async () => {
   const directory = await mkdtemp(join(tmpdir(), "agentloop-round-"));
@@ -79,7 +90,7 @@ test("repeating the same unresolved Round state is rejected before creation", as
     await database.prepare("UPDATE run_rounds SET status = 'completed', plan_id = ? WHERE run_id = ?").run("stuck-plan", "stuck-run");
     const result = {
       schema: "agentloop.roundResult/v1", runId: "stuck-run", roundNumber: 1, planId: "stuck-plan", planVersion: 1,
-      canonicalRevision: 1, output: "partial", reasonCode: "round_assessed_and_completed",
+      canonicalRevision: 1, evidenceFingerprints: ["receipt-content-sha"], output: "partial", reasonCode: "round_assessed_and_completed",
       steps: [{ stepId: "step-1", result: { schema: "agentloop.runtimeResultRef/v1", resultId: "result-1", producer: { runId: "stuck-run", planId: "stuck-plan", stepId: "step-1" } }, assessmentId: "assessment-1" }],
       decision: { kind: "next_round", canonicalRevision: 1, openGapIds: ["gap-1"], openTargetIds: ["target-1"] },
     };
@@ -88,7 +99,7 @@ test("repeating the same unresolved Round state is rejected before creation", as
     await assert.rejects(
       rounds.assertNextAllowed({
         runId: "stuck-run", roundNumber: 2, maxRounds: 8,
-        progressKey: JSON.stringify({ openGapIds: ["gap-1"], openTargetIds: ["target-1"], resultIds: ["result-1"] }),
+        progressKey: JSON.stringify({ openGapIds: ["gap-1"], openTargetIds: ["target-1"], evidenceFingerprints: ["receipt-content-sha"] }),
       }),
       (error: unknown) => error instanceof Error && "code" in error && error.code === "ROUND_NO_PROGRESS",
     );

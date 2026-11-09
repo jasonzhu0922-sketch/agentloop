@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
 import { randomUUID } from 'node:crypto';
+import { createSteerDrafts } from '../web/reference/ui/steer-queue.js';
 import { createComposerPreferences } from '../web/composer-preferences.js';
 
 // Run the actual app controller with a small DOM/transport fixture. Rendering
@@ -30,6 +31,7 @@ async function fixture(preferencesStorage = new Map(), running = false, runtimeC
     document: { getElementById: element, createElement(tag) { const node = new Element(); node.tag = tag; return node; }, querySelectorAll: () => [], addEventListener: noop, documentElement: { dataset: {} } },
     window: { confirm: () => confirmed }, crypto: { randomUUID }, btoa: value => Buffer.from(value, 'binary').toString('base64'),
     sessionStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
+    createSteerDrafts, createSteerQueueView: () => ({ render: noop, reconcile: noop, add: noop }),
     localStorage: { getItem: key => preferencesStorage.get(key), setItem: (key, value) => preferencesStorage.set(key, value) }, createComposerPreferences,
     createArtifactWorkspace: () => ({ render: noop, collapse: noop, activate: noop }),
     createConversationView: () => ({ clear() { clearCount++; }, render: noop, submitting: noop, submitted: noop }),
@@ -51,6 +53,7 @@ async function fixture(preferencesStorage = new Map(), running = false, runtimeC
       }
       else if (running && url.pathname === '/api/conversations/first') data = { runs: [{ id: 'run-first', status: 'running', conversationId: 'first' }] };
       else if (running && url.pathname === '/api/runs/run-first/events') data = { events: [] };
+      else if (url.pathname.endsWith('/messages')) data = { messages: [] };
       else if (running && url.pathname === '/api/runs/run-first/artifacts') data = { artifacts: [] };
       else if (running && url.pathname === '/api/runs/run-first/human-loop/current') data = {};
       else if (url.pathname.endsWith('/remove')) {
@@ -89,7 +92,7 @@ test('sidebar deletion cancellation and failure preserve the selected conversati
 test('a running conversation permits navigation and reconnects when selected again', async () => {
   const ui = await fixture(new Map(), true);
   await ui.rows()[0].children[0].onclick();
-  assert.equal(ui.element('message').disabled, true);
+  assert.equal(ui.element('message').disabled, false);
   assert.equal(ui.element('cancel').hidden, false);
   assert.equal(ui.element('new-conversation').disabled, false);
   assert.equal(ui.rows()[1].children[0].disabled, false);
@@ -97,7 +100,7 @@ test('a running conversation permits navigation and reconnects when selected aga
   assert.equal(ui.element('message').disabled, false);
   assert.equal(ui.element('cancel').hidden, true);
   await ui.rows()[0].children[0].onclick();
-  assert.equal(ui.element('message').disabled, true);
+  assert.equal(ui.element('message').disabled, false);
   assert.equal(ui.element('cancel').hidden, false);
   ui.element('new-conversation').onclick();
   assert.equal(ui.element('message').disabled, false);
@@ -144,7 +147,7 @@ test('a new conversation can start a run while another conversation is running',
   const request = ui.requests.find(item => item.path.startsWith('/api/runs?') && item.method === 'POST');
   assert.ok(request);
   assert.notEqual(JSON.parse(request.body).conversationId, 'first');
-  assert.equal(ui.element('message').disabled, true);
+  assert.equal(ui.element('message').disabled, false);
   await ui.rows()[0].children[0].onclick();
   assert.equal(ui.element('cancel').hidden, false);
 });

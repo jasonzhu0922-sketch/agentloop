@@ -77,6 +77,7 @@ export interface AgentLoopOptions {
   /** Server-authored guidance already applicable before the first model turn. */
   readonly initialRuntimePromptAugmentations?: readonly RuntimePromptAugmentation[];
   /** Standard Runtime boundary after Tool facts commit and before the next model request. */
+  readonly checkpoint?: () => Promise<void>;
   readonly enrichRuntimeContext?: (context: RuntimeContextEnrichmentInput) => Promise<RuntimeContextEnrichment | undefined>;
   readonly model: ModelAdapter;
   readonly tools: ToolRegistry;
@@ -87,6 +88,7 @@ export interface AgentLoopOptions {
     readonly contentHash: string;
   }[];
   readonly maxSteps: number;
+  readonly initialModelSteps?: number;
   /** Additional tool-enabled steps allowed after `maxSteps` when the model is still working. */
   readonly convergenceGraceSteps?: number;
   /** Additional tool-enabled steps available when a completion candidate needs another Runtime repair turn. */
@@ -931,7 +933,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let lastModelStep = 0;
   const automaticArtifactAcceptanceAttempts = new Set<string>();
   try {
-  for (let step = 1; step <= currentLimit(); step += 1) {
+  for (let step = 1 + (options.initialModelSteps ?? 0); step <= currentLimit(); step += 1) {
+    await options.checkpoint?.();
     lastModelStep = step;
     throwIfAborted(options.signal);
     const inGrace = step > options.maxSteps;
@@ -1309,6 +1312,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     let earlyOutcomes = new Map<string, ToolOutcome>();
     let response: ModelResponse | undefined;
     for (let candidateAttempt = 1; candidateAttempt <= EMPTY_CANDIDATE_REPAIR_ATTEMPTS; candidateAttempt += 1) {
+      await options.checkpoint?.();
       const invocation: ModelInvocation = {
         runId: options.runId,
         systemPrompt: options.systemPrompt,
@@ -1349,6 +1353,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         // rather than being prematurely rejected as an unavailable Tool.
         allowEarlyDispatch: !convergenceOnly,
       }, earlyOutcomes);
+      await options.checkpoint?.();
       if (
         response.toolCalls.length === 0
         && response.finishReason === "stop"

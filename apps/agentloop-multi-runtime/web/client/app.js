@@ -1,3 +1,4 @@
+import { createSteerDrafts, createSteerQueueView, renderSteerMessages } from "./ui/steer-queue.js";
 import { createLocalModelSettings } from "./local-runtime/local-model-settings.js";
 import { createLocalMemorySettings } from "./local-runtime/local-memory-settings.js";
 import { createLocalConnectorSettings } from "./local-runtime/local-connector-settings.js";
@@ -1637,6 +1638,7 @@ async function hydratePersistedAssistant(assistant, tenantId, userId, includeCom
     }
   } catch {}
   await refreshRounds(assistant.assignmentId, assistant, tenantId, userId);
+  try { assistant.inputMessages = await steerRequest(assistant.assignmentId); } catch { /* Offline Runtime retains the last persisted projection. */ }
   const eventsLoaded = await replayPersistedRunEvents(assistant, tenantId, userId);
   if (!runLoaded && !eventsLoaded) throw new Error("无法读取该轮的 Runtime Run");
   // Artifact projection is independent from terminal Run status: a generated
@@ -1849,6 +1851,40 @@ function refreshRuntimeOptions() {
   select.title = binding === undefined ? "" : runtimeBindingMessage(binding);
 }
 
+let steerQueue, steerScope;
+function steerTarget(conversation) {
+  return [...(conversation?.messages || [])].reverse().find(message => message.role === "assistant" && message.status === "running" && (message.assignmentId || message.localRunId));
+}
+function steerRunKey(message) { return message?.localRunId && message.executionLocation === "strict_local" ? `strict:${message.localRuntimeId}:${message.localRunId}` : message?.assignmentId; }
+async function steerRequest(key, input) {
+  const strict = key.startsWith("strict:");
+  const [, runtime, run] = strict ? key.split(":") : [];
+  const path = strict ? `/v1/strict-local-runs/${encodeURIComponent(runtime)}/${encodeURIComponent(run)}/messages` : `/v1/assignments/${encodeURIComponent(key)}/messages`;
+  const init = { ...(input === undefined ? {} : { method: "POST", body: JSON.stringify(input) }),
+    headers: { "content-type": "application/json", "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() } };
+  const response = strict ? await localAgentFetch(path, init) : await fetch(`${api}${path}`, init);
+  const body = await response.json();
+  if (!response.ok) throw Object.assign(new Error(body.error || "Steer 请求失败"), { status: response.status });
+  return input === undefined ? body.messages : body.message;
+}
+function renderSteerQueue(conversation) {
+  if (!conversation || !$("user-id").value) return;
+  let container = $("steer-queue");
+  if (!container) { container = document.createElement("div"); container.id = "steer-queue"; container.className = "steer-queue"; container.setAttribute("aria-label", "待处理消息"); $("composer").querySelector(".composer-box").before(container); }
+  const scope = [$("tenant-id").value, $("user-id").value, conversation.id];
+  if (JSON.stringify(scope) !== steerScope) {
+    steerScope = JSON.stringify(scope);
+    steerQueue = createSteerQueueView({ container, drafts: createSteerDrafts(localStorage, scope), getRunId: () => steerRunKey(steerTarget(conversation)),
+      submit: (key, input) => steerRequest(key, input), read: key => steerRequest(key),
+      onAccepted: (messages, key) => { const assistant = conversation.messages.find(message => message.role === "assistant" && (message.assignmentId === key || steerRunKey(message) === key));
+        if (assistant) assistant.inputMessages = [...(assistant.inputMessages || []).filter(item => !messages.some(next => next.id === item.id)), ...messages].sort((a, b) => a.seq - b.seq);
+        saveSessions(); render(); },
+      onMoveToComposer: text => { $("input").value = text; autoResizeComposerInput($("input")); $("input").focus(); },
+      onError: error => setStatus(`Steer 未确认：${error.message}。消息保留在队列中。`, "error"),
+    });
+  } else steerQueue.render();
+}
+
 async function submit() {
   const input = $("input").value.trim();
   const conversation = activeConversation();
@@ -1972,7 +2008,13 @@ function runComposerAction() {
   const conversation = activeConversation();
   if (!conversation) return;
   const target = cancellationTarget(runState.activeByConversation.get(conversation.id), conversation.messages);
-  if (target.canCancel) { void cancelActive(); return; }
+  if (target.canCancel) {
+    const text = $("input").value;
+    if (!text.trim()) return;
+    try { renderSteerQueue(conversation); steerQueue.add(text); $("input").value = ""; resetComposerInput($("input")); setStatus("已加入队列；点击 Steer 后提交给当前任务", "ok"); }
+    catch (error) { setStatus(error.message, "error"); }
+    return;
+  }
   void submit();
 }
 
@@ -2212,6 +2254,7 @@ function onEvent(event, conversation, assistant) {
   if (event.type === "error" || event.type === "stream.error") { setStatus("事件流暂时不可用，任务状态以 Runtime 为准", "error"); return false; }
   const terminal = projectAssistantEvent(assistant, event);
   assistant.events = mergeRuntimeEvents(assistant.events, [event]);
+  if (conversation.id === activeConversation()?.id) steerQueue?.reconcile(assistant.inputMessages || []);
   setVolatile(assistant, "detailEvents", mergeDetailEvents(assistant.detailEvents, [event]));
   if (assistant.assignmentId && isArtifactProjectionEvent(event)) {
     void refreshArtifacts(assistant.assignmentId, assistant, $("tenant-id").value.trim(), $("user-id").value.trim());
@@ -2505,13 +2548,13 @@ function render() {
   const cancellingKey = cancelTarget.localRunId ? `strict:${cancelTarget.activeRun?.localRuntimeId ?? cancelTarget.assistant?.localRuntimeId}:${cancelTarget.localRunId}` : cancelTarget.assignmentId;
   const primaryAction = $("submit");
   const stopping = cancelTarget.canCancel;
-  primaryAction.disabled = stopping
-    ? cancellingKey !== undefined && runState.cancellingAssignmentIds.has(cancellingKey)
-    : activeRun !== undefined || uploadCount(conversation.id) > 0 || localTargetUnavailable;
-  primaryAction.classList.toggle("is-stop", stopping);
-  primaryAction.textContent = stopping ? "■" : "↑";
-  primaryAction.setAttribute("aria-label", stopping ? "停止当前任务" : "发送任务");
-  primaryAction.title = stopping ? "停止当前任务" : "发送任务";
+  primaryAction.disabled = uploadCount(conversation.id) > 0 || (!stopping && (activeRun !== undefined || localTargetUnavailable));
+  primaryAction.classList.remove("is-stop"); primaryAction.textContent = "↑";
+  primaryAction.setAttribute("aria-label", stopping ? "加入待处理队列" : "发送任务"); primaryAction.title = stopping ? "加入待处理队列" : "发送任务";
+  let stop = $("steer-stop");
+  if (!stop) { stop = document.createElement("button"); stop.id = "steer-stop"; stop.type = "button"; stop.textContent = "■"; stop.title = "停止当前任务"; stop.setAttribute("aria-label", "停止当前任务"); stop.onclick = () => void cancelActive(); primaryAction.before(stop); }
+  stop.hidden = !stopping; stop.disabled = cancellingKey !== undefined && runState.cancellingAssignmentIds.has(cancellingKey);
+  renderSteerQueue(conversation);
   $("upload-file").disabled = (isLocalExecution() && selectedLocalRuntime()?.status !== "ready") || activeRun !== undefined || uploadCount(conversation.id) > 0 || pendingAttachments(conversation).length >= MAX_PENDING_ATTACHMENTS;
   renderPendingAttachments(conversation);
   // The artifact pane has its own selection: while a new turn is running the
@@ -2689,7 +2732,7 @@ function renderMessage(message) {
   const roundHistory = renderRoundHistory(message.rounds);
   const executionTrace = renderExecutionTrace(message);
   const inlineArtifacts = renderInlineArtifacts(message);
-  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><img class="msg-avatar logo-image" src="/assets/xuanwu-mascot-icon.png" alt="玄武" /><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop · ${stateLabel}</span>${provenance}${stepToggle}</div>${roundHistory}${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${executionTrace}${inlineArtifacts}${responseTiming}</div></div></article>`;
+  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><img class="msg-avatar logo-image" src="/assets/xuanwu-mascot-icon.png" alt="玄武" /><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop · ${stateLabel}</span>${provenance}${stepToggle}</div>${renderSteerMessages(message.inputMessages)}${roundHistory}${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${executionTrace}${inlineArtifacts}${responseTiming}</div></div></article>`;
 }
 
 function renderRoundHistory(rounds) {
@@ -2698,7 +2741,9 @@ function renderRoundHistory(rounds) {
     const result = round?.result;
     const decision = result?.decision?.kind === "complete_goal" ? "本轮完成目标" : result?.decision?.kind === "next_round" ? "本轮完成，继续下一轮" : "处理中";
     const output = typeof result?.output === "string" && result.output.trim() ? `<div class="round-history-output">${escapeHtml(result.output.slice(0, 240))}</div>` : "";
-    return `<li><span>第 ${Number(round.roundNumber) || "?"} 轮</span><b>${escapeHtml(decision)}</b>${output}</li>`;
+    const scope = round.roundScope || result?.roundScope;
+    const scopeText = scope ? `<div class="round-history-output">${escapeHtml(scope.kind === 'prerequisite' ? '前置研究' : '交付推进')}：${escapeHtml(scope.purpose)}<br>本轮完成条件：${escapeHtml(scope.completionBoundary)}<br>后续方向：${escapeHtml(scope.continuation)}</div>` : '';
+    return `<li><span>第 ${Number(round.roundNumber) || "?"} 轮</span><b>${escapeHtml(decision)}</b>${scopeText}${output}</li>`;
   }).join("");
   return `<details class="round-history"><summary>目标循环 · ${rounds.length} 轮</summary><ol>${items}</ol></details>`;
 }

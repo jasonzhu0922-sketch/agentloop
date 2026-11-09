@@ -706,7 +706,7 @@ test("externally grounded data analysis cannot collapse acquisition and delivery
   assert.match(topologyFailures[0]!, /"successorRole":"deliver"/);
 });
 
-test("source-grounded conversation lookup receives a single delivery boundary in its planning schema", async () => {
+test("source-grounded lookup permits research Rounds while preserving one canonical delivery target", async () => {
   const objective = "宝信软件的董事长是谁，总裁又是谁？需给出可核验的来源。";
   const targetId = "company-leadership";
   const tools = [
@@ -747,12 +747,13 @@ test("source-grounded conversation lookup receives a single delivery boundary in
       const leaves = properties?.leaves as Record<string, unknown>;
       const leaf = leaves?.items as Record<string, unknown>;
       const leafProperties = leaf?.properties as Record<string, unknown>;
-      assert.deepEqual(shape?.enum, ["single_leaf"]);
+      assert.ok((shape?.enum as string[]).includes("single_leaf"));
+      assert.ok((shape?.enum as string[]).includes("fact_then_produce"));
       assert.equal(leaves?.minItems, 1);
-      assert.equal(leaves?.maxItems, 1);
-      assert.deepEqual((leafProperties?.role as Record<string, unknown>)?.enum, ["deliver"]);
-      assert.equal((leafProperties?.dependsOn as Record<string, unknown>)?.maxItems, 0);
-      assert.equal((leafProperties?.targetIds as Record<string, unknown>)?.minItems, 1);
+      assert.ok(Number(leaves?.maxItems) > 1);
+      assert.ok((properties?.roundScope as Record<string, unknown>) !== undefined);
+      assert.equal((leafProperties?.targetIds as Record<string, unknown>)?.minItems, 0);
+      assert.deepEqual(((leafProperties?.targetIds as Record<string, unknown>)?.items as Record<string, unknown>)?.enum, [targetId]);
       return {
         content: "",
         finishReason: "tool_calls",
@@ -819,7 +820,6 @@ function webpageSummaryPlanningFixture() {
     evidenceKinds: ["source_summary"],
     basis: {
       kind: "user_requirement",
-      intentId: canonicalState.intent.id,
       targetIds: [targetId],
       rationale: "The fetched page is the evidence needed to summarize the requested webpage.",
     },
@@ -916,7 +916,7 @@ test("Recovery Planner retries a blocking execution method before submitting a r
           planRevision: { goal: fixture.task.canonicalState.intent.userInput, shape: "recovery_patch", selectedSkillIds: [], steps: [{
             id: "repair", objective: "Repair.", dependencies: [], skillIds: [], requiredCapabilities: [], targetIds: [],
             successCriteria: [{ id: "recheck", description: "Recheck sources.", source: "planner", blocking: true,
-              basis: { kind: "execution_method", intentId: fixture.task.canonicalState.intent.id, targetIds: [], rationale: "A search method." } }],
+              basis: { kind: "execution_method", targetIds: [], rationale: "A search method." } }],
           }] },
         } : { actionId: "recovery-action", expectedActionRevision: 1, decision: "fail", rationale: "No continuation.", evidenceRefs: [] },
       }] };
@@ -1023,7 +1023,7 @@ test("Planner repairs independent basis and target-ownership violations without 
       calls += 1;
       if (calls > 1) {
         assert.match(request.runtimeContext?.content ?? "", /requiredFacts\[\].basis\.targetIds records which canonical targets a fact supports/);
-        assert.match(request.runtimeContext?.content ?? "", /Bind every canonical delivery target exactly once across leaves/);
+        assert.match(request.runtimeContext?.content ?? "", /With roundScope=null, bind every target in the current allowed scope exactly once across leaves/);
       }
       return fixture.response(calls === 1 ? "quote" : calls === 2 ? "ownership" : undefined);
     },
@@ -1153,8 +1153,8 @@ test("Recovery resubmits explicit ownership and downstream fact provenance throu
       await assert.rejects(recovery.decide(input), /planRevision.steps\[0\].targetIds must be an array/);
       continue;
     }
-    if (binding === "forged-fact" || binding === "forged-criterion") {
-      await assert.rejects(recovery.decide(input), /requirement is Runtime-owned and must not be submitted/);
+    if (binding === "forged-fact" || binding === "forged-criterion" || binding === "foreign-intent") {
+      await assert.rejects(recovery.decide(input), /(?:requirement|intentId) is Runtime-owned and must not be submitted/);
       continue;
     }
     const decision = await recovery.decide(input);
@@ -1172,7 +1172,7 @@ test("Recovery resubmits explicit ownership and downstream fact provenance throu
 });
 
 function modelBasis(basis: import("../src/planning/contracts.ts").CriterionBasis) {
-  const { requirement: _requirement, ...metadata } = basis;
+  const { requirement: _requirement, intentId: _intentId, ...metadata } = basis;
   return metadata;
 }
 

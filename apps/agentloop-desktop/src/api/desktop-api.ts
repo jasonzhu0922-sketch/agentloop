@@ -337,6 +337,18 @@ export class DesktopApi {
   private async runRoute(request: IncomingMessage, response: ServerResponse, runtime: ManagedLocalRuntime, parts: string[], url: URL, context: LocalExecutionContext) {
     if (parts[0] !== "api" || parts[1] !== "runs" || !parts[2]) throw new HttpError(404, "route_not_found");
     const id = parts[2];
+    if (parts.length === 4 && parts[3] === "messages") {
+      if (request.method === "GET") {
+        const cursor = url.searchParams.get("afterSeq") ?? "0";
+        if (!/^\d{1,15}$/.test(cursor)) throw new HttpError(400, "message_sequence_invalid");
+        json(response, 200, { messages: await runtime.inputMessages(context, id, Number(cursor)) }); return;
+      }
+      if (request.method === "POST") {
+        const body = await readJson(request); fields(body, ["requestId", "text"]);
+        if (typeof body.requestId !== "string" || typeof body.text !== "string") throw new HttpError(400, "message_input_invalid");
+        json(response, 200, { message: await runtime.submitInput(context, id, { requestId: body.requestId, text: body.text }) }); return;
+      }
+    }
     if (request.method === "GET" && parts.length === 5 && parts[3] === "human-loop" && parts[4] === "current") {
       json(response, 200, { request: await runtime.currentHumanLoop(context, id) }); return;
     }

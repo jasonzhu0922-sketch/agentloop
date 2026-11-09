@@ -96,6 +96,11 @@ function compactMessage(message, tier) {
     planOpen: value.planOpen === true,
     plan: compactPlan(value.plan, tier),
     rounds: compactRounds(value.rounds),
+    inputMessages: (Array.isArray(value.inputMessages) ? value.inputMessages : []).slice(-40).map(message => ({
+      id: string(message.id, 120), requestId: string(message.requestId, 128), runId: string(message.runId, 120), seq: number(message.seq),
+      text: string(message.text, tier.text), status: string(message.status, 40),
+      decision: { explanation: string(record(message.decision).explanation, tier.text), reason: string(record(message.decision).reason, 120) },
+    })),
     events: (Array.isArray(value.events) ? value.events : []).slice(-tier.events).map((event) => compactEvent(event, tier)),
     artifacts: compactArtifacts(value.artifacts, tier),
   };
@@ -108,6 +113,10 @@ function compactRounds(rounds) {
     return {
       roundNumber: number(round.roundNumber),
       status: string(round.status, 40),
+      ...(round.roundScope ? { roundScope: {
+        kind: string(round.roundScope.kind, 40), purpose: string(round.roundScope.purpose, 400),
+        completionBoundary: string(round.roundScope.completionBoundary, 400), continuation: string(round.roundScope.continuation, 400),
+      } } : {}),
       ...(result.schema ? { result: {
         schema: string(result.schema, 80),
         roundNumber: number(result.roundNumber),

@@ -7,6 +7,8 @@ import { installIntentBudgetSchema, installPlanningBudgetSchema } from "./planni
 import { installPlanningRecoverySchema } from "./planning-recovery-schema.ts";
 import { installRoundResultSchema } from "./round-result-schema.ts";
 import { installMultiPlanSchema } from "./multi-plan-schema.ts";
+import { installRunInputSchema } from "./run-input-schema.ts";
+import { installRoundScopeSchema } from "./round-scope-schema.ts";
 
 /**
  * Schema owner and connection facade. Wraps any `SqlConnection`; the default
@@ -104,6 +106,16 @@ export class AppDatabase implements SqlConnection {
   async installMultiPlanSchema(): Promise<void> {
     await this.migrated;
     await installMultiPlanSchema(this.connection);
+  }
+
+  async installRoundScopeSchema(): Promise<void> {
+    await this.migrated;
+    await installRoundScopeSchema(this.connection);
+  }
+
+  async installRunInputSchema(): Promise<void> {
+    await this.migrated;
+    await installRunInputSchema(this.connection);
   }
 
   exec(sql: string): Promise<void> {
@@ -572,6 +584,8 @@ export class AppDatabase implements SqlConnection {
     await installPlanningRecoverySchema(this.connection);
     await installRoundResultSchema(this.connection);
     await installMultiPlanSchema(this.connection);
+    await installRoundScopeSchema(this.connection);
+    await installRunInputSchema(this.connection);
 
     // Kernel boundary: business rows are owned by opaque host-provided user
     // ids, so business tables must not enforce foreign keys into any

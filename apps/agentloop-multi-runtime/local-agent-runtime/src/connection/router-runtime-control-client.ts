@@ -124,7 +124,7 @@ export class RuntimeConnectionClient {
       const result = await this.invoke(typeof message.runtimeId === "string" ? message.runtimeId : undefined, message.method, record(message.payload));
       socket.send(JSON.stringify({ type: "rpc.response", messageId: message.messageId, ok: true, result }));
     } catch (error) {
-      socket.send(JSON.stringify({ type: "rpc.response", messageId: message.messageId, ok: false, error: error instanceof Error ? error.message : String(error) }));
+      socket.send(JSON.stringify({ type: "rpc.response", messageId: message.messageId, ok: false, error: error instanceof Error ? error.message : String(error), statusCode: error !== null && typeof error === "object" && "status" in error ? error.status : undefined }));
     }
   }
 
@@ -209,6 +209,12 @@ export class RuntimeConnectionClient {
       }
       if (method === "previewArtifact") {
         return await runtime.runs.previewProcessArtifact(ownerUserId, remoteRunId, stringValue(payload.artifactId, "artifactId"));
+      }
+      if (method === "rounds") return await runtime.runs.roundHistory(ownerUserId, remoteRunId);
+      if (method === "inputMessages") return await runtime.runs.inputMessages(ownerUserId, remoteRunId);
+      if (method === "submitInput") {
+        const input = record(payload.input);
+        return await runtime.runs.submitInput(ownerUserId, remoteRunId, { requestId: stringValue(input.requestId, "requestId"), text: stringValue(input.text, "text") });
       }
       if (method === "currentHumanLoop") return await runtime.runs.currentHumanLoop(ownerUserId, remoteRunId);
       if (method === "respondHumanLoop") {

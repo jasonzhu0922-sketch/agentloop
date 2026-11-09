@@ -342,6 +342,8 @@ class RuntimeManager implements LocalRuntimeManager {
       models: () => use(async facade => facade.models()),
       startRun: (context, input) => use(facade => facade.startRun(context, input)),
       getRun: (context, runId) => use(facade => facade.getRun(context, runId)),
+      submitInput: (context, runId, input) => use(facade => facade.submitInput(context, runId, input)),
+      inputMessages: (context, runId, afterSeq) => use(facade => facade.inputMessages(context, runId, afterSeq)),
       cancelRun: (context, runId) => use(facade => facade.cancelRun(context, runId)),
       currentHumanLoop: (context, runId) => use(facade => facade.currentHumanLoop(context, runId)),
       respondHumanLoop: (context, runId, requestId, value, expectedRevision) => use(facade => facade.respondHumanLoop(context, runId, requestId, value, expectedRevision)),

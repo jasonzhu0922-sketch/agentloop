@@ -40,6 +40,14 @@ const MIGRATIONS: readonly SchemaMigration[] = [
     if (!(database instanceof AppDatabase)) throw new SchemaMigrationError("Multi-Plan migration requires an AppDatabase facade");
     await database.installMultiPlanSchema();
   } },
+  { id: "runtime/0016_round_scopes", definition: "versioned-explicit-round-scope:v1", apply: async (database) => {
+    if (!(database instanceof AppDatabase)) throw new SchemaMigrationError("Round scope migration requires an AppDatabase facade");
+    await database.installRoundScopeSchema();
+  } },
+  { id: "runtime/0017_run_inputs", definition: "durable-run-input-ordering-and-decisions:v1", apply: async (database) => {
+    if (!(database instanceof AppDatabase)) throw new SchemaMigrationError("Run input migration requires an AppDatabase facade");
+    await database.installRunInputSchema();
+  } },
 ];
 
 export async function migrateRuntimeState(database: SqlConnection): Promise<void> {

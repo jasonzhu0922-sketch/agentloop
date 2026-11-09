@@ -1,3 +1,4 @@
+import { RunInputRepository } from "../runtime/run-input-repository.ts";
 import type { SqlConnection } from "../storage/connection.ts";
 import { insertIgnoreConflictsSql } from "../storage/dialect-sql.ts";
 import { notFound } from "../shared/errors.ts";
@@ -14,6 +15,7 @@ import type {
 import { parseRuntimeResult, parseRuntimeResultBinding } from "../runtime/runtime-result.ts";
 import type { RuntimeResultBinding } from "../runtime/runtime-result.ts";
 import type { CanonicalRunStateRef } from "../runtime/canonical-run-state.ts";
+import { parseRoundScope } from "./round-scope.ts";
 
 interface PlanRow {
   id: string;
@@ -61,6 +63,8 @@ interface PlanRevisionInput {
   readonly retiredStepIds: readonly string[];
   readonly reason: string;
   readonly actionId: string;
+  /** Explicit input decision may supersede a completed contract; its evidence stays archived. */
+  readonly steerMessageId?: string;
 }
 
 export class PlanRepository {
@@ -117,6 +121,7 @@ export class PlanRepository {
         );
       }
       await this.saveSnapshot(plan, "initial_admission", undefined, plan.createdAt);
+      await this.saveRoundScope(plan);
     });
     return await this.get(plan.id);
   }
@@ -167,6 +172,8 @@ export class PlanRepository {
   async completeStep(planId: string, stepId: string, output: string, evidence: StepEvidence): Promise<ExecutionPlan> {
     const now = Date.now();
     await this.database.transaction(async () => {
+      const plan = await this.get(planId);
+      await new RunInputRepository(this.database).assertDrained(plan.runId);
       await this.database.prepare(`
         UPDATE plan_steps
         SET status = 'completed', output = ?, evidence_json = ?, finished_at = ?
@@ -254,6 +261,10 @@ export class PlanRepository {
     const current = await this.get(input.planId);
     const next = input.proposal;
     if (next.runId !== current.runId) throw new Error("Plan revision must remain in the same Run");
+    if (input.steerMessageId !== undefined) {
+      const message = await this.database.prepare("SELECT id FROM run_input_messages WHERE id = ? AND run_id = ? AND status = 'processing'").get(input.steerMessageId, current.runId);
+      if (message === undefined) throw new Error("Steer revision requires the current durable input decision");
+    }
     const currentById = new Map(current.steps.map((step) => [step.id, step]));
     const proposedById = new Map(next.steps.map((step) => [step.id, step]));
     for (const step of current.steps.filter((item) => item.retiredAt === undefined)) {
@@ -265,7 +276,7 @@ export class PlanRepository {
       ) {
         throw new Error(`Plan revision cannot alter existing step ${step.id}`);
       }
-      if (step.status === "completed" && proposed === undefined) {
+      if (step.status === "completed" && proposed === undefined && input.steerMessageId === undefined) {
         throw new Error(`Plan revision cannot remove completed step ${step.id}`);
       }
     }
@@ -274,11 +285,11 @@ export class PlanRepository {
       if (!input.retiredStepIds.includes(step.id)) {
         throw new Error(`Plan revision must explicitly retire omitted step ${step.id}`);
       }
-      if (step.status === "completed") throw new Error(`Plan revision cannot retire completed step ${step.id}`);
+      if (step.status === "completed" && input.steerMessageId === undefined) throw new Error(`Plan revision cannot retire completed step ${step.id}`);
     }
     for (const stepId of input.retiredStepIds) {
       const step = currentById.get(stepId);
-      if (step === undefined || step.status === "completed" || step.retiredAt !== undefined) {
+      if (step === undefined || (step.status === "completed" && input.steerMessageId === undefined) || step.retiredAt !== undefined) {
         throw new Error(`Plan revision cannot retire step ${stepId}`);
       }
       if (proposedById.has(stepId)) throw new Error(`Retired step ${stepId} is still in the revised Plan`);
@@ -296,9 +307,9 @@ export class PlanRepository {
       await this.saveSnapshot(current, "before_revision", input.actionId, now);
       await this.database.prepare(`
         UPDATE plans
-        SET version = ?, goal = ?, selected_skill_ids_json = ?, status = 'running', updated_at = ?
+        SET version = ?, goal = ?, selected_skill_ids_json = ?, input_bindings_json = ?, canonical_state_ref_json = ?, status = 'running', updated_at = ?
         WHERE id = ?
-      `).run(current.version + 1, next.goal, JSON.stringify(next.selectedSkillIds), now, current.id);
+      `).run(current.version + 1, next.goal, JSON.stringify(next.selectedSkillIds), JSON.stringify(next.resultBindings ?? []), JSON.stringify(next.canonicalStateRef), now, current.id);
       const insertStep = this.database.prepare(`
         INSERT INTO plan_steps(
           plan_id, step_id, kind, parent_step_id, position, objective, dependencies_json,
@@ -347,6 +358,7 @@ export class PlanRepository {
       for (const stepId of input.retiredStepIds) {
         await retire.run(current.id, stepId, input.actionId, input.reason, now);
       }
+      await this.saveRoundScope({ ...next, ...(next.roundScope === undefined && current.roundScope !== undefined ? { roundScope: current.roundScope } : {}), id: current.id, version: current.version + 1 });
       const revised = await this.get(current.id);
       await this.saveSnapshot(revised, "recovery_revision", input.actionId, now);
     });
@@ -354,6 +366,9 @@ export class PlanRepository {
   }
 
   private async hydrate(row: PlanRow): Promise<ExecutionPlan> {
+    const scopeRow = await this.database.prepare("SELECT scope_json FROM plan_round_scopes WHERE plan_id = ? AND plan_version = ?")
+      .get<{ scope_json: string }>(row.id, row.version);
+    const roundScope = scopeRow === undefined ? undefined : parseRoundScope(JSON.parse(scopeRow.scope_json));
     const steps = await this.database.prepare(`
       SELECT plan_steps.*, plan_step_retirements.retired_at, plan_step_retirements.reason AS retirement_reason
       FROM plan_steps
@@ -370,6 +385,7 @@ export class PlanRepository {
       selectedSkillIds: JSON.parse(row.selected_skill_ids_json),
       canonicalStateRef: parseCanonicalStateRef(row.canonical_state_ref_json, row.run_id),
       resultBindings: parseResultBindings(row.input_bindings_json),
+      ...(roundScope === undefined ? {} : { roundScope }),
       status: row.status,
       steps: steps.map(toStep),
       createdAt: row.created_at,
@@ -383,6 +399,7 @@ export class PlanRepository {
       selectedSkillIds: plan.selectedSkillIds,
       canonicalStateRef: plan.canonicalStateRef,
       resultBindings: plan.resultBindings ?? [],
+      ...(plan.roundScope === undefined ? {} : { roundScope: plan.roundScope }),
       steps: plan.steps.map((step) => ({
         id: step.id,
         kind: step.kind,
@@ -406,6 +423,12 @@ export class PlanRepository {
         VALUES (?, ?, ?, ?, ?, ?)`,
       tidbNoopColumn: "plan_id",
     })).run(plan.id, plan.version, JSON.stringify(proposal), reason, actionId ?? null, createdAt);
+  }
+
+  private async saveRoundScope(plan: ExecutionPlan): Promise<void> {
+    if (plan.roundScope === undefined) return;
+    await this.database.prepare("INSERT INTO plan_round_scopes(plan_id, plan_version, scope_json) VALUES (?, ?, ?)")
+      .run(plan.id, plan.version, JSON.stringify(plan.roundScope));
   }
 }
 

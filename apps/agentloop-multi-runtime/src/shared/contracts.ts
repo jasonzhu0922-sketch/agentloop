@@ -207,6 +207,7 @@ export interface RuntimeRunStatus {
 }
 
 export interface RuntimeRoundHistoryEntry {
+  readonly roundScope?: { readonly kind: "delivery" | "prerequisite"; readonly targetIds: readonly string[]; readonly purpose: string; readonly completionBoundary: string; readonly continuation: string };
   readonly roundNumber: number;
   readonly status: string;
   readonly planId?: string;
@@ -248,6 +249,8 @@ export interface RuntimeControlPort {
   dispatch(envelope: RuntimeDispatchEnvelope): Promise<RuntimeDispatchResult>;
   models?(): Promise<readonly RuntimeModelSummary[]>;
   getRun?(remoteRunId: string): Promise<RuntimeRunStatus>;
+  submitInput?(remoteRunId: string, input: { readonly requestId: string; readonly text: string }): Promise<RuntimeRunInputMessage>;
+  inputMessages?(remoteRunId: string): Promise<readonly RuntimeRunInputMessage[]>;
   rounds?(remoteRunId: string): Promise<readonly RuntimeRoundHistoryEntry[]>;
   artifacts?(remoteRunId: string): Promise<readonly RuntimeArtifact[]>;
   readArtifact?(remoteRunId: string, artifactId: string): Promise<{ readonly artifact: RuntimeArtifact; readonly content: Uint8Array }>;
@@ -329,4 +332,13 @@ export interface RuntimeAssignment {
   readonly tenantId: string;
   readonly conversationId: string;
   readonly ownerUserId: string;
+}
+
+/** Wire projection of a Runtime-owned input, with no competing Router writer. */
+export interface RuntimeRunInputMessage {
+  readonly id: string; readonly runId: string; readonly conversationId?: string; readonly requestId: string;
+  readonly seq: number; readonly text: string;
+  readonly status: "accepted" | "processing" | "applied" | "answered" | "needs_clarification" | "unprocessed";
+  readonly decision?: Readonly<Record<string, unknown>>;
+  readonly createdAt: number; readonly updatedAt: number;
 }

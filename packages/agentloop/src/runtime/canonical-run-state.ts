@@ -36,6 +36,7 @@ export interface CanonicalGoalGap {
   readonly suggestedAction: FailedBoundary["suggestedRepairShape"];
   readonly openedAt: number;
   readonly resolvedAt?: number;
+  readonly supersededByMessageId?: string;
   /** Ordered owners of this same unresolved gap; Plan revisions do not reset it. */
   readonly repairStepIds?: readonly string[];
   /** Active leaves sharing this unresolved goal, including recovery prerequisites. */
@@ -93,8 +94,10 @@ export interface CanonicalRunState {
   readonly phase: CanonicalRunPhase;
   readonly intent: {
     readonly id: string;
-    readonly revision: 1;
+    readonly revision: number;
     readonly userInput: string;
+    readonly originalUserInput?: string;
+    readonly amendments?: readonly { readonly messageId: string; readonly seq: number; readonly text: string; readonly explanation: string }[];
     readonly runtimeClock?: RuntimeClock;
     readonly turnResolution?: ConversationTurnResolution;
     readonly understanding: StructuredTaskUnderstanding;
@@ -287,6 +290,37 @@ export function beginCanonicalRound(state: CanonicalRunState, now = Date.now()):
       target.status === "accepted" ? target : Object.freeze({ ...target, ownerStepIds: Object.freeze([]) }),
     ]))),
   }, now);
+}
+
+/** A new intent revision invalidates delivery acceptance, never recorded Actions or facts. */
+export function amendCanonicalIntent(state: CanonicalRunState, input: {
+  readonly messageId: string; readonly seq: number; readonly text: string; readonly explanation: string;
+  readonly understanding: StructuredTaskUnderstanding;
+  readonly turnResolution?: ConversationTurnResolution;
+}, now = Date.now()): CanonicalRunState {
+  assertMutable(state);
+  const fresh = createCanonicalRunState({ runId: state.runId, userInput: state.intent.userInput,
+    understanding: input.understanding, ...(input.turnResolution === undefined ? {} : { turnResolution: input.turnResolution }), now });
+  const amendments = [...(state.intent.amendments ?? []), { messageId: input.messageId, seq: input.seq, text: input.text, explanation: input.explanation }];
+  const originalUserInput = state.intent.originalUserInput ?? state.intent.userInput;
+  const progressed = next(state, {
+    phase: state.plan === undefined ? "understood" : state.phase,
+    targets: fresh.targets,
+    // Keep open goal identities/budgets when the target survives the amendment.
+    // Superseded Step contracts remain in the historical state revisions.
+    gaps: [...state.gaps.filter(gap => gap.targetId === undefined),
+      ...state.gaps.filter(gap => gap.targetId !== undefined && fresh.targets[gap.targetId] === undefined).map(gap => ({ ...gap, status: "resolved" as const, resolvedAt: now, supersededByMessageId: input.messageId })),
+      ...fresh.gaps.map(gap => {
+      const previous = state.gaps.find(old => old.targetId === gap.targetId);
+      return previous === undefined ? gap : { ...gap, id: previous.id, openedAt: previous.openedAt, repairAttempts: previous.repairAttempts };
+    })],
+  }, now);
+  const result: CanonicalRunState = Object.freeze({ ...progressed, intent: { ...state.intent, revision: state.intent.revision + 1, originalUserInput,
+      userInput: [originalUserInput, ...amendments.map(item => `User steer ${item.seq}:\n${item.text}`)].join("\n\n"),
+      understanding: input.understanding, amendments,
+      ...(input.turnResolution === undefined ? {} : { turnResolution: input.turnResolution }) } });
+  assertCanonicalDeliveryTargetInventory(result);
+  return result;
 }
 
 export function reviseCanonicalPlan(
