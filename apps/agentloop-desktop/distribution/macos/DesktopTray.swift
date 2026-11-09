@@ -5,6 +5,7 @@ import Foundation
 final class DesktopTray: NSObject, NSApplicationDelegate {
   private var item: NSStatusItem!
   private var stateItem: NSMenuItem!
+  private var versionItem: NSMenuItem!
   private var process: Process?
   private var input: Pipe?
   private var output: Pipe?
@@ -38,6 +39,8 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
     let menu = NSMenu()
     stateItem = NSMenuItem(title: "Desktop · 正在启动", action: nil, keyEquivalent: "")
     menu.addItem(stateItem)
+    versionItem = NSMenuItem(title: "当前版本 · 获取中", action: nil, keyEquivalent: "")
+    menu.addItem(versionItem)
     menu.addItem(action("启动本地服务", #selector(startBackend)))
     menu.addItem(action("在 Chrome 中打开", #selector(openChrome)))
     menu.addItem(action("查看日志", #selector(openLogs)))
@@ -52,6 +55,7 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
   }
   @objc private func startBackend() {
     if process?.isRunning == true { return }
+    versionItem.title = "当前版本 · 获取中"
     do {
       let logs = dataRoot.appendingPathComponent("logs")
       try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
@@ -87,7 +91,7 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
           self.output?.fileHandleForReading.readabilityHandler = nil
           self.process = nil; self.origin = nil; try? self.log?.close(); self.log = nil
           if self.quitting { NSApplication.shared.reply(toApplicationShouldTerminate: true) }
-          else { self.stateItem.title = "Desktop · 已停止" }
+          else { self.stateItem.title = "Desktop · 已停止"; self.versionItem.title = "当前版本 · 未运行" }
         }
       }
       process = child; input = stdin; output = stdout
@@ -108,7 +112,11 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
       switch message["type"] as? String {
       case "ready":
         guard let value = message["origin"] as? String, let url = URL(string: value), url.scheme == "http", url.host == "127.0.0.1", url.port != nil else { continue }
-        origin = url; stateItem.title = "Desktop · 运行中"; openChrome()
+        origin = url; stateItem.title = "Desktop · 运行中"
+        let version = (message["version"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let version, !version.isEmpty { versionItem.title = "当前版本 · \(version)" }
+        else { versionItem.title = "当前版本 · 未知" }
+        openChrome()
       case "close-refused":
         quitting = false; NSApplication.shared.reply(toApplicationShouldTerminate: false)
         alert("仍有运行中的任务或请求，请等待完成或取消任务后退出。")

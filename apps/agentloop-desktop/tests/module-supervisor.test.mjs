@@ -33,7 +33,7 @@ test('trusted supervisor stages only changed content, waits for busy Runs and co
   const { privateKey, publicKey } = generateKeyPairSync('ed25519', { publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
   const runtimeConfig = { python: { schema: 'agentloop.packagedRuntimePython/v1', pythonVersion: '3.12', pythonExecutable: 'runtime-python/bin/python3.12', version: '3.12.8', requiredModules: [] }, node: { version: '26.0.0' }, turnDefaults: {} };
   const update = { platform: 'mac', arch: 'arm64', channel: 'production', sequence: 1, feedUrl: 'https://updates.example/feed', publicKey };
-  await writeFile(join(base, 'desktop-config.json'), JSON.stringify({ ...runtimeConfig, update, accountServiceUrl: 'https://accounts.example' }));
+  await writeFile(join(base, 'desktop-config.json'), JSON.stringify({ ...runtimeConfig, update, version: '0.1.0', accountServiceUrl: 'https://accounts.example' }));
   const release = { schema: 'agentloop.desktop.module-release/v1', platform: 'mac', arch: 'arm64', channel: 'production', sequence: 2, version: '0.2.0', minimumBootstrap: 1, dataCompatibility: 'backward-compatible', generatedAt: new Date(Date.now()-1000).toISOString(), expiresAt: new Date(Date.now()+86400000).toISOString(), objectBaseUrl: 'https://updates.example/objects/', runtimeConfig, modules: nextManifest };
   const bytes = Buffer.from(JSON.stringify(release)); const envelope = { payload: bytes.toString('base64'), signature: sign(null, bytes, privateKey).toString('base64') };
   const events = [], roots = []; let downloads = 0, closeAttempts = 0, failCandidate = true;
@@ -50,13 +50,14 @@ test('trusted supervisor stages only changed content, waits for busy Runs and co
     p.kill = () => { p.stdout.end(); p.emit('close', 1); };
     setImmediate(() => {
       if (options.cwd !== base && failCandidate) { failCandidate = false; p.stdout.end(); p.emit('close', 1); }
-      else send({ type: 'ready', origin: 'http://127.0.0.1:1234' });
+      else send({ type: 'ready', origin: 'http://127.0.0.1:1234', version: options.cwd === base ? '0.1.0' : '0.2.0' });
     });
     return p;
   }
   const supervisor = await startModuleSupervisor({ resources: base, dataRoot, emit: m => events.push(m), spawnProcess: fakeSpawn,
     fetchFeed: async () => new Response(JSON.stringify(envelope)), fetchObject: async () => { downloads++; return new Response('new version'); } });
   await waitFor(() => events.some(e => e.type === 'ready'));
+  assert.equal(events.find(e => e.type === 'ready').version, '0.1.0');
   await supervisor.check(); assert.ok(events.some(e => e.type === 'update-available'));
   await supervisor.download(); assert.equal(downloads, 1); assert.ok(events.some(e => e.type === 'update-staged'));
   supervisor.apply(); await waitFor(() => events.some(e => e.type === 'update-busy'));
@@ -67,6 +68,7 @@ test('trusted supervisor stages only changed content, waits for busy Runs and co
   assert.equal(supervisor.state.active.sequence, 1); assert.equal(roots.length, 4);
   supervisor.apply(); await waitFor(() => events.some(e => e.type === 'update-installed'));
   assert.equal(supervisor.state.active.sequence, 2); assert.equal(roots.length, 5);
+  assert.equal(events.filter(e => e.type === 'ready').at(-1).version, '0.2.0');
   assert.equal(await readFile(join(roots[4], 'app.js'), 'utf8'), 'new version');
   supervisor.close(); await waitFor(() => events.some(e => e.type === 'supervisor-closed'));
 });
