@@ -75,6 +75,11 @@
 .process-protocol summary { width:fit-content; cursor:pointer; color:var(--text-3); }
 .process-protocol summary:hover { color:var(--text); }
 .process-protocol-text { margin-top:8px; padding:10px 12px; border-radius:8px; background:var(--bg-3); color:var(--text-2); font:12px/1.6 var(--mono); overflow-wrap:anywhere; }
+.execution-process .steer-message { display:flex; justify-content:flex-end; margin:14px 0; padding:0; border:0; background:transparent; }
+.execution-process .steer-message-bubble { max-width:78%; min-width:0; border-radius:22px; padding:14px 19px; background:var(--bg-3); color:var(--text); font-size:15px; line-height:1.65; }
+.execution-process .steer-message small { text-align:right; font-size:11px; }
+.execution-process .steer-message-decision { margin:0; color:var(--text); font-size:15px; line-height:1.8; overflow-wrap:anywhere; }
+@media(max-width:720px) { .execution-process .steer-message-bubble { max-width:92%; } }
 .planning-overview { display:grid; gap:8px; min-width:0; }
 .msg.assistant.live .planning-overview { border-top:1px solid var(--border); padding-top:10px; }
 .planning-overview-head { display:flex; align-items:flex-start; gap:10px; min-width:0; }

@@ -293,6 +293,8 @@ export interface ConversationTurnResolution {
   readonly memoryIntents: readonly MemoryIntentCandidate[];
   /** Derived time bounds are not explicit user constraints. */
   readonly temporalScope?: import("../runtime/runtime-clock.ts").ResolvedTemporalScope;
+  /** Recurring user condition, independent of any continuous date range. */
+  readonly recurringTime?: import("../runtime/runtime-clock.ts").RecurringTimeCondition;
   /** Explicit execution requirements, independent of catalog availability. */
   readonly requiredCapabilityReferences?: readonly RequiredCapabilityReference[];
   readonly source: "model" | "model_guarded";

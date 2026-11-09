@@ -6,11 +6,13 @@ import hashlib
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib import parse
 
 
 MAX_NAMES = 8
+MAX_SEARCH_CANDIDATES = 100
 MAX_NAME_LENGTH = 200
 MAX_MATCH_TYPE_LENGTH = 64
 MAX_REGION_LENGTH = 128
@@ -116,7 +118,7 @@ def validate_base_url(value: str) -> str:
     return value.rstrip("/")
 
 
-def post_json(url: str, payload: dict[str, object], operation: str) -> dict[str, object]:
+def post_json(url: str, payload: dict[str, object], operation: str, *, timeout_seconds: int = 30) -> dict[str, object]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     # The configured upstream is reachable with the platform curl/SecureTransport
     # stack, but the deployed Python/OpenSSL stack can time out during TLS
@@ -133,7 +135,7 @@ def post_json(url: str, payload: dict[str, object], operation: str) -> dict[str,
         "--connect-timeout",
         "10",
         "--max-time",
-        "30",
+        str(timeout_seconds),
         "--header",
         "content-type: application/json",
         "--header",
@@ -150,7 +152,7 @@ def post_json(url: str, payload: dict[str, object], operation: str) -> dict[str,
             input=body,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=35,
+            timeout=timeout_seconds + 2,
             check=False,
         )
     except FileNotFoundError:
@@ -158,16 +160,21 @@ def post_json(url: str, payload: dict[str, object], operation: str) -> dict[str,
     except subprocess.TimeoutExpired:
         raise SafeError(f"Enterprise API {operation} request timed out") from None
 
-    status_position = completed.stdout.rfind(CURL_STATUS_MARKER)
-    if status_position < 0:
+    if completed.returncode != 0:
         if completed.returncode == 28:
             raise SafeError(f"Enterprise API {operation} request timed out") from None
         if completed.returncode == 35:
             raise SafeError(f"Enterprise API {operation} TLS handshake failed") from None
         if completed.returncode == 60:
             raise SafeError(f"Enterprise API {operation} TLS certificate verification failed") from None
+        stderr = completed.stderr.decode("utf-8", errors="replace").lower()
+        if "openssl.cnf" in stderr and ("operation not permitted" in stderr or "permission denied" in stderr):
+            raise SafeError(f"Enterprise API {operation} local TLS configuration is inaccessible") from None
         raise SafeError(f"Enterprise API {operation} request failed (transport code {completed.returncode})") from None
 
+    status_position = completed.stdout.rfind(CURL_STATUS_MARKER)
+    if status_position < 0:
+        raise SafeError(f"Enterprise API {operation} returned no HTTP status") from None
     raw = completed.stdout[:status_position]
     status_text = completed.stdout[status_position + len(CURL_STATUS_MARKER):].strip()
     try:
@@ -176,8 +183,6 @@ def post_json(url: str, payload: dict[str, object], operation: str) -> dict[str,
         raise SafeError(f"Enterprise API {operation} returned an invalid HTTP status") from None
     if status_code < 200 or status_code >= 300:
         raise SafeError(f"Enterprise API {operation} returned HTTP {status_code}") from None
-    if completed.returncode != 0:
-        raise SafeError(f"Enterprise API {operation} request failed (transport code {completed.returncode})") from None
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -188,6 +193,7 @@ def post_json(url: str, payload: dict[str, object], operation: str) -> dict[str,
 
 
 def query(args: argparse.Namespace, base_url: str, client_id: str, client_secret: str) -> dict[str, object]:
+    search_deadline = time.monotonic() + 24
     token_response = post_json(f"{base_url}/authorize/token", {
         "client_id": client_id,
         "client_secret": client_secret,
@@ -206,6 +212,7 @@ def query(args: argparse.Namespace, base_url: str, client_id: str, client_secret
                 "busiName": name,
                 "matchType": args.match_type,
                 "region": args.region,
+                "offset": 0,
             }
             result_field = "advSearchNew"
         else:
@@ -221,6 +228,54 @@ def query(args: argparse.Namespace, base_url: str, client_id: str, client_secret
         status = response.get("responseStatus")
         if not isinstance(status, dict) or status.get("success") is not True:
             raise SafeError(f"Enterprise API {args.action} request was rejected")
+        if args.action == "search":
+            search = response.get(result_field)
+            if isinstance(search, dict) and isinstance(search.get("items"), list):
+                items = list(search["items"])
+                total = search.get("total")
+                total = total if isinstance(total, int) and not isinstance(total, bool) and total >= 0 else None
+                seen = {str(item.get("id") or item.get("credit_no")) for item in items if isinstance(item, dict) and (item.get("id") or item.get("credit_no"))}
+                offset = len(items)
+                reason = None
+                while total is not None and offset < total and len(items) < MAX_SEARCH_CANDIDATES:
+                    remaining = int(search_deadline - time.monotonic())
+                    if remaining < 1:
+                        reason = "time_budget"
+                        break
+                    try:
+                        page = post_json(f"{base_url}/enterpriseAPI/getInfo", {**payload, "offset": offset}, args.action, timeout_seconds=min(remaining, 8))
+                        if not isinstance(page.get("responseStatus"), dict) or page["responseStatus"].get("success") is not True:
+                            reason = "page_rejected"
+                            break
+                        page_result = page.get(result_field)
+                        page_items = page_result.get("items") if isinstance(page_result, dict) else None
+                        if isinstance(page_result, dict) and page_result.get("total") != total:
+                            reason = "total_changed"
+                            break
+                        if not isinstance(page_items, list) or not page_items:
+                            reason = "page_unavailable"
+                            break
+                        offset += len(page_items)
+                        added = 0
+                        for item in page_items:
+                            key = str(item.get("id") or item.get("credit_no") or "") if isinstance(item, dict) else ""
+                            if not key or key in seen:
+                                continue
+                            if len(items) >= MAX_SEARCH_CANDIDATES:
+                                break
+                            seen.add(key)
+                            items.append(item)
+                            added += 1
+                        if added == 0:
+                            reason = "no_new_candidates"
+                            break
+                    except SafeError:
+                        reason = "page_request_failed"
+                        break
+                complete = total is not None and len(seen) >= total and len(items) == len(seen)
+                if not complete and reason is None:
+                    reason = "total_unavailable" if total is None else "candidate_limit" if len(items) >= MAX_SEARCH_CANDIDATES else "incomplete_pages"
+                response[result_field] = {**search, "items": items, "coverage": {"total": total, "returned": len(items), "complete": complete, "reason": reason}}
         queries.append({"name": name, "action": args.action, "result": redact(response.get(result_field, {}), client_id, client_secret, token)})
 
     endpoint = f"{base_url}/enterpriseAPI/getInfo"
@@ -284,6 +339,10 @@ def query(args: argparse.Namespace, base_url: str, client_id: str, client_secret
     if args.action == "search" and len(queries) == 1:
         search = queries[0].get("result")
         items = search.get("items") if isinstance(search, dict) else None
+        coverage = search.get("coverage", {}) if isinstance(search, dict) else {}
+        incomplete = not isinstance(coverage, dict) or coverage.get("complete") is not True
+        if incomplete:
+            result["evidenceReceipt"]["caveats"].append("Search candidates are incomplete or their total is unknown; do not treat the returned list as exhaustive.")
         if isinstance(items, list):
             for item in items:
                 if not isinstance(item, dict):
@@ -294,14 +353,14 @@ def query(args: argparse.Namespace, base_url: str, client_id: str, client_secret
                     "fields": [{"name": key, "value": text_value(item.get(key))}
                                for key in ("name", "credit_no", "id") if item.get(key)],
                 })
-        if isinstance(items, list) and len(items) > 1:
+        if isinstance(items, list) and (items or incomplete):
             options = []
             for item in items:
                 if not isinstance(item, dict):
                     continue
                 option_id = item.get("id")
                 name = item.get("name")
-                if not isinstance(option_id, str) or not option_id or not isinstance(name, str) or not name:
+                if not isinstance(option_id, str) or not option_id or not isinstance(name, str) or not name or not isinstance(item.get("credit_no"), str) or not item["credit_no"]:
                     continue
                 details = []
                 for key, label in (("credit_no", "统一社会信用代码"), ("oper_name", "法定代表人"), ("start_date", "成立日期"), ("matchType", "匹配")):
@@ -310,14 +369,32 @@ def query(args: argparse.Namespace, base_url: str, client_id: str, client_secret
                         details.append(f"{label}：{value}")
                 identity_refs = [item["credit_no"]] if isinstance(item.get("credit_no"), str) and item["credit_no"] else []
                 options.append({"id": option_id, "label": name, "description": "；".join(details), "identityRefs": identity_refs})
-            if len(options) > 1:
+            if len(options) != len(items):
+                incomplete = True
+                if isinstance(coverage, dict):
+                    coverage["complete"] = False
+                    coverage["reason"] = "unselectable_candidates"
+                result["evidenceReceipt"]["caveats"].append("Some search records lack the identity needed for selection.")
+            if options and (len(options) > 1 or incomplete):
+                total = coverage.get("total") if isinstance(coverage, dict) else None
+                partial = f"来源共报告 {total} 条，" if isinstance(total, int) else "来源总数未知，"
+                prompt = (f"{partial}当前显示 {len(options)} 个可确认主体，列表可能不完整。请选择；若目标不在列表中，请不选直接提交，再提供更完整的企业名称或地区。" if incomplete else "检索到多个可区分的企业主体，请选择要继续查询详情的一家。")
                 result["humanLoopRequirement"] = {
                     "kind": "selection",
                     "title": "请选择要查询的企业主体",
-                    "prompt": "检索到多个可区分的企业主体，请选择要继续查询详情的一家。",
+                    "prompt": prompt,
                     "rationale": "候选主体之间的等同关系不能由 Runtime 推断。",
                     "evidenceRefs": [],
-                    "responseSchema": {"type": "select", "minSelections": 1, "maxSelections": 1, "options": options},
+                    "responseSchema": {"type": "select", "minSelections": 0 if incomplete else 1, "maxSelections": 1, "options": options},
+                    "resume": {"mode": "continue_step"},
+                }
+            elif incomplete and not options:
+                result["humanLoopRequirement"] = {
+                    "kind": "input", "title": "请补充企业主体线索",
+                    "prompt": "当前搜索没有可供身份确认的完整候选，请提供更完整的企业名称或地区。",
+                    "rationale": "未取得可绑定身份的候选，不能将搜索结果当作已确认主体。",
+                    "evidenceRefs": [],
+                    "responseSchema": {"type": "form", "fields": [{"id": "enterprise_clue", "label": "企业全称或地区", "valueType": "text", "required": True}]},
                     "resume": {"mode": "continue_step"},
                 }
     return result

@@ -35,13 +35,29 @@ export function createRuntimeClock(now = Date.now(), timeZone?: string): Runtime
 }
 
 /** Apply at the common model boundary, including resolver, retries and recovery. */
-export function withRuntimeClock(invocation: ModelInvocation, clock: RuntimeClock, temporalScope?: ResolvedTemporalScope): ModelInvocation {
+export function withRuntimeClock(invocation: ModelInvocation, clock: RuntimeClock, temporalScope?: ResolvedTemporalScope, recurringTime?: RecurringTimeCondition): ModelInvocation {
   return { ...invocation, systemPrompt: [invocation.systemPrompt,
     '<runtime_time_context source="server">', JSON.stringify(clock),
     "This is the authoritative reference for relative time in this Run. Use its localDate and timeZone, not model knowledge, historical transcripts, or source timestamps, for today/now. Keep this reference across phases and midnight. A user-supplied historical or hypothetical reference is a task scope, not a change to the runtime clock. Never promote a model-inferred date into an explicit user constraint. Use received/created/modified timestamps according to the declared tool contract; keyword matches do not establish date coverage or exhaustive counts.",
     "</runtime_time_context>",
     ...(temporalScope === undefined ? [] : ['<resolved_temporal_scope source="server" semantics="derived-not-user-quote">', JSON.stringify(temporalScope), "Use these resolved bounds for evidence acquisition and assessment. Do not replace them with dates in prior outputs. Tool receipts must establish the requested scope and completeness before asserting exhaustive counts or zero results.", "</resolved_temporal_scope>"]),
+    ...(recurringTime === undefined ? [] : ['<recurring_time_condition source="user-quote">', JSON.stringify(recurringTime), "This is a recurring condition, not a continuous date range. Preserve the quoted condition alongside any separate date range. Resolve ambiguous clock times, time zone and cross-day attribution using the task's authorized context; do not present assumptions as user-provided facts.", "</recurring_time_condition>"]),
   ].join("\n") };
+}
+
+/** A user-quoted recurring condition; its business interpretation is not a Runtime clock calculation. */
+export interface RecurringTimeCondition {
+  readonly kind: "recurring";
+  readonly expression: string;
+}
+
+export function parseRecurringTimeCondition(value: unknown, userInputs?: readonly string[]): RecurringTimeCondition | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some((key) => key !== "kind" && key !== "expression") || record.kind !== "recurring"
+    || typeof record.expression !== "string" || record.expression.trim() !== record.expression || !record.expression || record.expression.length > 240) return undefined;
+  if (userInputs !== undefined && !userInputs.some((input) => input.includes(record.expression as string))) return undefined;
+  return { kind: "recurring", expression: record.expression };
 }
 
 export interface ResolvedTemporalScope {

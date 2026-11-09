@@ -14,6 +14,35 @@ SPEC.loader.exec_module(enterprise_info)
 
 
 class PersonnelDeliveryTest(unittest.TestCase):
+    def test_search_collects_distinct_pages_and_exposes_complete_options(self) -> None:
+        args = argparse.Namespace(action="search", names=["示例"], identity_ref="", offset=0, region="", match_type="")
+        def candidate(n): return {"id": str(n), "name": f"示例{n}", "credit_no": f"ref{n}"}
+        responses = [{"success": True, "token": "token"},
+                     {"responseStatus": {"success": True}, "advSearchNew": {"total": 3, "items": [candidate(1), candidate(2)]}},
+                     {"responseStatus": {"success": True}, "advSearchNew": {"total": 3, "items": [candidate(3)]}}]
+        with patch.object(enterprise_info, "post_json", side_effect=responses) as post:
+            result = enterprise_info.query(args, "https://fixture.test", "client", "secret")
+        self.assertEqual(post.call_args_list[2].args[1]["offset"], 2)
+        self.assertEqual(result["result"]["coverage"], {"total": 3, "returned": 3, "complete": True, "reason": None})
+        selection = result["humanLoopRequirement"]["responseSchema"]
+        self.assertEqual(selection["minSelections"], 1)
+        self.assertEqual([o["id"] for o in selection["options"]], ["1", "2", "3"])
+
+    def test_incomplete_search_allows_user_to_decline_partial_choices(self) -> None:
+        args = argparse.Namespace(action="search", names=["示例"], identity_ref="", offset=0, region="", match_type="")
+        item = {"id": "1", "name": "示例一", "credit_no": "ref1"}
+        with patch.object(enterprise_info, "post_json", side_effect=[
+            {"success": True, "token": "token"},
+            {"responseStatus": {"success": True}, "advSearchNew": {"total": 3, "items": [item]}},
+            enterprise_info.SafeError("network error"),
+        ]):
+            result = enterprise_info.query(args, "https://fixture.test", "client", "secret")
+        self.assertEqual(result["result"]["coverage"]["reason"], "page_request_failed")
+        self.assertFalse(result["result"]["coverage"]["complete"])
+        self.assertEqual(result["humanLoopRequirement"]["responseSchema"]["minSelections"], 0)
+        self.assertIn("不完整", result["humanLoopRequirement"]["prompt"])
+        self.assertTrue(any("incomplete" in c for c in result["evidenceReceipt"]["caveats"]))
+
     def test_query_returns_source_records_without_claiming_final_delivery(self) -> None:
         detail = {"name": "示例公司", "credit_no": "company-001", "check_date": "2026-10-08",
                   "employees": [{"name": "张甲", "job_title": "董事长"}, {"name": "李乙", "job_title": "总经理"}]}

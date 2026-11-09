@@ -26,7 +26,7 @@ import type {
 import { admitPlan, bindRequiredSkillCompanions, reusableSourceEvidenceKindsForTurn } from "./admission.ts";
 import { resolveCapabilityGaps, resolveSourceGroundingGap } from "./capability-resolution.ts";
 import { planningCapabilitiesForSelectedSkills, planningCapabilitiesFromToolNames, planningCapabilitiesFromTools, skillSourceProviderCapabilityId } from "./step-execution-binding.ts";
-import { runtimeResultBindingsForConversationTurn, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
+import { mergeRuntimeResultBindings, runtimeResultBindingsForConversationTurn, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
 import { assertCanonicalDeliveryTargetInventory } from "../runtime/canonical-run-state.ts";
 import { MODEL_CRITERION_BASIS_SCHEMA, goalCriterionBasis, parseModelCriterionBasis } from "./criterion-basis.ts";
 import { EVIDENCE_KINDS } from "./contracts.ts";
@@ -1759,10 +1759,10 @@ function conversationResultInput(task: TaskSpec): NonNullable<NonNullable<TaskSp
 }
 
 function runtimeResultBindingsForPlanningTask(task: TaskSpec): readonly RuntimeResultBinding[] {
-  return [...(task.roundResultBindings ?? []), ...runtimeResultBindingsForConversationTurn({
+  return mergeRuntimeResultBindings(task.roundResultBindings ?? [], runtimeResultBindingsForConversationTurn({
     resolution: canonicalTurnResolution(task),
     resultCards: task.conversationWorkingSet?.resultCards,
-  })];
+  }));
 }
 
 function artifactFollowupReason(

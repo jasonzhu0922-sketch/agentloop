@@ -91,6 +91,9 @@ test('accepted steer stays at its event position and remains visible when the pr
   updateTurn(turn, run(), [event(1, 'assistant.committed', { content: '先查询' }), event(2, 'run.input.accepted', { message: accepted }), event(3, 'assistant.committed', { content: '继续分析' }), event(4, 'run.input.decided', { message: decided })]);
   const html = renderAssistant(turn, { process: true });
   assert.ok(html.indexOf('先查询') < html.indexOf('补充范围') && html.indexOf('补充范围') < html.indexOf('继续分析'));
+  assert.ok(html.indexOf('继续分析') < html.indexOf('已了解'), 'decision is shown when decided, not at acceptance');
+  assert.match(html, /class="steer-message-bubble"><div class="steer-message-user">补充范围/);
+  assert.match(html, /class="steer-message-decision">已了解/);
   assert.equal((html.match(/data-steer-message="steer-1"/g) || []).length, 1);
   assert.match(html, /已了解/);
   const collapsed = renderAssistant(turn, { process: false });
@@ -99,6 +102,15 @@ test('accepted steer stays at its event position and remains visible when the pr
   const pending = createTurn(run());
   updateTurn(pending, run(), [], undefined, undefined, undefined, [accepted]);
   assert.match(renderAssistant(pending), /data-steer-message="steer-1"/);
+});
+
+test('streaming text after an accepted steer appears after the user message without repeating its prefix', () => {
+  const turn = createTurn(run());
+  const message = { id: 's', seq: 1, text: '补充问题', status: 'accepted' };
+  updateTurn(turn, run(), [event(1, 'assistant.streaming', { content: '先处理' }), event(2, 'run.input.accepted', { message }), event(3, 'assistant.streaming', { content: '先处理再继续' })]);
+  const html = renderAssistant(turn);
+  assert.ok(html.indexOf('先处理') < html.indexOf('补充问题') && html.indexOf('补充问题') < html.indexOf('再继续'));
+  assert.equal((html.match(/先处理/g) || []).length, 1);
 });
 
 test('routine execution updates between tool calls stay inside one ordered group', () => {

@@ -65,6 +65,32 @@ test('ModelPlanner can submit a research-only Round and its scope survives Plan 
   } finally { await database.close(); }
 });
 
+test('ModelPlanner admits Steer planning when the existing Plan and conversation bind the same prior Result', async () => {
+  const original = state();
+  const result = { schema: 'agentloop.resultRef/v1' as const, resultId: 'rr_2a24dead-6f66-49be-bc38-c29cc65d488c' };
+  const canonicalState = { ...original, intent: { ...original.intent, turnResolution: {
+    schema: 'agentloop.conversationTurnResolution/v1' as const, mode: 'execute' as const, relation: 'refine_prior' as const,
+    inputMode: 'prior_result' as const, targetResult: result, effectiveGoal: goal,
+    taskIntent: { schema: 'agentloop.conversationTaskIntent/v1' as const, operation: 'analysis' as const, requiresExecution: true,
+      deliverables: [{ targetId: 'report', purpose: goal, expectedArtifactCount: 1, action: 'none' as const, kind: 'none' as const, surface: 'conversation' as const }] },
+    evidenceStrategy: 'source_grounded' as const, evidenceDemand: 'source_grounded' as const,
+    sourceBinding: { mode: 'none' as const, visibleDirectoryIds: [] }, userConstraints: [], memoryAction: 'none' as const, memoryIntents: [], source: 'model' as const,
+  } } };
+  let calls = 0;
+  const planner = new ModelPlanner({ limits: TEST_MODEL_LIMITS, complete: async () => {
+    calls++;
+    return { content: '', finishReason: 'tool_calls', toolCalls: [{ id: 'research-plan', name: 'submit_outcome_plan', arguments: {
+      schema: 'agentloop.outcomePlan/v2', goal, shape: 'single_leaf', roundScope: scope, selectedSkillRoles: [],
+      leaves: [{ id: 'research', objective: scope.purpose, requiredFacts: [], dependsOn: [], role: 'fact_acquisition', skillIds: [], requiredCapabilities: ['web_research'],
+        sourceConstraint: null, targetIds: [], evidenceContract: { requiredKinds: ['source_summary'], caveatPolicy: 'mark_unverified_facts' } }],
+    } }] };
+  } });
+  const planned = await planner.plan({ runId: canonicalState.runId, canonicalState, availableSkills: [], availableToolNames: toolNames,
+    availableCapabilities: capabilities, roundResultBindings: [{ schema: 'agentloop.resultBinding/v1', result, relation: 'refine_prior' }] });
+  assert.equal(planned.steps.length, 1);
+  assert.equal(calls, 1, 'the Runtime must not ask the model to repair its own duplicate binding');
+});
+
 test('a single-target Run researches in Round one and reads its committed result before planning delivery', async () => {
   const database = new AppDatabase(':memory:');
   let planningCalls = 0, reads = 0, readPrior = false;

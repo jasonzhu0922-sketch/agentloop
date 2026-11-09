@@ -4,6 +4,7 @@ import { AppDatabase } from "../src/storage/database.ts";
 import { RunInputRepository } from "../src/runtime/run-input-repository.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
 import { RunService } from "../src/runtime/run-service.ts";
+import { ModelPlanner } from "../src/planning/planner.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { TerminalCommitter } from "../src/runtime/terminal-committer.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
@@ -183,5 +184,55 @@ for (const kind of ["answer", "amend", "clarify"] as const) test(`active Run con
     const plan = (await runs.plan("owner", run.id)).plan;
     assert.equal(plan.version, kind === "answer" ? 1 : 2);
     assert.ok(!(await runs.events("owner", run.id)).some(e => e.type === "plan.step.completed" && e.data.output === "Stale draft"));
+  } finally { await db.close(); }
+});
+
+test("Steer replans a follow-up with its existing prior Result exactly once", async () => {
+  const db = new AppDatabase(":memory:");
+  let runs: RunService, followup = false, injected = false, steerPlans = 0;
+  const base = singleStepTestPlanner();
+  const intent = { schema: "agentloop.conversationTaskIntent/v1", operation: "answer", requiresExecution: true,
+    deliverables: [{ targetId: "answer", purpose: "Answer the question", expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] };
+  try {
+    runs = new RunService({ database: db, skills: new SkillService(db), assessorFactory: approvingTestAssessor,
+      plannerFactory: model => ({ plan: async task => {
+        if (task.roundResultBindings === undefined) return base.plan(task);
+        steerPlans++;
+        return new ModelPlanner(model).plan(task);
+      } }),
+      planRevisionAssessorFactory: () => ({ assess: async () => ({ approved: true, feedback: "Aligned", evidenceRefs: [] }) }),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+        if (request.runId.startsWith("conversation-turn:")) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "intent", name: "resolve_conversation_turn", arguments: {
+          mode: "execute", relation: "refine_prior", inputMode: "prior_result", targetGoalCandidateId: "goal_candidate_1", resultCandidateId: "result_candidate_1",
+          effectiveGoal: "Explain the prior result.", taskIntent: intent, evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+          userConstraints: [], memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
+        } }] };
+        if (request.tools.some(tool => tool.name === "submit_run_input_decision")) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "decision", name: "submit_run_input_decision", arguments: {
+          kind: "amend", explanation: "Broaden the answer.", effectiveGoal: "Explain all of the prior result.", userConstraints: ["Include all records"], taskIntent: intent,
+        } }] };
+        if (request.tools.some(tool => tool.name === "submit_outcome_plan")) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "plan", name: "submit_outcome_plan", arguments: {
+          schema: "agentloop.outcomePlan/v2", goal: "Explain all of the prior result.", shape: "single_leaf", selectedSkillRoles: [],
+          leaves: [{ id: "answer", objective: "Explain all of the prior result.", requiredFacts: [], dependsOn: [], role: "deliver", skillIds: [],
+            requiredCapabilities: ["conversation_delivery"], sourceConstraint: null, targetIds: ["answer"], evidenceContract: null }],
+        } }] };
+        if (followup && !injected) {
+          injected = true;
+          await runs.submitInput("owner", request.runId, { requestId: "steer", text: "Include all records" });
+          return { content: "Stale answer", finishReason: "stop", toolCalls: [] };
+        }
+        return { content: followup ? "All records are included." : "Prior result.", finishReason: "stop", toolCalls: [] };
+      } }),
+    });
+    const prior = await runs.execute("owner", "Produce the prior result.");
+    assert.equal(prior.status, "completed");
+    followup = true;
+    const run = await runs.executeConversation("owner", "Explain the prior result.", { conversationId: prior.conversationId });
+    assert.equal(run.status, "completed", JSON.stringify((await runs.events("owner", run.id)).filter(event => /failed|waiting/.test(event.type))));
+    assert.equal((await runs.inputMessages("owner", run.id))[0]?.status, "applied");
+    const plan = (await runs.plan("owner", run.id)).plan;
+    assert.equal(plan.version, 2);
+    assert.equal(plan.resultBindings?.length, 1);
+    assert.equal(plan.resultBindings?.[0]?.relation, "refine_prior");
+    assert.equal(steerPlans, 1);
   } finally { await db.close(); }
 });

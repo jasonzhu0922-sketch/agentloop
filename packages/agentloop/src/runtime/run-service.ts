@@ -44,7 +44,7 @@ import type {
   TaskSpec,
   ToolEvidence,
 } from "../planning/contracts.ts";
-import { parseRuntimeResultRef, runtimeResultBindingsForConversationTurn } from "./runtime-result.ts";
+import { mergeRuntimeResultBindings, parseRuntimeResultRef, runtimeResultBindingsForConversationTurn } from "./runtime-result.ts";
 import { ContextCompactionStore } from "./context-compaction-store.ts";
 import { clarifyUnresolvedConversationHistory, CONVERSATION_RECONSTRUCTION_PROMPT, conversationReconstructionContext } from "./conversation-intent-reconstruction.ts";
 import type {
@@ -195,7 +195,7 @@ import {
 } from "./canonical-run-state.ts";
 import { CanonicalRunStateRepository } from "./canonical-run-state-repository.ts";
 import type { AgentLoopMemoryPlugin, CurrentTurnMemoryCommitState, ExplicitMemoryCommitResult, InteractionMemoryProjection, MemoryIntentCandidate, PlanningMemoryProjection } from "./memory-plugin.ts";
-import { assertNoInferredCalendarDates, createRuntimeClock, parseResolvedTemporalScope, resolveTemporalScope, withRuntimeClock, type RuntimeClock, type ResolvedTemporalScope } from "./runtime-clock.ts";
+import { assertNoInferredCalendarDates, createRuntimeClock, parseRecurringTimeCondition, parseResolvedTemporalScope, resolveTemporalScope, withRuntimeClock, type RuntimeClock, type ResolvedTemporalScope, type RecurringTimeCondition } from "./runtime-clock.ts";
 import { temporalEvidenceGap } from "./temporal-evidence.ts";
 import { decideRoundProgress } from "./round-progress.ts";
 
@@ -1311,6 +1311,7 @@ export class RunService {
       () => actionScope,
       (await this.canonicalStates.getOptional(runId))?.intent.runtimeClock ?? createRuntimeClock(run.createdAt, this.timeZone),
       (await this.canonicalStates.getOptional(runId))?.intent.turnResolution?.temporalScope,
+      (await this.canonicalStates.getOptional(runId))?.intent.turnResolution?.recurringTime,
     );
     let currentPlan: ExecutionPlan | undefined;
     try {
@@ -1480,6 +1481,7 @@ export class RunService {
       () => actionScope,
       (await this.canonicalStates.getOptional(runId))?.intent.runtimeClock ?? createRuntimeClock(run.createdAt, this.timeZone),
       (await this.canonicalStates.getOptional(runId))?.intent.turnResolution?.temporalScope,
+      (await this.canonicalStates.getOptional(runId))?.intent.turnResolution?.recurringTime,
     );
     const assessor = this.assessorFactory(model);
     const canonicalState = await this.canonicalStates.get(runId);
@@ -2125,7 +2127,7 @@ export class RunService {
         availability: runtimeCapabilitySnapshot === undefined ? "not_provided" as const : "available" as const,
       };
       const replyNeedsCapabilityInventory = turnResolution?.mode === "reply" && runtimeCapabilityInventory !== undefined;
-      model.setTemporalScope(turnResolution?.temporalScope);
+      model.setTemporalScope(turnResolution?.temporalScope, turnResolution?.recurringTime);
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       if (conversationEntry) {
         await emit({
@@ -2546,7 +2548,7 @@ export class RunService {
             availableVisibleDirectoryIds: planningVisibleDirectories.map((directory) => directory.id),
             reusableEvidenceKinds: [...reusableRoundEvidence.kinds, ...reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution)],
             reusableToolSourceIds: reusableRoundEvidence.toolSourceIds,
-            ...(resultBindings.length === 0 && roundResultBindings.length === 0 ? {} : { resultBindings: [...roundResultBindings, ...resultBindings] }),
+            ...(resultBindings.length === 0 && roundResultBindings.length === 0 ? {} : { resultBindings: mergeRuntimeResultBindings(roundResultBindings, resultBindings) }),
             ...(resumePlanning?.context.targetScopeIds !== undefined
               ? { targetScopeIds: resumePlanning.context.targetScopeIds }
               : (openTargetScopeIds.length === Object.keys(canonicalState.targets).length ? {} : { targetScopeIds: openTargetScopeIds })),
@@ -2868,7 +2870,7 @@ export class RunService {
           depth: run.depth, workspaceRoot, visibleDirectories, uploadedSources: sources, allowedToolNames: context.allowedToolNames ?? [], allowedSkillIds: privateSkills.map(skill => skill.id) });
         const scope: { planId?: string; stepId?: string } = { planId: plan.id };
         const model = new ActionTrackedModel(this.modelFactory(this.retryReporter(runId), run.modelKey), this.actions, runId, () => scope,
-          state.intent.runtimeClock, state.intent.turnResolution?.temporalScope);
+          state.intent.runtimeClock, state.intent.turnResolution?.temporalScope, state.intent.turnResolution?.recurringTime);
         plan = await this.executePlanSteps({ actorUserId, runId, privateSkills, rootGrant, plan: await this.plans.get(plan.id), canonicalState: state,
           model, assessor: this.assessorFactory(model), defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
           registry: new ToolRegistry(allTools, { plugins: this.toolExecutionPlugins }), visibleDirectories, sources, emit,
@@ -3079,7 +3081,7 @@ export class RunService {
       depth: run.depth, workspaceRoot, visibleDirectories, uploadedSources: sources,
       allowedToolNames: context?.allowedToolNames ?? [], allowedSkillIds: context?.allowedSkillIds ?? [] });
     const model = new ActionTrackedModel(this.modelFactory(this.retryReporter(runId), run.modelKey), this.actions, runId, () => ({}),
-      state.intent.runtimeClock, state.intent.turnResolution?.temporalScope);
+      state.intent.runtimeClock, state.intent.turnResolution?.temporalScope, state.intent.turnResolution?.recurringTime);
     const plan = await optionalPlanByRun(this.plans, runId);
     if (this.isRunExecuting(runId)) return;
     const controller = new AbortController();
@@ -4414,6 +4416,7 @@ export class RunService {
       () => actionScope,
       canonicalState.intent.runtimeClock ?? createRuntimeClock(input.run.createdAt, this.timeZone),
       canonicalState.intent.turnResolution?.temporalScope,
+      canonicalState.intent.turnResolution?.recurringTime,
     );
     let decision: RecoveryDecisionRecord | undefined;
     try {
@@ -6768,6 +6771,7 @@ class ActionTrackedModel implements ModelAdapter {
   private readonly scope: () => { planId?: string; stepId?: string };
   private readonly runtimeClock: RuntimeClock;
   private temporalScope?: ResolvedTemporalScope;
+  private recurringTime?: RecurringTimeCondition;
 
   constructor(
     model: ModelAdapter,
@@ -6776,6 +6780,7 @@ class ActionTrackedModel implements ModelAdapter {
     scope: () => { planId?: string; stepId?: string },
     runtimeClock: RuntimeClock = createRuntimeClock(),
     temporalScope?: ResolvedTemporalScope,
+    recurringTime?: RecurringTimeCondition,
   ) {
     this.model = model;
     this.actions = actions;
@@ -6783,6 +6788,7 @@ class ActionTrackedModel implements ModelAdapter {
     this.scope = scope;
     this.runtimeClock = runtimeClock;
     this.temporalScope = temporalScope;
+    this.recurringTime = recurringTime;
     this.limits = model.limits;
     this.completeTimeoutMs = model.completeTimeoutMs ?? model.operationTimeoutMs ?? 120_000;
     this.operationTimeoutMs = model.operationTimeoutMs ?? 120_000;
@@ -6790,17 +6796,17 @@ class ActionTrackedModel implements ModelAdapter {
   }
 
   estimateInputTokens(invocation: ModelInvocation): number | undefined {
-    return this.model.estimateInputTokens?.(withRuntimeClock(invocation, this.runtimeClock, this.temporalScope));
+    return this.model.estimateInputTokens?.(withRuntimeClock(invocation, this.runtimeClock, this.temporalScope, this.recurringTime));
   }
 
   requestLogContext(invocation: ModelInvocation, stream: boolean): ModelRequestLogContext | undefined {
-    return this.model.requestLogContext?.(withRuntimeClock(invocation, this.runtimeClock, this.temporalScope), stream);
+    return this.model.requestLogContext?.(withRuntimeClock(invocation, this.runtimeClock, this.temporalScope, this.recurringTime), stream);
   }
 
-  setTemporalScope(scope: ResolvedTemporalScope | undefined): void { this.temporalScope = scope; }
+  setTemporalScope(scope: ResolvedTemporalScope | undefined, recurringTime?: RecurringTimeCondition): void { this.temporalScope = scope; this.recurringTime = recurringTime; }
 
   complete(invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse> {
-    invocation = withRuntimeClock(invocation, this.runtimeClock, this.temporalScope);
+    invocation = withRuntimeClock(invocation, this.runtimeClock, this.temporalScope, this.recurringTime);
     const scope = this.scope();
     return this.actions.execute({
       runId: this.runId,
@@ -6823,7 +6829,7 @@ class ActionTrackedModel implements ModelAdapter {
     base: Readonly<Record<string, unknown>>,
     signal?: AbortSignal,
   ): Promise<ModelResponse> {
-    invocation = withRuntimeClock(invocation, this.runtimeClock, this.temporalScope);
+    invocation = withRuntimeClock(invocation, this.runtimeClock, this.temporalScope, this.recurringTime);
     const scope = this.scope();
     let action: RuntimeActionRecord | undefined;
     return this.actions.execute({
@@ -6856,7 +6862,7 @@ class ActionTrackedModel implements ModelAdapter {
     sink: ModelStreamSink,
     signal?: AbortSignal,
   ): Promise<ModelResponse> {
-    invocation = withRuntimeClock(invocation, this.runtimeClock, this.temporalScope);
+    invocation = withRuntimeClock(invocation, this.runtimeClock, this.temporalScope, this.recurringTime);
     const scope = this.scope();
     const stream = this.model.streamComplete;
     return this.actions.execute({
@@ -8686,7 +8692,7 @@ function conversationTurnTool(context: ConversationIntentExternalContext): Model
         },
         temporalScope: {
           type: "object", additionalProperties: false,
-          description: "Time scope derived separately from the user's literal constraints. For relative calendar-day ranges use runtime_clock and integer day offsets (start inclusive, end exclusive). For explicit or historical reference ranges use user_explicit and RFC3339 bounds. Omit when no temporal range is requested.",
+          description: "A single continuous date/time interval only. For relative calendar-day ranges use runtime_clock and integer day offsets; for explicitly dated intervals use user_explicit and RFC3339 bounds. Omit for recurring times such as nightly or every morning; use recurringTime instead. Both may coexist.",
           required: ["expression", "basis"],
           properties: {
             expression: { type: "string", minLength: 1, maxLength: 240, description: "Verbatim contiguous quote from the user's time requirement, preserving spaces and punctuation. Do not paraphrase or append derived dates or interpretation." },
@@ -8699,6 +8705,11 @@ function conversationTurnTool(context: ConversationIntentExternalContext): Model
             startSecondOffset: { type: "integer" }, endSecondOffset: { type: "integer" },
             startInclusive: { type: "string" }, endExclusive: { type: "string" },
           },
+        },
+        recurringTime: {
+          type: "object", additionalProperties: false, required: ["kind", "expression"],
+          description: "A repeating time-of-day or calendar condition independent of the continuous date range. Copy the user's exact wording; do not invent clock hours or time zone. Use alongside temporalScope if both are requested.",
+          properties: { kind: { type: "string", enum: ["recurring"] }, expression: { type: "string", minLength: 1, maxLength: 240, description: "One contiguous verbatim quote from the current or selected prior user's request." } },
         },
       },
     },
@@ -8770,11 +8781,9 @@ async function resolveConversationTurn(
   await emit({ type: "conversation.turn.resolution_started", data: { maxAttempts: CONVERSATION_TURN_RESOLUTION_ATTEMPTS } });
   const runtimeContextId = `conversation-turn-context:${randomUUID()}`;
   let repairFeedback: string | undefined;
-  const rejectedContracts = new Set<string>();
   const repairMessages: ModelMessage[] = [];
   const retainRepairFeedback = (feedback: string, response: ModelResponse) => {
-    rejectedContracts.add(feedback);
-    repairFeedback = [...rejectedContracts].join("\n");
+    repairFeedback = feedback;
     // Keep the rejected arguments next to their actual validation result.
     // A detached error alone makes the model regenerate (and regress) fields
     // it cannot see. No service operation is invoked by this resolver tool.
@@ -8850,7 +8859,7 @@ async function resolveConversationTurn(
             resolverAttempt: attempt,
             category: "semantic_contract",
             feedback: nonExecutableArtifactFeedback,
-            ...conversationTurnResolutionAttemptSummary(response),
+            ...conversationTurnResolutionAttemptSummary(response, input),
           },
         });
         continue;
@@ -8888,7 +8897,7 @@ async function resolveConversationTurn(
           resolverAttempt: attempt,
           category: "semantic_contract",
           feedback: semanticFeedback,
-          ...conversationTurnResolutionAttemptSummary(response),
+          ...conversationTurnResolutionAttemptSummary(response, input),
         },
       });
       lastFailureWasBinding = resultBound.mode === "execute" && referencesPriorConversationResult(input) && resultBound.targetResult === undefined;
@@ -8903,7 +8912,7 @@ async function resolveConversationTurn(
         category: "shape_contract",
         ...(parsed.bindingFailure ? { boundary: "prior_work_binding" } : {}),
         feedback: repairFeedback,
-        ...conversationTurnResolutionAttemptSummary(response),
+        ...conversationTurnResolutionAttemptSummary(response, input),
       },
     });
     if (lastFailureWasBinding) await beginReconstruction(attempt);
@@ -8986,12 +8995,14 @@ function inheritContinuedConversationIntent(
   const temporalScope = resolution.inputMode === "refresh_sources"
     ? resolution.temporalScope
     : target.temporalScope ?? resolution.temporalScope;
+  const recurringTime = resolution.recurringTime ?? target.recurringTime;
   const evidenceDemand = sourceBinding.mode === "primary_data"
     ? "source_grounded"
     : strongerConversationEvidenceDemand(target.evidenceDemand, resolution.evidenceDemand);
   const evidenceStrategy = conversationEvidenceStrategyForDemand(evidenceDemand, sourceBinding);
   const changed = resolution.effectiveGoal !== target.effectiveGoal
     || JSON.stringify(temporalScope) !== JSON.stringify(resolution.temporalScope)
+    || JSON.stringify(recurringTime) !== JSON.stringify(resolution.recurringTime)
     || JSON.stringify(requiredCapabilityReferences) !== JSON.stringify(resolution.requiredCapabilityReferences ?? [])
     || evidenceDemand !== resolution.evidenceDemand
     || evidenceStrategy !== resolution.evidenceStrategy
@@ -9006,6 +9017,7 @@ function inheritContinuedConversationIntent(
     mode: "execute",
     effectiveGoal: target.effectiveGoal,
     ...(temporalScope === undefined ? {} : { temporalScope }),
+    ...(recurringTime === undefined ? {} : { recurringTime }),
     evidenceStrategy,
     sourceBinding,
     evidenceDemand,
@@ -9139,9 +9151,12 @@ function inheritBoundResultTemporalScope(
 ): ConversationTurnResolution {
   if (resolution.inputMode !== "prior_result" || resolution.targetResult === undefined) return resolution;
   const producer = workset?.resultCards?.find((card) => card.result.resultId === resolution.targetResult?.resultId)?.producer.runId;
-  const scope = workset?.resolvedIntents?.find((item) => item.runId === producer)?.resolution.temporalScope;
-  if (scope === undefined || JSON.stringify(scope) === JSON.stringify(resolution.temporalScope)) return resolution;
-  return { ...resolution, temporalScope: scope, source: "model_guarded" };
+  const prior = workset?.resolvedIntents?.find((item) => item.runId === producer)?.resolution;
+  const scope = prior?.temporalScope;
+  const recurringTime = prior?.recurringTime;
+  if ((scope === undefined || JSON.stringify(scope) === JSON.stringify(resolution.temporalScope))
+    && (recurringTime === undefined || JSON.stringify(recurringTime) === JSON.stringify(resolution.recurringTime))) return resolution;
+  return { ...resolution, ...(scope === undefined ? {} : { temporalScope: scope }), ...(recurringTime === undefined ? {} : { recurringTime }), source: "model_guarded" };
 }
 
 /** The validated semantic frame owns artifact edits, including elliptical turns. */
@@ -9511,6 +9526,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "For requests such as 'turn this analysis into a PDF', bind the prior result and use evidenceStrategy=none. For 'reanalyze the source and make a PDF', use refresh_sources with source_grounded evidence.",
       "Use runtimeContext as server-authored context and identity metadata, not as unverified source content.",
       "runtimeClock is the authoritative current reference. Never invent today's date. Preserve relative time wording in effectiveGoal, taskIntent and userConstraints; do not insert inferred absolute dates there, even when the runtime clock gives the correct date. Put computed bounds only in temporalScope. Quote its expression verbatim from the current user input or selected prior user's input. For relative calendar days, return basis=runtime_clock, alignment=calendar_day and startDayOffset/endDayOffset from the runtime's local day; Runtime computes the actual timestamps. Zero endDayOffset EXCLUDES today. For a calendar-day window through now, use endAtReferenceInstant=true instead of endDayOffset. State whether the current partial day is included in the eventual answer. For elapsed-hour ranges use basis=runtime_clock, alignment=elapsed_seconds and startSecondOffset/endSecondOffset from the reference instant. For explicitly dated or hypothetical ranges return basis=user_explicit with offset-aware timestamps; do not change the runtime clock. Do not label runtime-derived dates as user_explicit.",
+      "temporalScope is only a single continuous interval. A recurring time-of-day or calendar condition belongs in recurringTime with a verbatim user quote, not a clock-derived interval. If a request contains both a continuous date range and a recurring condition, return both independently. Omit temporalScope when no continuous interval is requested. Do not invent clock boundaries, dates, timezone, or cross-day attribution for a recurring condition; preserve uncertainty for the task's authorized business workflow.",
       "You cannot load or execute Skills or Tools in this resolver phase. Use availableSkills and availableTools only as capability metadata; input schemas, credentials, and source content are not exposed here. Actual discovery, workflow selection and invocation belong to Planner and execution.",
       "When the latest turn explicitly asks to use an available Skill, return execute; do not return clarify merely because no visible directory or uploaded source is bound.",
       "Preserve all explicitly mandatory Skill, MCP/tool source, and tool names in requiredCapabilityReferences independently of catalog availability. Unavailable does not mean unrequested. For an actionable request with unavailable requirements, return execute with those references; Runtime will explain and end the task before planning or execution. Do not silently substitute another provider or Skill.",
@@ -9668,8 +9684,10 @@ function parseConversationTurnResolution(
   if (argumentsRecord.temporalScope !== undefined) {
     if (context.runtimeClock === undefined) return reject("Runtime clock is required to resolve a temporal scope");
     try { temporalScope = resolveTemporalScope(argumentsRecord.temporalScope, context.runtimeClock, temporalUserInputs); }
-    catch (error) { groundingFailures.push(error instanceof Error ? error.message : "Invalid temporalScope"); }
+    catch (error) { groundingFailures.push(`temporalScope: ${error instanceof Error ? error.message : "Invalid temporalScope"}. temporalScope is for one continuous interval; put recurring conditions in recurringTime and omit temporalScope if no continuous interval was requested.`); }
   }
+  const recurringTime = argumentsRecord.recurringTime === undefined ? undefined : parseRecurringTimeCondition(argumentsRecord.recurringTime, temporalUserInputs);
+  if (argumentsRecord.recurringTime !== undefined && recurringTime === undefined) groundingFailures.push("recurringTime must contain only kind=recurring and expression quoting one contiguous current or selected prior user input exactly. Do not infer clock boundaries.");
   if (groundingFailures.length > 0 || requiredCapabilityReferences === undefined) return reject(groundingFailures.join("\n"));
   const evidenceDemand = conversationEvidenceDemandForStrategy(evidenceStrategy);
   if (!isConversationSourceBindingConsistent(evidenceStrategy, sourceBinding)) {
@@ -9704,17 +9722,20 @@ function parseConversationTurnResolution(
     memoryAction,
     memoryIntents,
     ...(temporalScope === undefined ? {} : { temporalScope }),
+    ...(recurringTime === undefined ? {} : { recurringTime }),
     requiredCapabilityReferences,
     source: guardedPriorArtifact || (candidateTargetRunId === undefined && resultProducer !== undefined) ? "model_guarded" : "model",
   } };
 }
 
-function conversationTurnResolutionAttemptSummary(response: ModelResponse): Readonly<Record<string, unknown>> {
+function conversationTurnResolutionAttemptSummary(response: ModelResponse, input: string): Readonly<Record<string, unknown>> {
   const call = response.toolCalls.find((item) => item.name === CONVERSATION_TURN_TOOL_NAME);
   const value = optionalRecord(call?.arguments);
   const artifact = optionalRecord(value.targetArtifact);
   const intent = optionalRecord(value.taskIntent);
   const deliverables = Array.isArray(intent.deliverables) ? intent.deliverables : [];
+  const references = value.requiredCapabilityReferences;
+  const temporal = optionalRecord(value.temporalScope);
   return {
     toolCallCount: response.toolCalls.length,
     toolCallNames: response.toolCalls.map((item) => item.name),
@@ -9723,6 +9744,16 @@ function conversationTurnResolutionAttemptSummary(response: ModelResponse): Read
     ...(typeof value.inputMode === "string" ? { inputMode: value.inputMode } : {}),
     ...(typeof value.memoryAction === "string" ? { memoryAction: value.memoryAction } : {}),
     ...(Array.isArray(value.memoryIntents) ? { memoryIntentCount: value.memoryIntents.length } : {}),
+    capabilityReferenceShape: references === undefined ? "missing" : Array.isArray(references) ? "array" : "invalid_type",
+    ...(Array.isArray(references) ? {
+      capabilityReferenceCount: references.length,
+      capabilityReferenceUngroundedCount: references.filter((item) => {
+        const reference = optionalRecord(item).reference;
+        return typeof reference === "string" && !input.includes(reference.trim());
+      }).length,
+    } : {}),
+    temporalScopeFields: Object.keys(temporal).filter((key) => ["expression", "basis", "alignment", "startDayOffset", "endDayOffset", "endAtReferenceInstant", "startSecondOffset", "endSecondOffset", "startInclusive", "endExclusive", "timeZone"].includes(key)),
+    recurringTimePresent: value.recurringTime !== undefined,
     ...(typeof value.targetGoalCandidateId === "string" ? { targetGoalCandidateId: value.targetGoalCandidateId } : {}),
     ...(typeof artifact.path === "string" ? { targetArtifactPath: artifact.path } : {}),
     deliverableKinds: deliverables.map((item) => optionalRecord(item).kind).filter((item) => typeof item === "string"),
@@ -9850,6 +9881,8 @@ function conversationTurnResolutionFromEvents(
       : data.memoryAction;
     const temporalScope = parseResolvedTemporalScope(data.temporalScope);
     if (data.temporalScope !== undefined && temporalScope === undefined) return undefined;
+    const recurringTime = data.recurringTime === undefined ? undefined : parseRecurringTimeCondition(data.recurringTime);
+    if (data.recurringTime !== undefined && recurringTime === undefined) return undefined;
     const requiredCapabilityReferences = parseRequiredCapabilityReferences(data.requiredCapabilityReferences);
     if (requiredCapabilityReferences === undefined) return undefined;
     if (data.schema !== "agentloop.conversationTurnResolution/v1") return undefined;
@@ -9895,6 +9928,7 @@ function conversationTurnResolutionFromEvents(
       memoryAction,
       memoryIntents,
       ...(temporalScope === undefined ? {} : { temporalScope }),
+      ...(recurringTime === undefined ? {} : { recurringTime }),
       requiredCapabilityReferences,
       source,
     };
@@ -10137,6 +10171,7 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
               evidenceDemand: intent.evidenceDemand,
               userConstraints: intent.userConstraints,
               ...(intent.temporalScope === undefined ? {} : { temporalScope: intent.temporalScope }),
+              ...(intent.recurringTime === undefined ? {} : { recurringTime: intent.recurringTime }),
             },
           }),
           ...(failure === undefined ? {} : {

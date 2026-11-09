@@ -40,6 +40,27 @@ export function parseRuntimeResultBinding(value: unknown): RuntimeResultBinding 
   return { schema: "agentloop.resultBinding/v1", result, relation: record.relation };
 }
 
+/** Merge independently derived inputs without adding the same binding twice.
+ * Duplicates within either source remain visible to admission validation. */
+export function mergeRuntimeResultBindings(
+  first: readonly RuntimeResultBinding[],
+  second: readonly RuntimeResultBinding[],
+): readonly RuntimeResultBinding[] {
+  const identities = new Set(first.flatMap((binding) => {
+    const parsed = parseRuntimeResultBinding(binding);
+    return parsed === undefined ? [] : [`${parsed.relation}:${parsed.result.resultId}`];
+  }));
+  const seenSecond = new Set<string>();
+  return [...first, ...second.filter((binding) => {
+    const parsed = parseRuntimeResultBinding(binding);
+    if (parsed === undefined) return true;
+    const identity = `${parsed.relation}:${parsed.result.resultId}`;
+    const repeatedWithinSecond = seenSecond.has(identity);
+    seenSecond.add(identity);
+    return repeatedWithinSecond || !identities.has(identity);
+  })];
+}
+
 export interface RuntimeResultPayload {
   readonly content: string;
   readonly contentFormat: "json" | "text";

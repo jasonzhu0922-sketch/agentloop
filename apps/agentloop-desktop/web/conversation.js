@@ -1,4 +1,3 @@
-import { renderSteerMessages } from './reference/ui/steer-queue.js';
 import { renderMarkdown } from './markdown.js';
 import { assistantMessagePresentation, completedArtifactSummary, terminalAwarePlanStepStatus } from './reference/presentation/assistant-message-presentation.js';
 import { isNearBottom, nextScrollTop } from './reference/ui/scroll-follow.js';
@@ -12,6 +11,10 @@ const runtimeIconUrl = key => `/assets/${RUNTIME_ICON_ASSETS[key] || RUNTIME_ICO
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const lines = value => escape(value).replace(/\n/g, '<br>');
 const clip = (value, max = 120) => { const text = String(value ?? '').replace(/\s+/g, ' ').trim(); return text.length > max ? `${text.slice(0, max)}…` : text; };
+const steerStatus = status => ({ accepted: '已接收，等待处理', processing: '正在处理', applied: '已应用', answered: '已回答', needs_clarification: '需要澄清', unprocessed: '未处理' }[status] || status || '');
+function renderSteerMessage(message) {
+  return `<div class="steer-message" data-steer-message="${escape(message.id)}"><div class="steer-message-bubble"><div class="steer-message-user">${escape(message.text)}</div><small>${escape(steerStatus(message.status))}</small></div></div>`;
+}
 const stepLabel = status => ({ completed: '已完成', running: '执行中', failed: '失败', cancelled: '已取消', pending: '待执行', queued: '待执行', rejected: '已拒绝', unfinished: '未确认完成', selected: '已选择', bound: '已绑定' }[status] || '待执行');
 const time = value => Number.isFinite(value) ? new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) : '';
 function formatDuration(seconds) {
@@ -69,6 +72,11 @@ function renderProcess(turn, openTools = {}, openProtocol = {}, processOpen = tr
       shownMessages.add(data.message.id);
       continue;
     }
+    if (event.type === 'run.input.decided' && data.message) {
+      const explanation = data.message.decision?.explanation || data.message.decision?.reason;
+      if (explanation) { segment = undefined; segmentPrefix = previousContent; items.push({ kind: 'steer-decision', text: explanation }); }
+      continue;
+    }
     if (data.responseVisibility === 'internal') continue;
     if (event.type === 'assistant.streaming' || event.type === 'assistant.committed') {
       if (typeof data.content === 'string') {
@@ -119,7 +127,8 @@ function renderProcess(turn, openTools = {}, openProtocol = {}, processOpen = tr
     else groups.push(item);
   }
   return groups.map(item => {
-    if (item.kind === 'steer') return renderSteerMessages([item.message]);
+    if (item.kind === 'steer') return renderSteerMessage(item.message);
+    if (item.kind === 'steer-decision') return `<div class="steer-message-decision">${lines(item.text)}</div>`;
     const hidden = processOpen ? '' : ' hidden';
     if (item.kind === 'text') {
       // Preserve protocol-shaped model text as evidence, without presenting it

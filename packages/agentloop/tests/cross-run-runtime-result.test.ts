@@ -5,12 +5,23 @@ import { RuntimeResultRepository } from "../src/runtime/runtime-result-repositor
 import {
   createRuntimeResult,
   createRuntimeResultCard,
+  mergeRuntimeResultBindings,
   runtimeResultBindingsForConversationTurn,
 } from "../src/runtime/runtime-result.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
 import { createResultTool } from "../src/tools/result-tool.ts";
+
+test("merging independently derived Result bindings preserves identity, relations, and invalid duplicates", () => {
+  const result = { schema: "agentloop.resultRef/v1" as const, resultId: "rr_2a24dead-6f66-49be-bc38-c29cc65d488c" };
+  const first = { schema: "agentloop.resultBinding/v1" as const, result, relation: "refine_prior" as const };
+  const otherRelation = { ...first, relation: "continue_prior" as const };
+  assert.deepEqual(mergeRuntimeResultBindings([first], [{ ...first }, otherRelation]), [first, otherRelation]);
+  assert.deepEqual(mergeRuntimeResultBindings([first, first], [first]), [first, first]);
+  assert.deepEqual(mergeRuntimeResultBindings([], [first, first]), [first, first]);
+  assert.deepEqual(mergeRuntimeResultBindings([first], [first, first]), [first, first]);
+});
 
 test("a pure continuation binds every published Step Result from its failed target Run", () => {
   const source = createRuntimeResult({

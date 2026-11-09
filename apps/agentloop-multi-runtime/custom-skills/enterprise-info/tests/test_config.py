@@ -2,6 +2,7 @@ import importlib.util
 import io
 import os
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -77,6 +78,20 @@ class SkillConfigurationTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, 1)
         self.assertEqual(error.getvalue(), "ERROR: Enterprise Info Skill root .env is unavailable\n")
         http.assert_not_called()
+
+    def test_transport_failure_reports_safe_local_tls_error_without_stderr(self):
+        result = subprocess.CompletedProcess([], 1, b"", b"fopen('/private/etc/ssl/openssl.cnf'): Operation not permitted private-secret")
+        with patch.object(client.subprocess, "run", return_value=result):
+            with self.assertRaisesRegex(client.SafeError, "local TLS configuration is inaccessible") as caught:
+                client.post_json("https://example.test", {"client_secret": "private-secret"}, "token")
+        self.assertNotIn("private-secret", str(caught.exception))
+
+    def test_transport_error_takes_precedence_over_zero_http_status(self):
+        result = subprocess.CompletedProcess([], 35, b"\n__agentloop_enterprise_http_status__:000", b"private-secret")
+        with patch.object(client.subprocess, "run", return_value=result):
+            with self.assertRaisesRegex(client.SafeError, "TLS handshake failed") as caught:
+                client.post_json("https://example.test", {}, "token")
+        self.assertNotIn("private-secret", str(caught.exception))
 
 
 if __name__ == "__main__":

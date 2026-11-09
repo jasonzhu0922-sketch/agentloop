@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertNoInferredCalendarDates, createRuntimeClock, resolveTemporalScope, withRuntimeClock } from "../src/runtime/runtime-clock.ts";
+import { assertNoInferredCalendarDates, createRuntimeClock, parseRecurringTimeCondition, resolveTemporalScope, withRuntimeClock } from "../src/runtime/runtime-clock.ts";
 import { temporalEvidenceGap } from "../src/runtime/temporal-evidence.ts";
 import { RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
@@ -35,7 +35,8 @@ for (const fixture of [
           const context = JSON.parse(request.runtimeContext!.content.split("\n")[1]);
           const candidate = context.conversationWorkingSet.priorGoalCandidates.find((item: { input?: string; status?: string }) => item.input === priorInput && item.status === priorStatus);
           assert.ok(candidate);
-          const repaired = request.systemPrompt.includes(`relation=${relation} requires targetGoalCandidateId`);
+          const repaired = attempts > 2 || request.systemPrompt.includes(`relation=${relation} requires targetGoalCandidateId`)
+            || request.messages.some((message) => message.role === "tool" && message.content.includes(`relation=${relation} requires targetGoalCandidateId`));
           if (attempts > 1) {
             assert.ok(repaired, "repair must identify the missing lineage, not reject a valid prior time quote");
             if (attempts === 2) assert.doesNotMatch(request.systemPrompt, /Rejected expression/);
@@ -211,6 +212,63 @@ test("the frozen clock is also projected into compaction invocations", () => {
   assert.match(request.systemPrompt, /2026-11-01T04:00:00.000Z/);
 });
 
+test("recurring time condition must be grounded in the user's exact words", () => {
+  assert.deepEqual(parseRecurringTimeCondition({ kind: "recurring", expression: "每天23:00到次日05:00" }, ["统计每天23:00到次日05:00的记录"]),
+    { kind: "recurring", expression: "每天23:00到次日05:00" });
+  assert.equal(parseRecurringTimeCondition({ kind: "recurring", expression: "23:00-05:00" }, ["半夜打车"]), undefined);
+  assert.equal(parseRecurringTimeCondition({ kind: "recurring", expression: "半夜", startLocalTime: "23:00" }, ["半夜打车"]), undefined);
+});
+
+for (const withDateRange of [false, true]) test(`recurring condition survives resolver repair, persistence and model phases (date range=${withDateRange})`, async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-recurring-time-"));
+  const database = new AppDatabase(":memory:");
+  const goal = withDateRange ? "查询最近 5 天半夜打车记录" : "查询半夜打车记录";
+  let attempts = 0;
+  const calls: ModelInvocation[] = [];
+  try {
+    const service = new RunService({ database, skills: new SkillService(database), workspaceRoot: root,
+      clock: () => Date.parse("2026-11-01T04:00:00Z"), timeZone: "Asia/Shanghai",
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        calls.push(request);
+        if (!request.runId.startsWith("conversation-turn:")) return { content: "结果。", finishReason: "stop", toolCalls: [] };
+        attempts++;
+        if (attempts === 2) assert.match(request.systemPrompt, /recurring conditions in recurringTime/);
+        return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `intent-${attempts}`, name: "resolve_conversation_turn", arguments: {
+          mode: "execute", relation: "new_goal", inputMode: "none", effectiveGoal: goal,
+          taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "lookup", requiresExecution: true,
+            deliverables: [{ targetId: "answer", purpose: goal, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
+          evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [],
+          memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
+          ...(attempts === 1 ? { temporalScope: { expression: "半夜", basis: "runtime_clock" } } : {
+            recurringTime: { kind: "recurring", expression: "半夜" },
+            ...(withDateRange ? { temporalScope: { expression: "最近 5 天", basis: "runtime_clock", startDayOffset: -4, endDayOffset: 1 } } : {}),
+          }),
+        } }] };
+      } }),
+      plannerFactory: (model) => ({ plan: async (task) => {
+        assert.deepEqual(task.canonicalState.intent.turnResolution?.recurringTime, { kind: "recurring", expression: "半夜" });
+        assert.equal(task.canonicalState.intent.turnResolution?.temporalScope !== undefined, withDateRange);
+        await model.complete({ runId: "recurring-planner-probe", phase: "planning", systemPrompt: "planner", messages: [], tools: [] });
+        return singleStepTestPlanner().plan(task);
+      } }), assessorFactory: () => approvingTestAssessor(),
+    });
+    const run = await service.executeConversation("owner", goal);
+    assert.equal(run.status, "completed");
+    assert.equal(attempts, 2);
+    const events = await service.events("owner", run.id);
+    const rejection = events.find((event) => event.type === "conversation.turn.resolution_rejected")!;
+    assert.deepEqual(rejection.data.temporalScopeFields, ["expression", "basis"]);
+    assert.equal(rejection.data.capabilityReferenceShape, "array");
+    assert.equal(rejection.data.capabilityReferenceCount, 0);
+    assert.equal(rejection.data.recurringTimePresent, false);
+    const state = await database.prepare("SELECT state_json FROM canonical_run_states WHERE run_id=?").get(run.id) as { state_json: string };
+    assert.deepEqual(JSON.parse(state.state_json).intent.turnResolution.recurringTime, { kind: "recurring", expression: "半夜" });
+    const projected = calls.filter((request) => !request.runId.startsWith("conversation-turn:"));
+    assert.ok(projected.some((request) => request.phase === "execution"));
+    assert.ok(projected.every((request) => request.systemPrompt.includes('<recurring_time_condition source="user-quote">')));
+  } finally { database.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 for (const simultaneous of [false, true]) test(`bounded resolver repair preserves validation context (simultaneous=${simultaneous})`, async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-clock-repair-"));
   const database = new AppDatabase(":memory:");
@@ -223,7 +281,7 @@ for (const simultaneous of [false, true]) test(`bounded resolver repair preserve
         if (!request.runId.startsWith("conversation-turn:")) return { content: "范围包含今天这个尚未结束的自然日。", finishReason: "stop", toolCalls: [] };
         attempts += 1;
         if (attempts === 3) {
-          assert.match(request.systemPrompt, /requiredCapabilityReferences must be/);
+          assert.doesNotMatch(request.systemPrompt, /requiredCapabilityReferences must be/);
           assert.match(request.systemPrompt, /temporalScope.expression must quote/);
           const rejectedCalls = request.messages.filter((message) => message.role === "assistant" && message.toolCalls?.length);
           const rejections = request.messages.filter((message) => message.role === "tool");
