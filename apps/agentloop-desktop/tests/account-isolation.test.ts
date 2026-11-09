@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import { join, parse } from "node:path";
@@ -33,7 +33,17 @@ async function start(t: test.TestContext, root?: string, models?: LocalModelProv
   const options = { mode: "development" as const, dataDirectory: root, openBrowser: false,
     cloudAuth: cloudAuth(), models, bundledSkillDirectories: [skills], connectorModules: builtinConnectorModules(), directoryPicker };
   let app: DesktopApplication = await startDesktop(options);
-  t.after(async () => { if (!app.existing) await app.close(); await rm(root!, { recursive: true, force: true }); });
+  t.after(async () => {
+    if (!app.existing) await app.close();
+    const makeWritable = async (path: string): Promise<void> => {
+      await chmod(path, 0o700);
+      for (const entry of await readdir(path, { withFileTypes: true })) {
+        if (entry.isDirectory()) await makeWritable(join(path, entry.name));
+      }
+    };
+    await makeWritable(root!);
+    await rm(root!, { recursive: true, force: true });
+  });
   let auth: { cookie: string; csrf: string } | undefined;
   const call = async (path: string, body?: unknown) => fetch(app.origin + path, {
     method: body === undefined ? "GET" : "POST", headers: { ...auth && { Cookie: auth.cookie },
@@ -269,4 +279,34 @@ test("host tool search paths cannot grant filesystem root or account databases t
       } finally { await accounts.close(); }
     }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+test("Skill replacement keeps bindings and removal enforces account and reference boundaries", async t => {
+  const f = await start(t); await f.login(aliceEmail);
+  const upload = (description: string) => f.json("/api/skills/import", { files: [{ path: "sample/SKILL.md", contentBase64: Buffer.from(`---\nname: sample\ndescription: ${description}\n---\n# Sample\n${description}\n`).toString("base64") }] });
+  const first = (await upload("first version")).skills[0];
+  await f.json("/api/runtimes/desktop-default/stop", {});
+  const stopped = await f.json("/api/runtimes/desktop-default/configuration");
+  await f.json("/api/runtimes/desktop-default/configuration", { configuration: { skillPackageIds: [first.packageId], mcpServerIds: [], iconKey: stopped.configuration.iconKey }, revision: stopped.revision });
+  await f.json("/api/runtimes/desktop-default/start", {});
+  const blocked = await f.call("/api/skills/import", { files: [{ path: "sample/SKILL.md", contentBase64: Buffer.from("---\nname: sample\ndescription: blocked version\n---\n# Sample\n").toString("base64") }] });
+  assert.equal(blocked.status, 409);
+  assert.equal((await blocked.json()).error, "skill_runtime_active");
+  await f.json("/api/runtimes/desktop-default/stop", {});
+  const second = (await upload("second version")).skills[0];
+  assert.equal(second.packageId, first.packageId);
+  assert.equal((await f.json("/api/skills")).skills.length, 1);
+  assert.equal(second.description, "second version");
+  assert.equal((await f.json("/api/runtimes/desktop-default/configuration")).configuration.skills[0].packageId, first.packageId);
+  assert.equal((await f.call(`/api/skills/${first.packageId}/remove`, {})).status, 409);
+  await f.reopen(); await f.login(aliceEmail);
+  assert.equal((await f.json("/api/skills")).skills[0].description, "second version");
+  await f.login(bobEmail);
+  assert.equal((await f.call(`/api/skills/${first.packageId}/remove`, {})).status, 404);
+  await f.login(aliceEmail);
+  const current = await f.json("/api/runtimes/desktop-default/configuration");
+  await f.json("/api/runtimes/desktop-default/configuration", { configuration: { skillPackageIds: [], mcpServerIds: [], iconKey: current.configuration.iconKey }, revision: current.revision });
+  await f.json(`/api/skills/${first.packageId}/remove`, {});
+  assert.deepEqual((await f.json("/api/skills")).skills, []);
 });

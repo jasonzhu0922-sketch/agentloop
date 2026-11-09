@@ -14,6 +14,66 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+test("same-Run recovery preserves an evidence conflict until a repaired observation resolves it", async () => {
+  const database = new AppDatabase(":memory:");
+  let reads = 0;
+  let oldRef = "";
+  let sawRepairContext = false;
+  try {
+    const runs = new RunService({ database, skills: new SkillService(database), plannerFactory: singleStepTestPlanner,
+      tools: [{ name: "inspect_filter", description: "Inspect a recorded filter", inputSchema: { type: "object" },
+        executionMode: "parallel", replaySafe: true, parse: (value) => value,
+        execute: async () => ({ predicate: ++reads === 1 ? "time >= 00 OR time <= 06" : "time >= 00 AND time <= 06" }) }],
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        const repair = request.messages.some((message) => message.role === "user" && message.content.includes("Continue the same unresolved canonical GoalGap"));
+        if (repair) {
+          sawRepairContext ||= (request.runtimeContext?.content ?? "").includes("daytime observation conflicts");
+          if (reads < 2) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "corrected", name: "inspect_filter", arguments: {} }] };
+          return { content: "The corrected observation supports the requested result.", finishReason: "stop", toolCalls: [] };
+        }
+        if (reads === 0) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "original", name: "inspect_filter", arguments: {} }] };
+        return { content: "The original result meets the requested window.", finishReason: "stop", toolCalls: [] };
+      } }),
+      recoveryPlannerFactory: () => ({ decide: async (input) => {
+        assert.equal(input.canonicalGap?.evidenceConcerns?.[0]?.observation, "daytime observation conflicts");
+        const repair = repairLeafForFailedBoundary(input.plan!.steps.find((step) => step.id === input.failedBoundary!.stepId)!, input.failedBoundary!, input.plan!.version);
+        assert.match(repair.objective, /unverified/);
+        return { actionId: input.action.id, expectedActionRevision: input.action.revision, decision: "revise_plan" as const,
+          rationale: "Inspect and correct the shared premise.", evidenceRefs: [oldRef],
+          planRevision: { schema: "agentloop.outcomePlan/v2" as const, shape: "recovery_patch" as const,
+            goal: input.plan!.goal, selectedSkillIds: [], steps: [repair] } };
+      } }),
+      planRevisionAssessorFactory: () => ({ assess: async () => ({ approved: true, feedback: "", evidenceRefs: [] }) }),
+      assessorFactory: () => ({ assess: async (input) => {
+        const base = await approvingTestAssessor().assess(input);
+        if (input.step.role === "repair") {
+          const gap = input.canonicalState.gaps.find((item) => item.stepId !== undefined && item.status === "open")!;
+          const newRef = input.evidence.toolCalls.find((call) => call.toolCallId === "corrected")?.resultRef?.resultId;
+          assert.ok(newRef);
+          return { ...base, concernResolutions: [{ gapId: gap.id, concernIndex: 0, status: "resolved" as const,
+            rationale: "The corrected filter was observed.", evidenceRefs: [newRef] }] };
+        }
+        oldRef = input.evidence.toolCalls.find((call) => call.toolCallId === "original")!.resultRef!.resultId;
+        return { ...base, approved: false,
+          criteria: base.criteria.map((criterion) => ({ ...criterion, satisfied: false, status: "conflict" as const })),
+          feedback: "Investigate the conflict.", failedBoundary: { stepId: input.step.id, missingEvidenceKinds: [],
+            violatedSkillRequirements: [], reusableEvidenceRefs: [], suggestedRepairShape: "revise_plan" as const,
+            evidenceConcerns: [{ observation: "daytime observation conflicts", evidenceRefs: [oldRef],
+              hypothesis: "The data channel may be wrong.", affectedEvidenceRefs: [oldRef] }] } };
+      } }),
+    });
+    const run = await runs.execute("owner", "Find the requested records within the specified time window.");
+    assert.equal(run.status, "completed");
+    assert.equal(reads, 2);
+    assert.equal(sawRepairContext, true);
+    const state = await new CanonicalRunStateRepository(database).get(run.id);
+    const gap = state.gaps.find((item) => item.evidenceConcerns?.length);
+    assert.equal(gap?.status, "resolved");
+    assert.equal(gap?.concernResolutions?.[0]?.status, "resolved");
+    assert.notEqual(gap?.concernResolutions?.[0]?.evidenceRefs[0], oldRef);
+  } finally { database.close(); }
+});
+
 for (const scenario of [
   {
     name: "role lookup",

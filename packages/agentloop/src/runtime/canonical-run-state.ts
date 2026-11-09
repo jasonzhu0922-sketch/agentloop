@@ -33,6 +33,10 @@ export interface CanonicalGoalGap {
   readonly missingEvidenceKinds: readonly string[];
   readonly violatedSkillRequirements: readonly string[];
   readonly evidenceRefs: readonly string[];
+  /** The assessor's reuse candidates are distinct from the full evidence provenance. */
+  readonly reusableEvidenceRefs?: readonly string[];
+  readonly evidenceConcerns?: FailedBoundary["evidenceConcerns"];
+  readonly concernResolutions?: SkillComplianceAssessment["concernResolutions"];
   readonly suggestedAction: FailedBoundary["suggestedRepairShape"];
   readonly openedAt: number;
   readonly resolvedAt?: number;
@@ -397,7 +401,7 @@ export function startCanonicalStep(state: CanonicalRunState, stepId: string, now
 
 export function recordCanonicalAssessment(
   state: CanonicalRunState,
-  assessment: Pick<SkillComplianceAssessment, "id" | "stepId" | "approved" | "criteria" | "failedBoundary">,
+  assessment: Pick<SkillComplianceAssessment, "id" | "stepId" | "approved" | "criteria" | "failedBoundary" | "concernResolutions">,
   evidence: StepEvidence,
   now = Date.now(),
 ): CanonicalRunState {
@@ -405,7 +409,14 @@ export function recordCanonicalAssessment(
   const step = requiredStep(state, assessment.stepId);
   const evidenceRefs = canonicalEvidenceRefs(evidence);
   const currentGap = state.gaps.find((gap) => gap.targetId === undefined && (gap.stepId === assessment.stepId || gap.repairScopeStepIds?.includes(assessment.stepId)) && gap.status === "open");
+  const hasUnresolvedConcerns = (assessment.failedBoundary?.evidenceConcerns?.length ?? 0) > 0
+    || (currentGap?.evidenceConcerns ?? []).some((_, concernIndex) => !assessment.concernResolutions?.some((resolution) =>
+      resolution.gapId === currentGap?.id && resolution.concernIndex === concernIndex && resolution.status === "resolved" && resolution.evidenceRefs.length > 0));
+  if (assessment.approved && hasUnresolvedConcerns) {
+    throw conflict("Cannot approve a Step while its canonical evidence concerns remain unresolved");
+  }
   const acceptedTargetIds = new Set(assessment.criteria
+    .filter(() => !hasUnresolvedConcerns)
     .filter((criterion) => criterion.satisfied && criterion.targetId !== undefined)
     .map((criterion) => criterion.targetId!)
     .filter((targetId) => step.targetIds.includes(targetId))
@@ -437,7 +448,8 @@ export function recordCanonicalAssessment(
     const resolved = progressedGaps.map((gap) =>
       gap.id === currentGap?.id && (gap.repairScopeStepIds ?? [assessment.stepId]).every((id) =>
         id === assessment.stepId || state.steps[id]?.status === "satisfied")
-        ? { ...gap, status: "resolved" as const, resolvedAt: now }
+        ? { ...gap, status: "resolved" as const, resolvedAt: now,
+          ...(assessment.concernResolutions === undefined ? {} : { concernResolutions: assessment.concernResolutions.filter((item) => item.gapId === gap.id) }) }
         : gap);
     return next(state, {
       steps: replaceStep(state, {
@@ -462,6 +474,11 @@ export function recordCanonicalAssessment(
     missingEvidenceKinds: Object.freeze([...boundary.missingEvidenceKinds]),
     violatedSkillRequirements: Object.freeze([...boundary.violatedSkillRequirements]),
     evidenceRefs: Object.freeze([...new Set([...(currentGap?.evidenceRefs ?? []), ...boundary.reusableEvidenceRefs, ...evidenceRefs])]),
+    reusableEvidenceRefs: Object.freeze([...boundary.reusableEvidenceRefs]),
+    ...((boundary.evidenceConcerns ?? currentGap?.evidenceConcerns) === undefined ? {} : {
+      evidenceConcerns: Object.freeze([...(currentGap?.evidenceConcerns ?? []), ...(boundary.evidenceConcerns ?? []).filter((concern) =>
+        !(currentGap?.evidenceConcerns ?? []).some((prior) => JSON.stringify(prior) === JSON.stringify(concern)))]),
+    }),
     suggestedAction: boundary.suggestedRepairShape,
     ...(boundary.unmetCriteria === undefined ? {} : { unmetCriteria: Object.freeze([...boundary.unmetCriteria]) }),
     openedAt: currentGap?.openedAt ?? now,

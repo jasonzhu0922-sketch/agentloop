@@ -113,6 +113,26 @@ function evidence(): StepEvidence {
   };
 }
 
+test("an open repair gap retains concerns without reclassifying all provenance as reusable", () => {
+  const state = createCanonicalRunState({ runId: "gap-concern", userInput: "produce result", understanding: understanding(), now: 1 });
+  const active = startCanonicalStep(bindCanonicalPlan(state, planFor(state), 2), "produce", 3);
+  const concern = { observation: "Observed rows conflict with the claimed filter.", evidenceRefs: ["tool-1"],
+    hypothesis: "The query may have ignored the filter.", affectedEvidenceRefs: ["tool-1"] };
+  const result = recordCanonicalAssessment(active, { id: "assessment-1", stepId: "produce", approved: false, criteria: [],
+    failedBoundary: { stepId: "produce", missingEvidenceKinds: [], violatedSkillRequirements: [], reusableEvidenceRefs: [],
+      suggestedRepairShape: "repair_leaf", evidenceConcerns: [concern] } }, evidence(), 4);
+  const gap = result.gaps.find((item) => item.stepId === "produce" && item.status === "open")!;
+  assert.ok(gap.evidenceRefs.includes("rr_00000000-0000-4000-8000-000000000001"));
+  assert.deepEqual(gap.reusableEvidenceRefs, []);
+  assert.deepEqual(gap.evidenceConcerns, [concern]);
+  assert.throws(() => recordCanonicalAssessment(result, { id: "unjustified", stepId: "produce", approved: true, criteria: [] }, evidence(), 5),
+    /evidence concerns remain unresolved/);
+  const next = recordCanonicalAssessment(result, { id: "assessment-2", stepId: "produce", approved: false, criteria: [],
+    failedBoundary: { stepId: "produce", missingEvidenceKinds: [], violatedSkillRequirements: [], reusableEvidenceRefs: [],
+      suggestedRepairShape: "repair_leaf" } }, evidence(), 5);
+  assert.deepEqual(next.gaps.find((item) => item.id === gap.id)?.evidenceConcerns, [concern]);
+});
+
 test("round progress separates incomplete work, open goal gaps, and goal completion", () => {
   const state = createCanonicalRunState({ runId: "round-progress", userInput: "生成中文 PPTX", understanding: understanding(), now: 1 });
   const plan = planFor(state);

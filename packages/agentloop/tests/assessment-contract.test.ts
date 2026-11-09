@@ -69,6 +69,56 @@ test("assessment uses one strict explicit-state schema, including nullable failu
   } }).assess(input);
 });
 
+test("assessment records an observed conflict separately from a hypothesis and binds only supplied evidence", async () => {
+  const base = assessmentInput();
+  const input: StepAssessmentInput = { ...base, evidence: { ...base.evidence, toolCalls: [
+    { toolCallId: "detail", toolName: "read", isError: false, result: "daytime row", resultRef: { schema: "agentloop.resultRef/v1", resultId: "rr_detail" } },
+    { toolCallId: "ranking", toolName: "query", isError: false, result: "ranking", resultRef: { schema: "agentloop.resultRef/v1", resultId: "rr_ranking" } },
+  ] } };
+  const concern = { observation: "A daytime row conflicts with the stated time window.", evidenceRefs: ["rr_detail"],
+    hypothesis: "The source channel may have ignored the filter.", affectedEvidenceRefs: ["rr_ranking"] };
+  const result = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete() {
+    const response = submission(input, undefined, { stepId: "response", missingEvidenceKinds: [], violatedSkillRequirements: [],
+      reusableEvidenceRefs: ["rr_ranking"], suggestedRepairShape: "repair_leaf", evidenceConcerns: [concern] });
+    response.toolCalls[0]!.arguments.criteria[0]!.satisfied = false;
+    return response;
+  } }).assess(input);
+  assert.equal(result.approved, false);
+  assert.deepEqual(result.failedBoundary?.evidenceConcerns, [concern]);
+
+  let attempts = 0;
+  await assert.rejects(new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete() {
+    attempts++;
+    const response = submission(input, undefined, { stepId: "response", missingEvidenceKinds: [], violatedSkillRequirements: [],
+      reusableEvidenceRefs: [], suggestedRepairShape: "repair_leaf", evidenceConcerns: [{ ...concern, evidenceRefs: ["invented"] }] });
+    response.toolCalls[0]!.arguments.criteria[0]!.satisfied = false;
+    return response;
+  } }).assess(input));
+  assert.equal(attempts, 3);
+});
+
+test("a repair cannot pass until every open evidence concern is explicitly resolved with a bound observation", async () => {
+  const base = assessmentInput();
+  const concern = { observation: "A daytime row contradicts the claimed window.", evidenceRefs: ["rr_detail"],
+    hypothesis: "The channel may have ignored the filter.", affectedEvidenceRefs: ["rr_ranking"] };
+  const input: StepAssessmentInput = { ...base, canonicalState: { ...base.canonicalState, gaps: [{ id: "gap-1", stepId: "response",
+    status: "open", missingEvidenceKinds: [], violatedSkillRequirements: [], evidenceRefs: ["rr_detail", "rr_ranking"],
+    evidenceConcerns: [concern], suggestedAction: "repair_leaf", openedAt: 1 }] } };
+  for (const status of ["unresolved", "resolved"] as const) {
+    const result = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
+      const context = JSON.parse(request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+      assert.deepEqual(context.assessmentGaps[0].evidenceConcerns, [concern]);
+      const response = submission(input) as any;
+      response.toolCalls[0].arguments.concernResolutions = [{ gapId: "gap-1", concernIndex: 0, status,
+        rationale: status === "resolved" ? "The actual query conditions were checked." : "The shared query premise remains unverified.",
+        evidenceRefs: ["rr_detail"] }];
+      return response;
+    } }).assess(input);
+    assert.equal(result.approved, status === "resolved");
+    assert.equal(result.concernResolutions?.[0]?.status, status);
+  }
+});
+
 test("temporal gaps reach the model as facts for contextual judgment, not automatic rejection", async () => {
   for (const satisfied of [true, false]) {
     const input = { ...assessmentInput(), temporalEvidenceGap: "Unverified intervals: 313 milliseconds." };

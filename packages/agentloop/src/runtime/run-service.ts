@@ -3811,8 +3811,11 @@ export class RunService {
           }
           const holisticSourceContractMismatch = sourceContractNeedsHolisticAssessment(activeStep, evidence);
           const assessmentProfile = selectAssessmentProfile(activeStep, evidence, holisticSourceContractMismatch);
+          const openEvidenceConcerns = canonicalState.gaps.filter((gap) => gap.status === "open" && gap.stepId !== undefined
+            && (gap.stepId === activeStep.id || gap.repairScopeStepIds?.includes(activeStep.id)) && (gap.evidenceConcerns?.length ?? 0) > 0)
+            .map((gap) => ({ gapId: gap.id, evidenceConcerns: gap.evidenceConcerns }));
           const useProfiledRuleAssessor = temporalScopeGap === undefined && input.defaultAssessmentPolicyEnabled
-            && isProfiledRuleAssessmentProfile(assessmentProfile);
+            && openEvidenceConcerns.length === 0 && isProfiledRuleAssessmentProfile(assessmentProfile);
           const assessor = useProfiledRuleAssessor
             ? new ProfiledRuleStepAssessor(assessmentProfile)
             : input.assessor;
@@ -3830,6 +3833,7 @@ export class RunService {
             activatedSkills: activatedStepSkills,
             evidence,
             modelEvidence,
+            openEvidenceConcerns,
             ...(temporalScopeGap === undefined ? {} : { temporalEvidenceGap: temporalScopeGap }),
             ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
             ...(input.runtimeCapabilityInventory === undefined ? {} : { runtimeCapabilityInventory: input.runtimeCapabilityInventory }),
@@ -3947,6 +3951,7 @@ export class RunService {
               evidenceDigest: assessment.evidenceDigest,
               criteria: assessment.criteria,
               skills: assessment.skills,
+              ...(assessment.concernResolutions === undefined ? {} : { concernResolutions: assessment.concernResolutions }),
               feedback: assessment.feedback,
               ...(assessment.failedBoundary === undefined ? {} : { failedBoundary: assessment.failedBoundary }),
             },
@@ -5576,6 +5581,15 @@ function failedBoundaryFromErrorDetails(value: unknown): FailedBoundary | undefi
     violatedSkillRequirements: stringArrayField(boundary.violatedSkillRequirements),
     reusableEvidenceRefs: stringArrayField(boundary.reusableEvidenceRefs),
     suggestedRepairShape,
+    ...(Array.isArray(boundary.evidenceConcerns) ? { evidenceConcerns: boundary.evidenceConcerns.map((value) => {
+      const item = asRecord(value);
+      if (typeof item?.observation !== "string" || typeof item.hypothesis !== "string"
+        || !Array.isArray(item.evidenceRefs) || !Array.isArray(item.affectedEvidenceRefs)) {
+        throw new AppError("CONFLICT", "Invalid assessment evidence concern", 409);
+      }
+      return { observation: item.observation, hypothesis: item.hypothesis,
+        evidenceRefs: stringArrayField(item.evidenceRefs), affectedEvidenceRefs: stringArrayField(item.affectedEvidenceRefs) };
+    }) } : {}),
     ...(Array.isArray(boundary.unmetCriteria) ? { unmetCriteria: boundary.unmetCriteria.map((value) => {
       const item = asRecord(value);
       if (typeof item?.criterionId !== "string" || typeof item.rationale !== "string"
@@ -5857,9 +5871,10 @@ function failedBoundaryFromCanonicalGap(gap: CanonicalGoalGap): FailedBoundary {
     stepId: gap.stepId,
     missingEvidenceKinds: gap.missingEvidenceKinds,
     violatedSkillRequirements: gap.violatedSkillRequirements,
-    reusableEvidenceRefs: gap.evidenceRefs,
+    reusableEvidenceRefs: gap.reusableEvidenceRefs ?? [],
     suggestedRepairShape: gap.suggestedAction,
     ...(gap.unmetCriteria === undefined ? {} : { unmetCriteria: gap.unmetCriteria }),
+    ...(gap.evidenceConcerns === undefined ? {} : { evidenceConcerns: gap.evidenceConcerns }),
   };
 }
 
@@ -5890,7 +5905,7 @@ export function repairLeafForFailedBoundary(
     // A failed assessment does not replace the Step's output contract. The
     // repair leaf must still own the original work product and its sources;
     // the evidence gap only narrows what remains to be completed.
-    objective: `Complete the original Step ${target.id} deliverable: ${target.objective} Resolve the remaining result problems: ${JSON.stringify(failedBoundary.unmetCriteria ?? [])}. Missing execution observations: ${missing}. Produce, verify, and deliver the original admissible output.`,
+    objective: `Complete the original Step ${target.id} deliverable: ${target.objective} Resolve the remaining result problems: ${JSON.stringify(failedBoundary.unmetCriteria ?? [])}. Missing execution observations: ${missing}. Evidence concerns: ${JSON.stringify(failedBoundary.evidenceConcerns ?? [])}. Treat assessor hypotheses and suggested actions as unverified; inspect referenced observations and their premises before deciding what can be reused or changed. A shared premise is not independently validated by repetition. Produce, verify, and deliver the original admissible output.`,
     dependencies: target.dependencies,
     role: "repair",
     refinementState: "not_refinable",
@@ -7585,6 +7600,7 @@ function stepAssessmentSignature(input: {
   activatedSkills: readonly PrivateSkill[];
   evidence: StepEvidence;
   modelEvidence: StepEvidence;
+  openEvidenceConcerns: readonly { readonly gapId: string; readonly evidenceConcerns: CanonicalGoalGap["evidenceConcerns"] }[];
   temporalEvidenceGap?: string;
   runtimeCapabilitySnapshot?: RuntimeCapabilitySnapshot;
   runtimeCapabilityInventory?: {
@@ -7602,6 +7618,7 @@ function stepAssessmentSignature(input: {
       .sort((left, right) => left.id.localeCompare(right.id, "en")),
     evidence: assessmentEvidenceSignature(input.evidence),
     modelEvidence: assessmentEvidenceSignature(input.modelEvidence),
+    openEvidenceConcerns: input.openEvidenceConcerns,
     ...(input.temporalEvidenceGap === undefined ? {} : { temporalEvidenceGap: input.temporalEvidenceGap }),
     ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
     ...(input.runtimeCapabilityInventory === undefined ? {} : { runtimeCapabilityInventory: input.runtimeCapabilityInventory }),

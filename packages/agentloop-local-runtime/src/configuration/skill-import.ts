@@ -79,6 +79,7 @@ export async function importSkillFiles(library: string, files: readonly SkillImp
       await writeFile(path, file.content, { flag: "wx", mode: 0o600 });
     }
     const inspections = await Promise.all(roots.map(root => inspectSkillPackage(join(staging, root))));
+    if (new Set(inspections.map(item => item.name)).size !== inspections.length) return fail();
     const installed = [];
     for (const inspection of inspections) {
       const storageKey = `uploaded-${inspection.packageHash}`, target = join(library, storageKey);

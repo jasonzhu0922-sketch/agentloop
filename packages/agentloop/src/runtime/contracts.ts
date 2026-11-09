@@ -1,4 +1,5 @@
 import type { RuntimeResultRef } from "./runtime-result.ts";
+import type { FailedBoundary } from "../planning/contracts.ts";
 
 export type JsonSchema = Readonly<Record<string, unknown>>;
 
@@ -437,12 +438,6 @@ export interface CandidateCompletionEvaluation {
   readonly requiresEvidenceProgress?: boolean;
   /** Runtime blocked this candidate because that substantive gap has no new evidence. */
   readonly evidenceProgressBlocked?: boolean;
-  readonly failedBoundary?: Readonly<{
-    readonly stepId: string;
-    readonly missingEvidenceKinds: readonly string[];
-    readonly violatedSkillRequirements: readonly string[];
-    readonly reusableEvidenceRefs: readonly string[];
-    readonly suggestedRepairShape: "repair_leaf" | "revise_plan" | "ask_user" | "fail";
-  }>;
+  readonly failedBoundary?: FailedBoundary;
   readonly assessmentReused?: boolean;
 }

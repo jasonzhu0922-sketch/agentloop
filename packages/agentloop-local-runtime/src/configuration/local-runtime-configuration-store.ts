@@ -1,6 +1,7 @@
 import type { ResolvedLocalRuntimeConfiguration } from "../contracts/host.ts";
 export type { ResolvedLocalRuntimeConfiguration } from "../contracts/host.ts";
 import { createHash, randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type { LocalModelConfigurationStore } from "./local-model-configuration-store.ts";
 import {
@@ -619,7 +620,13 @@ export class LocalRuntimeConfigurationStore {
     readonly metadataGeneration?: LocalSkillMetadataGeneration;
   }): Promise<LocalSkillPackageSummary> {
     if (!/^uploaded-[0-9a-f]{64}$/.test(input.storageKey)) throw new LocalRuntimeConfigurationStoreError(400, "skill_package_storage_key_invalid");
-    const packageId = `local_skill_${input.inspection.packageHash.slice(0, 32)}`;
+    const matches = await this.database.prepare("SELECT package_id, storage_key FROM local_skill_packages WHERE source_kind = 'uploaded' AND skill_name = ? ORDER BY created_at, package_id").all(input.inspection.name) as Array<{ package_id: string; storage_key: string }>;
+    const selected = matches.find(row => row.storage_key === input.storageKey) ?? matches[0];
+    const packageId = selected?.package_id ?? `local_skill_${input.inspection.packageHash.slice(0, 32)}`;
+    const changing = matches.some(row => row.package_id !== packageId || row.storage_key !== input.storageKey);
+    if (changing) {
+      for (const row of matches) await this.assertSkillRuntimeStopped(row.package_id);
+    }
     const metadataDeclaration = input.metadataDeclaration ?? input.inspection.declaration ?? detectSkillDeclaration(
       input.inspection.name,
       input.inspection.description,
@@ -633,54 +640,69 @@ export class LocalRuntimeConfigurationStore {
     };
     const metadataSource = input.inspection.metadataSource ?? input.metadataSource ?? (input.inspection.declaration === undefined ? "detected" : "package");
     const now = Date.now();
-    await this.database.prepare(`
-      INSERT INTO local_skill_packages(
-        package_id, skill_name, display_name, source_kind, storage_key, manifest_json,
-        validation_status, validation_detail, created_at, updated_at
-      ) VALUES (?, ?, ?, 'uploaded', ?, ?, 'valid', NULL, ?, ?)
-      ON CONFLICT(package_id) DO UPDATE SET
-        skill_name = excluded.skill_name,
-        display_name = excluded.display_name,
-        storage_key = excluded.storage_key,
-        manifest_json = excluded.manifest_json,
-        validation_status = 'valid',
-        validation_detail = NULL,
-        updated_at = excluded.updated_at
-    `).run(
-      packageId,
-      input.inspection.name,
-      input.inspection.name,
-      input.storageKey,
-      JSON.stringify({
-        description: input.inspection.description,
-        packageHash: input.inspection.packageHash,
-        fileCount: input.inspection.fileCount,
-        totalBytes: input.inspection.totalBytes,
-        ...(input.inspection.agentLoop === undefined ? {} : { agentLoop: input.inspection.agentLoop }),
-      }),
-      now,
-      now,
-    );
-    const existingRevision = await this.database.prepare(
-      "SELECT revision FROM local_skill_metadata_revisions WHERE package_id = ? AND status = 'active' LIMIT 1",
-    ).get(packageId) as { revision: number } | undefined;
-    if (existingRevision === undefined) {
+    await this.database.transaction(async () => {
+      for (const duplicate of matches.filter(row => row.package_id !== packageId)) {
+        await this.database.prepare("INSERT OR IGNORE INTO local_runtime_skill_bindings(runtime_id, package_id, created_at) SELECT runtime_id, ?, created_at FROM local_runtime_skill_bindings WHERE package_id = ?").run(packageId, duplicate.package_id);
+        await this.database.prepare("DELETE FROM local_runtime_skill_bindings WHERE package_id = ?").run(duplicate.package_id);
+        await this.database.prepare("DELETE FROM local_skill_metadata_revisions WHERE package_id = ?").run(duplicate.package_id);
+        await this.database.prepare("DELETE FROM local_skill_packages WHERE package_id = ?").run(duplicate.package_id);
+      }
+      if (selected && selected.storage_key !== input.storageKey) await this.database.prepare("DELETE FROM local_skill_metadata_revisions WHERE package_id = ?").run(packageId);
       await this.database.prepare(`
-        INSERT INTO local_skill_metadata_revisions(
-          package_id, package_hash, revision, metadata_source, generation_method,
-          declaration_json, field_metadata_json, generation_json, status, created_at, updated_at
-        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, 'active', ?, ?)
+        INSERT INTO local_skill_packages(
+          package_id, skill_name, display_name, source_kind, storage_key, manifest_json,
+          validation_status, validation_detail, created_at, updated_at
+        ) VALUES (?, ?, ?, 'uploaded', ?, ?, 'valid', NULL, ?, ?)
+        ON CONFLICT(package_id) DO UPDATE SET
+          skill_name = excluded.skill_name,
+          display_name = excluded.display_name,
+          storage_key = excluded.storage_key,
+          manifest_json = excluded.manifest_json,
+          validation_status = 'valid',
+          validation_detail = NULL,
+          updated_at = excluded.updated_at
       `).run(
         packageId,
-        input.inspection.packageHash,
-        metadataSource,
-        metadataGeneration.generationMethod,
-        JSON.stringify(metadataDeclaration),
-        JSON.stringify(metadataGeneration.fields ?? {}),
-        JSON.stringify(metadataGeneration),
+        input.inspection.name,
+        input.inspection.name,
+        input.storageKey,
+        JSON.stringify({
+          description: input.inspection.description,
+          packageHash: input.inspection.packageHash,
+          fileCount: input.inspection.fileCount,
+          totalBytes: input.inspection.totalBytes,
+          ...(input.inspection.agentLoop === undefined ? {} : { agentLoop: input.inspection.agentLoop }),
+        }),
         now,
         now,
       );
+      const existingRevision = await this.database.prepare(
+        "SELECT revision FROM local_skill_metadata_revisions WHERE package_id = ? AND status = 'active' LIMIT 1",
+      ).get(packageId) as { revision: number } | undefined;
+      if (existingRevision === undefined) {
+        await this.database.prepare(`
+          INSERT INTO local_skill_metadata_revisions(
+            package_id, package_hash, revision, metadata_source, generation_method,
+            declaration_json, field_metadata_json, generation_json, status, created_at, updated_at
+          ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, 'active', ?, ?)
+        `).run(
+          packageId,
+          input.inspection.packageHash,
+          metadataSource,
+          metadataGeneration.generationMethod,
+          JSON.stringify(metadataDeclaration),
+          JSON.stringify(metadataGeneration.fields ?? {}),
+          JSON.stringify(metadataGeneration),
+          now,
+          now,
+        );
+      }
+    });
+    for (const duplicate of matches.filter(row => row.package_id !== packageId)) this.packageRoots.delete(duplicate.package_id);
+    if (this.uploadedPackageRoot) for (const old of matches) {
+      if (old.storage_key !== input.storageKey && /^uploaded-[0-9a-f]{64}$/.test(old.storage_key)) {
+        await rm(resolve(this.uploadedPackageRoot, old.storage_key), { recursive: true, force: true });
+      }
     }
     this.packageRoots.set(packageId, input.root);
     return (await this.listSkillPackages()).find((skill) => skill.packageId === packageId)!;
@@ -743,6 +765,26 @@ export class LocalRuntimeConfigurationStore {
       generation: parseRecord(revision.generation_json, "stored Skill metadata generation"),
       fields: parseRecord(revision.field_metadata_json, "stored Skill metadata fields") as Readonly<Record<string, LocalSkillMetadataField>>,
     };
+  }
+
+  private async assertSkillRuntimeStopped(packageId: string): Promise<void> {
+    const active = await this.database.prepare(`SELECT i.status FROM local_runtime_skill_bindings b JOIN local_runtime_instances i ON i.runtime_id = b.runtime_id WHERE b.package_id = ? AND i.status <> 'stopped' LIMIT 1`).get(packageId);
+    if (active) throw new LocalRuntimeConfigurationStoreError(409, "skill_runtime_active");
+  }
+
+  async removeUploadedPackage(packageId: string): Promise<void> {
+    const row = await this.skillPackageRow(packageId);
+    if (row.source_kind !== "uploaded") throw new LocalRuntimeConfigurationStoreError(403, "skill_package_not_removable");
+    const binding = await this.database.prepare("SELECT runtime_id FROM local_runtime_skill_bindings WHERE package_id = ? LIMIT 1").get(packageId);
+    if (binding) throw new LocalRuntimeConfigurationStoreError(409, "skill_package_referenced");
+    await this.database.transaction(async () => {
+      await this.database.prepare("DELETE FROM local_skill_metadata_revisions WHERE package_id = ?").run(packageId);
+      await this.database.prepare("DELETE FROM local_skill_packages WHERE package_id = ?").run(packageId);
+    });
+    this.packageRoots.delete(packageId);
+    if (this.uploadedPackageRoot && /^uploaded-[0-9a-f]{64}$/.test(row.storage_key)) {
+      await rm(resolve(this.uploadedPackageRoot, row.storage_key), { recursive: true, force: true });
+    }
   }
 
   /** Create a new metadata revision without changing the immutable uploaded package. */

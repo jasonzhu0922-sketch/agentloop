@@ -83,6 +83,7 @@ export interface LocalRuntimeManager {
   runtimeSettings(runtimeId: string): Promise<{ configuration: Awaited<ReturnType<LocalRuntimeSupervisor["configuration"]>>; revision: string }>;
   skillPackages(): ReturnType<LocalRuntimeConfigurationStore["listSkillPackages"]>;
   importSkills(input: { files: readonly SkillImportFile[] } | { zip: Buffer }): ReturnType<LocalRuntimeConfigurationStore["listSkillPackages"]>;
+  removeSkill(id: string): Promise<void>;
   skillMetadata(id: string): ReturnType<LocalRuntimeConfigurationStore["skillMetadata"]>;
   updateSkillMetadata(id: string, declaration: unknown): ReturnType<LocalRuntimeConfigurationStore["updateSkillMetadata"]>;
   deviceMcpServers(): ReturnType<LocalRuntimeConfigurationStore["deviceMcpServers"]>;
@@ -288,6 +289,7 @@ class RuntimeManager implements LocalRuntimeManager {
     for (const pkg of installed) packages.push(await this.#configurations.registerUploadedPackage({ ...pkg, inspection: { ...pkg.inspection, metadataSource: pkg.inspection.declarationSource } }));
     return packages;
   })); }
+  removeSkill(id: string) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(() => this.#configurations.removeUploadedPackage(id))); }
   skillMetadata(id: string) { return this.guard(() => this.#configurations.skillMetadata(id)); }
   updateSkillMetadata(id: string, value: unknown) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(() => this.#configurations.updateSkillMetadata(id, value))); }
   deviceMcpServers() { return this.guard(() => this.#configurations.deviceMcpServers()); }

@@ -12,7 +12,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
   const dialog = element('model-settings'), body = element('capability-body');
   let tab = 'general', target, runtimeDetail, runtimeDetailMode = 'view', dirty = false, working = false, snapshot, runtimeList = [], packages = [], mcpCatalog = [];
   const labels = { general: ['常规', '管理当前账号的本机存储与 Memory 配置。'], 'web-search': ['联网搜索', '配置 websearch 工具使用的端点和凭据；配置按当前账号加密保存在本机。'], skills: ['Skill 管理', '上传和维护本机 Skill 包；安装后可在各个 Runtime 配置中分别选择。'], mcp: ['MCP 配置', '配置当前账号的 MCP Server，供所有本机 Runtime 使用。'], runtimes: ['子 Runtime 管理', '新增、停止、重启、删除和查看各个本机 Runtime；每个 Runtime 独立选择扩展 Skill，共享当前账号的 MCP。'], connectors: ['Connector 配置', '个人 Connector 只保存在 Desktop；配置凭据不会上传到云端。'] };
-  const errors = { account_storage_outside_scope: '此目录不适用于当前账号，请选择其他目录。', runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_json_invalid: 'JSON 格式无效，请检查引号、括号和逗号。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', mcp_server_key_duplicate: '当前账号的 MCP key 不能重复。', mcp_server_referenced_by_runtime: '该 MCP 已被一个或多个 Runtime 选择，不能删除。请先在对应 Runtime 中解除勾选。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。', web_search_api_key_required: 'Bocha 搜索需要 API Key。', web_search_endpoint_required: 'Bocha 搜索需要搜索端点。', web_search_endpoint_invalid: '搜索端点必须为 HTTP 或 HTTPS，且不能包含凭据、查询参数或片段。', web_search_provider_invalid: '搜索服务类型无效。', web_search_credentials_missing: '搜索凭据缺失，请重新填写 API Key。' };
+  const errors = { account_storage_outside_scope: '此目录不适用于当前账号，请选择其他目录。', runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_json_invalid: 'JSON 格式无效，请检查引号、括号和逗号。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', mcp_server_key_duplicate: '当前账号的 MCP key 不能重复。', mcp_server_referenced_by_runtime: '该 MCP 已被一个或多个 Runtime 选择，不能删除。请先在对应 Runtime 中解除勾选。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', skill_runtime_active: '请先停止使用同名 Skill 的 Runtime，再重新上传。', skill_package_referenced: '该 Skill 已被 Runtime 选择，请先在对应 Runtime 配置中取消选择。', skill_metadata_runtime_active: '请先停止使用此 Skill 的 Runtime。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。', web_search_api_key_required: 'Bocha 搜索需要 API Key。', web_search_endpoint_required: 'Bocha 搜索需要搜索端点。', web_search_endpoint_invalid: '搜索端点必须为 HTTP 或 HTTPS，且不能包含凭据、查询参数或片段。', web_search_provider_invalid: '搜索服务类型无效。', web_search_credentials_missing: '搜索凭据缺失，请重新填写 API Key。' };
   const connectorBindings = {
     '126-mail': {
       title: '绑定 126 邮箱', displayName: '我的 126 邮箱', scopes: ['email:search', 'email:read'],
@@ -161,7 +161,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     }
     zip.onchange = () => void perform(() => importFiles([...zip.files], true));
     directory.onchange = () => void perform(() => importFiles([...directory.files], false));
-    const heading = el('section', undefined, 'skill-library-heading'); const copy = el('div'); copy.append(el('strong', '本机 Skill 包'), el('p', '内核 Skills 默认加载；此处管理 Custom / 上传 Skill。支持 ZIP 或目录，导入内容只保存在本机当前账号的本机库。'));
+    const heading = el('section', undefined, 'skill-library-heading'); const copy = el('div'); copy.append(el('strong', '本机 Skill 包'), el('p', '内核 Skills 默认加载；此处管理 Custom / 上传 Skill。支持 ZIP 或目录；同名上传会覆盖现有包及其维护的元数据，使用中的 Runtime 需先停止。导入内容只保存在当前账号的本机库。'));
     // Opening a file chooser must happen before any import work disables the
     // hidden input. The import itself remains serialized by perform() above.
     const pickerButton = (title, picker) => { const control = el('button', title); control.type = 'button'; control.onclick = () => picker.click(); return control; };
@@ -177,7 +177,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
         c.replaceChildren(el('strong', p.displayName || p.skillName), el('p', '编辑当前账号的本机库中的声明元数据，不改写原始 Skill 内容；保存后需重启使用此包的 Runtime。'), editor);
         editor.disabled = !meta.editable;
         c.append(button('保存声明', async () => { await api(`/api/skills/${p.packageId}/metadata`, { declaration: JSON.parse(editor.value) }); dirty = false; await load(); message('声明已保存，请重启使用此 Skill 的 Runtime。'); }));
-      })); c.append(state, actions);
+      })); if (p.sourceKind === 'uploaded') { const remove = button('移除', async () => { if (dirty) throw new Error('请先保存或放弃更改'); if (!confirm(`移除“${p.displayName || p.skillName}”及其本机文件？`)) return; await api(`/api/skills/${p.packageId}/remove`, {}); dirty = false; await load(); await changed(); message('Skill 已移除。'); }, true); remove.setAttribute('aria-label', `移除 ${p.displayName || p.skillName}`); actions.append(remove); } c.append(state, actions);
     }
   }
   function renderRuntimes() {

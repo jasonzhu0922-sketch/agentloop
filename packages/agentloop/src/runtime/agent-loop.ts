@@ -3497,6 +3497,7 @@ function candidateRepairDirective(evaluation: CandidateCompletionEvaluation, fal
     "<runtime_candidate_repair>",
     feedback,
     "Repair only the current admitted Plan step described in runtime context.",
+    "Assessment feedback is an interpretation and proposed action, not proof of its diagnosis. Distinguish observed contradictions from hypotheses; inspect the relevant committed evidence and shared premises before reusing results. Repeated results with the same premise do not independently validate that premise.",
     "The rejected completion candidate was internal Runtime material, not a user-visible assistant answer. Choose the next action from the current canonical gaps. Submit a complete standalone replacement when the observations support it; otherwise inspect or acquire the missing evidence with an authorized action.",
     "Do not refer to an earlier answer, previous message, prior candidate, or already delivered result as the final answer.",
     "Do not start pending downstream Plan steps, load downstream Skills, or produce downstream artifacts unless the current step objective explicitly requires the same work.",
@@ -3529,7 +3530,10 @@ function candidateRepairDirective(evaluation: CandidateCompletionEvaluation, fal
       lines.push(`Unmet Skill requirements: ${violatedSkillRequirements.join(", ")}.`);
     }
     if (reusableEvidenceRefs.length > 0) {
-      lines.push(`Reuse or inspect these canonical evidence references before repeating work: ${reusableEvidenceRefs.join(", ")}.`);
+      lines.push(`Inspect these assessor-identified evidence references before repeating work; their suitability depends on the claim and any unresolved concern: ${reusableEvidenceRefs.join(", ")}.`);
+    }
+    if ((evaluation.failedBoundary.evidenceConcerns?.length ?? 0) > 0) {
+      lines.push(`Observed evidence concerns and unverified hypotheses: ${JSON.stringify(evaluation.failedBoundary.evidenceConcerns)}.`);
     }
     if (suggestedRepairShape === "revise_plan") {
       lines.push("The recorded evidence shape does not match this Plan boundary; do not claim completion from it. Let Runtime route the failure to Plan revision.");

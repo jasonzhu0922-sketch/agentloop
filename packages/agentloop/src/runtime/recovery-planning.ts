@@ -103,6 +103,7 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
       "Submit basis metadata (kind, targetIds, rationale) only. Omit basis.intentId and basis.requirement, including when copying currentPlan criteria or facts: Runtime binds both from canonicalState.intent. A rationale must justify the condition; binding provenance does not prove that a derived condition is necessary.",
       "Within every revised Step, each success criterion id must appear exactly once. Copy each existing criterion at most once; do not duplicate a criterion while adding or preserving a delivery condition. Runtime derives delivery_target:<targetId> criteria from targetIds, so never submit those criteria in successCriteria.",
       "Use failedBoundary.unmetCriteria to identify the actual result gap and any contractIssue. Choose a continuation that can change that cause, considering previously attempted strategies, available capabilities and the remaining gap budget in runtimeContext. A locally stalled turn does not prove global exhaustion. Never repeat unchanged work or weaken an explicit user requirement to obtain approval.",
+      "Evidence concerns distinguish observations from unverified hypotheses. Do not elevate a suggested explanation or action into a proven cause. Reuse references only for the properties they support; a contradiction can affect several results sharing a premise, and repeated results do not independently verify that premise. Bind the relevant evidence for inspection in the repair instead of assuming it proves the requested result.",
       "Do not ask the user to authorize a Plan revision, confirm whether a recorded Action had an effect, or accept a candidate as evidence that it meets a result criterion. Those are Runtime recovery and assessment obligations. Use ask_user only for a concrete, missing input that only the user can supply and that an execution continuation will consume; a missing capability to observe or verify the requested result is not such an input. When the available capabilities cannot change or verify a remaining result gap, choose fail and retain the stage artifact and its evidence.",
     ].join("\n");
     const messages: ModelInvocation["messages"] = [{ role: "user", content: input.userInput }];
@@ -153,6 +154,7 @@ export class ModelPlanRevisionAssessor implements PlanRevisionAssessor {
         "Approve only when the revised Plan still covers the explicit user request. Retiring a Step does not discard its recorded Actions: an unknown external effect remains a durable caveat and the revised Plan must neither claim it succeeded nor replay or depend on it without a new justified execution path.",
         "Check criterion basis against the original userInput: a plan may replace execution methods and repair unjustified derived conditions, but cannot remove or weaken the original requested result, source constraints or explicit user requirements. A quote and rationale are provenance, not proof that a derived condition is necessary.",
         "Do not infer completion from an artifact, model prose, or an event alone.",
+        "Assess the revised Plan against open canonical evidence concerns. Do not treat an assessor hypothesis as a proven cause or reuse affected results as proof of a disputed premise without resolving the concern. Repeated results based on the same premise are not independent proof of that premise.",
         "Return exactly one submit_plan_revision_assessment tool call.",
       ].join("\n"),
       runtimeContext: planRevisionRuntimeContext(input),
@@ -205,6 +207,26 @@ export function parseRecoveryDecision(call: ModelToolCall, canonicalState: Canon
 }
 
 function recoveryRuntimeContext(input: RecoveryPlannerInput): RuntimeContextSnapshot {
+  const refs = new Set([
+    ...(input.failedBoundary?.reusableEvidenceRefs ?? []),
+    ...(input.failedBoundary?.unmetCriteria ?? []).flatMap((criterion) => criterion.evidenceRefs),
+    ...(input.failedBoundary?.evidenceConcerns ?? []).flatMap((concern) => [...concern.evidenceRefs, ...concern.affectedEvidenceRefs]),
+  ]);
+  const callIds = new Set<string>();
+  for (const event of input.events) {
+    const ref = event.data.resultRef;
+    const resultId = typeof ref === "object" && ref !== null && "resultId" in ref ? ref.resultId : undefined;
+    if ((typeof resultId === "string" && refs.has(resultId)) || (typeof event.data.toolCallId === "string" && refs.has(event.data.toolCallId))) {
+      if (typeof event.data.toolCallId === "string") callIds.add(event.data.toolCallId);
+    }
+  }
+  const referencedEvidenceEvents = input.events.filter((event) =>
+    (event.type === "tool.result_committed" || event.type === "tool.failed" || event.type === "assistant.tool_call.committed")
+    && typeof event.data.toolCallId === "string" && callIds.has(event.data.toolCallId))
+    .slice(-60).map((event) => {
+      const serialized = JSON.stringify(event.data);
+      return { seq: event.seq, type: event.type, dataPreview: serialized.slice(0, 4000), truncated: serialized.length > 4000 };
+    });
   return {
     id: `${input.runId}:recovery:${input.action.id}:${input.action.revision}`,
     phase: "planning",
@@ -228,6 +250,7 @@ function recoveryRuntimeContext(input: RecoveryPlannerInput): RuntimeContextSnap
       availableCapabilities: input.availableCapabilities,
       unresolvedActionEffects: input.unresolvedActionEffects,
       userResponses: input.userResponses,
+      referencedEvidenceEvents,
       events: input.events.slice(-100),
     }),
   };

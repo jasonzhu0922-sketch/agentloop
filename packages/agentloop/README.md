@@ -6,8 +6,8 @@ engine and exposes it through the `@zhujun/agentloop` entry point only.
 
 - Identity is an opaque `userId` string; bring your own authentication.
 - Persistence goes through injectable connections/stores (SQLite default).
-- HTTP serving is not part of the kernel — see `apps/agentloop-app` for the
-  reference application (HTTP API + auth + web frontend).
+- HTTP serving is not part of the kernel — see `apps/agentloop-desktop` for the Desktop host and
+  `apps/agentloop-multi-runtime` for the multi-runtime application.
 - Bundled Skills live in `@zhujun/agentloop-skills`.
 
 ## Delivery to baowu-super-agent
@@ -25,7 +25,7 @@ npm run pack:skills
 ```
 
 The generated package contains the compiled kernel only; it does not contain
-`apps/agentloop-app` or bundled Skills. The host should install the generated
+the Desktop App or bundled Skills. The host should install the generated
 tarball (or the published `@zhujun/agentloop` package) and import only from the
 package entry point:
 
@@ -33,9 +33,8 @@ package entry point:
 import { AppDatabase, RunService, SkillService } from "@zhujun/agentloop";
 ```
 
-`apps/agentloop-app` is a reference application for local demonstration and
-acceptance. Its HTTP server, authentication, and web UI are not part of the
-kernel delivery contract.
+The Desktop App is an independent local host. Its HTTP server, authentication,
+and web UI are not part of the kernel delivery contract.
 
 ## Usage
 

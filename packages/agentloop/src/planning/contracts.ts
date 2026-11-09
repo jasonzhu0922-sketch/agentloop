@@ -660,12 +660,29 @@ export interface SkillAssessment {
 
 export type SuggestedRepairShape = "repair_leaf" | "revise_plan" | "ask_user" | "fail";
 
+/** An assessor observation and its proposed explanation are not the same fact. */
+export interface EvidenceConcern {
+  readonly observation: string;
+  readonly evidenceRefs: readonly string[];
+  readonly hypothesis: string;
+  readonly affectedEvidenceRefs: readonly string[];
+}
+
+export interface EvidenceConcernResolution {
+  readonly gapId: string;
+  readonly concernIndex: number;
+  readonly status: "resolved" | "unresolved";
+  readonly rationale: string;
+  readonly evidenceRefs: readonly string[];
+}
+
 export interface FailedBoundary {
   readonly stepId: string;
   readonly missingEvidenceKinds: readonly string[];
   readonly violatedSkillRequirements: readonly string[];
   readonly reusableEvidenceRefs: readonly string[];
   readonly suggestedRepairShape: SuggestedRepairShape;
+  readonly evidenceConcerns?: readonly EvidenceConcern[];
   /** Exact unmet result conditions and explanations, not receipt labels. */
   readonly unmetCriteria?: readonly {
     readonly criterionId: string;
@@ -699,6 +716,7 @@ export interface SkillComplianceAssessment {
   /** Server-owned HIL commitments evaluated alongside, not after, Assessment. */
   readonly decisionBindings?: readonly DecisionBindingAssessment[];
   readonly skills: readonly SkillAssessment[];
+  readonly concernResolutions?: readonly EvidenceConcernResolution[];
   readonly evidenceDigest: string;
   readonly feedback: string;
   readonly failedBoundary?: FailedBoundary;

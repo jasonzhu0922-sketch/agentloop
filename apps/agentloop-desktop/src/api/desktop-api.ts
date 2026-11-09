@@ -291,6 +291,8 @@ export class DesktopApi {
       if (action === "remove") { fields(b, []); await manager.removeDeviceMcpServer(id!); json(response, 200, { removed: true }); return true; }
       fields(b, ["server"]); json(response, 200, await manager.testDeviceMcpServer(mcpInput({ ...(record(b.server, ["id", "displayName", "key", "transport", "url", "protocolVersion", "timeoutMs", "auth", "toolAllowlist", "toolBlocklist", "trust", "aliases", "capabilities"])), id }))); return true;
     }
+    const skillRemoval = /^\/api\/skills\/([a-zA-Z0-9_-]{1,200})\/remove$/.exec(path);
+    if (skillRemoval && post) { fields(await readJson(request), []); await manager.removeSkill(skillRemoval[1]!); json(response, 200, { removed: true }); return true; }
     const skill = /^\/api\/skills\/([a-zA-Z0-9_-]{1,200})\/metadata$/.exec(path);
     if (skill) {
       if (get) { json(response, 200, await manager.skillMetadata(skill[1]!)); return true; }

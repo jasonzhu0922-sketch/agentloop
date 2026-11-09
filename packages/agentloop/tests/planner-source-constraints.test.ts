@@ -902,6 +902,33 @@ test("Recovery Planner retries a duplicate-criterion proposal with parser feedba
   assert.equal(calls, 2);
 });
 
+test("Recovery Planner retains referenced evidence outside the recent event window", async () => {
+  const fixture = webpageSummaryPlanningFixture();
+  const input: RecoveryPlannerInput = {
+    runId: fixture.task.runId, userInput: fixture.task.canonicalState.intent.userInput,
+    action: { id: "recovery-action", runId: fixture.task.runId, kind: "recovery_review", state: "recovery_required",
+      attempt: 1, maxAttempts: 3, replayPolicy: "safe", fence: 1, revision: 1, metadata: {}, effectState: "not_started", createdAt: 1, updatedAt: 1 },
+    canonicalState: fixture.task.canonicalState,
+    failedBoundary: { stepId: "answer", missingEvidenceKinds: [], violatedSkillRequirements: [], reusableEvidenceRefs: [],
+      suggestedRepairShape: "revise_plan", evidenceConcerns: [{ observation: "Rows conflict with the claimed scope.",
+        hypothesis: "The request may have been interpreted incorrectly.", evidenceRefs: ["rr_old"], affectedEvidenceRefs: [] }] },
+    events: [
+      { seq: 1, type: "assistant.tool_call.committed", data: { toolCallId: "call-old", name: "read", arguments: { path: "plan.json" } } },
+      { seq: 2, type: "tool.result_committed", data: { toolCallId: "call-old", resultRef: { resultId: "rr_old" }, resultPreview: "actual condition" } },
+      ...Array.from({ length: 150 }, (_, index) => ({ seq: index + 3, type: "step.started", data: {} })),
+    ], userResponses: [],
+  };
+  await new ModelRecoveryPlanner({ limits: { contextWindowTokens: 40_000, maxOutputTokens: 4_096 }, async complete(request) {
+    const context = JSON.parse(request.runtimeContext!.content);
+    assert.equal(context.events.length, 100);
+    assert.deepEqual(context.referencedEvidenceEvents.map((event: any) => event.seq), [1, 2]);
+    assert.match(context.referencedEvidenceEvents[1].dataPreview, /actual condition/);
+    assert.match(request.systemPrompt, /unverified hypotheses/);
+    return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "decision", name: "submit_recovery_decision",
+      arguments: { actionId: "recovery-action", expectedActionRevision: 1, decision: "fail", rationale: "No safe continuation.", evidenceRefs: [] } }] };
+  } }).decide(input);
+});
+
 test("Recovery Planner retries a blocking execution method before submitting a revision", async () => {
   const fixture = webpageSummaryPlanningFixture();
   let calls = 0;
