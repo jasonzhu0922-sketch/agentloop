@@ -19,7 +19,9 @@ test('supervisor entry executes when invoked through a symlinked path', async t 
   assert.equal(run.status, 1); assert.match(run.stdout, /startup-error/);
 });
 
-test('trusted supervisor stages only changed content, waits for busy Runs and commits after new readiness', async t => {
+// Online updates may change the product version or only advance the sequence.
+for (const releaseVersion of ['0.2.0', '0.1.0']) {
+test(`trusted supervisor preserves active version and sequence through update/recovery (${releaseVersion})`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'desktop-supervisor-')); t.after(() => rm(root, { recursive: true, force: true }));
   const base = join(root, 'base'), next = join(root, 'next'), dataRoot = join(root, 'data');
   for (const path of [base, next]) {
@@ -34,7 +36,7 @@ test('trusted supervisor stages only changed content, waits for busy Runs and co
   const runtimeConfig = { python: { schema: 'agentloop.packagedRuntimePython/v1', pythonVersion: '3.12', pythonExecutable: 'runtime-python/bin/python3.12', version: '3.12.8', requiredModules: [] }, node: { version: '26.0.0' }, turnDefaults: {} };
   const update = { platform: 'mac', arch: 'arm64', channel: 'production', sequence: 1, feedUrl: 'https://updates.example/feed', publicKey };
   await writeFile(join(base, 'desktop-config.json'), JSON.stringify({ ...runtimeConfig, update, version: '0.1.0', accountServiceUrl: 'https://accounts.example' }));
-  const release = { schema: 'agentloop.desktop.module-release/v1', platform: 'mac', arch: 'arm64', channel: 'production', sequence: 2, version: '0.2.0', minimumBootstrap: 1, dataCompatibility: 'backward-compatible', generatedAt: new Date(Date.now()-1000).toISOString(), expiresAt: new Date(Date.now()+86400000).toISOString(), objectBaseUrl: 'https://updates.example/objects/', runtimeConfig, modules: nextManifest };
+  const release = { schema: 'agentloop.desktop.module-release/v1', platform: 'mac', arch: 'arm64', channel: 'production', sequence: 2, version: releaseVersion, minimumBootstrap: 1, dataCompatibility: 'backward-compatible', generatedAt: new Date(Date.now()-1000).toISOString(), expiresAt: new Date(Date.now()+86400000).toISOString(), objectBaseUrl: 'https://updates.example/objects/', runtimeConfig, modules: nextManifest };
   const bytes = Buffer.from(JSON.stringify(release)); const envelope = { payload: bytes.toString('base64'), signature: sign(null, bytes, privateKey).toString('base64') };
   const events = [], roots = []; let downloads = 0, closeAttempts = 0, failCandidate = true;
   function fakeSpawn(_executable, _args, options) {
@@ -48,9 +50,12 @@ test('trusted supervisor stages only changed content, waits for busy Runs and co
       done();
     } });
     p.kill = () => { p.stdout.end(); p.emit('close', 1); };
-    setImmediate(() => {
+    setImmediate(async () => {
       if (options.cwd !== base && failCandidate) { failCandidate = false; p.stdout.end(); p.emit('close', 1); }
-      else send({ type: 'ready', origin: 'http://127.0.0.1:1234', version: options.cwd === base ? '0.1.0' : '0.2.0' });
+      else {
+        const config = JSON.parse(await readFile(join(options.cwd, 'desktop-config.json'), 'utf8'));
+        send({ type: 'ready', origin: 'http://127.0.0.1:1234', version: config.version, updateSequence: config.update?.sequence });
+      }
     });
     return p;
   }
@@ -58,17 +63,22 @@ test('trusted supervisor stages only changed content, waits for busy Runs and co
     fetchFeed: async () => new Response(JSON.stringify(envelope)), fetchObject: async () => { downloads++; return new Response('new version'); } });
   await waitFor(() => events.some(e => e.type === 'ready'));
   assert.equal(events.find(e => e.type === 'ready').version, '0.1.0');
+  assert.equal(events.find(e => e.type === 'ready').updateSequence, 1);
   await supervisor.check(); assert.ok(events.some(e => e.type === 'update-available'));
   await supervisor.download(); assert.equal(downloads, 1); assert.ok(events.some(e => e.type === 'update-staged'));
+  assert.equal(events.filter(e => e.type === 'ready').at(-1).updateSequence, 1);
   supervisor.apply(); await waitFor(() => events.some(e => e.type === 'update-busy'));
   assert.equal(supervisor.state.active.sequence, 1); assert.equal(roots.length, 1);
   supervisor.apply(); await waitFor(() => events.some(e => e.type === 'update-error') && events.filter(e => e.type === 'ready').length === 2);
   assert.equal(supervisor.state.active.sequence, 1); assert.equal(roots.length, 2);
   supervisor.apply(); await waitFor(() => events.some(e => e.type === 'update-rolled-back') && events.filter(e => e.type === 'ready').length === 3);
   assert.equal(supervisor.state.active.sequence, 1); assert.equal(roots.length, 4);
+  assert.equal(events.filter(e => e.type === 'ready').at(-1).updateSequence, 1);
   supervisor.apply(); await waitFor(() => events.some(e => e.type === 'update-installed'));
   assert.equal(supervisor.state.active.sequence, 2); assert.equal(roots.length, 5);
-  assert.equal(events.filter(e => e.type === 'ready').at(-1).version, '0.2.0');
+  assert.equal(events.filter(e => e.type === 'ready').at(-1).version, releaseVersion);
+  assert.equal(events.filter(e => e.type === 'ready').at(-1).updateSequence, 2);
   assert.equal(await readFile(join(roots[4], 'app.js'), 'utf8'), 'new version');
   supervisor.close(); await waitFor(() => events.some(e => e.type === 'supervisor-closed'));
 });
+}

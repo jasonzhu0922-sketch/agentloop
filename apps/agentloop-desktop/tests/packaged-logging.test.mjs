@@ -10,7 +10,7 @@ test('packaged backend sends operational summaries to the host log, separate fro
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'dist', 'auth'), { recursive: true });
   await copyFile(new URL('../distribution/backend.mjs', import.meta.url), join(root, 'backend.mjs'));
-  await writeFile(join(root, 'desktop-config.json'), JSON.stringify({ accountServiceUrl: 'https://example.com', version: '0.2.3' }));
+  await writeFile(join(root, 'desktop-config.json'), JSON.stringify({ accountServiceUrl: 'https://example.com', version: '0.2.3', update: { sequence: 17 } }));
   await writeFile(join(root, 'dist', 'application.js'), `export async function startDesktop(options) { options.log('event=run.completed'); return { existing: false, origin: 'http://127.0.0.1:1234', close: async () => {} }; }`);
   await writeFile(join(root, 'dist', 'auth', 'cloud-auth.js'), 'export class CloudAccountAuth {}');
   await writeFile(join(root, 'packaged-tools.mjs'), 'export async function packagedToolEnvironment() { return {}; } export async function verifyPackagedPython() {}');
@@ -32,4 +32,6 @@ test('packaged backend sends operational summaries to the host log, separate fro
   assert.doesNotMatch(stdout, /event=run\.completed/);
   assert.match(stdout, /AGENTLOOP_DESKTOP:.*"type":"ready"/);
   assert.match(stdout, /AGENTLOOP_DESKTOP:.*"version":"0\.2\.3"/);
+  const ready = stdout.split('\n').filter(line => line.startsWith('AGENTLOOP_DESKTOP:')).map(line => JSON.parse(line.slice('AGENTLOOP_DESKTOP:'.length))).find(message => message.type === 'ready');
+  assert.equal(ready.updateSequence, 17);
 });

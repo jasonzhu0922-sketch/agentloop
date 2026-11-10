@@ -54,7 +54,7 @@ try {
   });
   if (desktop.existing) throw new Error('desktop_backend_already_owned');
   process.stderr.write(`[AgentLoop Desktop] ${new Date().toISOString()} 本地服务已就绪\n`);
-  notify({ type: 'ready', origin: desktop.origin, version: config.version });
+  notify({ type: 'ready', origin: desktop.origin, version: config.version, updateSequence: config.update?.sequence });
 } catch {
   notify({ type: 'startup-error' });
   console.error('Desktop backend initialization failed.');

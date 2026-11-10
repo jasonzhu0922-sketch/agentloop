@@ -6,6 +6,7 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
   private var item: NSStatusItem!
   private var stateItem: NSMenuItem!
   private var versionItem: NSMenuItem!
+  private var sequenceItem: NSMenuItem!
   private var process: Process?
   private var input: Pipe?
   private var output: Pipe?
@@ -41,6 +42,8 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
     menu.addItem(stateItem)
     versionItem = NSMenuItem(title: "当前版本 · 获取中", action: nil, keyEquivalent: "")
     menu.addItem(versionItem)
+    sequenceItem = NSMenuItem(title: "更新序号 · 获取中", action: nil, keyEquivalent: "")
+    menu.addItem(sequenceItem)
     menu.addItem(action("启动本地服务", #selector(startBackend)))
     menu.addItem(action("在 Chrome 中打开", #selector(openChrome)))
     menu.addItem(action("查看日志", #selector(openLogs)))
@@ -56,6 +59,7 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
   @objc private func startBackend() {
     if process?.isRunning == true { return }
     versionItem.title = "当前版本 · 获取中"
+    sequenceItem.title = "更新序号 · 获取中"
     do {
       let logs = dataRoot.appendingPathComponent("logs")
       try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
@@ -91,7 +95,7 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
           self.output?.fileHandleForReading.readabilityHandler = nil
           self.process = nil; self.origin = nil; try? self.log?.close(); self.log = nil
           if self.quitting { NSApplication.shared.reply(toApplicationShouldTerminate: true) }
-          else { self.stateItem.title = "Desktop · 已停止"; self.versionItem.title = "当前版本 · 未运行" }
+          else { self.stateItem.title = "Desktop · 已停止"; self.versionItem.title = "当前版本 · 未运行"; self.sequenceItem.title = "更新序号 · 未运行" }
         }
       }
       process = child; input = stdin; output = stdout
@@ -100,7 +104,7 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
         guard let self, let child, self.process === child, child.isRunning, self.origin == nil else { return }
         child.terminate(); self.alert("本地服务启动超时，请查看日志后重试。")
       }
-    } catch { process = nil; stateItem.title = "Desktop · 启动失败"; alert("无法启动随包运行环境，请查看日志或重新安装。") }
+    } catch { process = nil; stateItem.title = "Desktop · 启动失败"; versionItem.title = "当前版本 · 未运行"; sequenceItem.title = "更新序号 · 未运行"; alert("无法启动随包运行环境，请查看日志或重新安装。") }
   }
   private func receive(_ data: Data) {
     buffer.append(data)
@@ -116,6 +120,8 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
         let version = (message["version"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let version, !version.isEmpty { versionItem.title = "当前版本 · \(version)" }
         else { versionItem.title = "当前版本 · 未知" }
+        if let sequence = message["updateSequence"] as? Int, sequence > 0 { sequenceItem.title = "更新序号 · \(sequence)" }
+        else { sequenceItem.title = "更新序号 · 未知" }
         openChrome()
       case "close-refused":
         quitting = false; NSApplication.shared.reply(toApplicationShouldTerminate: false)
