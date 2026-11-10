@@ -23,7 +23,7 @@
     "build:desktop": "npm run build --workspace agentloop-desktop",
     "test:desktop": "npm run test --workspace agentloop-desktop",
     "start:desktop": "npm run restart:accounts && AGENTLOOP_DESKTOP_AUTH_BASE_URL=http://127.0.0.1:8795 npm run start --workspace agentloop-desktop -- --development",
-    "restart:desktop": "bash apps/agentloop-desktop/scripts/stop-development.sh && npm run build:local-runtime && npm run start:desktop",
+    "restart:desktop": "bash apps/agentloop-desktop/scripts/stop-development.sh && npm run start:desktop",
     "restore:desktop-models": "node apps/agentloop-desktop/scripts/restore-legacy-models.ts",
     "build:artifact-preview": "npm run build --workspace @zhujun/agentloop-artifact-preview",
     "build:skills": "npm run build --workspace @zhujun/agentloop-skills",

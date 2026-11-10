@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json",
+    "prestart": "npm run build --workspace @zhujun/agentloop && npm run build --workspace @zhujun/agentloop-local-runtime",
     "start": "node src/main.ts",
     "test": "node --test --test-isolation=process tests/*.test.ts tests/*.test.mjs",
     "package:mac": "node scripts/package-desktop.mjs --platform mac",

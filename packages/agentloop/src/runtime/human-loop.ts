@@ -3,6 +3,7 @@ import type { SqlConnection } from "../storage/connection.ts";
 import { appendRunEvent } from "../storage/repositories/run-event-sequencer.ts";
 import { AppError, badRequest } from "../shared/errors.ts";
 import { createDecisionCommit } from "./decision-ledger.ts";
+import type { RuntimeHumanLoopAnswer } from "./user-authority.ts";
 
 export type HumanLoopKind = "selection" | "input" | "confirmation" | "approval";
 export type HumanLoopOrigin = "skill" | "tool" | "planner" | "assessor" | "recovery";
@@ -120,6 +121,49 @@ export class HumanLoopRepository {
   }
 
   async hasOpen(runId: string): Promise<boolean> { return (await this.current(runId)) !== undefined; }
+
+  /** Use the accepted response and original request, never assistant/tool paraphrases. */
+  async answers(runId: string): Promise<RuntimeHumanLoopAnswer[]> {
+    const rows = await this.database.prepare(`SELECT requests.*, responses.id AS response_id,
+        responses.request_revision, responses.response_json, responses.created_at AS answered_at
+      FROM human_loop_requests requests JOIN human_loop_responses responses ON responses.request_id = requests.id
+      WHERE requests.run_id = ? AND responses.run_id = requests.run_id
+      ORDER BY responses.created_at, responses.id`).all(runId) as Array<Row & {
+        response_id: string; request_revision: number; response_json: string; answered_at: number;
+      }>;
+    const events = await this.database.prepare("SELECT seq, payload_json FROM run_events WHERE run_id = ? AND type = 'human_loop.answered' ORDER BY seq")
+      .all(runId) as Array<{ seq: number; payload_json: string }>;
+    const answerOrder = new Map(events.map(event => {
+      const data = JSON.parse(event.payload_json) as { requestId: string; requestRevision: number };
+      return [`${data.requestId}:${data.requestRevision}`, event.seq] as const;
+    }));
+    return rows.map(row => {
+      const request = requestFromRow(row);
+      const value: unknown = JSON.parse(row.response_json);
+      const schema = request.responseSchema;
+      const eventSeq = answerOrder.get(`${request.id}:${row.request_revision}`);
+      if (eventSeq === undefined) throw new AppError("CONFLICT", "Accepted Human-in-the-Loop answer lost its event reference", 409);
+      return {
+        responseId: row.response_id, requestId: request.id, requestRevision: row.request_revision, createdAt: row.answered_at, eventSeq,
+        ...(request.planId === undefined ? {} : { planId: request.planId }),
+        ...(request.stepId === undefined ? {} : { stepId: request.stepId }),
+        question: { kind: request.kind, title: request.title, prompt: request.prompt, responseType: schema.type,
+          ...(schema.type === "form" ? { fields: schema.fields } : {}),
+          ...(schema.type === "confirm" ? { acceptLabel: schema.acceptLabel, rejectLabel: schema.rejectLabel } : {}),
+        },
+        value,
+        ...(schema.type === "select" && Array.isArray(value) ? {
+          selectedOptions: value.flatMap(id => {
+            const option = schema.options.find(option => option.id === id);
+            return option === undefined ? [] : [{ id: option.id, label: option.label,
+              ...(option.description === undefined ? {} : { description: option.description }),
+              ...(option.identityRefs === undefined ? {} : { identityRefs: option.identityRefs }),
+            }];
+          }),
+        } : {}),
+      };
+    }).sort((left, right) => left.eventSeq - right.eventSeq);
+  }
   private async require(id: string): Promise<HumanLoopRequest> { const row = await this.database.prepare("SELECT * FROM human_loop_requests WHERE id = ?").get(id) as Row | undefined; if (row === undefined) throw new AppError("NOT_FOUND", "Human-in-the-Loop request not found", 404); return requestFromRow(row); }
 }
 

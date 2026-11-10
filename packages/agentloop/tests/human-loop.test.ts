@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { AppDatabase } from "../src/storage/database.ts";
 import { HumanLoopRepository } from "../src/runtime/human-loop.ts";
-import { recoveryProposalSuccessCriteria, RunService } from "../src/runtime/run-service.ts";
+import { recoveryProposalSuccessCriteria, repairLeafForFailedBoundary, RunService } from "../src/runtime/run-service.ts";
 import { admitPlan } from "../src/planning/admission.ts";
 import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
@@ -20,6 +20,7 @@ import { AppError } from "../src/shared/errors.ts";
 import { TEST_MODEL_LIMITS, approvingTestAssessor, singleStepTestPlanner } from "./runtime-test-helpers.ts";
 import type { ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import type { RuntimeEvent, RuntimeTool } from "../src/index.ts";
+import { ModelStepAssessor } from "../src/planning/assessor.ts";
 
 test("recovery proposals let Admission derive delivery-target criteria exactly once", () => {
   const targetId = "data-distribution-analysis";
@@ -232,6 +233,107 @@ test("an empty optional selection does not create an exact decision", async () =
     const decision = await database.prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND type = 'decision.committed'").get("run-empty-selection");
     assert.equal(decision, undefined);
     assert.equal(await loops.current("run-empty-selection"), undefined);
+  } finally { database.close(); }
+});
+
+test("accepted selection, form and confirmation survive resume, independent assessment and replacement repair steps", async () => {
+  const database = new AppDatabase(":memory:");
+  const userId = "user-authority-test";
+  const originalInput = "为我选定的分公司写一段欢迎词";
+  const requests = [
+    { kind: "selection", title: "选择主体", prompt: "确认欢迎词面向哪个主体？", rationale: "主体不同", evidenceRefs: [],
+      responseSchema: { type: "select", minSelections: 1, maxSelections: 1, options: [
+        { id: "parent", label: "母公司", identityRefs: ["parent-code"] },
+        { id: "branch", label: "西南分公司", identityRefs: ["branch-code"] },
+      ] }, resume: { mode: "continue_step" } },
+    { kind: "input", title: "补充范围", prompt: "欢迎词需要包含哪些内容？", rationale: "范围待确认", evidenceRefs: [],
+      responseSchema: { type: "form", fields: [{ id: "scope", label: "内容范围", valueType: "textarea", required: true }] },
+      resume: { mode: "continue_step" } },
+    { kind: "confirmation", title: "确认范围", prompt: "仅为选定分公司写欢迎词，是否继续？", rationale: "确认范围", evidenceRefs: [],
+      responseSchema: { type: "confirm", acceptLabel: "继续", rejectLabel: "取消" }, resume: { mode: "continue_step" } },
+  ];
+  const answers = [["branch"], { scope: "只写选定分公司，不添加未提供的事实" }, true];
+  let executionCalls = 0;
+  let assessments = 0;
+  let recoveryPlanned = false;
+  let revisionAssessed = false;
+  let lastAuthority: unknown;
+  try {
+    const runs = new RunService({ database, skills: new SkillService(database), plannerFactory: singleStepTestPlanner,
+      assessorFactory: model => new ModelStepAssessor(model),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, async complete(invocation) {
+        if (invocation.tools[0]?.name === "submit_recovery_decision") {
+          const context = JSON.parse(invocation.runtimeContext!.content);
+          assert.deepEqual(context.userAuthority, lastAuthority);
+          const repair = repairLeafForFailedBoundary(context.currentPlan.steps.find((step: any) => step.id === context.failedBoundary.stepId),
+            context.failedBoundary, context.currentPlan.version);
+          recoveryPlanned = true;
+          return { content: "", finishReason: "tool_calls" as const, toolCalls: [{ id: "recovery", name: "submit_recovery_decision", arguments: {
+            actionId: context.recoveryAction.id, expectedActionRevision: context.recoveryAction.revision, decision: "revise_plan",
+            rationale: "Write the greeting for the same user-selected branch.", evidenceRefs: [],
+            planRevision: { schema: "agentloop.outcomePlan/v2", shape: "recovery_patch", goal: context.currentPlan.goal,
+              selectedSkillIds: [], steps: [{ ...repair, targetIds: repair.targetIds ?? [],
+                successCriteria: repair.successCriteria.map(({ basis, ...criterion }) => ({ ...criterion,
+                  ...(basis === undefined ? {} : { basis: { kind: basis.kind, targetIds: basis.targetIds, rationale: basis.rationale } }),
+                })),
+              }] },
+          } }] };
+        }
+        if (invocation.tools[0]?.name === "submit_plan_revision_assessment") {
+          const context = JSON.parse(invocation.runtimeContext!.content);
+          assert.deepEqual(context.userAuthority, lastAuthority);
+          assert.notEqual(context.proposedPlan.steps[0].id, "test-step");
+          revisionAssessed = true;
+          return { content: "", finishReason: "tool_calls" as const, toolCalls: [{ id: "revision", name: "submit_plan_revision_assessment",
+            arguments: { approved: true, feedback: "The repair preserves the accepted HIL scope.", evidenceRefs: [] } }] };
+        }
+        if (invocation.phase === "assessment") {
+          const context = JSON.parse(invocation.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+          assert.deepEqual(context.userAuthority, lastAuthority);
+          assert.equal(context.userAuthority.originalUserInput, originalInput);
+          assert.deepEqual(context.userAuthority.humanLoopAnswers.map((item: any) => item.value), answers);
+          assert.deepEqual(context.userAuthority.decisionLedger[0].selectedOptions.map((item: any) => item.id), ["branch"]);
+          assert.equal(JSON.stringify(context.userAuthority).includes("parent-code"), false);
+          assessments++;
+          const satisfied = assessments > 1;
+          const schema = invocation.tools[0]!.inputSchema as any;
+          return { content: "", finishReason: "tool_calls" as const, toolCalls: [{ id: "assess", name: "submit_assessment", arguments: {
+            criteria: schema.properties.criteria.items.properties.criterionId.enum.map((criterionId: string) => ({ criterionId, satisfied,
+              rationale: satisfied ? "The greeting addresses the confirmed subject." : "Deliver the greeting rather than its outline.", evidenceRefs: ["candidateOutput"],
+              contractCheck: { status: "valid", rationale: "The original source constraint and accepted HIL answers define the scope." } })),
+            skills: [], feedback: satisfied ? "Selected subject delivered" : "Write the greeting for the selected branch.",
+            failedBoundary: satisfied ? null : { stepId: context.step.id, missingEvidenceKinds: [], violatedSkillRequirements: [],
+              reusableEvidenceRefs: [], suggestedRepairShape: "revise_plan" }, concernResolutions: [],
+          } }] };
+        }
+        const context = JSON.parse(invocation.runtimeContext!.content.match(/<execution_context source="server">\n([^\n]+)\n/)![1]!);
+        assert.equal(context.userAuthority.originalUserInput, originalInput);
+        assert.equal(context.userAuthority.humanLoopAnswers.length, Math.min(executionCalls, answers.length));
+        assert.deepEqual(context.userAuthority.humanLoopAnswers.map((item: any) => item.value), answers.slice(0, executionCalls));
+        lastAuthority = context.userAuthority;
+        const requirement = requests[executionCalls++];
+        if (requirement !== undefined) return { content: "", finishReason: "tool_calls" as const,
+          toolCalls: [{ id: `ask-${executionCalls}`, name: HUMAN_LOOP_TOOL_NAME, arguments: requirement }] };
+        return { content: assessments === 0 ? "西南分公司欢迎词提纲" : "欢迎西南分公司的各位同事！", finishReason: "stop" as const, toolCalls: [] };
+      } }), maxSteps: 8,
+    });
+    const run = await runs.execute(userId, originalInput);
+    for (const answer of answers) {
+      const request = await waitForHumanLoop(runs, userId, run.id, "test-step");
+      await runs.whenRunIdle(run.id);
+      await runs.respondHumanLoop(userId, run.id, request.id, answer, request.revision);
+    }
+    const completed = await waitForRunCompletion(runs, userId, run.id);
+    assert.equal(completed.status, "completed", JSON.stringify({ code: completed.errorCode,
+      tail: (await runs.events(userId, run.id)).filter(event => /failed|rejected/.test(event.type)).slice(-4) }));
+    assert.equal(assessments, 2);
+    assert.equal(recoveryPlanned, true);
+    assert.equal(revisionAssessed, true);
+    assert.equal(executionCalls, 5);
+    const persisted = await new HumanLoopRepository(database).answers(run.id);
+    assert.deepEqual(persisted.map(answer => answer.question.responseType), ["select", "form", "confirm"]);
+    assert.ok(persisted.every((answer, index) => index === 0 || answer.eventSeq > persisted[index - 1]!.eventSeq));
+    assert.equal((await new HumanLoopRepository(database).answers("other-run")).length, 0);
   } finally { database.close(); }
 });
 

@@ -3,6 +3,7 @@ import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 import { requireRecord, requireString, requireStringArray } from "../shared/validation.ts";
 import type { ModelAdapter, ModelInvocation, ModelToolCall, RuntimeContextSnapshot, RuntimeEventSink } from "../runtime/contracts.ts";
 import { completeWithStreaming } from "../runtime/model-streaming.ts";
+import { buildUserAuthorityContext, USER_AUTHORITY_INSTRUCTION } from "../runtime/user-authority.ts";
 import { operationProfileCatalogForPlanning, operationProfilesForTaskUnderstanding } from "../runtime/operation-profiles.ts";
 import { taskEvidencePolicyForTaskUnderstanding, uploadedSourcePlanningContext, type TaskEvidencePolicy, type TaskIntentClassification } from "../runtime/task-intent.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext, type PlanTopologyRequirement, type TaskProfile } from "../runtime/dynamic-prompt.ts";
@@ -337,9 +338,10 @@ export class ModelPlanner implements Planner {
         "You are the Planner for a Plan-first Runtime.",
         "Return exactly one submit_outcome_plan tool call; do not execute work, call other tools, or declare completion.",
         "Use only supplied context facts, capability catalog entries, and Skill catalog entries.",
-        "The original canonicalRunState.intent.userInput owns the requested facts, concepts and scope. Use intent.understanding for resolved operation, evidence, deliverable and workflow boundaries, but never let resolver paraphrases, source-provider scope or Skill templates narrow or substitute the original request. Do not infer new boundaries from attachment filenames or generic report wording.",
+        "The original canonicalRunState.intent.userInput together with accepted amendments and HIL answers in userAuthority owns the requested facts, concepts and scope. Use intent.understanding for resolved operation, evidence, deliverable and workflow boundaries, but never let resolver paraphrases, source-provider scope or Skill templates narrow or substitute the user-confirmed request. Do not infer new boundaries from attachment filenames or generic report wording.",
       ],
       contractLines: [
+        USER_AUTHORITY_INSTRUCTION,
         "Fill the smallest Outcome Plan using agentloop.outcomePlan/v2 so Runtime can start useful work.",
         "Use the supplied TaskProfile shape as the default. When further planning depends on source facts not yet available, explicitly scope a prerequisite Round with purpose, supported canonical targetIds, completionBoundary and continuation. Plan only assessable source work for this Round; later Rounds will plan from its committed results. Otherwise use roundScope=null or an explicit delivery scope. A required planTopology applies within delivery Rounds.",
         "Use one leaf for ordinary answers/artifacts; split only for reusable source facts.",
@@ -1370,10 +1372,11 @@ function planningRuntimeContext(
           : { requiredToolSourceIds: canonicalRequiredToolSourceIds(task) }),
         ...(task.workspaceFacts === undefined ? {} : { workspaceFacts: task.workspaceFacts }),
         canonicalRunState: task.canonicalState,
+        userAuthority: task.userAuthority ?? buildUserAuthorityContext({ userInput: canonicalUserInput(task), intent: task.canonicalState.intent }),
         ...(task.roundResultBindings === undefined ? {} : { roundResultBindings: task.roundResultBindings }),
         ...(task.priorRoundResult === undefined ? {} : { priorRoundResult: task.priorRoundResult }),
         ...(task.targetScopeIds === undefined ? {} : { targetScopeIds: task.targetScopeIds }),
-        canonicalIntentPolicy: "Read task, format, evidence, deliverables, constraints, and turn binding only from canonicalRunState.intent. Do not reinterpret them from Plan text or conversation summaries.",
+        canonicalIntentPolicy: "Read task, format, evidence, deliverables, constraints, and turn binding from canonicalRunState.intent together with accepted user answers in userAuthority. Do not reinterpret them from Plan text or conversation summaries.",
         visibleDirectories: task.visibleDirectories ?? [],
         sources: task.sources ?? [],
         sourceBindingIdentityPolicy: sourceBindingIdentityPolicy(task),

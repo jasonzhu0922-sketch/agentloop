@@ -16,6 +16,7 @@ import type {
 import type { RuntimeDecisionCommit } from "./decision-ledger.ts";
 import type { ResolvedOperationBinding } from "./decision-binding.ts";
 import type { RuntimeResultBinding } from "./runtime-result.ts";
+import type { RuntimeUserAuthorityContext } from "./user-authority.ts";
 
 export function buildStepRuntimeContextSnapshot(input: {
   readonly step: ExecutionPlan["steps"][number];
@@ -30,6 +31,7 @@ export function buildStepRuntimeContextSnapshot(input: {
   readonly requiresFileOutput: boolean;
   readonly conversationWorkingSet?: ConversationWorkingSet;
   readonly decisionLedger?: readonly RuntimeDecisionCommit[];
+  readonly userAuthority?: RuntimeUserAuthorityContext;
   readonly resolvedOperationBindings?: readonly ResolvedOperationBinding[];
 }): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   const visibleDirectories = input.visibleDirectories ?? [];
@@ -64,11 +66,13 @@ export function buildStepRuntimeContextSnapshot(input: {
   });
   return {
     phase: "execution",
+    ...(input.userAuthority === undefined ? {} : { userAuthority: input.userAuthority }),
     ...(input.decisionLedger === undefined || input.decisionLedger.length === 0 ? {} : { decisionLedger: input.decisionLedger }),
     ...(input.resolvedOperationBindings === undefined || input.resolvedOperationBindings.length === 0 ? {} : { resolvedOperationBindings: input.resolvedOperationBindings }),
     content: [
       "<execution_context source=\"server\">",
       JSON.stringify({
+        ...(input.userAuthority === undefined ? {} : { userAuthority: input.userAuthority }),
         toolSelectionPolicy: {
           executionBindingGuidesCurrentObjective: true,
           instruction: "Use the step execution binding to understand the current objective, evidence contract, and preferred tool families. Choose among currently exposed Run-authorized tools to satisfy that contract.",

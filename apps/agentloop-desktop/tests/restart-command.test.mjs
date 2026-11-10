@@ -30,7 +30,7 @@ test('restart waits for the old host and refuses to continue when it cannot exit
     await assert.rejects(execute('bash', [script], { env, timeout: 5000 }), error => error.code === 1 && error.stderr.includes('本次不会复用旧进程'));
     assert.equal(child.exitCode, null);
     const manifest = JSON.parse(await readFile(new URL('../../../package.json', import.meta.url), 'utf8'));
-    assert.equal(manifest.scripts['restart:desktop'], 'bash apps/agentloop-desktop/scripts/stop-development.sh && npm run build:local-runtime && npm run start:desktop');
+    assert.equal(manifest.scripts['restart:desktop'], 'bash apps/agentloop-desktop/scripts/stop-development.sh && npm run start:desktop');
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) { const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited; }
     await rm(root, { recursive: true, force: true });

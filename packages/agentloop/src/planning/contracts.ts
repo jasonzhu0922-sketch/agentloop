@@ -128,6 +128,7 @@ export interface TaskSpec {
   readonly runId: string;
   /** The single Run-owned state read by Planner and every downstream phase. */
   readonly canonicalState: CanonicalRunState;
+  readonly userAuthority?: import("../runtime/user-authority.ts").RuntimeUserAuthorityContext;
   readonly availableSkills: readonly PrivateSkill[];
   readonly selectedSkillRoles?: readonly SelectedSkillRole[];
   /**
@@ -772,6 +773,7 @@ export interface StepAssessmentInput {
   readonly holisticSourceContractMismatch?: boolean;
   readonly attempt: number;
   readonly decisionLedger?: readonly import("../runtime/decision-ledger.ts").RuntimeDecisionCommit[];
+  readonly userAuthority?: import("../runtime/user-authority.ts").RuntimeUserAuthorityContext;
   /** Step/decision-bound actions whose exact authenticated receipt is required. */
   readonly workflowEvidenceActions?: readonly import("../runtime/tool-progress-policy.ts").RuntimeWorkflowEvidenceAction[];
 }
@@ -784,6 +786,7 @@ export interface PlanRevisionAssessmentInput {
   readonly runId: string;
   readonly userInput: string;
   readonly canonicalState?: CanonicalRunState;
+  readonly userAuthority?: import("../runtime/user-authority.ts").RuntimeUserAuthorityContext;
   readonly currentPlan: ExecutionPlan;
   readonly proposal: PlanProposal;
   readonly retiredStepIds: readonly string[];

@@ -153,6 +153,7 @@ import {
 } from "./recovery-repository.ts";
 import { reconstructRecoveryTranscript } from "./recovery-transcript.ts";
 import { assessDecisionBindings, decisionCommitsFromEvents, type RuntimeDecisionCommit } from "./decision-ledger.ts";
+import { buildUserAuthorityContext, type RuntimeUserAuthorityContext } from "./user-authority.ts";
 import {
   requiredSkillWorkflowEvidenceBindings,
   resolveOperationBindings,
@@ -829,6 +830,16 @@ export class RunService {
     return this.humanLoops.list(runId);
   }
 
+  private async userAuthority(runId: string, state: CanonicalRunState): Promise<RuntimeUserAuthorityContext> {
+    const [humanLoopAnswers, rows] = await Promise.all([this.humanLoops.answers(runId),
+      this.database.prepare("SELECT type, payload_json FROM run_events WHERE run_id = ? AND type = 'decision.committed' ORDER BY seq").all(runId),
+    ]);
+    const events = (rows as Array<{ type: string; payload_json: string }>).map(row => ({ type: row.type,
+      data: JSON.parse(row.payload_json) as Record<string, unknown> }));
+    return buildUserAuthorityContext({ userInput: state.intent.userInput, intent: state.intent,
+      humanLoopAnswers, decisionLedger: decisionCommitsFromEvents(events) });
+  }
+
   async respondHumanLoop(actorUserId: string, runId: string, requestId: string, value: unknown, expectedRevision: unknown): Promise<HumanLoopResponse> {
     if ((await this.get(actorUserId, runId)).status !== "running") throw new AppError("CONFLICT", "Run is no longer accepting Human-in-the-Loop responses", 409);
     const revision = optionalPositiveInteger(expectedRevision, "expectedRevision", 1, Number.MAX_SAFE_INTEGER);
@@ -1333,6 +1344,7 @@ export class RunService {
       ?? await this.recoveryPlannerFactory(model).decide({
         runId,
         canonicalState,
+        userAuthority: await this.userAuthority(runId, canonicalState),
         userInput: run.input,
         action,
         ...(currentPlan === undefined ? {} : { plan: currentPlan }),
@@ -2498,6 +2510,7 @@ export class RunService {
       const planner = this.plannerFactory(model);
       const proposalFromPlanner = async (): Promise<PlanProposal> => planner.plan({
         ...planningTask,
+        userAuthority: await this.userAuthority(runId, planningTask.canonicalState),
         ...(
           planningExtensionResolution.contexts.length === 0
             ? {}
@@ -3222,6 +3235,7 @@ export class RunService {
             for (let attempt = 1; attempt <= 3; attempt++) {
               try {
                 const proposal = await this.plannerFactory(input.model).plan({ runId: input.runId, canonicalState: amended,
+                  userAuthority: await this.userAuthority(input.runId, amended),
                   availableSkills: input.privateSkills, availableToolNames: [...input.rootGrant.allowedToolNames], availableTools: tools,
                   availableCapabilities: [...planningCapabilitiesFromTools(tools, input.sources), ...planningCapabilitiesFromSkills(input.privateSkills)],
                   visibleDirectories: input.visibleDirectories, sources: input.sources, roundResultBindings: bindings,
@@ -3241,6 +3255,7 @@ export class RunService {
                 });
                 const assessment = await this.planRevisionAssessorFactory(input.model).assess({ runId: input.runId, userInput: amended.intent.userInput,
                   canonicalState: amended, currentPlan: basePlan, proposal: namespaced, retiredStepIds: retired,
+                  userAuthority: await this.userAuthority(input.runId, amended),
                   recoveryAction: { id: actionId, kind: "planning", replayPolicy: "safe", metadata: { reason: "steer", messageId: message.id,
                     unresolvedActionEffects: await this.unresolvedUnsafeEffects(input.runId, basePlan.id) } } });
                 await this.appendRunEvent(input.runId, { type: "plan.steer_revision_assessed", data: {
@@ -3351,7 +3366,6 @@ export class RunService {
         [key: string]: unknown;
       }>;
     }>;
-    decisionLedger?: readonly RuntimeDecisionCommit[];
     onStepChanged: (stepId: string | undefined) => void;
     signal?: AbortSignal;
   }): Promise<ExecutionPlan> {
@@ -3397,10 +3411,8 @@ export class RunService {
       const stepSkillIds = stepSkills.map((skill) => skill.id);
       const skillExecutionRoots = skillExecutionRootsForSkills(stepSkills);
       const recovery = input.initialRecovery?.stepIds.includes(activeStep.id) ? input.initialRecovery : undefined;
-      const decisionLedger = input.decisionLedger
-        ?? (isRecord(recovery?.facts) && Array.isArray(recovery.facts.decisionLedger)
-          ? recovery.facts.decisionLedger as RuntimeDecisionCommit[]
-          : []);
+      const userAuthority = await this.userAuthority(input.runId, canonicalState);
+      const decisionLedger = userAuthority.decisionLedger;
       const skillManifests = new Map<string, Awaited<ReturnType<typeof readSkillExecutionManifest>>>();
       for (const skill of stepSkills) {
         if (skill.package === undefined) continue;
@@ -3633,6 +3645,7 @@ export class RunService {
             resolvedOperationBindings,
             input.runtimeCapabilitySnapshot,
             input.runtimeCapabilityInventory,
+            userAuthority,
           )
           : buildRecoveredStepRuntimeContext(
             activeStep,
@@ -3649,6 +3662,7 @@ export class RunService {
             resolvedOperationBindings,
             input.runtimeCapabilitySnapshot,
             input.runtimeCapabilityInventory,
+            userAuthority,
           ),
         input: canonicalState.intent.userInput,
         ...(input.conversationHistory === undefined ? {} : { conversationHistory: input.conversationHistory }),
@@ -3870,6 +3884,7 @@ export class RunService {
             ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
             ...(input.runtimeCapabilityInventory === undefined ? {} : { runtimeCapabilityInventory: input.runtimeCapabilityInventory }),
             decisionLedger,
+            userAuthority,
           });
           const reusedAssessment = assessedCandidates.get(assessmentSignature);
           if (reusedAssessment !== undefined) {
@@ -3946,6 +3961,7 @@ export class RunService {
             ...(holisticSourceContractMismatch ? { holisticSourceContractMismatch: true } : {}),
             attempt: assessmentAttempt,
             decisionLedger,
+            userAuthority,
             workflowEvidenceActions,
           };
           const assess = async () => assessor.assess(assessmentInput, input.signal, input.emit);
@@ -4138,6 +4154,7 @@ export class RunService {
       runId: input.run.id,
       userInput: input.run.input,
       canonicalState,
+      userAuthority: await this.userAuthority(input.run.id, canonicalState),
       currentPlan: input.currentPlan,
       proposal: planRevision,
       retiredStepIds,
@@ -4272,7 +4289,6 @@ export class RunService {
         emit: async (event) => this.appendRunEvent(input.run.id, event),
         visibleDirectories,
         sources,
-        decisionLedger: decisionCommitsFromEvents(await this.runtimeEvents(input.run.id)),
         ...(input.run.conversationId === undefined
           ? {}
           : { conversationHistory: await this.conversationHistory(input.run.conversationId) }),
@@ -4496,6 +4512,7 @@ export class RunService {
           userResponses: [],
           canonicalGap,
           canonicalState,
+          userAuthority: await this.userAuthority(input.run.id, canonicalState),
           availableCapabilities: [...planningCapabilitiesFromTools(toolSummaries(allTools, toolNames), sources),
             ...planningCapabilitiesFromSkills(privateSkills)],
           availableTools: toolSummaries(allTools, toolNames),
@@ -7640,6 +7657,7 @@ function stepAssessmentSignature(input: {
     readonly availability: "available" | "not_provided";
   };
   decisionLedger: readonly RuntimeDecisionCommit[];
+  userAuthority: RuntimeUserAuthorityContext;
 }): string {
   return createHash("sha256").update(JSON.stringify({
     stepId: input.stepId,
@@ -7662,6 +7680,7 @@ function stepAssessmentSignature(input: {
       mode: commit.mode,
       satisfaction: commit.satisfaction,
     })),
+    userAuthority: input.userAuthority,
   })).digest("hex");
 }
 
@@ -8253,6 +8272,7 @@ function buildStepRuntimeContext(
     readonly requestedScope: import("./capability-snapshot.ts").RuntimeCapabilitySnapshotScope;
     readonly availability: "available" | "not_provided";
   },
+  userAuthority?: RuntimeUserAuthorityContext,
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   const operationProfile = taskProfile.operations[0] ?? executionOperationProfile({
     objective: step.objective,
@@ -8273,6 +8293,7 @@ function buildStepRuntimeContext(
     requiresFileOutput: stepRequiresFileOutput(step),
     conversationWorkingSet,
     decisionLedger,
+    userAuthority,
     resolvedOperationBindings,
   }), runtimeCapabilitySnapshot, runtimeCapabilityInventory);
 }
@@ -8295,6 +8316,7 @@ function buildRecoveredStepRuntimeContext(
     readonly requestedScope: import("./capability-snapshot.ts").RuntimeCapabilitySnapshotScope;
     readonly availability: "available" | "not_provided";
   },
+  userAuthority?: RuntimeUserAuthorityContext,
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   // Draft bodies are persisted for Runtime identity/rejection decisions,
   // not evidence for the resumed model. Keep only their neutral identities
@@ -8331,6 +8353,7 @@ function buildRecoveredStepRuntimeContext(
     resolvedOperationBindings,
     runtimeCapabilitySnapshot,
     runtimeCapabilityInventory,
+    userAuthority,
   );
   return {
     ...base,

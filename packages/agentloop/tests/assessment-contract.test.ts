@@ -8,6 +8,8 @@ import { ModelPlanRevisionAssessor } from "../src/runtime/recovery-planning.ts";
 import type { PlanRevisionAssessmentInput } from "../src/planning/contracts.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
 import { AppError } from "../src/shared/errors.ts";
+import { createDecisionCommit } from "../src/runtime/decision-ledger.ts";
+import { buildUserAuthorityContext } from "../src/runtime/user-authority.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
@@ -148,6 +150,121 @@ test("a repair cannot pass until every open evidence concern is explicitly resol
     assert.equal(result.approved, status === "resolved");
     assert.equal(result.concernResolutions?.[0]?.status, status);
   }
+});
+
+test("assessment preserves the authoritative HIL subject instead of reinterpreting the ambiguous original request", async () => {
+  const base = assessmentInput();
+  const choice = createDecisionCommit({ requestId: "choose-subject", requestRevision: 1,
+    planId: base.planId, stepId: base.step.id,
+    selectedOptions: [{ id: "branch", label: "Selected branch", identityRefs: ["branch-id"] }] });
+  const input: StepAssessmentInput = { ...base, decisionLedger: [choice] };
+  let received = false;
+  const result = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
+    const context = JSON.parse(request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+    assert.deepEqual(context.userAuthority.decisionLedger, [choice]);
+    assert.equal(context.userAuthority.originalUserInput, userInput);
+    assert.match(request.systemPrompt, /reject a candidate merely for following that choice/);
+    assert.match(context.userAuthority.instruction, /inferred example or optional field/);
+    received = true;
+    return submission(input);
+  } }).assess(input);
+  assert.equal(received, true);
+  assert.equal(result.approved, true);
+});
+
+test("a replacement repair can cite two accepted choices to resolve missing-user-confirmation concerns", async () => {
+  const base = assessmentInput();
+  const selectedOptions = [{ id: "branch", label: "Selected branch", identityRefs: ["branch-code"] }];
+  const decisions = ["first-choice", "confirmed-choice"].map(requestId => createDecisionCommit({
+    requestId, requestRevision: 1, planId: base.planId, stepId: base.step.id, selectedOptions,
+  }));
+  const authority = buildUserAuthorityContext({ userInput: base.canonicalState.intent.userInput,
+    intent: base.canonicalState.intent, decisionLedger: decisions,
+    humanLoopAnswers: decisions.map((decision, index) => ({ responseId: `answer-${index}`, requestId: decision.requestId,
+      requestRevision: 1, createdAt: index + 1, eventSeq: index * 2 + 1, planId: base.planId, stepId: base.step.id,
+      question: { kind: "selection", title: "Choose subject", prompt: "Which subject should be queried?", responseType: "select" },
+      value: ["branch"], selectedOptions,
+    })),
+  });
+  const concern = { observation: "The supplied evidence does not contain the user's subject confirmation.",
+    evidenceRefs: ["rr_search"], hypothesis: "The answer may have substituted a branch for the first search result.",
+    affectedEvidenceRefs: ["rr_branch"] };
+  const input: StepAssessmentInput = { ...base, userAuthority: authority,
+    step: { ...base.step, id: `${base.step.id}.repair.1` },
+    canonicalState: { ...base.canonicalState, gaps: [{ id: "subject-gap", stepId: base.step.id,
+      repairScopeStepIds: [`${base.step.id}.repair.1`], status: "open", missingEvidenceKinds: [], violatedSkillRequirements: [],
+      evidenceRefs: ["rr_search", "rr_branch"], evidenceConcerns: [concern], suggestedAction: "repair_leaf", openedAt: 1 }] },
+  };
+  for (const ref of [authority.humanLoopAnswers[1]!.responseId, decisions[1]!.requestId, decisions[1]!.id, "invented-answer"]) {
+    let calls = 0;
+    const assessment = new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
+      calls++;
+      const context = JSON.parse(request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+      assert.deepEqual(context.userAuthority.humanLoopAnswers.map((answer: any) => answer.value), [["branch"], ["branch"]]);
+      const response = submission(input) as any;
+      response.toolCalls[0].arguments.concernResolutions = [{ gapId: "subject-gap", concernIndex: 0, status: "resolved",
+        rationale: "The persisted user responses twice select this branch; search order does not override them.", evidenceRefs: [ref] }];
+      return response;
+    } });
+    if (ref === "invented-answer") {
+      await assert.rejects(assessment.assess(input), /must cite supplied evidence/);
+      assert.equal(calls, 3);
+    } else {
+      assert.equal((await assessment.assess(input)).approved, true);
+      assert.equal(calls, 1);
+    }
+  }
+  const unresolvedSourceInput: StepAssessmentInput = { ...input, canonicalState: { ...input.canonicalState,
+    gaps: [{ ...input.canonicalState.gaps[0]!, evidenceConcerns: [concern, {
+      observation: "The personnel endpoint rejected the request; personnel facts remain unverified.",
+      evidenceRefs: ["rr_branch"], hypothesis: "", affectedEvidenceRefs: ["rr_branch"],
+    }] }],
+  } };
+  const result = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete() {
+    const response = submission(unresolvedSourceInput) as any;
+    response.toolCalls[0].arguments.concernResolutions = [
+      { gapId: "subject-gap", concernIndex: 0, status: "resolved", rationale: "The user confirmed the branch.", evidenceRefs: ["answer-1"] },
+      { gapId: "subject-gap", concernIndex: 1, status: "unresolved", rationale: "The selection does not prove personnel facts.", evidenceRefs: ["rr_branch"] },
+    ];
+    return response;
+  } }).assess(unresolvedSourceInput);
+  assert.equal(result.approved, false);
+});
+
+test("unmet criteria do not become evidence concerns and retries expose the exact empty resolution contract", async () => {
+  const base = assessmentInput();
+  const input: StepAssessmentInput = { ...base, canonicalState: { ...base.canonicalState, gaps: [{
+    id: "gap-unmet", stepId: base.step.id, status: "open", missingEvidenceKinds: [], violatedSkillRequirements: [],
+    evidenceRefs: [], suggestedAction: "repair_leaf", openedAt: 1,
+    unmetCriteria: [{ criterionId: "answered", status: "unverified", rationale: "Revise the answer", evidenceRefs: [] }],
+  }] } };
+  const events: RuntimeEvent[] = [];
+  let calls = 0;
+  const result = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
+    calls++;
+    const context = JSON.parse(request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+    assert.deepEqual(context.openEvidenceConcerns, []);
+    const schema = request.tools[0]!.inputSchema as any;
+    assert.equal(schema.properties.concernResolutions.minItems, 0);
+    assert.equal(schema.properties.concernResolutions.maxItems, 0);
+    const response = submission(input) as any;
+    if (calls === 1) {
+      response.toolCalls[0].arguments.concernResolutions = [{ gapId: "gap-unmet", concernIndex: 0,
+        status: "resolved", rationale: "Wrongly resolving a criterion", evidenceRefs: [] }];
+    } else {
+      const repair = JSON.parse(request.runtimeContext!.content.match(/<runtime_directive>\n([^\n]+)\n/)![1]!).assessmentRepair;
+      assert.equal(repair.validationDetails.expectedCount, 0);
+      assert.equal(repair.validationDetails.actualCount, 1);
+      assert.deepEqual(repair.validationDetails.expectedConcerns, []);
+      assert.match(repair.validationDetails.instruction, /Return concernResolutions: \[\]/);
+      response.toolCalls[0].arguments.concernResolutions = [];
+    }
+    return response;
+  } }).assess(input, undefined, async event => { events.push(event); });
+  assert.equal(calls, 2);
+  assert.equal(result.approved, true);
+  const rejection = events.find(event => event.type === "assessment.validation.rejected")!;
+  assert.equal((rejection.data.validationDetails as any).actualCount, 1);
 });
 
 test("temporal gaps reach the model as facts for contextual judgment, not automatic rejection", async () => {

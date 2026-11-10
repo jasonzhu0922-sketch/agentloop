@@ -6,6 +6,7 @@ import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext,
 import { completeWithStreaming } from "../runtime/model-streaming.ts";
 import { isTextToolInvocation } from "../runtime/text-tool-invocation.ts";
 import { deliveryCandidateCaveats } from "../runtime/delivery-candidate.ts";
+import { buildUserAuthorityContext, USER_AUTHORITY_INSTRUCTION } from "../runtime/user-authority.ts";
 import { artifactMatchesExpectedTarget } from "../runtime/tool-progress-policy.ts";
 import {
   canonicalArtifactAcceptanceVerdict,
@@ -105,7 +106,7 @@ const SUBMIT_ASSESSMENT_TOOL = {
           suggestedRepairShape: { type: "string", enum: ["repair_leaf", "revise_plan", "ask_user", "fail"] },
           evidenceConcerns: {
             type: "array", maxItems: 20,
-            description: "Observed contradictions and unverified explanations, with exact supplied tool evidence IDs. Empty when no specific contradiction is observed.",
+            description: "Observed contradictions and unverified explanations, with exact supplied evidence IDs, including accepted user answer or decision IDs for scope contradictions. Empty when no specific contradiction is observed.",
             items: { type: "object", additionalProperties: false,
               required: ["observation", "evidenceRefs", "hypothesis", "affectedEvidenceRefs"],
               properties: {
@@ -124,12 +125,19 @@ function submitAssessmentTool(input: StepAssessmentInput): ModelInvocation["tool
   const properties = SUBMIT_ASSESSMENT_TOOL.inputSchema.properties;
   const criterionIds = input.step.successCriteria.map((criterion) => criterion.id);
   const skillIds = input.skills.map((skill) => skill.id);
+  const concerns = openEvidenceConcerns(input);
   return {
     ...SUBMIT_ASSESSMENT_TOOL,
     inputSchema: {
       ...SUBMIT_ASSESSMENT_TOOL.inputSchema,
       properties: {
         ...properties,
+        concernResolutions: {
+          ...properties.concernResolutions,
+          minItems: concerns.length,
+          maxItems: concerns.length,
+          description: "Resolve only the entries in assessment_context.openEvidenceConcerns. Unmet criteria and missing facts are not evidence concerns. Return [] when that list is empty.",
+        },
         criteria: {
           ...properties.criteria,
           minItems: criterionIds.length,
@@ -213,12 +221,14 @@ export class ModelStepAssessor implements StepAssessor {
             "The submit_assessment arguments must be one JSON object at the root, with criteria, skills, feedback, failedBoundary, and concernResolutions as direct properties. Do not return a JSON-encoded string, array, or nested wrapper object.",
           ],
           contractLines: [
+            USER_AUTHORITY_INSTRUCTION,
+            "Cite userAuthority.humanLoopAnswers[].responseId or requestId and decisionLedger[].id for the user's accepted choice or clarification. These records prove user intent, not external facts or completed operations; use them to resolve a prior concern that the user's choice was missing from evidence.",
             "A tool result, artifact, trace, or model claim is not completion by itself.",
             "When observations contradict a claimed result or its stated conditions, record the observation and exact evidence IDs in failedBoundary.evidenceConcerns, separately from an unverified hypothesis. Identify known affected evidence IDs; do not assert a suspected cause as fact. A receipt may prove an operation returned data without proving the interpretation or premises. Repeated results sharing a premise are not independent verification of that premise. An empty hypothesis means the cause is unknown.",
             "When current open assessmentGaps contain prior evidence concerns, evaluate whether the new observations resolve each material contradiction and whether the delivery still depends on affected premises. A new wording or repeated result alone cannot resolve the concern.",
-            "Return one concernResolutions entry for every evidenceConcern in the open assessmentGaps, keyed by gapId and zero-based concernIndex, with status, rationale and evidenceRefs. Mark resolved only when the cited observations actually address the contradiction and affected premises. Return [] if there are no concerns.",
+            "Return one concernResolutions entry for every entry in openEvidenceConcerns, keyed by gapId and zero-based concernIndex, with status, rationale and evidenceRefs. Unmet criteria and missing facts are not evidence concerns. Mark resolved only when the cited observations actually address the contradiction and affected premises. Return [] if openEvidenceConcerns is empty.",
             "Assess every criterion exactly once.",
-            "Validate each criterion's basis against canonicalIntent.userInput and its owned targets. A quoted requirement and rationale establish traceability, not semantic correctness. Set contractCheck.status to valid when the condition is justified, independently of whether its result is satisfied. If an inferred condition is unrelated, overstates the request, or merely prescribes one implementation, set contractCheck.status to invalid and explain the unsupported requirement in contractCheck.rationale so Recovery can revise the Plan. Never silently waive an admitted condition or weaken an explicit user constraint.",
+            "Validate each criterion's basis against canonicalIntent.userInput, the accepted amendments and HIL answers in userAuthority, and its owned targets. A quoted requirement and rationale establish traceability, not semantic correctness. Set contractCheck.status to valid when the condition is justified, independently of whether its result is satisfied. If an inferred condition is unrelated, overstates the request, or merely prescribes one implementation, set contractCheck.status to invalid and explain the unsupported requirement in contractCheck.rationale so Recovery can revise the Plan. Never silently waive an admitted condition or weaken an explicit user constraint.",
             "For an open-ended analysis, an inferred background detail, example, exhaustive inventory or extra source verification is not automatically a user-required fact. If its absence does not prevent a supported answer to the actual request, flag a blocking criterion that demands it as an invalid contract. Relevant source material may support a bounded conclusion without independently proving that every statement in the source is true; distinguish source claims from the candidate's inference and respect explicit source and verification constraints.",
             "Do not demand further search when the available materials support the requested conclusion. Seek additional material for a consequential gap, contradiction, freshness requirement or explicit source/verification constraint; preserve and report unresolved limitations without presenting them as established facts.",
             "Submit contractCheck for every criterion. Its status, not the wording of its rationale, identifies a contract issue. Use failedBoundary: null when there is no proposed failure boundary; never create an empty placeholder boundary.",
@@ -234,7 +244,7 @@ export class ModelStepAssessor implements StepAssessor {
             "For ordinary stable general-knowledge questions, reliable model knowledge can support a direct answer when the user did not require sources or verification. Do not demand external evidence solely because the answer is factual. Assess uncertainty and the actual goal: current, private, disputed, source-specific, or consequential facts may require additional evidence, and unsupported precision must not be invented.",
             "For a user-facing delivery target, approve only when the candidate directly fulfills that target's stated purpose. Source records, field tables, excerpts, and citations establish support but do not substitute for the requested answer, explanation, conclusion, or other user-facing result.",
             "Preserve the user's exact requested fields, distinctions, scope, and freshness. A related field or differently titled role is not equivalent without readable source support. A retrieval timestamp alone does not establish the effective date or current validity of a fact. Do not repair missing facts yourself in assessment feedback.",
-            "Use the original user goal when checking whether the delivered facts match the request. A resolver/Plan paraphrase or provider scope cannot authorize substituting another field or narrowing the requested result. A caveat that a requested fact is unverified records a remaining gap; it does not prove that fact or satisfy a blocking criterion requiring it.",
+            "Use the original user goal together with accepted amendments and HIL answers when checking whether the delivered facts match the request. A resolver/Plan paraphrase or provider scope cannot authorize substituting another field or narrowing the requested result. A caveat that a requested fact is unverified records a remaining gap; it does not prove that fact or satisfy a blocking criterion requiring it.",
             "Distinguish a delivery revision from missing evidence. When canonical evidence is sufficient but the candidate fails to answer the goal, identify the required synthesis in feedback and leave failedBoundary.missingEvidenceKinds empty. Name missing evidence kinds only for facts, operations, or work-product state that actually need new evidence; a wording or answer-organization gap must not require repeating acquisition.",
           ],
           taskProfile,
@@ -1154,8 +1164,7 @@ function parseFailedBoundary(input: StepAssessmentInput, value: unknown): Failed
 function parseEvidenceConcerns(value: unknown, input: StepAssessmentInput): NonNullable<FailedBoundary["evidenceConcerns"]> {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > 20) throw new TypeError("failedBoundary.evidenceConcerns must be an array with at most 20 entries");
-  const known = new Set([...(input.evidence.toolCalls ?? []), ...(input.modelEvidence?.toolCalls ?? [])]
-    .flatMap((call) => [call.toolCallId, ...(call.resultRef === undefined ? [] : [call.resultRef.resultId])]));
+  const known = suppliedAssessmentEvidenceRefs(input);
   for (const gap of input.canonicalState.gaps) {
     if (gap.status === "open" && (gap.stepId === input.step.id || gap.repairScopeStepIds?.includes(input.step.id))) {
       for (const ref of gap.evidenceRefs) known.add(ref);
@@ -1167,7 +1176,7 @@ function parseEvidenceConcerns(value: unknown, input: StepAssessmentInput): NonN
     const evidenceRefs = parseEvidenceRefs(row.evidenceRefs, `${label}.evidenceRefs`);
     const affectedEvidenceRefs = parseEvidenceRefs(row.affectedEvidenceRefs, `${label}.affectedEvidenceRefs`);
     if (evidenceRefs.length === 0 || [...evidenceRefs, ...affectedEvidenceRefs].some((ref) => !known.has(ref))) {
-      throw new TypeError(`${label} must reference supplied tool evidence`);
+      throw new TypeError(`${label} must reference supplied evidence`);
     }
     if (typeof row.hypothesis !== "string" || row.hypothesis.length > 4000) throw new TypeError(`${label}.hypothesis must be a string`);
     return { observation: requireString(row.observation, `${label}.observation`, { max: 4000 }), evidenceRefs,
@@ -1181,11 +1190,31 @@ function openEvidenceConcerns(input: StepAssessmentInput): Array<{ gapId: string
     .flatMap((gap) => (gap.evidenceConcerns ?? []).map((_, concernIndex) => ({ gapId: gap.id, concernIndex })));
 }
 
+function suppliedAssessmentEvidenceRefs(input: StepAssessmentInput): Set<string> {
+  const authority = input.userAuthority ?? buildUserAuthorityContext({ userInput: input.canonicalState.intent.userInput,
+    intent: input.canonicalState.intent, decisionLedger: input.decisionLedger });
+  return new Set([
+    ...[...input.evidence.toolCalls, ...(input.modelEvidence?.toolCalls ?? [])]
+      .flatMap(call => [call.toolCallId, ...(call.resultRef === undefined ? [] : [call.resultRef.resultId])]),
+    ...authority.humanLoopAnswers.flatMap(answer => [answer.responseId, answer.requestId]),
+    ...authority.decisionLedger.flatMap(commit => [commit.id, commit.requestId]),
+  ]);
+}
+
 function parseConcernResolutions(value: unknown, input: StepAssessmentInput): NonNullable<SkillComplianceAssessment["concernResolutions"]> {
   const expected = openEvidenceConcerns(input);
   if (value === undefined && expected.length === 0) return [];
-  if (!Array.isArray(value) || value.length !== expected.length) throw new TypeError("concernResolutions must cover every open evidence concern exactly once");
-  const known = new Set(input.evidence.toolCalls.flatMap((call) => [call.toolCallId, ...(call.resultRef === undefined ? [] : [call.resultRef.resultId])]));
+  if (!Array.isArray(value) || value.length !== expected.length) {
+    throw new AppError("ASSESSMENT_ERROR", "Invalid assessment: concernResolutions must cover every open evidence concern exactly once", 422, {
+      field: "concernResolutions", expectedCount: expected.length, expectedConcerns: expected,
+      actualType: value === null ? "null" : Array.isArray(value) ? "array" : typeof value,
+      actualCount: Array.isArray(value) ? value.length : null,
+      instruction: expected.length === 0
+        ? "Return concernResolutions: []. Open unmet criteria do not create evidence concerns."
+        : "Return exactly one resolution for each expected {gapId, concernIndex}; do not resolve unrelated unmet criteria.",
+    });
+  }
+  const known = suppliedAssessmentEvidenceRefs(input);
   for (const gap of input.canonicalState.gaps) for (const ref of gap.evidenceRefs) known.add(ref);
   const seen = new Set<string>();
   return value.map((item, index) => {
@@ -1208,7 +1237,7 @@ function parseConcernResolutions(value: unknown, input: StepAssessmentInput): No
 function concernsResolved(input: StepAssessmentInput, resolutions: SkillComplianceAssessment["concernResolutions"], boundary?: FailedBoundary): boolean {
   if ((boundary?.evidenceConcerns?.length ?? 0) > 0) return false;
   const expected = openEvidenceConcerns(input);
-  const known = new Set(input.evidence.toolCalls.flatMap((call) => [call.toolCallId, ...(call.resultRef === undefined ? [] : [call.resultRef.resultId])]));
+  const known = suppliedAssessmentEvidenceRefs(input);
   for (const gap of input.canonicalState.gaps) for (const ref of gap.evidenceRefs) known.add(ref);
   return expected.every((entry) => resolutions?.some((resolution) => resolution.gapId === entry.gapId
     && resolution.concernIndex === entry.concernIndex && resolution.status === "resolved" && resolution.evidenceRefs.length > 0
@@ -1299,6 +1328,9 @@ function assessmentView(input: StepAssessmentInput): Record<string, unknown> {
   const policy = assessmentPolicy(input);
   return {
     canonicalIntent: input.canonicalState.intent,
+    userAuthority: input.userAuthority ?? buildUserAuthorityContext({ userInput: input.canonicalState.intent.userInput,
+      intent: input.canonicalState.intent, decisionLedger: input.decisionLedger }),
+    openEvidenceConcerns: openEvidenceConcerns(input),
     step: {
       id: input.step.id,
       objective: input.step.objective,

@@ -35,6 +35,8 @@ test("root development scripts pin the Account Service and Desktop topology", as
   assert.equal(manifest.scripts["start:accounts"], "node apps/agentloop-account-service/scripts/local-service-manager.mjs --foreground");
   assert.equal(manifest.scripts["restart:accounts"], "node apps/agentloop-account-service/scripts/local-service-manager.mjs --background");
   assert.equal(manifest.scripts["start:desktop"], "npm run restart:accounts && AGENTLOOP_DESKTOP_AUTH_BASE_URL=http://127.0.0.1:8795 npm run start --workspace agentloop-desktop -- --development");
+  const desktop = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as { scripts: Record<string, string> };
+  assert.equal(desktop.scripts.prestart, "npm run build --workspace @zhujun/agentloop && npm run build --workspace @zhujun/agentloop-local-runtime");
 });
 
 test("Desktop host approves the built-in Connector modules", () => {

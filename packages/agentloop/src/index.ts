@@ -243,6 +243,8 @@ export {
   decisionSatisfied,
   assessDecisionBindings,
 } from "./runtime/decision-ledger.ts";
+export { buildUserAuthorityContext } from "./runtime/user-authority.ts";
+export type { RuntimeUserAuthorityContext, RuntimeHumanLoopAnswer } from "./runtime/user-authority.ts";
 export type {
   RuntimeDecisionClaim,
   RuntimeDecisionCommit,
