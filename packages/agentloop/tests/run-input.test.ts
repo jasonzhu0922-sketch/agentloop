@@ -55,9 +55,12 @@ for (const boundary of ["before_dispatch", "tool_completed", "terminal_commit"] 
         executionMode: "exclusive", replaySafe: false, parse: value => value,
         execute: async context => { effects++; if (boundary === "tool_completed") await inject(context.grant.runId); return { receipt: "effect-confirmed" }; } }],
       modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
-        if (request.tools.some(tool => tool.name === "submit_run_input_decision")) return {
-          content: "", finishReason: "tool_calls", toolCalls: [{ id: "decision", name: "submit_run_input_decision", arguments: { kind: "answer", explanation: "The recorded task is in progress." } }],
-        };
+        if (request.tools.some(tool => tool.name === "submit_run_input_decision")) {
+          const properties = request.tools.find(tool => tool.name === "submit_run_input_decision")!.inputSchema.properties as any;
+          assert.deepEqual(properties.userConstraints.anyOf, [{ type: "array", items: { type: "string" } }, { type: "null" }]);
+          assert.deepEqual(properties.effectiveGoal.type, ["string", "null"]);
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "decision", name: "submit_run_input_decision", arguments: { kind: "answer", explanation: "The recorded task is in progress." } }] };
+        }
         modelCalls++;
         if (modelCalls === 1) {
           if (boundary === "before_dispatch") await inject(request.runId);

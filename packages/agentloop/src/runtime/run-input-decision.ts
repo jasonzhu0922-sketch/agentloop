@@ -2,6 +2,7 @@ import type { ModelAdapter } from "./contracts.ts";
 import type { CanonicalRunState } from "./canonical-run-state.ts";
 import type { RunInputMessage } from "./run-input-repository.ts";
 import { AppError } from "../shared/errors.ts";
+import { nullableJsonSchema } from "../shared/json-schema.ts";
 
 export interface RunInputDecision {
   readonly kind: "answer" | "amend" | "clarify" | "cancel";
@@ -37,7 +38,7 @@ export async function decideRunInput(input: {
     tools: [{ name: "submit_run_input_decision", description: "Submit a semantic input decision; no execution authority.", inputSchema: {
       type: "object", additionalProperties: false, required: ["kind", "explanation", "effectiveGoal", "userConstraints", "taskIntent"], properties: {
         kind: { type: "string", enum: ["answer", "amend", "clarify", "cancel"] }, explanation: { type: "string", minLength: 1, maxLength: 8000 },
-        effectiveGoal: { type: ["string", "null"] }, userConstraints: { type: ["array", "null"], items: { type: "string" } },
+        effectiveGoal: { type: ["string", "null"] }, userConstraints: nullableJsonSchema({ type: "array", items: { type: "string" } }),
         taskIntent: { anyOf: [{ type: "null" }, { type: "object", additionalProperties: false,
           required: ["schema", "operation", "requiresExecution", "deliverables"], properties: {
             schema: { type: "string", enum: ["agentloop.conversationTaskIntent/v1"] },

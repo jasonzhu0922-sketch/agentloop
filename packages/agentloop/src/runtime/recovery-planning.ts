@@ -1,4 +1,5 @@
 import { AppError, badRequest } from "../shared/errors.ts";
+import { nullableJsonSchema } from "../shared/json-schema.ts";
 import { requireRecord, requireString, requireStringArray } from "../shared/validation.ts";
 import { MODEL_CRITERION_BASIS_SCHEMA, parseModelCriterionBasis } from "../planning/criterion-basis.ts";
 import type {
@@ -105,6 +106,7 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
       "Execution-method criteria must never be blocking. Reuse collected evidence; do not add an extra search or verification step unless it can resolve a material gap or contradiction, or is needed for an explicit user constraint.",
       "Submit basis metadata (kind, targetIds, rationale) only. Omit basis.intentId and basis.requirement, including when copying currentPlan criteria or facts: Runtime binds both from canonicalState.intent. A rationale must justify the condition; binding provenance does not prove that a derived condition is necessary.",
       "Within every revised Step, each success criterion id must appear exactly once. Copy each existing criterion at most once; do not duplicate a criterion while adding or preserving a delivery condition. Runtime derives delivery_target:<targetId> criteria from targetIds, so never submit those criteria in successCriteria.",
+      "currentPlan is an editable projection: successCriteria contains model-authored conditions and basis metadata only. runtimeDerivedSuccessCriteria preserves observed Runtime obligations for review; never copy that field or its entries into planRevision. Canonical targets and targetIds retain those delivery obligations and Runtime regenerates their criteria.",
       "Use failedBoundary.unmetCriteria to identify the actual result gap and any contractIssue. Choose a continuation that can change that cause, considering previously attempted strategies, available capabilities and the remaining gap budget in runtimeContext. A locally stalled turn does not prove global exhaustion. Never repeat unchanged work or weaken an explicit user requirement to obtain approval.",
       "Evidence concerns distinguish observations from unverified hypotheses. Do not elevate a suggested explanation or action into a proven cause. Reuse references only for the properties they support; a contradiction can affect several results sharing a premise, and repeated results do not independently verify that premise. Bind the relevant evidence for inspection in the repair instead of assuming it proves the requested result.",
       "Do not ask the user to authorize a Plan revision, confirm whether a recorded Action had an effect, or accept a candidate as evidence that it meets a result criterion. Those are Runtime recovery and assessment obligations. Use ask_user only for a concrete, missing input that only the user can supply and that an execution continuation will consume; a missing capability to observe or verify the requested result is not such an input. When the available capabilities cannot change or verify a remaining result gap, choose fail and retain the stage artifact and its evidence.",
@@ -246,7 +248,7 @@ function recoveryRuntimeContext(input: RecoveryPlannerInput): RuntimeContextSnap
         maxAttempts: input.action.maxAttempts,
         metadata: input.action.metadata,
       },
-      currentPlan: input.plan,
+      currentPlan: recoveryPlanProjection(input.plan),
       failedBoundary: input.failedBoundary,
       canonicalGap: input.canonicalGap,
       canonicalState: input.canonicalState,
@@ -258,6 +260,31 @@ function recoveryRuntimeContext(input: RecoveryPlannerInput): RuntimeContextSnap
       userResponses: input.userResponses,
       referencedEvidenceEvents,
       events: input.events.slice(-100),
+    }),
+  };
+}
+
+/** Keep observable obligations while separating fields a model may resubmit. */
+function recoveryPlanProjection(plan: RecoveryPlannerInput["plan"]): unknown {
+  if (plan === undefined) return undefined;
+  const basisMetadata = (basis: NonNullable<SuccessCriterion["basis"]>) => ({
+    kind: basis.kind, targetIds: basis.targetIds, rationale: basis.rationale,
+  });
+  return {
+    ...plan,
+    steps: plan.steps.map((step) => {
+      const derived = step.successCriteria.filter((criterion) => criterion.id.startsWith("delivery_target:")
+        && step.executionBinding.targetIds.includes(criterion.id.slice("delivery_target:".length)));
+      return {
+        ...step,
+        successCriteria: step.successCriteria.filter((criterion) => !derived.includes(criterion)).map(({ basis, ...criterion }) => ({
+          ...criterion, ...(basis === undefined ? {} : { basis: basisMetadata(basis) }),
+        })),
+        requiredFacts: step.requiredFacts.map(({ basis, ...fact }) => ({
+          ...fact, ...(basis === undefined ? {} : { basis: basisMetadata(basis) }),
+        })),
+        runtimeDerivedSuccessCriteria: derived,
+      };
     }),
   };
 }
@@ -427,14 +454,14 @@ function planProposalSchema(): Record<string, unknown> {
       caveatPolicy: { type: "string", enum: ["none", "mark_unverified_facts", "strict_fail_on_missing_source"] },
     },
   };
-  const sourceConstraint = {
-    type: ["object", "null"], additionalProperties: false,
+  const sourceConstraint = nullableJsonSchema({
+    type: "object", additionalProperties: false,
     properties: {
       requiredToolSourceIds: { type: "array", items: { type: "string" } },
       requiredUploadedSourceIds: { type: "array", items: { type: "string" } },
       requiredVisibleDirectoryIds: { type: "array", items: { type: "string" } },
     },
-  };
+  });
   const criterion = {
     type: "object", additionalProperties: false,
     required: ["id", "description", "source"],

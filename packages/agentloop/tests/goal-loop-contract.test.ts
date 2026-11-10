@@ -12,7 +12,7 @@ import { understandTask } from "../src/runtime/task-intent.ts";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { ToolRegistry } from "../src/tools/tool-registry.ts";
-import { parseRecoveryDecision } from "../src/runtime/recovery-planning.ts";
+import { ModelRecoveryPlanner, parseRecoveryDecision } from "../src/runtime/recovery-planning.ts";
 import { RunService, recoveryProposalSuccessCriteria } from "../src/runtime/run-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { installAssessmentProfileSchema } from "../src/storage/assessment-profile-schema.ts";
@@ -795,7 +795,7 @@ test("criterion provenance rejects foreign intents, invented quotes and unowned 
   assert.equal(proposal.steps[0]!.successCriteria[0]!.blocking, true);
 });
 
-test("an unjustified derived result obligation remains rejected and reaches the same canonical Gap as a contract issue", async () => {
+test("an unjustified extra proof obligation cannot reopen a canonical Gap for a matching reply", async () => {
   const { state, proposal, basis } = fixture();
   const plan = admitPlan({ runId: state.runId, canonicalState: state, availableSkills: [], availableToolNames: new Set(),
     proposal: { ...proposal, steps: proposal.steps.map((step) => ({ ...step,
@@ -815,14 +815,13 @@ test("an unjustified derived result obligation remains rejected and reaches the 
     } }] };
   } }).assess({ runId: state.runId, planId: plan.id, step, canonicalState: running, skills: [], attempt: 1,
     assessmentProfile: "result_judged", evidence });
-  assert.equal(assessment.approved, false);
-  assert.equal(assessment.failedBoundary?.suggestedRepairShape, "revise_plan");
-  assert.deepEqual(assessment.failedBoundary?.missingEvidenceKinds, []);
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.failedBoundary, undefined);
+  assert.equal(assessment.criteria[0]!.blocking, false);
+  assert.match(assessment.criteria[0]!.contractIssue ?? "", /execution method/);
   const assessed = recordCanonicalAssessment(running, assessment, evidence, 4);
-  const gap = assessed.gaps.find((gap) => gap.stepId === step.id)!;
-  assert.deepEqual(gap.unmetCriteria, assessment.failedBoundary?.unmetCriteria);
-  assert.equal(gap.unmetCriteria?.[0]?.status, "conflict");
-  assert.match(gap.unmetCriteria?.[0]?.contractIssue ?? "", /execution method/);
+  assert.equal(assessed.steps[step.id]!.status, "satisfied");
+  assert.equal(assessed.gaps.some((gap) => gap.stepId === step.id && gap.status === "open"), false);
 });
 
 for (const duplicate of [false, true]) {
@@ -1042,4 +1041,44 @@ test("an accepted file receipt cannot route a requested content property through
     assert.equal(artifact.role, "process");
     assert.ok(artifact.verification?.limitations.some((text) => text.includes("difference")));
   } finally { await database.close(); await rm(workspaceRoot, { recursive: true, force: true }); }
+});
+
+test("Recovery projects editable criteria separately and Admission alone restores delivery obligations", async () => {
+  const userInput = "Compare the recorded totals and state their difference.";
+  const state = createCanonicalRunState({ runId: "recovery-projection", userInput, now: 1,
+    understanding: { ...understandTask({ objective: userInput }), deliverables: [{
+      targetId: "comparison", purpose: userInput, surface: "conversation", kind: "none", action: "none", expectedArtifactCount: 1,
+    }] } });
+  const basis = goalCriterionBasis(state, ["comparison"], "user_requirement", "The user requested the difference.");
+  const plan = admitPlan({ runId: state.runId, canonicalState: state, availableSkills: [], availableToolNames: new Set(),
+    proposal: { goal: userInput, selectedSkillIds: [], steps: [{ id: "answer", objective: userInput, targetIds: ["comparison"],
+      dependencies: [], skillIds: [], requiredCapabilities: ["conversation_delivery"],
+      requiredFacts: [{ id: "totals", description: "Both totals", evidenceKinds: ["source_summary"], basis }],
+      successCriteria: [{ id: "difference", description: "State the difference", source: "task", basis, blocking: true }],
+    }] } });
+  const before = JSON.stringify(plan);
+  const decision = await new ModelRecoveryPlanner({ limits: TEST_MODEL_LIMITS, complete: async request => {
+    const context = JSON.parse(request.runtimeContext!.content);
+    const step = context.currentPlan.steps[0];
+    assert.deepEqual(step.successCriteria.map((criterion: { id: string }) => criterion.id), ["difference"]);
+    assert.deepEqual(step.runtimeDerivedSuccessCriteria.map((criterion: { id: string }) => criterion.id), ["delivery_target:comparison"]);
+    assert.equal(step.successCriteria[0].basis.intentId, undefined);
+    assert.equal(step.successCriteria[0].basis.requirement, undefined);
+    assert.equal(step.requiredFacts[0].basis.intentId, undefined);
+    assert.equal(context.canonicalState.targets.comparison.purpose, userInput);
+    return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "revise", name: "submit_recovery_decision", arguments: {
+      actionId: "recovery-action", expectedActionRevision: 1, decision: "revise_plan", rationale: "Repair the result", evidenceRefs: [],
+      planRevision: { goal: userInput, selectedSkillIds: [], steps: [{ id: "answer.repair.2", objective: userInput,
+        dependencies: [], skillIds: [], requiredCapabilities: ["conversation_delivery"], targetIds: step.executionBinding.targetIds,
+        requiredFacts: step.requiredFacts, successCriteria: step.successCriteria }] },
+    } }] };
+  } }).decide({ runId: state.runId, userInput, canonicalState: state, plan, events: [], userResponses: [], action: {
+    id: "recovery-action", runId: state.runId, kind: "recovery_review", state: "recovery_required", attempt: 1, maxAttempts: 3,
+    replayPolicy: "safe", fence: 1, revision: 1, metadata: {}, effectState: "not_started", createdAt: 1, updatedAt: 1,
+  } });
+  assert.equal(JSON.stringify(plan), before, "the admitted Plan and provenance remain unchanged");
+  assert.equal(decision.planRevision!.steps[0]!.successCriteria[0]!.basis!.intentId, state.intent.id);
+  assert.equal(decision.planRevision!.steps[0]!.successCriteria[0]!.basis!.requirement, userInput);
+  const revised = admitPlan({ runId: state.runId, canonicalState: state, proposal: decision.planRevision!, availableSkills: [], availableToolNames: new Set() });
+  assert.equal(revised.steps[0]!.successCriteria.filter(criterion => criterion.id === "delivery_target:comparison").length, 1);
 });

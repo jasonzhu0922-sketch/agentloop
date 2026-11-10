@@ -328,6 +328,18 @@ test("submit_outcome_plan uses the provider-supported strict schema subset for d
     async complete(request): Promise<ModelResponse> {
       const schema = request.tools.find((tool) => tool.name === "submit_outcome_plan")?.inputSchema;
       assert.equal(JSON.stringify(schema).includes('"uniqueItems"'), false);
+      assert.equal(JSON.stringify(schema).includes('"type":["object","null"]'), false);
+      const properties = schema!.properties as any;
+      assert.deepEqual(properties.roundScope.anyOf[1], { type: "null" });
+      const leaf = properties.leaves.items;
+      const binding = leaf.properties.sourceConstraint.anyOf[0];
+      assert.equal(binding.additionalProperties, false);
+      assert.deepEqual(binding.required, ["bindings"]);
+      assert.equal(binding.properties.bindings.minItems, 1);
+      assert.deepEqual(leaf.properties.sourceConstraint.anyOf[1], { type: "null" });
+      const contract = leaf.properties.evidenceContract.anyOf[0];
+      assert.equal(contract.additionalProperties, false);
+      assert.deepEqual(contract.required, ["requiredKinds", "caveatPolicy"]);
       return {
         content: "",
         finishReason: "tool_calls",
@@ -861,6 +873,8 @@ test("Recovery Planner retries a duplicate-criterion proposal with parser feedba
     limits: { contextWindowTokens: 40_000, maxOutputTokens: 4_096 },
     complete: async (request) => {
       calls += 1;
+      const schema = request.tools.find(tool => tool.name === "submit_recovery_decision")!.inputSchema;
+      assert.equal(JSON.stringify(schema).includes('"type":["object","null"]'), false);
       if (calls === 2) assert.match(request.systemPrompt, /duplicate ids/);
       const criterion = { id: "repair-result", description: "Deliver the repaired result.", source: "planner" };
       return {

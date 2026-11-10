@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ModelStepAssessor } from "../src/planning/assessor.ts";
+import { enforceAdmittedAssessment, ModelStepAssessor } from "../src/planning/assessor.ts";
+import { OpenAICompatibleModel, ResponsesModel } from "../src/runtime/models.ts";
 import type { StepAssessmentInput } from "../src/planning/contracts.ts";
 import type { ModelInvocation, RuntimeEvent } from "../src/runtime/contracts.ts";
 import { amendCanonicalIntent, createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
@@ -76,6 +77,7 @@ function submission(input: StepAssessmentInput,
 }
 
 function assertStrictObjects(schema: any): void {
+  if (schema.anyOf) schema.anyOf.forEach(assertStrictObjects);
   const types = Array.isArray(schema.type) ? schema.type : [schema.type];
   if (types.includes("object")) {
     assert.equal(schema.additionalProperties, false);
@@ -96,11 +98,68 @@ test("assessment uses one strict explicit-state schema, including nullable failu
     assert.deepEqual(check.properties.status.enum, ["valid", "invalid"]);
     assert.equal(check.properties.rationale.minLength, 1);
     assert.equal(schema.properties.criteria.items.properties.contractIssue, undefined);
-    assert.deepEqual(schema.properties.failedBoundary.type, ["object", "null"]);
-    assert.deepEqual(schema.properties.failedBoundary.properties.stepId.enum, [input.step.id]);
+    assert.deepEqual(schema.properties.failedBoundary.anyOf[1], { type: "null" });
+    assert.equal(schema.properties.failedBoundary.anyOf[0].type, "object");
+    assert.deepEqual(schema.properties.failedBoundary.anyOf[0].properties.stepId.enum, [input.step.id]);
     return submission(input);
   } }).assess(input);
 });
+
+for (const Model of [OpenAICompatibleModel, ResponsesModel]) {
+  for (const streaming of [false, true]) {
+    for (const approved of [false, true]) {
+      test(`${Model.name} preserves strict assessment and ${approved ? "approval" : "rejection"} via ${streaming ? "streaming" : "complete"}`, async () => {
+        const input = assessmentInput();
+        const failedBoundary = approved ? null : { stepId: input.step.id, missingEvidenceKinds: [],
+          violatedSkillRequirements: [], reusableEvidenceRefs: ["candidateOutput"], suggestedRepairShape: "repair_leaf", evidenceConcerns: [] };
+        const response = submission(input, undefined, failedBoundary);
+        response.toolCalls[0]!.arguments.criteria[0]!.satisfied = approved;
+        const args = response.toolCalls[0]!.arguments;
+        const originalFetch = globalThis.fetch;
+        let calls = 0;
+        globalThis.fetch = async (_url, init) => {
+          calls++;
+          const body = JSON.parse(String(init?.body));
+          const wireStreaming = streaming || Model === ResponsesModel;
+          assert.equal(body.stream === true, wireStreaming);
+          const tool = Model === ResponsesModel ? body.tools[0] : body.tools[0].function;
+          const schema = tool.parameters;
+          assert.equal(tool.strict, true);
+          assertStrictObjects(schema);
+          assert.deepEqual(schema.required, ["criteria", "skills", "feedback", "failedBoundary", "concernResolutions"]);
+          assert.deepEqual(schema.properties.failedBoundary.anyOf[0].properties.stepId.enum, [input.step.id]);
+          // Reproduce the provider's rejection at the original boundary. The
+          // nullable object must arrive as anyOf, with its constraints intact.
+          if (JSON.stringify(schema).includes('"type":["object","null"]')) {
+            return new Response('{"error":{"message":"type arrays only support primitive types"}}', { status: 400 });
+          }
+          const payload = Model === ResponsesModel
+            ? { status: "completed", output: [{ type: "function_call", call_id: "assessment", name: "submit_assessment", arguments: JSON.stringify(args) }] }
+            : { choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [
+                { id: "assessment", type: "function", function: { name: "submit_assessment", arguments: JSON.stringify(args) } },
+              ] } }] };
+          const text = !wireStreaming ? JSON.stringify(payload)
+            : Model === ResponsesModel ? `data: ${JSON.stringify({ type: "response.completed", response: payload })}\n\n`
+              : `data: ${JSON.stringify({ choices: [{ finish_reason: "tool_calls", delta: { tool_calls: [
+                  { index: 0, id: "assessment", type: "function", function: { name: "submit_assessment", arguments: JSON.stringify(args) } },
+                ] } }] })}\n\ndata: [DONE]\n\n`;
+          return new Response(text, { headers: { "content-type": wireStreaming ? "text/event-stream" : "application/json" } });
+        };
+        try {
+          const model = new Model({ baseUrl: "https://models.example.test/v1", apiKey: "test-secret", model: "test-model",
+            ...TEST_MODEL_LIMITS, maxAttempts: 1 });
+          const adapter = streaming ? model : { limits: model.limits, complete: model.complete.bind(model) };
+          const result = await new ModelStepAssessor(adapter).assess(input, undefined, streaming ? async () => undefined : undefined);
+          assert.equal(calls, 1);
+          assert.equal(result.approved, approved);
+          assert.equal(result.criteria[0]!.satisfied, approved);
+          assert.equal(result.failedBoundary?.stepId, approved ? undefined : input.step.id);
+          if (!approved) assert.deepEqual(result.failedBoundary?.reusableEvidenceRefs, ["candidateOutput"]);
+        } finally { globalThis.fetch = originalFetch; }
+      });
+    }
+  }
+}
 
 test("assessment records an observed conflict separately from a hypothesis and binds only supplied evidence", async () => {
   const base = assessmentInput();
@@ -130,7 +189,7 @@ test("assessment records an observed conflict separately from a hypothesis and b
   assert.equal(attempts, 3);
 });
 
-test("a repair cannot pass until every open evidence concern is explicitly resolved with a bound observation", async () => {
+test("evidence concern status stays observable without vetoing a reply that matches the request", async () => {
   const base = assessmentInput();
   const concern = { observation: "A daytime row contradicts the claimed window.", evidenceRefs: ["rr_detail"],
     hypothesis: "The channel may have ignored the filter.", affectedEvidenceRefs: ["rr_ranking"] };
@@ -147,7 +206,8 @@ test("a repair cannot pass until every open evidence concern is explicitly resol
         evidenceRefs: ["rr_detail"] }];
       return response;
     } }).assess(input);
-    assert.equal(result.approved, status === "resolved");
+    assert.equal(result.approved, true);
+    assert.equal(enforceAdmittedAssessment(input, result).approved, true);
     assert.equal(result.concernResolutions?.[0]?.status, status);
   }
 });
@@ -228,7 +288,8 @@ test("a replacement repair can cite two accepted choices to resolve missing-user
     ];
     return response;
   } }).assess(unresolvedSourceInput);
-  assert.equal(result.approved, false);
+  assert.equal(result.approved, true);
+  assert.equal(result.concernResolutions?.[1]?.status, "unresolved");
 });
 
 test("unmet criteria do not become evidence concerns and retries expose the exact empty resolution contract", async () => {
@@ -273,8 +334,8 @@ test("temporal gaps reach the model as facts for contextual judgment, not automa
     const result = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
       const context = JSON.parse(request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
       assert.equal(context.temporalEvidenceGap, input.temporalEvidenceGap);
-      assert.match(context.assessmentPolicy.temporalCoverage.judgment, /not an automatic failure/);
-      assert.match(context.assessmentPolicy.temporalCoverage.boundary, /Never treat uncovered time as proven empty/);
+      assert.equal(context.assessmentPolicy.boundary, "user_request_match");
+      assert.equal(context.assessmentPolicy.temporalCoverage, undefined);
       const response = submission(input);
       response.toolCalls[0]!.arguments.criteria[0]!.satisfied = satisfied;
       return response;
@@ -361,19 +422,19 @@ for (const rationale of ["None.", "No unsupported requirement was added.", "该�
   });
 }
 
-test("an explicit invalid condition overrides satisfied=true and preserves its reason for canonical Plan revision", async () => {
+test("an unsupported extra condition preserves its reason without rejecting a matching reply", async () => {
   const input = assessmentInput();
   const reason = "A separate proof document is an execution method, not a necessary result condition.";
   const result = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete() {
     return submission(input, { status: "invalid", rationale: reason });
   } }).assess(input);
-  assert.equal(result.approved, false);
-  assert.equal(result.criteria[0]!.satisfied, false);
-  assert.equal(result.criteria[0]!.status, "conflict");
+  assert.equal(result.approved, true);
+  assert.equal(result.criteria[0]!.satisfied, true);
+  assert.equal(result.criteria[0]!.status, "satisfied");
+  assert.equal(result.criteria[0]!.blocking, false);
   assert.equal(result.criteria[0]!.contractIssue, reason);
-  assert.equal(result.failedBoundary?.suggestedRepairShape, "revise_plan");
-  assert.equal(result.failedBoundary?.unmetCriteria?.[0]?.contractIssue, reason);
-  assert.deepEqual(result.failedBoundary?.missingEvidenceKinds, []);
+  assert.equal(result.failedBoundary, undefined);
+  assert.equal(enforceAdmittedAssessment(input, result).approved, true);
 });
 
 test("a valid condition does not approve an unsatisfied result or erase its gap when failedBoundary is null", async () => {
@@ -386,6 +447,75 @@ test("a valid condition does not approve an unsatisfied result or erase its gap 
   assert.equal(result.criteria[0]!.contractIssue, undefined);
   assert.equal(result.failedBoundary?.stepId, input.step.id);
   assert.equal(result.failedBoundary?.unmetCriteria?.[0]?.criterionId, "answered");
+});
+
+for (const matches of [true, false]) {
+  test(`capability reply matching=${matches} is judged against the question without an extra catalog-proof obligation`, async () => {
+    const base = assessmentInput();
+    const question = "你有什么能力？";
+    const input: StepAssessmentInput = { ...base,
+      canonicalState: createCanonicalRunState({ runId: base.runId, userInput: question,
+        understanding: understandTask({ objective: "列出当前 Runtime 已授权且经过验证的全部能力" }), now: 1 }),
+      step: { ...base.step, objective: "List independently verified run_authorized capabilities.",
+        successCriteria: [...base.step.successCriteria, { id: "catalog-proof", source: "planner",
+          description: "Supply a schema_summary proving every available capability.", blocking: true, verification: "model_judged" }],
+      },
+      evidence: { ...base.evidence, candidateOutput: matches
+        ? "我可以帮你处理文档、表格、检索资料和分析数据。"
+        : "今天的天气很好。" },
+    };
+    const result = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
+      const context = JSON.parse(request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+      assert.equal(context.userAuthority.originalUserInput, question);
+      assert.equal(context.runtimeCapabilitySnapshot, undefined);
+      assert.equal(context.assessmentPolicy.boundary, "user_request_match");
+      const response = submission(input);
+      response.toolCalls[0]!.arguments.criteria[0]!.satisfied = matches;
+      response.toolCalls[0]!.arguments.criteria[1]!.satisfied = false;
+      response.toolCalls[0]!.arguments.criteria[1]!.contractCheck = {
+        status: "invalid", rationale: "The user asked for a capability introduction, not an independent catalog proof.",
+      };
+      return response;
+    } }).assess(input);
+    assert.equal(result.approved, matches);
+    assert.equal(enforceAdmittedAssessment(input, result).approved, matches);
+    assert.equal(result.criteria[1]!.satisfied, false);
+    assert.equal(result.criteria[1]!.blocking, false);
+    assert.ok(result.criteria[1]!.contractIssue);
+    assert.deepEqual(result.failedBoundary?.unmetCriteria?.map(criterion => criterion.criterionId), matches ? undefined : ["answered"]);
+    assert.deepEqual(result.failedBoundary?.missingEvidenceKinds, matches ? undefined : []);
+  });
+}
+
+test("the assessor sees the full long reply including the requested answer at the end", async () => {
+  const base = assessmentInput();
+  const candidateOutput = "背景说明。".repeat(700) + "\n最终答案：差额为20。";
+  const input = { ...base, evidence: { ...base.evidence, candidateOutput } };
+  const result = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
+    const context = JSON.parse(request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+    assert.equal(context.evidence.candidateOutput, candidateOutput);
+    assert.ok(context.evidence.candidateOutput.endsWith("最终答案：差额为20。"));
+    return submission(input);
+  } }).assess(input);
+  assert.equal(result.approved, true);
+});
+
+test("an explicit request for source verification stays a matching requirement", async () => {
+  const base = assessmentInput();
+  const question = "请提供有官方来源引用的结论。";
+  const input: StepAssessmentInput = { ...base,
+    canonicalState: createCanonicalRunState({ runId: base.runId, userInput: question,
+      understanding: understandTask({ objective: question }), now: 1 }),
+    step: { ...base.step, successCriteria: [{ id: "official-source", description: question, source: "task",
+      blocking: true, verification: "model_judged" }] },
+    evidence: { ...base.evidence, candidateOutput: "我没有查询官方资料，但结论应该如此。" },
+  };
+  const response = submission(input);
+  response.toolCalls[0]!.arguments.criteria[0]!.satisfied = false;
+  const result = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete() { return response; } }).assess(input);
+  assert.equal(result.approved, false);
+  assert.equal(enforceAdmittedAssessment(input, result).approved, false);
+  assert.deepEqual(result.failedBoundary?.unmetCriteria?.map(criterion => criterion.criterionId), ["official-source"]);
 });
 
 for (const check of [undefined, null, "", "None.", {}, { status: "unknown", rationale: "No issue." },
@@ -506,5 +636,51 @@ test("the production exact-reply scenario reaches persisted assessment, formal R
       criterion.satisfied && criterion.contractIssue === undefined), true);
     assert.equal((await database.prepare("SELECT COUNT(*) AS count FROM run_outcomes WHERE run_id = ?")
       .get<{ count: number }>(run.id))!.count, 1);
+  } finally { await database.close(); }
+});
+
+test("a matching reply reaches terminal delivery while an extra Plan proof stays an unsatisfied advisory", async () => {
+  const database = new AppDatabase(":memory:");
+  let assessmentCalls = 0;
+  try {
+    const runs = new RunService({ database, skills: new SkillService(database), tools: [],
+      plannerFactory: () => ({ async plan(task) {
+        const proposal = await singleStepTestPlanner().plan(task);
+        return { ...proposal, steps: proposal.steps.map(step => ({ ...step,
+          successCriteria: [...step.successCriteria.map(criterion => ({ ...criterion, verification: "model_judged" as const })),
+            { id: "extra-proof", description: "Provide an independent written proof document.", source: "planner" as const,
+              verification: "model_judged" as const, blocking: true }],
+        })) };
+      } }),
+      recoveryPlannerFactory: () => ({ async decide() { throw new Error("An extra Plan obligation must not trigger Recovery"); } }),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, async complete(request) {
+        if (request.phase !== "assessment") return { content: output, finishReason: "stop", toolCalls: [] };
+        assessmentCalls++;
+        const context = JSON.parse(request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+        return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "assess", name: "submit_assessment", arguments: {
+          criteria: context.step.successCriteria.map((criterion: { id: string }) => ({ criterionId: criterion.id,
+            satisfied: criterion.id !== "extra-proof",
+            rationale: criterion.id === "extra-proof" ? "No separate proof was produced." : "The reply matches the user's exact request.",
+            evidenceRefs: ["candidateOutput"], contractCheck: criterion.id === "extra-proof"
+              ? { status: "invalid", rationale: "The user did not request a proof document." }
+              : { status: "valid", rationale: "The exact reply is requested." },
+          })), skills: [], concernResolutions: [], feedback: "The proof document is an extra Plan condition.", failedBoundary: null,
+        } }] };
+      } }),
+    });
+    const run = await runs.execute("owner", userInput);
+    assert.equal(run.status, "completed");
+    assert.equal(run.output, output);
+    assert.equal(assessmentCalls, 1);
+    const assessments = await database.prepare("SELECT approved, criteria_json FROM skill_compliance_assessments WHERE plan_id IN (SELECT id FROM plans WHERE run_id = ?)")
+      .all<{ approved: number; criteria_json: string }>(run.id);
+    assert.equal(assessments[0]!.approved, 1);
+    const proof = JSON.parse(assessments[0]!.criteria_json).find((criterion: { criterionId: string }) => criterion.criterionId === "extra-proof");
+    assert.equal(proof.satisfied, false);
+    assert.equal(proof.blocking, false);
+    assert.ok(proof.contractIssue);
+    const events = await runs.events("owner", run.id);
+    assert.equal(events.some(event => event.type === "terminal.delivery_committed"), true);
+    assert.equal(events.some(event => event.type === "run.repairing"), false);
   } finally { await database.close(); }
 });

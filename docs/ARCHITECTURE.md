@@ -16,7 +16,9 @@
 - 会话是单 Agent 的会话：后续轮次通过 `conversationId` 继承同一会话的上下文，`parent_run_id` 只表达同一会话内的轮次先后，不构成委派谱系。
 - 批次是 `Batch → BatchItem → Run → Plan`，并发和失败策略只调度独立 Run，不能绕过单 Run 的规划、Skill 和终态提交链。
 
-真实契约是：从登录身份进入 Worker 后，所有模型调用、Skill 加载和 Tool 执行都必须服从同一份持久、可审计、不可由模型修改的授权事实；Run 只有在 Plan 全部步骤的成功标准与 Skill Compliance 都通过后，才能由 Terminal Committer 提交完成。
+真实契约是：从登录身份进入 Worker 后，所有模型调用、Skill 加载和 Tool 执行都必须服从同一份持久、可审计、不可由模型修改的授权事实；最终交付与 Outcome 由 Terminal Committer 提交。
+
+Assessment 的语义边界是判断回复是否匹配用户实际提问、是否切题。原始提问、已接受的补充和 HIL 答复是要求来源；Resolver、Planner、Skill 或专业指引不能增加用户义务。只有用户明确提出的来源、验证、范围或交付要求才参与匹配判断。多余的 Plan 条件、Skill QA、证据形式和未消除的过程疑点作为审计观察保留，不单独阻止切题的回复，也不要求先修订 Plan 才能交付。评估接收完整候选回复；授权、文件绑定与交付回执仍由 Runtime 的独立契约负责。
 
 每个执行 Step 还会由 Runtime 派生一份 `StepSemanticFrame`，作为执行上下文中的统一语义帧。它不改变 Plan schema，也不是 Admission 硬门槛；它把 Step 的阶段角色、证据来源、第一动作、完成边界和 QA 所有权投影给模型，避免模型在“获取证据、复用上游证据、生产产物、验收产物”之间反复猜测。详见 [Step Semantic Frame 设计标准](./STEP-SEMANTIC-FRAME.md)。
 

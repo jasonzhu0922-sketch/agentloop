@@ -633,11 +633,11 @@ export interface CriterionAssessment {
   readonly satisfied: boolean;
   /** `unverified` is distinct from a demonstrated contradiction. */
   readonly status?: "satisfied" | "unverified" | "conflict";
-  /** Copied from the admitted criterion so TerminalCommitter need not infer semantics. */
+  /** Admitted blocking, except that unsupported user obligations remain advisory. */
   readonly blocking?: boolean;
   readonly rationale: string;
   readonly evidenceRefs: readonly string[];
-  /** A faulty inferred condition must be revised, never silently waived. */
+  /** An unsupported addition to the user request, retained as an advisory observation. */
   readonly contractIssue?: string;
 }
 
@@ -762,6 +762,8 @@ export interface StepAssessmentInput {
    * or that any user business data was read.
    */
   readonly runtimeCapabilitySnapshot?: import("../runtime/capability-snapshot.ts").RuntimeCapabilitySnapshot;
+  /** The same descriptive Skill metadata supplied to the response turn; not activated Skills or execution authority. */
+  readonly runtimeSkillCatalog?: readonly Pick<PrivateSkill, "id" | "name" | "description">[];
   /** Server-authored availability of the exact requested capability-knowledge scope. */
   readonly runtimeCapabilityInventory?: {
     readonly requestedScope: import("../runtime/capability-snapshot.ts").RuntimeCapabilitySnapshotScope;

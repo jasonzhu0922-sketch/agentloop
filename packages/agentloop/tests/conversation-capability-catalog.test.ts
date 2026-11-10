@@ -403,3 +403,48 @@ test("missing configured metadata cannot turn a selected-Run inventory into a sy
     assert.equal(run.status, "completed", run.output);
   } finally { database.close(); await rm(root, { recursive: true, force: true }); }
 });
+
+for (const goal of ["你有什么能力？", "你能帮我做些什么？", "Tell me how you can help."]) {
+  test(`ordinary capability reply and assessment share the same descriptive evidence: ${goal}`, async () => {
+    const database = new AppDatabase(":memory:");
+    let executionCatalog: unknown;
+    let assessed = false;
+    try {
+      const skills = new SkillService(database);
+      const skill = await skills.create("owner", { name: "archive-notes", description: "Summarize archive notes", instructions: "PRIVATE WORKFLOW BODY" });
+      const runs = new RunService({ database, skills,
+        modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+          if (request.runId.startsWith("conversation-turn:")) return resolution("reply", goal);
+          if (request.phase === "assessment") {
+            const context = JSON.parse(request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+            assessed = true;
+            assert.deepEqual(context.runtimeSkillCatalog, executionCatalog);
+            assert.deepEqual(context.skills, [], "descriptive registration must not imply Skill activation");
+            assert.equal(context.runtimeCapabilitySnapshot.scope, "run_authorized");
+            assert.deepEqual(context.runtimeCapabilitySnapshot.sources, []);
+            assert.doesNotMatch(request.runtimeContext!.content, /PRIVATE WORKFLOW BODY/);
+            return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "assess", name: "submit_assessment", arguments: {
+              criteria: context.step.successCriteria.map((criterion: { id: string }) => ({ criterionId: criterion.id, satisfied: true,
+                rationale: "The reply describes registered metadata without claiming authorization or invocation.",
+                evidenceRefs: ["candidateOutput", "runtimeSkillCatalog", "runtimeCapabilitySnapshot"],
+                contractCheck: { status: "valid", rationale: "Answer the capability question." } })),
+              skills: [], concernResolutions: [], feedback: "", failedBoundary: null,
+            } }] };
+          }
+          assert.deepEqual(request.tools, []);
+          const prompt = `${request.systemPrompt}\n${request.runtimeContext!.content}`;
+          const catalog = prompt.match(/<available_skill_catalog[^>]*>\n([^\n]+)\n/);
+          assert.ok(catalog);
+          executionCatalog = JSON.parse(catalog[1]!).skills;
+          assert.deepEqual(executionCatalog, [{ id: skill.id, name: skill.name, description: skill.description }]);
+          assert.match(prompt, /"scope":"run_authorized"/);
+          return { content: "已注册 archive-notes Skill，可按其声明整理笔记。本次没有已授权的外部服务。", finishReason: "stop", toolCalls: [] };
+        } }),
+      });
+      const run = await runs.executeConversation("owner", goal);
+      assert.equal(run.status, "completed", run.output);
+      assert.equal(assessed, true);
+      assert.equal((await runs.events("owner", run.id)).some(event => event.type === "tool.dispatched"), false);
+    } finally { database.close(); }
+  });
+}

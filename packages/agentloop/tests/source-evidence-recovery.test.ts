@@ -281,7 +281,7 @@ test("source receipts and non-empty fabricated claims cannot bypass semantic ass
         if (request.phase === "assessment") {
           assessments += 1;
           const context = request.runtimeContext?.content ?? "";
-          assert.match(context, /factualSupport/);
+          assert.match(context, /user_request_match/);
           assert.match(context, /没有披露负责人姓名/);
           assert.match(context, /sourceContent/);
           const match = context.match(/<assessment_context source="server">\n([^\n]+)\n/);

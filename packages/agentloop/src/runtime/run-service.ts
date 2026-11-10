@@ -2132,13 +2132,17 @@ export class RunService {
       const responseOnly = turnResolution !== undefined && turnResolution.mode !== "execute";
       const requestedCapabilityScope = requestedRuntimeCapabilityScope(input);
       const runtimeCapabilitySnapshot = requestedCapabilityScope === undefined
-        ? undefined
+        // Replies already receive descriptive Skill metadata. Always preserve
+        // the corresponding Run facts too, even for an ordinary capability
+        // question without explicit scope vocabulary. Broader requests still
+        // require their exact host-supplied scope; they never fall back here.
+        ? turnResolution?.mode === "reply" ? runCapabilitySnapshot : undefined
         : runtimeCapabilitySnapshots.find((snapshot) => snapshot.scope === requestedCapabilityScope);
       const runtimeCapabilityInventory = requestedCapabilityScope === undefined ? undefined : {
         requestedScope: requestedCapabilityScope,
         availability: runtimeCapabilitySnapshot === undefined ? "not_provided" as const : "available" as const,
       };
-      const replyNeedsCapabilityInventory = turnResolution?.mode === "reply" && runtimeCapabilityInventory !== undefined;
+      const replyNeedsCapabilityInventory = turnResolution?.mode === "reply";
       model.setTemporalScope(turnResolution?.temporalScope, turnResolution?.recurringTime);
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       if (conversationEntry) {
@@ -2659,6 +2663,7 @@ export class RunService {
 
       const assessor = this.assessorFactory(model);
       const registry = new ToolRegistry(allTools, { plugins: this.toolExecutionPlugins });
+      const runtimeSkillCatalog = privateSkills.map(({ id, name, description }) => ({ id, name, description }));
       const initialRuntimePromptAugmentations = [
         ...(responseMemoryProjection === undefined ? [] : [interactionMemoryPromptAugmentation(responseMemoryProjection)]),
         ...(currentTurnMemoryCommit === undefined ? [] : [currentTurnMemoryCommitPromptAugmentation(currentTurnMemoryCommit)]),
@@ -2666,7 +2671,7 @@ export class RunService {
           schema: "agentloop.promptAugmentation/v1" as const,
           id: "runtime:available-skill-catalog",
           source: "runtime_skill_catalog",
-          content: `<available_skill_catalog scope="runtime" source="server">\n${JSON.stringify({ skills: privateSkills.map(({ id, name, description }) => ({ id, name, description })), instruction: "This is the Runtime's available Skill metadata for answering capability questions. It does not mean a Skill was invoked and does not grant execution authority." })}\n</available_skill_catalog>`,
+          content: `<available_skill_catalog scope="runtime" source="server">\n${JSON.stringify({ skills: runtimeSkillCatalog, instruction: "This is the Runtime's available Skill metadata for answering capability questions. It does not mean a Skill was invoked and does not grant execution authority." })}\n</available_skill_catalog>`,
         }] : []),
       ];
       for (;;) {
@@ -2688,6 +2693,7 @@ export class RunService {
           ...(conversationHistory === undefined ? {} : { conversationHistory }),
           ...(conversationWorkingSet === undefined ? {} : { conversationWorkingSet }),
           ...(initialRuntimePromptAugmentations.length === 0 ? {} : { initialRuntimePromptAugmentations }),
+          ...(responseOnly ? { runtimeSkillCatalog } : {}),
           ...(responseMemoryProjection === undefined
             ? {}
             : { confirmedResponseMemory: responseMemoryProjection }),
@@ -3351,6 +3357,7 @@ export class RunService {
     currentTurnMemoryCommit?: CurrentTurnMemoryCommitState;
     /** Informational, frozen source metadata for a response-only capability reply. */
     runtimeCapabilitySnapshot?: RuntimeCapabilitySnapshot;
+    runtimeSkillCatalog?: readonly Pick<PrivateSkill, "id" | "name" | "description">[];
     /** Availability of the requested capability-knowledge scope; it never grants a Tool. */
     runtimeCapabilityInventory?: {
       readonly requestedScope: import("./capability-snapshot.ts").RuntimeCapabilitySnapshotScope;
@@ -3882,6 +3889,7 @@ export class RunService {
             openEvidenceConcerns,
             ...(temporalScopeGap === undefined ? {} : { temporalEvidenceGap: temporalScopeGap }),
             ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
+            ...(input.runtimeSkillCatalog === undefined ? {} : { runtimeSkillCatalog: input.runtimeSkillCatalog }),
             ...(input.runtimeCapabilityInventory === undefined ? {} : { runtimeCapabilityInventory: input.runtimeCapabilityInventory }),
             decisionLedger,
             userAuthority,
@@ -3954,6 +3962,7 @@ export class RunService {
             }),
             runtimeEvidenceBundles,
             ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
+            ...(input.runtimeSkillCatalog === undefined ? {} : { runtimeSkillCatalog: input.runtimeSkillCatalog }),
             ...(input.runtimeCapabilityInventory === undefined ? {} : { runtimeCapabilityInventory: input.runtimeCapabilityInventory }),
             ...(candidate.contextSummary === undefined ? {} : { contextSummary: candidate.contextSummary }),
             assessmentProfile,
@@ -7652,6 +7661,7 @@ function stepAssessmentSignature(input: {
   openEvidenceConcerns: readonly { readonly gapId: string; readonly evidenceConcerns: CanonicalGoalGap["evidenceConcerns"] }[];
   temporalEvidenceGap?: string;
   runtimeCapabilitySnapshot?: RuntimeCapabilitySnapshot;
+  runtimeSkillCatalog?: readonly Pick<PrivateSkill, "id" | "name" | "description">[];
   runtimeCapabilityInventory?: {
     readonly requestedScope: import("./capability-snapshot.ts").RuntimeCapabilitySnapshotScope;
     readonly availability: "available" | "not_provided";
@@ -7671,6 +7681,7 @@ function stepAssessmentSignature(input: {
     openEvidenceConcerns: input.openEvidenceConcerns,
     ...(input.temporalEvidenceGap === undefined ? {} : { temporalEvidenceGap: input.temporalEvidenceGap }),
     ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
+    ...(input.runtimeSkillCatalog === undefined ? {} : { runtimeSkillCatalog: input.runtimeSkillCatalog }),
     ...(input.runtimeCapabilityInventory === undefined ? {} : { runtimeCapabilityInventory: input.runtimeCapabilityInventory }),
     decisionLedger: input.decisionLedger.map((commit) => ({
       id: commit.id,

@@ -1,22 +1,23 @@
 import { AppError } from "../shared/errors.ts";
+import { nullableJsonSchema } from "../shared/json-schema.ts";
 import { requireRecord, requireString, requireStringArray } from "../shared/validation.ts";
 import type { CanonicalRunState } from "../runtime/canonical-run-state.ts";
 import type { PlanProposal, RoundScope } from "./contracts.ts";
 
-export const ROUND_SCOPE_SCHEMA = {
-  type: ["object", "null"], additionalProperties: false,
+export const ROUND_SCOPE_SCHEMA = nullableJsonSchema({
+  type: "object", additionalProperties: false,
   required: ["kind", "targetIds", "purpose", "completionBoundary", "continuation"],
   properties: {
     kind: { type: "string", enum: ["delivery", "prerequisite"] },
     targetIds: { type: "array", minItems: 1, maxItems: 8, items: { type: "string" } },
     purpose: { type: "string" }, completionBoundary: { type: "string" }, continuation: { type: "string" },
   },
-} as const;
+});
 
 export function parseRoundScope(value: unknown): RoundScope | undefined {
   if (value === undefined || value === null) return undefined;
   const record = requireRecord(value, "roundScope");
-  if (Object.keys(record).some((key) => !Object.hasOwn(ROUND_SCOPE_SCHEMA.properties, key))) {
+  if (Object.keys(record).some((key) => !Object.hasOwn(ROUND_SCOPE_SCHEMA.anyOf[0].properties, key))) {
     throw new AppError("PLAN_NOT_ADMITTED", "Unknown Round scope field", 422);
   }
   const kind = requireString(record.kind, "roundScope.kind", { max: 32 });

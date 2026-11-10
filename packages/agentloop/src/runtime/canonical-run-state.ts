@@ -409,14 +409,9 @@ export function recordCanonicalAssessment(
   const step = requiredStep(state, assessment.stepId);
   const evidenceRefs = canonicalEvidenceRefs(evidence);
   const currentGap = state.gaps.find((gap) => gap.targetId === undefined && (gap.stepId === assessment.stepId || gap.repairScopeStepIds?.includes(assessment.stepId)) && gap.status === "open");
-  const hasUnresolvedConcerns = (assessment.failedBoundary?.evidenceConcerns?.length ?? 0) > 0
-    || (currentGap?.evidenceConcerns ?? []).some((_, concernIndex) => !assessment.concernResolutions?.some((resolution) =>
-      resolution.gapId === currentGap?.id && resolution.concernIndex === concernIndex && resolution.status === "resolved" && resolution.evidenceRefs.length > 0));
-  if (assessment.approved && hasUnresolvedConcerns) {
-    throw conflict("Cannot approve a Step while its canonical evidence concerns remain unresolved");
-  }
+  // Assessment owns the request-matching judgment. Historical evidence
+  // concerns remain audit facts, not a second semantic completion gate.
   const acceptedTargetIds = new Set(assessment.criteria
-    .filter(() => !hasUnresolvedConcerns)
     .filter((criterion) => criterion.satisfied && criterion.targetId !== undefined)
     .map((criterion) => criterion.targetId!)
     .filter((targetId) => step.targetIds.includes(targetId))

@@ -5,6 +5,42 @@ import { completeWithRequestTelemetry, completeWithStreaming } from "../src/runt
 import type { ModelStreamRawCaptureInput } from "../src/runtime/contracts.ts";
 
 for (const Model of [OpenAICompatibleModel, ResponsesModel]) {
+  test(`${Model.name} forwards external tool schemas without rewriting references, unions or literal values`, async () => {
+    const schema = {
+      $id: "https://schemas.example.test/lookup",
+      $defs: { filter: { type: ["object", "null"], additionalProperties: false,
+        required: ["value"], properties: { value: { type: "string" } } } },
+      type: "object",
+      properties: {
+        filter: { $ref: "#/$defs/filter" },
+        type: { type: "string", default: "object" },
+        data: { const: { type: ["array", "null"], items: { type: "string" } } },
+      },
+    };
+    const original = structuredClone(schema);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      const tool = Model === ResponsesModel ? body.tools[0] : body.tools[0].function;
+      assert.deepEqual(tool.parameters, original);
+      assert.equal(tool.strict, undefined);
+      return new Response(JSON.stringify(Model === ResponsesModel
+        ? { status: "completed", output_text: "done" }
+        : { choices: [{ finish_reason: "stop", message: { content: "done" } }] }),
+      { headers: { "content-type": "application/json" } });
+    };
+    try {
+      const model = new Model({ baseUrl: "https://models.example.test/v1", apiKey: "test-secret", model: "test-model",
+        contextWindowTokens: 128_000, maxOutputTokens: 8_192, maxAttempts: 1 });
+      const result = await model.complete({ runId: "external-schema", phase: "execution", systemPrompt: "Use the supplied tool if needed.",
+        messages: [{ role: "user", content: "Check status" }], tools: [{ name: "lookup", description: "Lookup", inputSchema: schema }] });
+      assert.equal(result.content, "done");
+      assert.deepEqual(schema, original);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+}
+
+for (const Model of [OpenAICompatibleModel, ResponsesModel]) {
   for (const scenario of ["json", "stream", "http-error", "invalid-json", "stream-error", "no-request-id", "gateway-only-json", "gateway-only-stream"] as const) {
     test(`${Model.name} preserves provider request identity in ${scenario} lifecycle telemetry`, async () => {
       const originalFetch = globalThis.fetch;

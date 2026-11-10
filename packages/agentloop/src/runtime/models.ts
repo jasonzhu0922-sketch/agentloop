@@ -1,287 +1,16 @@
-import { createHash } from "node:crypto";
+import { createOpenAI } from "@ai-sdk/openai";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import type { LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4GenerateResult, LanguageModelV4Prompt, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { AppError } from "../shared/errors.ts";
-import type {
-  ModelAdapter,
-  ModelProviderIdentity,
-  ModelMessage,
-  ModelInvocation,
-  ModelRequestLogContext,
-  ModelResponse,
-  ModelRetryReporter,
-  ModelStreamRawCaptureWriter,
-  ModelStreamReceipt,
-  ModelStreamSink,
-  ModelToolCall,
-} from "./contracts.ts";
-import {
-  encodeOpenAICompatiblePrompt,
-  type RuntimeContextPlacement,
-} from "./prompt-protocol.ts";
+import type { ModelAdapter, ModelInvocation, ModelRequestLogContext, ModelResponse, ModelRetryReporter, ModelStreamRawCaptureWriter, ModelStreamSink, ModelToolCall } from "./contracts.ts";
+import { encodeOpenAICompatiblePrompt, type RuntimeContextPlacement } from "./prompt-protocol.ts";
+import { type OpenAICompatibleModelOptions, type ResponsesReasoningContinuationStore } from "./model-provider-options.ts";
+import { ProviderTransport, JsonProviderResponse, normalizeJsonPayload, type ProviderProtocol } from "./model-provider-transport.ts";
+import * as policy from "./model-provider-policy.ts";
+export { InMemoryResponsesReasoningContinuationStore } from "./model-provider-options.ts";
+export type { OpenAICompatibleModelOptions, ResponsesReasoningContinuationStore } from "./model-provider-options.ts";
 
-export interface OpenAICompatibleModelOptions {
-  readonly baseUrl: string;
-  readonly apiKey: string;
-  readonly model: string;
-  readonly contextWindowTokens: number;
-  readonly maxOutputTokens: number;
-  readonly timeoutMs?: number;
-  readonly maxAttempts?: number;
-  readonly retryDelayMs?: number;
-  /**
-   * Some reasoning-mode OpenAI-compatible Providers reject named function
-   * `tool_choice` values. `constrained-as-auto` keeps the legacy lowest common
-   * denominator. `named-as-required` preserves single-tool structured phases by
-   * requiring a tool call while leaving Runtime to validate the tool name.
-   */
-  readonly toolChoiceMode?: "native" | "constrained-as-auto" | "named-as-required";
-  readonly runtimeContextPlacement?: RuntimeContextPlacement;
-  /** Request a public reasoning summary from Responses-compatible models. */
-  readonly reasoningSummary?: "auto" | "detailed";
-  /** Keep provider-encrypted reasoning continuation in the Responses adapter only. */
-  readonly reasoningEncryptedContent?: boolean;
-  /** Internal registry-owned store; never part of the Runtime model contract. */
-  readonly reasoningContinuationStore?: ResponsesReasoningContinuationStore;
-  /** Internal profile scope for the registry-owned store. */
-  readonly reasoningContinuationScope?: string;
-  /** Optional upstream sampling controls; omitted values are not sent. */
-  readonly temperature?: number;
-  readonly topP?: number;
-  /** Control Responses reasoning, or disable reasoning for tool-calling Chat Completions. */
-  readonly reasoningEffort?: "none" | "low" | "medium" | "high";
-  /** Control thinking for Chat Completions providers that expose DeepSeek's thinking extension. */
-  readonly thinkingMode?: "enabled" | "disabled";
-  /** Map the provider-neutral setting to Bailian's `enable_thinking` field. */
-  readonly enableThinking?: boolean;
-  /** Optional DeepSeek Chat Completions reasoning effort when thinking is enabled. */
-  readonly thinkingEffort?: "low" | "medium" | "high";
-  /** Whether provider reasoning may be projected into Runtime events. */
-  readonly reasoningVisibility?: "visible" | "hidden";
-  /** Override Chat Completions thinking for formal OutcomePlan requests only. */
-  readonly planningThinkingMode?: "enabled" | "disabled";
-  /** Server-configured OpenAI Chat Completions template extensions. */
-  readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
-  /** Provider-owned JSON request parameters forwarded without interpretation. */
-  readonly providerParameters?: Readonly<Record<string, unknown>>;
-  /** Optional server-authored reporter invoked before each retry attempt. */
-  readonly onRetry?: ModelRetryReporter;
-  /** Deployment-owned persistence for anomalous raw upstream SSE bytes. */
-  readonly streamRawCaptureWriter?: ModelStreamRawCaptureWriter;
-}
-
-export interface ResponsesReasoningContinuationStore {
-  get(scope: string, runId: string): readonly Record<string, unknown>[];
-  set(scope: string, runId: string, items: readonly Record<string, unknown>[]): void;
-}
-
-export class InMemoryResponsesReasoningContinuationStore implements ResponsesReasoningContinuationStore {
-  private readonly values = new Map<string, { readonly items: readonly Record<string, unknown>[]; readonly expiresAt: number }>();
-  private readonly maxEntries = 2_048;
-  private readonly ttlMs = 24 * 60 * 60 * 1_000;
-
-  get(scope: string, runId: string): readonly Record<string, unknown>[] {
-    this.prune();
-    return this.values.get(`${scope}\u0000${runId}`)?.items ?? [];
-  }
-
-  set(scope: string, runId: string, items: readonly Record<string, unknown>[]): void {
-    const key = `${scope}\u0000${runId}`;
-    this.prune();
-    if (items.length === 0) this.values.delete(key);
-    else {
-      if (!this.values.has(key) && this.values.size >= this.maxEntries) {
-        const oldest = this.values.keys().next().value;
-        if (oldest !== undefined) this.values.delete(oldest);
-      }
-      this.values.delete(key);
-      this.values.set(key, { items: items.map((item) => structuredClone(item)), expiresAt: Date.now() + this.ttlMs });
-    }
-  }
-
-  private prune(): void {
-    const now = Date.now();
-    for (const [key, entry] of this.values) if (entry.expiresAt <= now) this.values.delete(key);
-  }
-}
-
-interface CompatibleResponse {
-  id?: string;
-  choices?: Array<{
-    finish_reason?: string;
-    message?: {
-      content?: string | null;
-      reasoning_content?: string | null;
-      tool_calls?: Array<{
-        id?: string;
-        function?: { name?: string; arguments?: unknown };
-      }>;
-    };
-  }>;
-  usage?: {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-  };
-}
-
-interface CompatibleStreamChunk {
-  id?: string;
-  choices?: Array<{
-    finish_reason?: string | null;
-    delta?: {
-      role?: string | null;
-      content?: string | null;
-      reasoning_content?: string | null;
-      tool_calls?: Array<{
-        index?: number;
-        id?: string | null;
-        function?: { name?: string | null; arguments?: unknown };
-      }>;
-    };
-  }>;
-  usage?: {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-  };
-}
-
-interface ProviderRequest {
-  readonly body: string;
-  readonly logContext: ModelRequestLogContext;
-}
-
-interface StreamFailureDiagnostics {
-  providerResponseId?: string;
-  eventsSeen: number;
-  hadSinkEmission: boolean;
-  lastEvent?: StreamEventSummary;
-  readChunkCount: number;
-  sseEventCount: number;
-  jsonEventCount: number;
-  nonJsonEventCount: number;
-  doneEventCount: number;
-  unrecognizedJsonEventCount: number;
-  unterminatedFinalEventBytes: number;
-  finishReasonObserved: boolean;
-  observedDeltaFields: Set<string>;
-  streamReceipt?: ModelStreamReceipt;
-}
-
-interface StreamEventSummary {
-  readonly dataKind: "done" | "json" | "non-json";
-  readonly byteLength: number;
-  readonly shape?: readonly string[];
-}
-
-class StreamConsumptionError extends Error {
-  readonly stage: "read" | "consume_event";
-  readonly diagnostics: StreamFailureDiagnostics;
-  readonly cause: unknown;
-
-  constructor(stage: "read" | "consume_event", error: unknown, diagnostics: StreamFailureDiagnostics) {
-    super(stage === "read" ? "stream read failed" : "stream event consumption failed");
-    this.name = "StreamConsumptionError";
-    this.stage = stage;
-    this.diagnostics = diagnostics;
-    this.cause = error;
-  }
-}
-
-const STREAM_WALL_TIMEOUT_FACTOR = 3;
-const STREAM_WALL_TIMEOUT_MAX_MS = 15 * 60 * 1_000;
-const MODEL_OUTPUT_BYTES_PER_TOKEN = 32;
-const MIN_MODEL_OUTPUT_BYTES = 64 * 1024;
-const MODEL_RESPONSE_ENVELOPE_MULTIPLIER = 4;
-const MODEL_RESPONSE_ENVELOPE_OVERHEAD_BYTES = 64 * 1024;
-const MAX_ANOMALOUS_RAW_SSE_CAPTURE_BYTES = 2 * 1024 * 1024;
-const NEVER_ABORT_SIGNAL = new AbortController().signal;
-
-function createStreamReceiptCollector(input: {
-  readonly response: Response;
-  readonly runId: string;
-  readonly request: ModelRequestLogContext;
-  readonly diagnostics: StreamFailureDiagnostics;
-  readonly writer?: ModelStreamRawCaptureWriter;
-}): Readonly<{
-  recordChunk(value: Uint8Array): void;
-  build(anomalyReasons: readonly string[], forceTruncated?: boolean): Promise<ModelStreamReceipt>;
-}> {
-  const rawHash = createHash("sha256");
-  const rawCaptureChunks: Buffer[] = [];
-  let rawBytes = 0;
-  let capturedBytes = 0;
-  return {
-    recordChunk(value) {
-      const rawChunk = Buffer.from(value);
-      rawHash.update(rawChunk);
-      rawBytes += rawChunk.length;
-      if (capturedBytes >= MAX_ANOMALOUS_RAW_SSE_CAPTURE_BYTES) return;
-      const retained = rawChunk.subarray(0, MAX_ANOMALOUS_RAW_SSE_CAPTURE_BYTES - capturedBytes);
-      rawCaptureChunks.push(Buffer.from(retained));
-      capturedBytes += retained.length;
-    },
-    async build(anomalyReasons, forceTruncated = false) {
-      const contentType = input.response.headers.get("content-type") ?? undefined;
-      const identity = { ...providerRequestIdentity(input.response), ...providerResponseIdentity({ id: input.diagnostics.providerResponseId }) };
-      const rawSha256 = rawHash.digest("hex");
-      let rawCapture: ModelStreamReceipt["rawCapture"];
-      let rawCaptureError: string | undefined;
-      if (anomalyReasons.length > 0 && input.writer !== undefined) {
-        try {
-          rawCapture = await input.writer({
-            schema: "agentloop.modelStreamRawCapture/v1",
-            runId: input.runId,
-            request: input.request,
-            response: {
-              status: input.response.status,
-              ...(contentType === undefined ? {} : { contentType }),
-              ...identity,
-            },
-            anomalyReasons,
-            rawSse: Buffer.concat(rawCaptureChunks),
-            rawBytes,
-            rawSha256,
-            truncated: forceTruncated || capturedBytes < rawBytes,
-          });
-        } catch (error) {
-          rawCaptureError = safeErrorMessage(error) ?? "raw stream capture failed";
-        }
-      }
-      return {
-        schema: "agentloop.modelStreamReceipt/v1",
-        transport: "sse",
-        httpStatus: input.response.status,
-        ...(contentType === undefined ? {} : { contentType }),
-        ...identity,
-        rawBytes,
-        rawSha256,
-        readChunkCount: input.diagnostics.readChunkCount,
-        sseEventCount: input.diagnostics.sseEventCount,
-        jsonEventCount: input.diagnostics.jsonEventCount,
-        nonJsonEventCount: input.diagnostics.nonJsonEventCount,
-        doneEventCount: input.diagnostics.doneEventCount,
-        unrecognizedJsonEventCount: input.diagnostics.unrecognizedJsonEventCount,
-        unterminatedFinalEventBytes: input.diagnostics.unterminatedFinalEventBytes,
-        finishReasonObserved: input.diagnostics.finishReasonObserved,
-        sinkEmissionObserved: input.diagnostics.hadSinkEmission,
-        observedDeltaFields: [...input.diagnostics.observedDeltaFields].sort(),
-        anomalyReasons,
-        ...(rawCapture === undefined ? {} : { rawCapture }),
-        ...(rawCaptureError === undefined ? {} : { rawCaptureError }),
-      };
-    },
-  };
-}
-
-interface ModelResponseBudget {
-  readonly maxOutputTokens: number;
-  readonly maxOutputBytes: number;
-  readonly maxResponseBytes: number;
-  addOutputBytes(value: string, field: string): void;
-  replaceOutputBytes(previous: string, value: string, field: string): void;
-  assertEventBytes(value: string): void;
-  assertResponse(response: ModelResponse): void;
-}
-
-export class OpenAICompatibleModel implements ModelAdapter {
+class AiSdkModel implements ModelAdapter {
   readonly limits: Readonly<{ contextWindowTokens: number; maxOutputTokens: number }>;
   readonly completeTimeoutMs: number;
   readonly operationTimeoutMs: number;
@@ -307,12 +36,17 @@ export class OpenAICompatibleModel implements ModelAdapter {
   private readonly onRetry?: ModelRetryReporter;
   private readonly streamRawCaptureWriter?: ModelStreamRawCaptureWriter;
 
-  constructor(options: OpenAICompatibleModelOptions) {
+  private readonly reasoningEncryptedContent: boolean;
+  private readonly reasoningContinuationStore?: ResponsesReasoningContinuationStore;
+  private readonly reasoningContinuationScope: string;
+  private readonly protocol: ProviderProtocol;
+  constructor(options: OpenAICompatibleModelOptions, protocol: ProviderProtocol) {
+    this.protocol = protocol;
     const base = new URL(options.baseUrl.endsWith("/") ? options.baseUrl : `${options.baseUrl}/`);
     if (base.protocol !== "https:" && base.protocol !== "http:") {
       throw new TypeError("LLM base URL must use http or https");
     }
-    this.endpoint = new URL("chat/completions", base);
+    this.endpoint = new URL(protocol === "responses" ? "responses" : "chat/completions", base);
     this.apiKey = options.apiKey;
     this.model = options.model;
     if (!Number.isSafeInteger(options.contextWindowTokens) || options.contextWindowTokens < 4_096) {
@@ -331,13 +65,17 @@ export class OpenAICompatibleModel implements ModelAdapter {
     };
     this.timeoutMs = options.timeoutMs ?? 120_000;
     this.completeTimeoutMs = this.timeoutMs;
-    this.operationTimeoutMs = streamOperationTimeoutMs(this.timeoutMs);
+    this.operationTimeoutMs = policy.streamOperationTimeoutMs(this.timeoutMs);
     this.reasoningVisibility = options.reasoningVisibility ?? "visible";
     this.maxAttempts = options.maxAttempts ?? 3;
     this.retryDelayMs = options.retryDelayMs ?? 250;
     this.toolChoiceMode = options.toolChoiceMode ?? "native";
     this.runtimeContextPlacement = options.runtimeContextPlacement ?? "system";
     this.reasoningSummary = options.reasoningSummary;
+    this.reasoningEncryptedContent = options.reasoningEncryptedContent ?? false;
+    this.reasoningContinuationStore = options.reasoningContinuationStore;
+    this.reasoningContinuationScope = options.reasoningContinuationScope ?? this.model;
+    if (this.reasoningEncryptedContent && !this.reasoningContinuationStore) throw new TypeError("Responses encrypted reasoning requires an adapter-owned continuation store");
     for (const [name, value, max] of [["temperature", options.temperature, 2], ["topP", options.topP, 1]] as const) {
       if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > max)) {
         throw new TypeError(`LLM ${name} must be a number between 0 and ${max}`);
@@ -382,7 +120,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
     ) {
       throw new TypeError("reasoning effort must be none, low, medium, or high");
     }
-    if (this.reasoningEffort !== undefined && this.reasoningEffort !== "none") {
+    if (protocol === "chat-completions" && this.reasoningEffort !== undefined && this.reasoningEffort !== "none") {
       throw new TypeError("Chat Completions reasoning effort must be none; low, medium, and high require Responses");
     }
     if (this.thinkingMode !== undefined && this.thinkingMode !== "enabled" && this.thinkingMode !== "disabled") {
@@ -407,1902 +145,355 @@ export class OpenAICompatibleModel implements ModelAdapter {
     }
   }
 
+
   estimateInputTokens(invocation: ModelInvocation): number {
-    const prompt = encodeOpenAICompatiblePrompt(invocation, this.runtimeContextPlacement);
-    const providerTools = invocation.tools.map((tool) => ({
-      type: "function",
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.inputSchema,
-        ...(tool.strict === undefined ? {} : { strict: tool.strict }),
-      },
-    }));
-    // This remains an estimate rather than a vendor tokenizer result, but it
-    // measures the same system/user/assistant/tool envelope used by complete.
-    return estimateWireTokens(JSON.stringify({ messages: prompt.messages, tools: providerTools }))
-      + prompt.messages.length * 4
-      + providerTools.length * 4;
+    const encoded = encodeOpenAICompatiblePrompt(invocation, this.runtimeContextPlacement);
+    return policy.estimateWireTokens(JSON.stringify({ messages: encoded.messages, tools: invocation.tools })) + encoded.messages.length * 4 + invocation.tools.length * 4;
   }
 
   requestLogContext(invocation: ModelInvocation, stream: boolean): ModelRequestLogContext {
-    return this.buildRequest(invocation, stream).logContext;
+    const messages = encodeOpenAICompatiblePrompt(invocation, this.runtimeContextPlacement).messages;
+    const input = messages.filter(message => message.role !== "system");
+    const count = input.reduce((total, message) => total + (message.role === "assistant"
+      ? (typeof message.content === "string" && message.content.length > 0 ? 1 : 0) + (Array.isArray(message.tool_calls) ? message.tool_calls.length : 0) : 1), 0);
+    const choice = this.sdkToolChoice(invocation);
+    const wireChoice = choice?.type === "tool"
+      ? this.protocol === "responses" ? { type: "function", name: choice.toolName } : { type: "function", function: { name: choice.toolName } }
+      : choice?.type;
+    return policy.modelRequestLogContext({
+      protocol: this.protocol, model: this.model, invocation, stream,
+      runtimeContextPlacement: this.runtimeContextPlacement,
+      ...(this.protocol === "responses" ? { providerInputItemCount: Math.max(1, count), insertedEmptyInputSentinel: count === 0 } : { providerMessageCount: messages.length }),
+      toolChoice: wireChoice,
+    });
   }
 
-  async complete(invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse> {
-    const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
-    const combinedSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
-    const request = this.buildRequest(invocation, false);
+  complete(invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse> {
+    // Responses-compatible servers already use the stream path for semantic complete.
+    return this.invoke(invocation, this.protocol === "responses", async () => undefined, signal);
+  }
 
-    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
-      let response: Response;
-      try {
-        response = await fetch(this.endpoint, {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${this.apiKey}`,
-            "content-type": "application/json",
-          },
-          body: request.body,
-          signal: combinedSignal,
-        });
-      } catch (error) {
-        if (combinedSignal.aborted) throw modelRequestAborted();
-        if (attempt < this.maxAttempts) {
-          await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, undefined, request.logContext);
-          continue;
-        }
-        throw new AppError("MODEL_ERROR", "Model provider is unreachable", 502, {
-          attempts: attempt,
-          causeCode: transportCauseCode(error),
-          request: request.logContext,
-        });
-      }
+  streamComplete(invocation: ModelInvocation, sink: ModelStreamSink, signal?: AbortSignal): Promise<ModelResponse> {
+    return this.invoke(invocation, true, sink, signal);
+  }
 
-      if (!response.ok) {
-        if (isRetryableStatus(response.status) && attempt < this.maxAttempts) {
-          await response.body?.cancel().catch(() => undefined);
-          await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, response.status, request.logContext, providerRequestIdentity(response));
-          continue;
-        }
-        throw await providerHttpError(response, request.logContext);
-      }
+  private sdkToolChoice(invocation: ModelInvocation): LanguageModelV4CallOptions["toolChoice"] {
+    if (!invocation.tools.length) return undefined;
+    const choice = invocation.toolChoice ?? "auto";
+    if (this.toolChoiceMode === "constrained-as-auto" && choice !== "auto") return { type: "auto" };
+    if (this.toolChoiceMode === "named-as-required" && typeof choice !== "string") return { type: invocation.tools.length === 1 ? "required" : "auto" };
+    return typeof choice === "string" ? { type: choice } : { type: "tool", toolName: choice.name };
+  }
 
-      const budget = createModelResponseBudget(invocation, this.limits);
-      let payload: CompatibleResponse;
-      try {
-        payload = await readJsonResponseWithinLimit(response, budget) as CompatibleResponse;
-        assertChatCompletionsPayload(payload);
-      } catch (error) {
-        if (combinedSignal.aborted) throw withProviderRequestIdentity(modelRequestAborted(), response);
-        if (error instanceof AppError) throw withProviderRequestIdentity(error, response);
-        if (attempt < this.maxAttempts) {
-          await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, undefined, request.logContext, providerRequestIdentity(response));
-          continue;
+  private callOptions(invocation: ModelInvocation, signal: AbortSignal): LanguageModelV4CallOptions {
+    const encoded = encodeOpenAICompatiblePrompt(invocation, this.runtimeContextPlacement).messages;
+    const prompt: LanguageModelV4Prompt = [];
+    for (const message of encoded) {
+      if (message.role === "system") {
+        if (this.protocol === "chat-completions") prompt.push({ role: "system", content: String(message.content) });
+      } else if (message.role === "user") {
+        prompt.push({ role: "user", content: [{ type: "text", text: String(message.content) }] });
+      } else if (message.role === "tool") {
+        prompt.push({ role: "tool", content: [{ type: "tool-result", toolCallId: String(message.tool_call_id), toolName: "", output: { type: "text", value: String(message.content) } }] });
+      } else {
+        const content: Extract<LanguageModelV4Prompt[number], { role: "assistant" }>["content"] = [];
+        if (typeof message.content === "string" && message.content.length) content.push({ type: "text", text: message.content });
+        if (this.protocol === "chat-completions" && typeof message.reasoning_content === "string") content.push({ type: "reasoning", text: message.reasoning_content });
+        for (const call of (message.tool_calls ?? []) as Array<Record<string, any>>) {
+          content.push({ type: "tool-call", toolCallId: call.id, toolName: call.function.name, input: JSON.parse(call.function.arguments) });
         }
-        throw new AppError("MODEL_ERROR", "Model provider returned an unreadable response", 502, {
-          ...providerRequestIdentity(response),
-          attempts: attempt,
-          causeCode: transportCauseCode(error),
-          request: request.logContext,
-        });
-      }
-
-      try {
-        const choice = payload.choices?.[0];
-        const message = choice?.message;
-        if (message === undefined) throw new AppError("MODEL_ERROR", "Model provider returned no message", 502);
-        const toolCalls = (message.tool_calls ?? []).map((call, index) => parseToolCall(call, index));
-        if (requestRequiresToolCall(request.logContext.toolChoice) && toolCalls.length === 0 && attempt < this.maxAttempts) {
-          await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, undefined, request.logContext, providerRequestIdentity(response));
-          continue;
-        }
-        const result: ModelResponse = {
-          ...providerRequestIdentity(response),
-          ...providerResponseIdentity(payload),
-          content: message.content ?? "",
-          toolCalls,
-          finishReason: normalizeFinishReason(choice?.finish_reason, toolCalls.length),
-          ...(typeof message.reasoning_content === "string" && message.reasoning_content.length > 0
-            ? { reasoningContent: message.reasoning_content }
-            : {}),
-          ...(payload.usage === undefined
-            ? {}
-            : {
-                usage: {
-                  inputTokens: payload.usage.prompt_tokens,
-                  outputTokens: payload.usage.completion_tokens,
-                },
-              }),
-        };
-        budget.assertResponse(result);
-        return result;
-      } catch (error) {
-        throw error instanceof AppError ? withProviderRequestIdentity(error, response) : error;
+        if (content.length) prompt.push({ role: "assistant", content });
       }
     }
-    throw new AppError("MODEL_ERROR", "Model request exhausted its attempts", 502);
-  }
-
-  async streamComplete(
-    invocation: ModelInvocation,
-    sink: ModelStreamSink,
-    signal?: AbortSignal,
-  ): Promise<ModelResponse> {
-    const request = this.buildRequest(invocation, true);
-    const retrySignal = signal ?? NEVER_ABORT_SIGNAL;
-
-    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
-      const requestTimeout = createStreamingModelTimeout(this.timeoutMs, signal);
-      try {
-        let response: Response;
-        try {
-          response = await fetch(this.endpoint, {
-            method: "POST",
-            headers: {
-              authorization: `Bearer ${this.apiKey}`,
-              "content-type": "application/json",
-            },
-            body: request.body,
-            signal: requestTimeout.signal,
-          });
-        } catch (error) {
-          if (requestTimeout.aborted) {
-            if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
-              await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
-              continue;
-            }
-            throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
-          }
-          if (attempt < this.maxAttempts) {
-            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
-            continue;
-          }
-          throw new AppError("MODEL_ERROR", "Model provider is unreachable", 502, {
-            attempts: attempt,
-            causeCode: transportCauseCode(error),
-            request: request.logContext,
-          });
-        }
-
-        if (!response.ok) {
-          if (isRetryableStatus(response.status) && attempt < this.maxAttempts) {
-            const providerFailure = await retryableProviderFailure(response);
-            await response.body?.cancel().catch(() => undefined);
-            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, response.status, request.logContext, providerFailure);
-            continue;
-          }
-          throw await providerHttpError(response, request.logContext);
-        }
-
-        try {
-          const result = await this.consumeStream(
-            response,
-            sink,
-            invocation,
-            request.logContext,
-            requestTimeout.recordActivity,
-            createModelResponseBudget(invocation, this.limits),
-          );
-          return { ...result, ...providerRequestIdentity(response) };
-        } catch (error) {
-          if (requestTimeout.aborted) {
-            if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
-              await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext, providerRequestIdentity(response));
-              continue;
-            }
-            throw withProviderRequestIdentity(modelRequestAborted(requestTimeout.abortReason, requestTimeout.details()), response);
-          }
-          if (error instanceof StreamConsumptionError && !error.diagnostics.hadSinkEmission && attempt < this.maxAttempts) {
-            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext, providerRequestIdentity(response));
-            continue;
-          }
-          if (error instanceof AppError) throw withProviderRequestIdentity(error, response);
-          // Partial deltas may already have been emitted to the sink, so a
-          // mid-stream failure is never replayed through a second provider call.
-          throw withProviderRequestIdentity(unreadableStreamingResponse(error, attempt, request.logContext), response);
-        }
-      } finally {
-        requestTimeout.dispose();
+    if (this.protocol === "responses") {
+      const continuation = this.reasoningEncryptedContent ? this.reasoningContinuationStore?.get(this.reasoningContinuationScope, invocation.runId) ?? [] : [];
+      if (continuation.length) {
+        const index = prompt.findLastIndex(message => message.role === "user");
+        prompt.splice(index < 0 ? prompt.length : index, 0, { role: "assistant", content: continuation.map(item => ({
+          type: "reasoning" as const, text: "", providerOptions: { openai: { itemId: item.id as string, reasoningEncryptedContent: item.encrypted_content as string } },
+        })) });
       }
+      if (!prompt.length) prompt.push({ role: "user", content: [{ type: "text", text: "Continue." }] });
     }
-    throw new AppError("MODEL_ERROR", "Model request exhausted its attempts", 502);
-  }
-
-  private buildRequest(invocation: ModelInvocation, stream: boolean): ProviderRequest {
-    const prompt = encodeOpenAICompatiblePrompt(invocation, this.runtimeContextPlacement);
-    const providerTools = invocation.tools.map((tool) => ({
-      type: "function",
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.inputSchema,
-        ...(tool.strict === undefined ? {} : { strict: tool.strict }),
-      },
-    }));
-    const toolChoice = invocation.tools.length === 0
-      ? undefined
-      : toProviderToolChoice(invocation.toolChoice ?? "auto", this.toolChoiceMode, invocation.tools.length);
-    const thinkingMode = invocation.plannerRequest && this.planningThinkingMode !== undefined
-      ? this.planningThinkingMode
-      : this.thinkingMode;
-    // `enableThinking` is the vendor-specific switch used by Bailian. When it
-    // is present, it is authoritative and the generic DeepSeek `thinking`
-    // envelope is omitted to avoid sending two competing controls.
-    const wireThinkingMode = this.enableThinking === undefined ? thinkingMode : undefined;
-    const wireThinkingEffort = this.enableThinking === false ? undefined : this.thinkingEffort;
-    const body = JSON.stringify({
-      ...this.providerParameters,
-      model: this.model,
-      ...(this.temperature === undefined ? {} : { temperature: this.temperature }),
-      ...(this.topP === undefined ? {} : { top_p: this.topP }),
-      messages: prompt.messages,
-      tools: providerTools,
-      ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
-      ...(wireThinkingMode === undefined && wireThinkingEffort === undefined
-        ? {}
-        : {
-            ...(wireThinkingMode === undefined ? {} : { thinking: { type: wireThinkingMode } }),
-            ...(wireThinkingEffort === undefined ? {} : { reasoning_effort: wireThinkingEffort }),
-          }),
+    const thinkingMode = invocation.plannerRequest && this.planningThinkingMode !== undefined ? this.planningThinkingMode : this.thinkingMode;
+    const vendorOptions = {
+      ...(this.enableThinking === undefined && thinkingMode !== undefined ? { thinking: { type: thinkingMode } } : {}),
+      ...(this.enableThinking !== false && this.thinkingEffort !== undefined ? { reasoning_effort: this.thinkingEffort } : {}),
       ...(this.reasoningEffort === undefined ? {} : { reasoning_effort: this.reasoningEffort }),
       ...(this.chatTemplateKwargs === undefined ? {} : { chat_template_kwargs: this.chatTemplateKwargs }),
       ...(this.enableThinking === undefined ? {} : { enable_thinking: this.enableThinking }),
-      max_tokens: Math.min(invocation.maxOutputTokens ?? this.limits.maxOutputTokens, this.limits.maxOutputTokens),
-      ...(stream ? { stream: true } : {}),
-    });
+    };
     return {
-      body,
-      logContext: modelRequestLogContext({
-        protocol: "chat-completions",
-        model: this.model,
-        invocation,
-        stream,
-        runtimeContextPlacement: this.runtimeContextPlacement,
-        providerMessageCount: prompt.messages.length,
-        toolChoice,
-      }),
+      prompt, abortSignal: signal, includeRawChunks: true,
+      maxOutputTokens: Math.min(invocation.maxOutputTokens ?? this.limits.maxOutputTokens, this.limits.maxOutputTokens),
+      ...(this.protocol === "chat-completions" ? { temperature: this.temperature, topP: this.topP } : {}),
+      tools: invocation.tools.map(tool => ({ type: "function", name: tool.name, description: tool.description,
+        // Responses-compatible tools keep their original schema at the transport
+        // boundary instead of undergoing OpenAI-only constraint removal.
+        inputSchema: this.protocol === "responses" ? {} : tool.inputSchema,
+        ...(tool.strict === undefined ? {} : { strict: tool.strict }),
+      })),
+      toolChoice: this.sdkToolChoice(invocation),
+      providerOptions: this.protocol === "chat-completions" ? { agentloop: vendorOptions as any } : { openai: {
+        instructions: String(encoded.find(message => message.role === "system")?.content ?? ""),
+        forceReasoning: this.reasoningSummary !== undefined || this.reasoningEffort !== undefined || this.reasoningEncryptedContent,
+        ...(this.reasoningSummary === undefined ? {} : { reasoningSummary: this.reasoningSummary }),
+        ...(this.reasoningEffort === undefined ? {} : { reasoningEffort: this.reasoningEffort }),
+        ...(this.reasoningEncryptedContent ? { include: ["reasoning.encrypted_content"] } : {}),
+      } },
     };
   }
 
-  private async consumeStream(
-    response: Response,
-    sink: ModelStreamSink,
-    invocation: ModelInvocation,
-    request: ModelRequestLogContext,
-    recordActivity: () => void = () => undefined,
-    budget: ModelResponseBudget,
-  ): Promise<ModelResponse> {
-    if (response.body === null) {
-      throw new AppError("MODEL_ERROR", "Model provider returned no streaming body", 502);
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let content = "";
-    let reasoningContent = "";
-    const toolCallAccumulator = new Map<number, {
-      id?: string;
-      name?: string;
-      arguments: string;
-      argumentValue?: unknown;
-      hasArgumentValue: boolean;
-    }>();
-    let finishReason: string | undefined;
-    let inputTokens: number | undefined;
-    let outputTokens: number | undefined;
-    const diagnostics: StreamFailureDiagnostics = {
-      eventsSeen: 0,
-      hadSinkEmission: false,
-      readChunkCount: 0,
-      sseEventCount: 0,
-      jsonEventCount: 0,
-      nonJsonEventCount: 0,
-      doneEventCount: 0,
-      unrecognizedJsonEventCount: 0,
-      unterminatedFinalEventBytes: 0,
-      finishReasonObserved: false,
-      observedDeltaFields: new Set<string>(),
-    };
-    const receiptCollector = createStreamReceiptCollector({
-      response,
-      runId: invocation.runId,
-      request,
-      diagnostics,
-      writer: this.streamRawCaptureWriter,
-    });
-    const emit = async (event: Parameters<ModelStreamSink>[0]): Promise<void> => {
-      diagnostics.hadSinkEmission = true;
-      await sink(event);
-    };
-
-    const handleData = async (data: string): Promise<void> => {
-      diagnostics.eventsSeen += 1;
-      diagnostics.lastEvent = summarizeStreamEvent(data);
-      if (data.trim() === "[DONE]") {
-        diagnostics.doneEventCount += 1;
-        return;
-      }
-      budget.assertEventBytes(data);
-      let payload: CompatibleStreamChunk;
-      try {
-        payload = JSON.parse(data) as CompatibleStreamChunk;
-      } catch {
-        diagnostics.nonJsonEventCount += 1;
-        return;
-      }
-      diagnostics.jsonEventCount += 1;
-      assertChatCompletionsPayload(payload);
-      if (typeof payload?.id === "string") diagnostics.providerResponseId = payload.id;
-      const choice = payload.choices?.[0];
-      let recognized = false;
-      for (const field of Object.keys(choice?.delta ?? {})) diagnostics.observedDeltaFields.add(field);
-      if (typeof choice?.delta?.role === "string" && choice.delta.role.length > 0) recognized = true;
-      const deltaContent = choice?.delta?.content;
-      if (typeof deltaContent === "string" && deltaContent.length > 0) {
-        recognized = true;
-        budget.addOutputBytes(deltaContent, "content");
-        content += deltaContent;
-        await emit({ type: "text_delta", text: deltaContent });
-      }
-      const reasoningDelta = choice?.delta?.reasoning_content;
-      if (typeof reasoningDelta === "string" && reasoningDelta.length > 0) {
-        recognized = true;
-        budget.addOutputBytes(reasoningDelta, "reasoningContent");
-        reasoningContent += reasoningDelta;
-        await emit({ type: "reasoning_delta", text: reasoningDelta });
-      }
-      for (const call of choice?.delta?.tool_calls ?? []) {
-        recognized = true;
-        const index = typeof call.index === "number" ? call.index : toolCallAccumulator.size;
-        const accumulated = toolCallAccumulator.get(index) ?? { arguments: "", hasArgumentValue: false };
-        if (typeof call.id === "string" && call.id.length > 0) accumulated.id = call.id;
-        const nameDelta = call.function?.name;
-        if (typeof nameDelta === "string" && nameDelta.length > 0) accumulated.name = nameDelta;
-        const rawArgumentsDelta = call.function?.arguments;
-        const argumentsDelta = streamingToolArgumentsDelta(rawArgumentsDelta);
-        if (argumentsDelta.length > 0) {
-          budget.addOutputBytes(argumentsDelta, "toolCall.arguments");
-          if (typeof rawArgumentsDelta === "string") {
-            // Standard Chat Completions streams JSON arguments as fragments.
-            // Some compatible gateways instead send the complete JSON value;
-            // retain that value rather than silently turning it into `{}`.
-            if (!accumulated.hasArgumentValue) accumulated.arguments += rawArgumentsDelta;
-          } else {
-            accumulated.argumentValue = rawArgumentsDelta;
-            accumulated.hasArgumentValue = true;
-          }
-        }
-        toolCallAccumulator.set(index, accumulated);
-        await emit({
-          type: "tool_call_delta",
-          index,
-          ...(accumulated.id === undefined ? {} : { id: accumulated.id }),
-          ...(accumulated.name === undefined ? {} : { name: accumulated.name }),
-          argumentsDelta,
-        });
-      }
-      if (choice?.finish_reason != null) {
-        recognized = true;
-        diagnostics.finishReasonObserved = true;
-        finishReason = choice.finish_reason;
-      }
-      if (payload.usage?.prompt_tokens !== undefined) {
-        recognized = true;
-        inputTokens = payload.usage.prompt_tokens;
-      }
-      if (payload.usage?.completion_tokens !== undefined) {
-        recognized = true;
-        outputTokens = payload.usage.completion_tokens;
-      }
-      if (!recognized) diagnostics.unrecognizedJsonEventCount += 1;
-    };
-
-    const handleEventBlock = async (event: string): Promise<void> => {
-      if (event.trim().length === 0) return;
-      diagnostics.sseEventCount += 1;
-      const dataLines: string[] = [];
-      for (const line of event.split("\n")) {
-        if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
-      }
-      if (dataLines.length > 0) await handleData(dataLines.join("\n"));
-    };
-
-    let consumptionFailed = false;
-    let consumptionError: unknown;
-    try {
-      for (;;) {
-        let result: ReadableStreamReadResult<Uint8Array>;
-        try {
-          result = await reader.read();
-        } catch (error) {
-          throw new StreamConsumptionError("read", error, diagnostics);
-        }
-        const { done, value } = result;
-        if (done) break;
-        diagnostics.readChunkCount += 1;
-        receiptCollector.recordChunk(value);
-        recordActivity();
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.replaceAll("\r\n", "\n").split("\n\n");
-        buffer = events.pop() ?? "";
-        for (const event of events) {
-          try {
-            await handleEventBlock(event);
-          } catch (error) {
-            if (error instanceof AppError) throw error;
-            throw new StreamConsumptionError("consume_event", error, diagnostics);
-          }
-        }
-      }
-      buffer += decoder.decode();
-      if (buffer.trim().length > 0) {
-        diagnostics.unterminatedFinalEventBytes = Buffer.byteLength(buffer, "utf8");
-        try {
-          await handleEventBlock(buffer.replaceAll("\r\n", "\n"));
-        } catch (error) {
-          if (error instanceof AppError) throw error;
-          throw new StreamConsumptionError("consume_event", error, diagnostics);
-        }
-      }
-    } catch (error) {
-      consumptionFailed = true;
-      consumptionError = error;
-      await reader.cancel().catch(() => undefined);
-    } finally {
-      reader.releaseLock();
-    }
-    if (consumptionFailed) {
-      const anomalyReasons = streamFailureAnomalyReasons(consumptionError, diagnostics);
-      const streamReceipt = await receiptCollector.build(anomalyReasons, true);
-      diagnostics.streamReceipt = streamReceipt;
-      if (consumptionError instanceof AppError) {
-        throw new AppError(consumptionError.code, consumptionError.message, consumptionError.status, {
-          ...consumptionError.details,
-          streamReceipt,
-        });
-      }
-      throw consumptionError;
-    }
-
-    const ordered = [...toolCallAccumulator.entries()].sort(([left], [right]) => left - right);
-    const toolCalls: ModelToolCall[] = [];
-    const readyCalls: Array<{ index: number; call: ModelToolCall }> = [];
-    for (const [index, accumulated] of ordered) {
-      if (accumulated.id === undefined || accumulated.name === undefined) continue;
-      const call = parseAccumulatedToolCall(
-        accumulated.id,
-        accumulated.name,
-        accumulated.arguments,
-        accumulated.hasArgumentValue ? accumulated.argumentValue : undefined,
-      );
-      toolCalls.push(call);
-      readyCalls.push({ index, call });
-    }
-    const finalFinishReason = normalizeFinishReason(finishReason, toolCalls.length);
-    // Chat Completions has no per-item "arguments done" signal. A length-truncated
-    // response may carry incomplete arguments, so those calls are never marked
-    // ready for early dispatch; the caller rejects them.
-    if (finalFinishReason !== "length") {
-      for (const { index, call } of readyCalls) {
-        await sink({ type: "tool_call_ready", index, id: call.id, name: call.name, arguments: call.arguments });
-      }
-    }
-    const resultWithoutReceipt: ModelResponse = {
-      ...providerResponseIdentity({ id: diagnostics.providerResponseId }),
-      content,
-      toolCalls,
-      finishReason: finalFinishReason,
-      ...(reasoningContent.length > 0 ? { reasoningContent } : {}),
-      ...(inputTokens === undefined && outputTokens === undefined
-        ? {}
-        : {
-            usage: {
-              ...(inputTokens === undefined ? {} : { inputTokens }),
-              ...(outputTokens === undefined ? {} : { outputTokens }),
-            },
-          }),
-    };
-    const anomalyReasons = streamAnomalyReasons(resultWithoutReceipt, diagnostics);
-    const streamReceipt = await receiptCollector.build(anomalyReasons);
-    const result: ModelResponse = { ...resultWithoutReceipt, streamReceipt };
-    budget.assertResponse(result);
-    return result;
-  }
-}
-
-/**
- * OpenAI Responses API adapter. Provider-encrypted continuation is optional,
- * in-memory, and scoped by the registry to one model profile and Run. DeepSeek exposes this protocol at
- * the root base URL (https://api.deepseek.com, no /v1) for Codex compatibility.
- * Its streaming events carry per-item completion signals
- * (`function_call_arguments.done`), which lets the Runtime dispatch a tool the
- * moment its arguments finish instead of waiting for the whole response.
- */
-export class ResponsesModel implements ModelAdapter {
-  readonly limits: Readonly<{ contextWindowTokens: number; maxOutputTokens: number }>;
-  readonly completeTimeoutMs: number;
-  readonly operationTimeoutMs: number;
-  readonly reasoningVisibility: "visible" | "hidden";
-  private readonly endpoint: URL;
-  private readonly apiKey: string;
-  private readonly model: string;
-  private readonly timeoutMs: number;
-  private readonly maxAttempts: number;
-  private readonly retryDelayMs: number;
-  private readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
-  private readonly runtimeContextPlacement: RuntimeContextPlacement;
-  private readonly reasoningSummary?: "auto" | "detailed";
-  private readonly reasoningEffort?: "none" | "low" | "medium" | "high";
-  private readonly reasoningEncryptedContent: boolean;
-  private readonly providerParameters: Readonly<Record<string, unknown>>;
-  private readonly reasoningContinuationStore?: ResponsesReasoningContinuationStore;
-  private readonly reasoningContinuationScope: string;
-  private readonly onRetry?: ModelRetryReporter;
-  private readonly streamRawCaptureWriter?: ModelStreamRawCaptureWriter;
-
-  constructor(options: OpenAICompatibleModelOptions) {
-    const base = new URL(options.baseUrl.endsWith("/") ? options.baseUrl : `${options.baseUrl}/`);
-    if (base.protocol !== "https:" && base.protocol !== "http:") {
-      throw new TypeError("LLM base URL must use http or https");
-    }
-    this.endpoint = new URL("responses", base);
-    this.apiKey = options.apiKey;
-    this.model = options.model;
-    if (!Number.isSafeInteger(options.contextWindowTokens) || options.contextWindowTokens < 4_096) {
-      throw new TypeError("LLM context window must be an integer of at least 4096 tokens");
-    }
-    if (
-      !Number.isSafeInteger(options.maxOutputTokens)
-      || options.maxOutputTokens < 1
-      || options.maxOutputTokens >= options.contextWindowTokens
-    ) {
-      throw new TypeError("LLM max output must be a positive integer smaller than its context window");
-    }
-    this.limits = {
-      contextWindowTokens: options.contextWindowTokens,
-      maxOutputTokens: options.maxOutputTokens,
-    };
-    this.timeoutMs = options.timeoutMs ?? 120_000;
-    this.completeTimeoutMs = this.timeoutMs;
-    this.operationTimeoutMs = streamOperationTimeoutMs(this.timeoutMs);
-    this.reasoningVisibility = options.reasoningVisibility ?? "visible";
-    this.maxAttempts = options.maxAttempts ?? 3;
-    this.retryDelayMs = options.retryDelayMs ?? 250;
-    this.toolChoiceMode = options.toolChoiceMode ?? "native";
-    this.runtimeContextPlacement = options.runtimeContextPlacement ?? "system";
-    this.reasoningSummary = options.reasoningSummary;
-    for (const [name, value, max] of [["temperature", options.temperature, 2], ["topP", options.topP, 1]] as const) {
-      if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > max)) {
-        throw new TypeError(`LLM ${name} must be a number between 0 and ${max}`);
-      }
-    }
-    this.reasoningEffort = options.reasoningEffort;
-    this.providerParameters = options.providerParameters ?? {};
-    this.reasoningEncryptedContent = options.reasoningEncryptedContent ?? false;
-    this.reasoningContinuationStore = options.reasoningContinuationStore;
-    this.reasoningContinuationScope = options.reasoningContinuationScope ?? this.model;
-    if (this.reasoningEncryptedContent && this.reasoningContinuationStore === undefined) {
-      throw new TypeError("Responses encrypted reasoning requires an adapter-owned continuation store");
-    }
-    this.onRetry = options.onRetry;
-    this.streamRawCaptureWriter = options.streamRawCaptureWriter;
-    if (!Number.isSafeInteger(this.maxAttempts) || this.maxAttempts < 1 || this.maxAttempts > 5) {
-      throw new TypeError("LLM max attempts must be an integer between 1 and 5");
-    }
-    if (!Number.isSafeInteger(this.retryDelayMs) || this.retryDelayMs < 0 || this.retryDelayMs > 30_000) {
-      throw new TypeError("LLM retry delay must be an integer between 0 and 30000 milliseconds");
-    }
-    if (
-      this.toolChoiceMode !== "native"
-      && this.toolChoiceMode !== "constrained-as-auto"
-      && this.toolChoiceMode !== "named-as-required"
-    ) {
-      throw new TypeError("LLM tool choice mode must be native, constrained-as-auto, or named-as-required");
-    }
-    if (this.runtimeContextPlacement !== "system" && this.runtimeContextPlacement !== "user-envelope") {
-      throw new TypeError("runtime context placement must be system or user-envelope");
-    }
-    if (this.reasoningSummary !== undefined && this.reasoningSummary !== "auto" && this.reasoningSummary !== "detailed") {
-      throw new TypeError("reasoning summary must be auto or detailed");
-    }
-    if (
-      this.reasoningEffort !== undefined
-      && this.reasoningEffort !== "none"
-      && this.reasoningEffort !== "low"
-      && this.reasoningEffort !== "medium"
-      && this.reasoningEffort !== "high"
-    ) {
-      throw new TypeError("reasoning effort must be none, low, medium, or high");
-    }
-    if (this.reasoningVisibility !== "visible" && this.reasoningVisibility !== "hidden") {
-      throw new TypeError("reasoning visibility must be visible or hidden");
-    }
+  private provider(fetch: typeof globalThis.fetch): LanguageModelV4 {
+    const suffix = this.protocol === "responses" ? "responses" : "chat/completions";
+    const baseURL = this.endpoint.href.slice(0, -suffix.length).replace(/\/$/u, "");
+    return this.protocol === "responses"
+      ? createOpenAI({ baseURL, apiKey: this.apiKey, fetch }).responses(this.model)
+      : createOpenAICompatible({ baseURL, apiKey: this.apiKey, name: "agentloop", fetch }).chatModel(this.model);
   }
 
-  async complete(invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse> {
-    return await this.streamComplete(invocation, async () => undefined, signal);
+  private decode(result: LanguageModelV4GenerateResult, payload?: Record<string, any>): ModelResponse {
+    const toolCalls = [...new Map(result.content.filter(part => part.type === "tool-call").map(part => {
+      const original = originalSdkToolCall(part);
+      const tool = { id: original.toolCallId, name: original.toolName, arguments: policy.parseToolArguments(original.input || "{}") };
+      return [tool.id, tool] as const;
+    })).values()];
+    const content = result.content.filter(part => part.type === "text").map(part => part.text).join("");
+    const reasoning = result.content.filter(part => part.type === "reasoning").map(part => part.text).join("");
+    const usage = sdkUsage(result.usage);
+    return {
+      ...policy.providerResponseIdentity(payload), content, toolCalls,
+      finishReason: this.finishReason(result.finishReason.unified, toolCalls.length, payload),
+      ...(reasoning ? { reasoningContent: reasoning } : {}),
+      ...(usage ? { usage } : {}),
+      ...(typeof payload?.incomplete_details?.reason === "string" ? { finishReasonDetail: payload.incomplete_details.reason } : {}),
+    };
   }
 
-  requestLogContext(invocation: ModelInvocation, stream: boolean): ModelRequestLogContext {
-    return this.buildRequest(invocation, stream).logContext;
+  private finishReason(reason: string, count: number, payload?: Record<string, any>): ModelResponse["finishReason"] {
+    if (payload?.status === "failed" || payload?.status === "cancelled") return "error";
+    if (payload?.status === "incomplete" || reason === "length") return "length";
+    if (reason === "error" || reason === "interrupted" || reason === "content-filter") return "error";
+    if (count || reason === "tool-calls") return "tool_calls";
+    return reason === "stop" || payload?.status === "completed" ? "stop" : "error";
   }
 
-  async streamComplete(
-    invocation: ModelInvocation,
-    sink: ModelStreamSink,
-    signal?: AbortSignal,
-  ): Promise<ModelResponse> {
-    const request = this.buildRequest(invocation, true);
-    const retrySignal = signal ?? NEVER_ABORT_SIGNAL;
+  /** Decode the received JSON/terminal envelope locally; never make another upstream call. */
+  private async decodeSnapshot(payload: Record<string, any>, call: LanguageModelV4CallOptions): Promise<ModelResponse> {
+    if (payload.status === "failed") return { ...policy.providerResponseIdentity(payload), content: "", toolCalls: [], finishReason: "error" };
+    const normalized = normalizeJsonPayload(payload, this.protocol);
+    const provider = this.provider(async () => new Response(JSON.stringify(normalized), { headers: { "content-type": "application/json" } }));
+    return this.decode(await provider.doGenerate(call), payload);
+  }
 
+  private rememberContinuation(runId: string, payload?: Record<string, any>): void {
+    if (!this.reasoningEncryptedContent || !this.reasoningContinuationStore) return;
+    const items = (Array.isArray(payload?.output) ? payload.output : []).filter((item: Record<string, unknown>) => item.type === "reasoning" && typeof item.encrypted_content === "string" && item.encrypted_content.length > 0);
+    if (Buffer.byteLength(JSON.stringify(items)) > 256 * 1024) throw new AppError("MODEL_ERROR", "Responses reasoning continuation exceeded the configured size limit", 502);
+    this.reasoningContinuationStore.set(this.reasoningContinuationScope, runId, items);
+  }
+
+  private async invoke(invocation: ModelInvocation, stream: boolean, sink: ModelStreamSink, signal?: AbortSignal): Promise<ModelResponse> {
+    const request = this.requestLogContext(invocation, stream);
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
-      const requestTimeout = createStreamingModelTimeout(this.timeoutMs, signal);
+      const timeout = policy.createStreamingModelTimeout(this.timeoutMs, signal);
+      const budget = policy.createModelResponseBudget(invocation, this.limits);
+      const transport = new ProviderTransport({ protocol: this.protocol, invocation, request, apiKey: this.apiKey, model: this.model,
+        budget, parameters: this.providerParameters, recordActivity: timeout.recordActivity, writer: this.streamRawCaptureWriter,
+        continuation: this.reasoningEncryptedContent ? this.reasoningContinuationStore?.get(this.reasoningContinuationScope, invocation.runId) : undefined,
+        reasoning: this.reasoningEffort !== undefined || this.reasoningSummary !== undefined ? {
+          ...(this.reasoningEffort === undefined ? {} : { effort: this.reasoningEffort }),
+          ...(this.reasoningSummary === undefined ? {} : { summary: this.reasoningSummary }),
+        } : undefined });
+      const call = this.callOptions(invocation, timeout.signal);
+      const provider = this.provider(transport.fetch);
       try {
-        let response: Response;
-        try {
-          response = await fetch(this.endpoint, {
-            method: "POST",
-            headers: {
-              authorization: `Bearer ${this.apiKey}`,
-              "content-type": "application/json",
-            },
-            body: request.body,
-            signal: requestTimeout.signal,
+        let result: ModelResponse;
+        if (!stream) {
+          result = this.decode(await provider.doGenerate(call), transport.jsonPayload);
+        } else {
+          try { result = await this.consumeSdkStream(provider, call, transport, sink, budget); }
+          catch (error) {
+            if (transport.failure instanceof JsonProviderResponse && transport.jsonPayload) result = await this.decodeSnapshot(transport.jsonPayload, call);
+            else throw error;
+          }
+        }
+        if (timeout.aborted) throw policy.modelRequestAborted(timeout.abortReason, timeout.details());
+        budget.assertResponse(result);
+        this.rememberContinuation(invocation.runId, transport.terminal ?? transport.jsonPayload);
+        if (transport.response) result = { ...result, ...policy.providerRequestIdentity(transport.response) };
+        if (policy.requestRequiresToolCall(request.toolChoice) && result.toolCalls.length === 0 && result.finishReason !== "error" && !transport.diagnostics.hadSinkEmission && attempt < this.maxAttempts) {
+          await policy.retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, signal ?? policy.NEVER_ABORT_SIGNAL, undefined, request, result);
+          continue;
+        }
+        return result;
+      } catch (caught) {
+        // A sink/Runtime failure takes precedence over transport read-ahead.
+        // SDK wrappers may otherwise obscure the original transport failure.
+        let error = caught instanceof AppError || caught instanceof policy.StreamConsumptionError || transport.failure instanceof JsonProviderResponse
+          ? caught : transport.failure ?? caught;
+        const response = transport.response;
+        const emitted = transport.diagnostics.hadSinkEmission;
+        const httpFailure = error instanceof AppError && typeof error.details?.status === "number" ? error.details.status as number : undefined;
+        const retry = attempt < this.maxAttempts && !emitted && (timeout.aborted
+          ? policy.isRetryableStreamingAbort(timeout.abortReason)
+          : httpFailure !== undefined ? policy.isRetryableStatus(httpFailure)
+            : !response || error instanceof policy.StreamConsumptionError || (!stream && !(error instanceof AppError)));
+        if (timeout.aborted) error = policy.modelRequestAborted(timeout.abortReason, timeout.details());
+        if (transport.collector) {
+          if (!(error instanceof AppError) && !(error instanceof policy.StreamConsumptionError)) error = new policy.StreamConsumptionError("consume_event", error, transport.diagnostics);
+          const receipt = await transport.collector.build(policy.streamFailureAnomalyReasons(error, transport.diagnostics), true);
+          transport.diagnostics.streamReceipt = receipt;
+          if (error instanceof AppError) error = new AppError(error.code, error.message, error.status, { ...error.details, streamReceipt: receipt });
+        }
+        if (retry) {
+          const identity = response ? policy.providerRequestIdentity(response) : {};
+          const providerErrorBody = error instanceof AppError ? error.details?.providerErrorBody : undefined;
+          await policy.retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, signal ?? policy.NEVER_ABORT_SIGNAL, httpFailure, request, {
+            ...identity, ...(typeof providerErrorBody === "string" ? { providerErrorBody } : {}),
           });
-        } catch (error) {
-          if (requestTimeout.aborted) {
-            if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
-              await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
-              continue;
-            }
-            throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
-          }
-          if (attempt < this.maxAttempts) {
-            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
-            continue;
-          }
-          throw new AppError("MODEL_ERROR", "Model provider is unreachable", 502, {
-            attempts: attempt,
-            causeCode: transportCauseCode(error),
-            request: request.logContext,
-          });
+          continue;
         }
-
-        if (!response.ok) {
-          if (isRetryableStatus(response.status) && attempt < this.maxAttempts) {
-            const providerFailure = await retryableProviderFailure(response);
-            await response.body?.cancel().catch(() => undefined);
-            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, response.status, request.logContext, providerFailure);
-            continue;
-          }
-          throw await providerHttpError(response, request.logContext);
+        if (!(error instanceof AppError)) {
+          error = !response ? new AppError("MODEL_ERROR", "Model provider is unreachable", 502, { attempts: attempt, causeCode: policy.transportCauseCode(error), request })
+            : stream ? policy.unreadableStreamingResponse(error, attempt, request)
+              : new AppError("MODEL_ERROR", "Model provider returned an unreadable response", 502, { attempts: attempt, causeCode: policy.transportCauseCode(error), request });
         }
-
-        try {
-          const budget = createModelResponseBudget(invocation, this.limits);
-          if (isJsonResponse(response)) {
-            const payload = await readJsonResponseWithinLimit(response, budget);
-            assertResponsesPayload(payload);
-            const result = { ...parseResponsesResponse(payload), ...providerRequestIdentity(response) };
-            budget.assertResponse(result);
-            this.rememberReasoningContinuation(invocation.runId, payload as Record<string, unknown>);
-            return result;
-          }
-          const result = await this.consumeStream(response, invocation.runId, sink, requestTimeout.recordActivity, budget, request.logContext);
-          return { ...result, ...providerRequestIdentity(response) };
-        } catch (error) {
-          if (requestTimeout.aborted) {
-            if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
-              await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext, providerRequestIdentity(response));
-              continue;
-            }
-            throw withProviderRequestIdentity(modelRequestAborted(requestTimeout.abortReason, requestTimeout.details()), response);
-          }
-          if (error instanceof StreamConsumptionError && !error.diagnostics.hadSinkEmission && attempt < this.maxAttempts) {
-            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext, providerRequestIdentity(response));
-            continue;
-          }
-          if (error instanceof AppError) throw withProviderRequestIdentity(error, response);
-          throw withProviderRequestIdentity(unreadableStreamingResponse(error, attempt, request.logContext), response);
-        }
-      } finally {
-        requestTimeout.dispose();
-      }
+        if (response) error = policy.withProviderRequestIdentity(error as AppError, response);
+        throw redactModelError(error as AppError, this.apiKey);
+      } finally { timeout.dispose(); }
     }
     throw new AppError("MODEL_ERROR", "Model request exhausted its attempts", 502);
   }
 
-  private buildRequest(invocation: ModelInvocation, stream: boolean): ProviderRequest {
-    const encoded = encodeOpenAICompatiblePrompt(invocation, this.runtimeContextPlacement);
-    const system = encoded.messages.find((message) => message.role === "system");
-    const instructions = typeof system?.content === "string" ? system.content : "";
-    const continuation = this.reasoningEncryptedContent
-      ? this.reasoningContinuationStore?.get(this.reasoningContinuationScope, invocation.runId) ?? []
-      : [];
-    const inputMessages = encoded.messages.filter((message) => message.role !== "system");
-    const lastUserMessageIndex = inputMessages.findLastIndex((message) => message.role === "user");
-    const encodedInput = inputMessages.flatMap((message, index) => [
-      ...(continuation.length > 0 && index === lastUserMessageIndex ? continuation : []),
-      ...toResponsesInputItems(message),
-    ]);
-    if (continuation.length > 0 && lastUserMessageIndex < 0) encodedInput.push(...continuation);
-    const input = encodedInput.length === 0 ? [responsesEmptyInputSentinel()] : encodedInput;
-    const providerTools = invocation.tools.map((tool) => ({
-      type: "function",
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.inputSchema,
-      ...(tool.strict === undefined ? {} : { strict: tool.strict }),
-    }));
-    const toolChoice = invocation.tools.length === 0
-      ? undefined
-      : toResponsesToolChoice(invocation.toolChoice ?? "auto", this.toolChoiceMode, invocation.tools.length);
-    // This Responses-compatible upstream rejects both sampling controls. Keep
-    // shared configuration parsing intact, but never put these fields on the
-    // wire for the Responses protocol.
-    const body = JSON.stringify({
-      ...this.providerParameters,
-      model: this.model,
-      ...(instructions.length === 0 ? {} : { instructions }),
-      input,
-      tools: providerTools,
-      ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
-      ...(this.reasoningSummary === undefined && this.reasoningEffort === undefined
-        ? {}
-        : {
-            reasoning: {
-              ...(this.reasoningSummary === undefined ? {} : { summary: this.reasoningSummary }),
-              ...(this.reasoningEffort === undefined ? {} : { effort: this.reasoningEffort }),
-            },
-          }),
-      ...(this.reasoningEncryptedContent ? { include: ["reasoning.encrypted_content"] } : {}),
-      max_output_tokens: Math.min(
-        invocation.maxOutputTokens ?? this.limits.maxOutputTokens,
-        this.limits.maxOutputTokens,
-      ),
-      ...(stream ? { stream: true } : {}),
-    });
-    return {
-      body,
-      logContext: modelRequestLogContext({
-        protocol: "responses",
-        model: this.model,
-        invocation,
-        stream,
-        runtimeContextPlacement: this.runtimeContextPlacement,
-        providerInputItemCount: input.length,
-        insertedEmptyInputSentinel: encodedInput.length === 0,
-        toolChoice,
-      }),
-    };
-  }
-
-  private async consumeStream(
-    response: Response,
-    runId: string,
-    sink: ModelStreamSink,
-    recordActivity: () => void = () => undefined,
-    budget: ModelResponseBudget,
-    request: ModelRequestLogContext,
-  ): Promise<ModelResponse> {
-    if (response.body === null) {
-      throw new AppError("MODEL_ERROR", "Model provider returned no streaming body", 502);
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
+  private async consumeSdkStream(provider: LanguageModelV4, call: LanguageModelV4CallOptions, transport: ProviderTransport, sink: ModelStreamSink, budget: policy.ModelResponseBudget): Promise<ModelResponse> {
     let content = "";
     let reasoningContent = "";
-    const functionCalls = new Map<string, {
-      itemId: string; index: number; callId?: string; name?: string; arguments: string;
-    }>();
-    const readyEmitted = new Set<string>();
-    let finalResponse: Record<string, unknown> | undefined;
-    let inputTokens: number | undefined;
-    let outputTokens: number | undefined;
-    const diagnostics: StreamFailureDiagnostics = {
-      eventsSeen: 0,
-      hadSinkEmission: false,
-      readChunkCount: 0,
-      sseEventCount: 0,
-      jsonEventCount: 0,
-      nonJsonEventCount: 0,
-      doneEventCount: 0,
-      unrecognizedJsonEventCount: 0,
-      unterminatedFinalEventBytes: 0,
-      finishReasonObserved: false,
-      observedDeltaFields: new Set<string>(),
+    let reason = "error";
+    let usage: ModelResponse["usage"];
+    const inputs = new Map<string, { index: number; name: string; raw: string }>();
+    const itemIds = new Map<string, { id: string; index: number }>();
+    const wireIndexes = new Map<string, number>();
+    const calls = new Map<string, ModelToolCall>();
+    const ready = new Set<string>();
+    const emit = async (event: Parameters<ModelStreamSink>[0]) => {
+      transport.diagnostics.hadSinkEmission = true;
+      try { await sink(event); }
+      catch (error) { throw new policy.StreamConsumptionError("consume_event", error, transport.diagnostics); }
     };
-    const receiptCollector = createStreamReceiptCollector({
-      response,
-      runId,
-      request,
-      diagnostics,
-      writer: this.streamRawCaptureWriter,
-    });
-    const emit = async (event: Parameters<ModelStreamSink>[0]): Promise<void> => {
-      diagnostics.hadSinkEmission = true;
-      await sink(event);
+    const finishCall = async (id: string, name: string, raw: string, early: boolean) => {
+      const existing = inputs.get(id);
+      if (existing) { budget.replaceOutputBytes(existing.raw, raw, "toolCall.arguments"); existing.raw = raw; }
+      else budget.addOutputBytes(raw, "toolCall.arguments");
+      const tool = { id, name, arguments: policy.parseToolArguments(raw || "{}") };
+      calls.set(id, tool);
+      if (early && !ready.has(id)) { ready.add(id); await emit({ type: "tool_call_ready", index: existing?.index ?? calls.size - 1, ...tool }); }
     };
-
-    const handleData = async (data: string): Promise<void> => {
-      diagnostics.eventsSeen += 1;
-      diagnostics.lastEvent = summarizeStreamEvent(data);
-      if (data.trim() === "[DONE]") {
-        diagnostics.doneEventCount += 1;
-        return;
-      }
-      budget.assertEventBytes(data);
-      let chunk: ResponsesStreamChunk;
-      try {
-        chunk = JSON.parse(data) as ResponsesStreamChunk;
-      } catch {
-        diagnostics.nonJsonEventCount += 1;
-        return;
-      }
-      diagnostics.jsonEventCount += 1;
-      assertResponsesPayload(chunk);
-      const responseId = providerResponseIdentity(chunk.response).providerResponseId;
-      if (responseId !== undefined) diagnostics.providerResponseId = responseId;
-      let recognized = true;
-      switch (chunk.type) {
-        case "error":
-          throw responsesProviderErrorEvent(chunk, this.apiKey, request, diagnostics);
-        case "response.created":
-        case "response.in_progress":
-          // Observed Responses lifecycle envelopes carry no consumable model
-          // output; recognizing them prevents normal streams from being
-          // misclassified as anomalous without weakening unknown-event capture.
-          break;
-        case "response.reasoning_summary_text.delta":
-          if (typeof chunk.delta === "string" && chunk.delta.length > 0) {
-            diagnostics.observedDeltaFields.add("reasoning_content");
-            budget.addOutputBytes(chunk.delta, "reasoningContent");
-            reasoningContent += chunk.delta;
-            await emit({ type: "reasoning_delta", text: chunk.delta });
-          }
-          break;
-        case "response.output_text.delta":
-          if (typeof chunk.delta === "string" && chunk.delta.length > 0) {
-            diagnostics.observedDeltaFields.add("content");
-            budget.addOutputBytes(chunk.delta, "content");
-            content += chunk.delta;
-            await emit({ type: "text_delta", text: chunk.delta });
-          }
-          break;
-        case "response.output_item.added": {
-          const item = chunk.item;
-          if (item?.type !== "function_call") break;
-          const itemId = item.id;
-          if (itemId === undefined) break;
-          functionCalls.set(itemId, {
-            itemId,
-            index: chunk.output_index ?? functionCalls.size,
-            ...(item.call_id === undefined ? {} : { callId: item.call_id }),
-            ...(item.name === undefined ? {} : { name: item.name }),
-            arguments: "",
-          });
-          break;
-        }
-        case "response.function_call_arguments.delta": {
-          if (chunk.item_id === undefined || typeof chunk.delta !== "string") break;
-          const call = functionCalls.get(chunk.item_id);
-          if (call === undefined) break;
-          diagnostics.observedDeltaFields.add("tool_calls");
-          budget.addOutputBytes(chunk.delta, "toolCall.arguments");
-          call.arguments += chunk.delta;
-          await emit({
-            type: "tool_call_delta",
-            index: call.index,
-            ...(call.callId === undefined ? {} : { id: call.callId }),
-            ...(call.name === undefined ? {} : { name: call.name }),
-            argumentsDelta: chunk.delta,
-          });
-          break;
-        }
-        case "response.function_call_arguments.done": {
-          if (chunk.item_id === undefined) break;
-          const call = functionCalls.get(chunk.item_id);
-          if (call === undefined) break;
-          if (typeof chunk.arguments === "string") {
-            budget.replaceOutputBytes(call.arguments, chunk.arguments, "toolCall.arguments");
-            call.arguments = chunk.arguments;
-          }
-          await emitReadyIfComplete(call);
-          break;
-        }
-        case "response.output_item.done": {
-          const item = chunk.item;
-          if (item?.type !== "function_call" || item.id === undefined) break;
-          const call = functionCalls.get(item.id);
-          if (call === undefined) break;
-          if (item.call_id !== undefined) call.callId = item.call_id;
-          if (item.name !== undefined) call.name = item.name;
-          if (typeof item.arguments === "string" && call.arguments.length === 0) {
-            budget.addOutputBytes(item.arguments, "toolCall.arguments");
-            call.arguments = item.arguments;
-          }
-          await emitReadyIfComplete(call);
-          break;
-        }
-        case "response.completed":
-        case "response.incomplete":
-        case "response.failed":
-          diagnostics.finishReasonObserved = true;
-          if (chunk.response !== undefined) finalResponse = chunk.response;
-          break;
-        default:
-          recognized = false;
-          break;
-      }
-      if (!recognized) diagnostics.unrecognizedJsonEventCount += 1;
-    };
-
-    const emitReadyIfComplete = async (call: {
-      itemId: string; index: number; callId?: string; name?: string; arguments: string;
-    }): Promise<void> => {
-      if (readyEmitted.has(call.itemId)) return;
-      if (call.callId === undefined || call.name === undefined) return;
-      readyEmitted.add(call.itemId);
-      await emit({
-        type: "tool_call_ready",
-        index: call.index,
-        id: call.callId,
-        name: call.name,
-        arguments: parseToolArguments(call.arguments === "" ? "{}" : call.arguments),
-      });
-    };
-
-    const handleEventBlock = async (event: string): Promise<void> => {
-      if (event.trim().length === 0) return;
-      diagnostics.sseEventCount += 1;
-      const dataLines: string[] = [];
-      for (const line of event.split("\n")) {
-        if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
-      }
-      if (dataLines.length > 0) await handleData(dataLines.join("\n"));
-    };
-
-    let consumptionFailed = false;
-    let consumptionError: unknown;
     try {
-      for (;;) {
-        let result: ReadableStreamReadResult<Uint8Array>;
-        try {
-          result = await reader.read();
-        } catch (error) {
-          throw new StreamConsumptionError("read", error, diagnostics);
-        }
-        const { done, value } = result;
-        if (done) break;
-        diagnostics.readChunkCount += 1;
-        receiptCollector.recordChunk(value);
-        recordActivity();
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.replaceAll("\r\n", "\n").split("\n\n");
-        buffer = events.pop() ?? "";
-        for (const event of events) {
-          try {
-            await handleEventBlock(event);
-          } catch (error) {
-            if (error instanceof AppError) throw error;
-            throw new StreamConsumptionError("consume_event", error, diagnostics);
+      const result = await provider.doStream(call);
+      for await (const part of result.stream) {
+        switch (part.type) {
+          case "raw": {
+            const raw = part.rawValue as Record<string, any>;
+            if (!raw || typeof raw !== "object") break;
+            for (const wire of raw.choices?.[0]?.delta?.tool_calls ?? []) if (wire.id) wireIndexes.set(wire.id, wire.index ?? wireIndexes.size);
+            if (raw.type === "response.output_item.added" && raw.item?.type === "function_call") {
+              itemIds.set(raw.item.id, { id: raw.item.call_id, index: raw.output_index });
+              wireIndexes.set(raw.item.call_id, raw.output_index);
+            }
+            // The SDK emits a tool-call for output_item.done. Compatible servers
+            // can use arguments.done as the authoritative earlier completion.
+            if (raw.type === "response.function_call_arguments.done") {
+              const meta = itemIds.get(raw.item_id);
+              const input = meta && inputs.get(meta.id);
+              if (meta && input) await finishCall(meta.id, input.name, raw.arguments || input.raw, true);
+            }
+            break;
           }
-        }
-      }
-      buffer += decoder.decode();
-      if (buffer.trim().length > 0) {
-        diagnostics.unterminatedFinalEventBytes = Buffer.byteLength(buffer, "utf8");
-        try {
-          await handleEventBlock(buffer.replaceAll("\r\n", "\n"));
-        } catch (error) {
-          if (error instanceof AppError) throw error;
-          throw new StreamConsumptionError("consume_event", error, diagnostics);
+          case "text-delta": budget.addOutputBytes(part.delta, "content"); content += part.delta; await emit({ type: "text_delta", text: part.delta }); break;
+          case "reasoning-delta": budget.addOutputBytes(part.delta, "reasoningContent"); reasoningContent += part.delta; await emit({ type: "reasoning_delta", text: part.delta }); break;
+          case "tool-input-start":
+            // SDK-expanded wrapper children are not native calls. Preserve the
+            // original call below instead of projecting synthetic execution.
+            if (this.protocol === "responses" && !wireIndexes.has(part.id)) break;
+            inputs.set(part.id, { index: wireIndexes.get(part.id) ?? inputs.size, name: part.toolName, raw: "" }); break;
+          case "tool-input-delta": {
+            const input = inputs.get(part.id);
+            if (!input && this.protocol === "responses" && !wireIndexes.has(part.id)) break;
+            if (!input) throw new AppError("MODEL_ERROR", "Provider tool delta has no declared tool call", 502);
+            budget.addOutputBytes(part.delta, "toolCall.arguments"); input.raw += part.delta;
+            await emit({ type: "tool_call_delta", index: input.index, id: part.id, name: input.name, argumentsDelta: part.delta });
+            break;
+          }
+          case "tool-call": {
+            if (part.providerExecuted) throw new AppError("MODEL_ERROR", "Provider-executed tools are not enabled for this Runtime", 502);
+            const original = originalSdkToolCall(part);
+            if (!wireIndexes.has(original.toolCallId)) throw new AppError("MODEL_ERROR", "Provider tool call has no native call identity", 502);
+            if (calls.has(original.toolCallId) && original !== part) break;
+            await finishCall(original.toolCallId, original.toolName, original.input || inputs.get(original.toolCallId)?.raw || "", this.protocol === "responses");
+            break;
+          }
+          case "error":
+            if (transport.terminal?.status === "failed" && (part.error as any)?.data?.type === "response.failed") break;
+            throw new policy.StreamConsumptionError("consume_event", part.error, transport.diagnostics);
+          case "finish": reason = part.finishReason.unified; usage = sdkUsage(part.usage); break;
         }
       }
     } catch (error) {
-      consumptionFailed = true;
-      consumptionError = error;
-      await reader.cancel().catch(() => undefined);
-    } finally {
-      reader.releaseLock();
+      // A failed provider terminal is a failed ModelResponse, not a transport
+      // retry. The Runtime decides recovery from its terminal semantics.
+      if (!(transport.terminal?.status === "failed" && (error as any)?.data?.type === "response.failed")) throw error;
     }
-    if (consumptionFailed) {
-      const anomalyReasons = streamFailureAnomalyReasons(consumptionError, diagnostics);
-      const streamReceipt = await receiptCollector.build(anomalyReasons, true);
-      diagnostics.streamReceipt = streamReceipt;
-      if (consumptionError instanceof AppError) {
-        throw new AppError(consumptionError.code, consumptionError.message, consumptionError.status, {
-          ...consumptionError.details,
-          streamReceipt,
-        });
-      }
-      throw consumptionError;
+    if (this.protocol === "responses" && !transport.diagnostics.finishReasonObserved) throw policy.missingResponsesTerminalEvent(transport.options.request, transport.diagnostics);
+    if (this.protocol === "chat-completions" && (!transport.diagnostics.finishReasonObserved || reason === "error" || reason === "interrupted")) {
+      throw new AppError("MODEL_ERROR", "Chat Completions Provider stream ended without a successful terminal event", 502, { streamFailureStage: "missing_terminal_event", request: transport.options.request });
     }
-
-    if (finalResponse === undefined) {
-      const missing = missingResponsesTerminalEvent(request, diagnostics);
-      const anomalyReasons = streamFailureAnomalyReasons(missing, diagnostics);
-      const streamReceipt = await receiptCollector.build(anomalyReasons);
-      throw new AppError(missing.code, missing.message, missing.status, {
-        ...missing.details,
-        streamReceipt,
-      });
-    }
-
-    const final = parseResponsesResponse(finalResponse, content);
-    if (final !== undefined) budget.assertResponse(final);
-    this.rememberReasoningContinuation(runId, finalResponse);
-    const usage = finalResponse?.usage as { input_tokens?: number; output_tokens?: number } | undefined;
-    if (usage?.input_tokens !== undefined) inputTokens = usage.input_tokens;
-    if (usage?.output_tokens !== undefined) outputTokens = usage.output_tokens;
-
-    const streamedToolCalls = responseStreamToolCalls(functionCalls);
-    if (final !== undefined) {
-      const finalToolCalls = final.toolCalls.length > 0 ? final.toolCalls : streamedToolCalls;
-      const resultWithoutReceipt: ModelResponse = {
-        ...final,
-        toolCalls: finalToolCalls,
-        finishReason: normalizeFinishReason(final.finishReason, finalToolCalls.length),
-        ...(reasoningContent.length === 0 ? {} : { reasoningContent }),
-        ...(inputTokens === undefined && outputTokens === undefined
-          ? {}
-          : {
-              usage: {
-                ...(inputTokens === undefined ? {} : { inputTokens }),
-                ...(outputTokens === undefined ? {} : { outputTokens }),
-              },
-            }),
-      };
-      const anomalyReasons = streamAnomalyReasons(resultWithoutReceipt, diagnostics);
-      const streamReceipt = await receiptCollector.build(anomalyReasons);
-      const result: ModelResponse = { ...resultWithoutReceipt, streamReceipt };
-      budget.assertResponse(result);
-      return result;
-    }
-    const toolCalls = streamedToolCalls;
-    const resultWithoutReceipt: ModelResponse = {
-      ...providerResponseIdentity({ id: diagnostics.providerResponseId }),
-      content,
-      toolCalls,
-      finishReason: normalizeFinishReason(undefined, toolCalls.length),
-      ...(reasoningContent.length === 0 ? {} : { reasoningContent }),
-      ...(inputTokens === undefined && outputTokens === undefined
-        ? {}
-        : {
-            usage: {
-              ...(inputTokens === undefined ? {} : { inputTokens }),
-              ...(outputTokens === undefined ? {} : { outputTokens }),
-            },
-          }),
+    let snapshot: ModelResponse | undefined;
+    if (transport.terminal) snapshot = await this.decodeSnapshot(transport.terminal, call);
+    const toolCalls = snapshot?.toolCalls.length ? snapshot.toolCalls : [...calls.values()];
+    const response: ModelResponse = {
+      ...policy.providerResponseIdentity({ id: transport.diagnostics.providerResponseId }),
+      content: snapshot?.content || content, toolCalls,
+      finishReason: snapshot?.finishReason === "error" || snapshot?.finishReason === "length" ? snapshot.finishReason : this.finishReason(reason, toolCalls.length, transport.terminal),
+      ...(snapshot?.finishReasonDetail ? { finishReasonDetail: snapshot.finishReasonDetail } : {}),
+      ...((reasoningContent || snapshot?.reasoningContent) ? { reasoningContent: reasoningContent || snapshot?.reasoningContent } : {}),
+      ...((snapshot?.usage ?? usage) ? { usage: snapshot?.usage ?? usage } : {}),
     };
-    const anomalyReasons = streamAnomalyReasons(resultWithoutReceipt, diagnostics);
-    const streamReceipt = await receiptCollector.build(anomalyReasons);
-    const result: ModelResponse = { ...resultWithoutReceipt, streamReceipt };
-    budget.assertResponse(result);
-    return result;
-  }
-
-  private rememberReasoningContinuation(runId: string, response: Record<string, unknown> | undefined): void {
-    if (!this.reasoningEncryptedContent || this.reasoningContinuationStore === undefined) return;
-    const output = Array.isArray(response?.output) ? response.output : [];
-    const items = output.filter((item): item is Record<string, unknown> =>
-      item !== null
-      && typeof item === "object"
-      && !Array.isArray(item)
-      && (item as Record<string, unknown>).type === "reasoning"
-      && typeof (item as Record<string, unknown>).encrypted_content === "string"
-      && ((item as Record<string, unknown>).encrypted_content as string).length > 0,
-    );
-    const bytes = items.reduce((total, item) => total + Buffer.byteLength(JSON.stringify(item)), 0);
-    if (bytes > 256 * 1024) {
-      throw new AppError("MODEL_ERROR", "Responses reasoning continuation exceeded the configured size limit", 502);
+    budget.assertResponse(response);
+    if (this.protocol === "chat-completions" && response.finishReason !== "error" && response.finishReason !== "length") {
+      for (const tool of toolCalls) await emit({ type: "tool_call_ready", index: inputs.get(tool.id)?.index ?? 0, ...tool });
     }
-    this.reasoningContinuationStore.set(this.reasoningContinuationScope, runId, items);
+    const streamReceipt = await transport.collector!.build(policy.streamAnomalyReasons(response, transport.diagnostics));
+    return { ...response, streamReceipt };
   }
 }
 
-function responseStreamToolCalls(
-  functionCalls: ReadonlyMap<string, { itemId: string; index: number; callId?: string; name?: string; arguments: string }>,
-): ModelToolCall[] {
-  const ordered = [...functionCalls.values()].sort((left, right) => left.index - right.index);
-  const toolCalls: ModelToolCall[] = [];
-  for (const call of ordered) {
-    if (call.callId === undefined || call.name === undefined) continue;
-    toolCalls.push({
-      id: call.callId,
-      name: call.name,
-      arguments: parseToolArguments(call.arguments === "" ? "{}" : call.arguments),
-    });
-  }
-  return toolCalls;
-}
-
-interface ResponsesStreamChunk {
-  type?: string;
-  code?: unknown;
-  message?: unknown;
-  error?: unknown;
-  delta?: string;
-  item_id?: string;
-  output_index?: number;
-  arguments?: unknown;
-  item?: {
-    type?: string;
-    id?: string;
-    call_id?: string;
-    name?: string;
-    arguments?: unknown;
-  };
-  response?: Record<string, unknown>;
-}
-
-function responsesProviderErrorEvent(
-  chunk: ResponsesStreamChunk,
-  apiKey: string,
-  request: ModelRequestLogContext,
-  diagnostics: StreamFailureDiagnostics,
-): AppError {
-  const nested = chunk.error !== null && typeof chunk.error === "object" && !Array.isArray(chunk.error)
-    ? chunk.error as Record<string, unknown>
-    : undefined;
-  const providerErrorType = boundedProviderErrorText(nested?.type, apiKey, 120);
-  const providerErrorCode = boundedProviderErrorText(nested?.code ?? chunk.code, apiKey, 120);
-  const providerErrorMessage = boundedProviderErrorText(
-    nested?.message ?? chunk.message ?? (typeof chunk.error === "string" ? chunk.error : undefined),
-    apiKey,
-    500,
-  );
-  const displayMessage = providerErrorMessage === undefined
-    ? "Responses Provider returned an error event"
-    : `Responses Provider error: ${boundedProviderErrorText(providerErrorMessage, apiKey, 200)}`;
-  return new AppError("MODEL_ERROR", displayMessage, 502, {
-    streamFailureStage: "provider_error_event",
-    streamEventsSeen: diagnostics.eventsSeen,
-    ...(diagnostics.lastEvent === undefined ? {} : { lastStreamEvent: diagnostics.lastEvent }),
-    ...(providerErrorType === undefined ? {} : { providerErrorType }),
-    ...(providerErrorCode === undefined ? {} : { providerErrorCode }),
-    ...(providerErrorMessage === undefined ? {} : { providerErrorMessage }),
-    request,
-  });
-}
-
-function boundedProviderErrorText(value: unknown, apiKey: string, maximum: number): string | undefined {
-  if (typeof value !== "string") return undefined;
-  let compact = value.replace(/\s+/gu, " ").trim();
-  if (compact.length === 0) return undefined;
-  if (apiKey.length > 0) compact = compact.replaceAll(apiKey, "[REDACTED]");
-  compact = compact
-    .replace(/\bBearer\s+[^\s,;]+/giu, "Bearer [REDACTED]")
-    .replace(/((?:api[_-]?key|access[_-]?token|authorization|credential|secret)\s*[:=]\s*["']?)[^\s,;}"']+/giu, "$1[REDACTED]");
-  if (compact.length <= maximum) return compact;
-  return `${compact.slice(0, Math.max(0, maximum - 3))}...`;
-}
-
-function parseResponsesResponse(payload: unknown, fallbackContent = ""): ModelResponse {
-  const record = payload as Record<string, unknown>;
-  const output = Array.isArray(record.output) ? record.output as Array<Record<string, unknown>> : [];
-  const toolCalls: ModelToolCall[] = [];
-  const content = responseOutputText(record, output, fallbackContent);
-  const reasoningContent = responseReasoningSummary(output);
-  for (const [index, item] of output.entries()) {
-    if (item.type !== "function_call") continue;
-    const callId = typeof item.call_id === "string" ? item.call_id : undefined;
-    const name = typeof item.name === "string" ? item.name : undefined;
-    if (callId === undefined || name === undefined) continue;
-    toolCalls.push({
-      id: callId,
-      name,
-      arguments: parseToolArguments(item.arguments ?? "{}"),
-    });
-  }
-  const status = typeof record.status === "string" ? record.status : "completed";
-  const incompleteDetails = record.incomplete_details as Record<string, unknown> | undefined;
-  const finishReason = status === "completed"
-    ? (toolCalls.length > 0 ? "tool_calls" as const : "stop" as const)
-    : status === "incomplete" ? "length" as const : "error" as const;
-  const usage = record.usage as Record<string, unknown> | undefined;
-  return {
-    ...providerResponseIdentity(payload),
-    content,
-    toolCalls,
-    finishReason,
-    ...(reasoningContent.length === 0 ? {} : { reasoningContent }),
-    ...(status === "incomplete" && typeof incompleteDetails?.reason === "string"
-      ? { finishReasonDetail: incompleteDetails.reason }
-      : {}),
-    ...(usage === undefined
-      ? {}
-      : {
-          usage: {
-            ...(usage.input_tokens === undefined ? {} : { inputTokens: usage.input_tokens as number }),
-            ...(usage.output_tokens === undefined ? {} : { outputTokens: usage.output_tokens as number }),
-          },
-        }),
+function sdkUsage(usage: LanguageModelV4GenerateResult["usage"]): ModelResponse["usage"] {
+  const inputTokens = usage.inputTokens.total;
+  const outputTokens = usage.outputTokens.total;
+  return inputTokens === undefined && outputTokens === undefined ? undefined : {
+    ...(inputTokens === undefined ? {} : { inputTokens }), ...(outputTokens === undefined ? {} : { outputTokens }),
   };
 }
 
-function responseReasoningSummary(output: readonly Record<string, unknown>[]): string {
-  const text: string[] = [];
-  for (const item of output) {
-    if (item.type !== "reasoning" || !Array.isArray(item.summary)) continue;
-    for (const part of item.summary) {
-      if (part === null || typeof part !== "object" || Array.isArray(part)) continue;
-      const record = part as Record<string, unknown>;
-      if (record.type === "summary_text" && typeof record.text === "string") text.push(record.text);
-    }
-  }
-  return text.join("\n");
+function originalSdkToolCall(part: Extract<LanguageModelV4StreamPart, { type: "tool-call" }>): { toolCallId: string; toolName: string; input: string } {
+  // The provider can expand a wire-level `parallel` wrapper. Runtime admission
+  // must see the actual provider intent, including an unknown tool, unchanged.
+  const original = (part.providerMetadata?.openai as Record<string, any> | undefined)?.parallelToolCall;
+  return original && typeof original.toolCallId === "string" && typeof original.toolName === "string" && typeof original.input === "string" ? original : part;
 }
 
-function assertResponsesPayload(payload: unknown): void {
-  if (payload === null || typeof payload !== "object") return;
-  const record = payload as Record<string, unknown>;
-  if (Array.isArray(record.choices) && record.output === undefined) {
-    throw new AppError(
-      "MODEL_ERROR",
-      "Configured Responses Provider returned a Chat Completions payload; set protocol to chat-completions",
-      502,
-      {
-        expectedProtocol: "responses",
-        observedProtocol: "chat-completions",
-        responseShape: ["choices"],
-      },
-    );
-  }
+function redactModelError(error: AppError, apiKey: string): AppError {
+  const redact = (value: unknown): any => typeof value === "string" ? (apiKey ? value.replaceAll(apiKey, "[REDACTED]") : value)
+    : Array.isArray(value) ? value.map(redact)
+      : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redact(item)])) : value;
+  return new AppError(error.code, redact(error.message), error.status, redact(error.details));
 }
 
-function assertChatCompletionsPayload(payload: unknown): void {
-  if (payload === null || typeof payload !== "object") return;
-  const record = payload as Record<string, unknown>;
-  const responseRecord = record.response !== null && typeof record.response === "object"
-    ? record.response as Record<string, unknown>
-    : undefined;
-  const isResponsesPayload = Array.isArray(record.output) && record.choices === undefined;
-  const isResponsesStreamEvent = typeof record.type === "string"
-    && record.type.startsWith("response.")
-    && record.choices === undefined;
-  const isNestedResponsesPayload = responseRecord !== undefined
-    && Array.isArray(responseRecord.output)
-    && record.choices === undefined;
-  if (isResponsesPayload || isResponsesStreamEvent || isNestedResponsesPayload) {
-    throw new AppError(
-      "MODEL_ERROR",
-      "Configured Chat Completions Provider returned a Responses payload; set protocol to responses",
-      502,
-      {
-        expectedProtocol: "chat-completions",
-        observedProtocol: "responses",
-        responseShape: isResponsesStreamEvent ? ["type", "response"] : ["output"],
-      },
-    );
-  }
+/** Existing public adapters now share the standard SDK provider implementation. */
+export class OpenAICompatibleModel extends AiSdkModel {
+  constructor(options: OpenAICompatibleModelOptions) { super(options, "chat-completions"); }
 }
-
-function responseOutputText(
-  record: Record<string, unknown>,
-  output: readonly Record<string, unknown>[],
-  fallbackContent: string,
-): string {
-  if (typeof record.output_text === "string" && record.output_text.length > 0) return record.output_text;
-  const parts: string[] = [];
-  for (const item of output) {
-    if (item.type !== "message" || !Array.isArray(item.content)) continue;
-    for (const part of item.content as Array<Record<string, unknown>>) {
-      if (part.type !== "output_text") continue;
-      if (typeof part.text === "string" && part.text.length > 0) parts.push(part.text);
-    }
-  }
-  return parts.length > 0 ? parts.join("") : fallbackContent;
-}
-
-function toResponsesInputItems(message: Record<string, unknown>): Record<string, unknown>[] {
-  const role = message.role as string;
-  if (role === "user") {
-    return [{ type: "message", role: "user", content: [{ type: "input_text", text: message.content as string }] }];
-  }
-  if (role === "tool") {
-    return [{ type: "function_call_output", call_id: message.tool_call_id, output: message.content }];
-  }
-  if (role !== "assistant") return [];
-  const text = typeof message.content === "string" ? message.content : "";
-  const items: Record<string, unknown>[] = [];
-  if (text.length > 0) {
-    items.push({
-      type: "message",
-      role: "assistant",
-      content: [{ type: "output_text", text }],
-    });
-  }
-  const toolCalls = Array.isArray(message.tool_calls)
-    ? message.tool_calls as Array<Record<string, unknown>>
-    : [];
-  for (const call of toolCalls) {
-    items.push({
-      type: "function_call",
-      call_id: call.id,
-      name: (call.function as Record<string, unknown> | undefined)?.name,
-      arguments: (call.function as Record<string, unknown> | undefined)?.arguments ?? "{}",
-    });
-  }
-  return items;
-}
-
-function responsesEmptyInputSentinel(): Record<string, unknown> {
-  return {
-    type: "message",
-    role: "user",
-    content: [{ type: "input_text", text: "Continue." }],
-  };
-}
-
-function toResponsesToolChoice(
-  choice: NonNullable<ModelInvocation["toolChoice"]>,
-  mode: "native" | "constrained-as-auto" | "named-as-required",
-  toolCount: number,
-): "auto" | "required" | Readonly<{ type: "function"; name: string }> {
-  if (mode === "constrained-as-auto" && choice !== "auto") return "auto";
-  if (mode === "named-as-required" && typeof choice !== "string") {
-    return toolCount === 1 ? "required" : "auto";
-  }
-  if (typeof choice === "string") return choice;
-  return { type: "function", name: choice.name };
-}
-
-function estimateWireTokens(value: string): number {
-  let ascii = 0;
-  let nonAscii = 0;
-  for (const character of value) {
-    if (character.codePointAt(0)! <= 0x7f) ascii += 1;
-    else nonAscii += 1;
-  }
-  return Math.max(1, Math.ceil(ascii / 4 + nonAscii));
-}
-
-function toProviderToolChoice(
-  choice: NonNullable<ModelInvocation["toolChoice"]>,
-  mode: "native" | "constrained-as-auto" | "named-as-required",
-  toolCount: number,
-): "auto" | "required" | Readonly<{ type: "function"; function: { name: string } }> {
-  if (mode === "constrained-as-auto" && choice !== "auto") return "auto";
-  if (mode === "named-as-required" && typeof choice !== "string") {
-    return toolCount === 1 ? "required" : "auto";
-  }
-  if (typeof choice === "string") return choice;
-  return { type: "function", function: { name: choice.name } };
-}
-
-function modelRequestLogContext(options: {
-  protocol: ModelRequestLogContext["protocol"];
-  model: string;
-  invocation: ModelInvocation;
-  stream: boolean;
-  runtimeContextPlacement: RuntimeContextPlacement;
-  providerMessageCount?: number;
-  providerInputItemCount?: number;
-  insertedEmptyInputSentinel?: boolean;
-  toolChoice?: unknown;
-}): ModelRequestLogContext {
-  return {
-    protocol: options.protocol,
-    model: options.model,
-    phase: options.invocation.phase ?? "unknown",
-    stream: options.stream,
-    canonicalMessageCount: options.invocation.messages.length,
-    ...(options.providerMessageCount === undefined ? {} : { providerMessageCount: options.providerMessageCount }),
-    ...(options.providerInputItemCount === undefined ? {} : { providerInputItemCount: options.providerInputItemCount }),
-    ...(options.insertedEmptyInputSentinel === undefined ? {} : { insertedEmptyInputSentinel: options.insertedEmptyInputSentinel }),
-    toolCount: options.invocation.tools.length,
-    toolChoice: describeToolChoice(options.toolChoice),
-    runtimeContextPlacement: options.runtimeContextPlacement,
-  };
-}
-
-function describeToolChoice(value: unknown): string {
-  if (value === undefined) return "none";
-  if (typeof value === "string") return value;
-  if (value !== null && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    if (record.type === "function") {
-      const fn = record.function as Record<string, unknown> | undefined;
-      const name = typeof record.name === "string" ? record.name : typeof fn?.name === "string" ? fn.name : undefined;
-      return name === undefined ? "function" : `function:${name}`;
-    }
-  }
-  return "unknown";
-}
-
-function requestRequiresToolCall(toolChoice: string): boolean {
-  return toolChoice === "required" || toolChoice.startsWith("function:");
-}
-
-function createModelResponseBudget(
-  invocation: ModelInvocation,
-  limits: Readonly<{ maxOutputTokens: number }>,
-): ModelResponseBudget {
-  const maxOutputTokens = Math.min(invocation.maxOutputTokens ?? limits.maxOutputTokens, limits.maxOutputTokens);
-  const maxOutputBytes = Math.max(MIN_MODEL_OUTPUT_BYTES, maxOutputTokens * MODEL_OUTPUT_BYTES_PER_TOKEN);
-  const maxResponseBytes = maxOutputBytes * MODEL_RESPONSE_ENVELOPE_MULTIPLIER
-    + MODEL_RESPONSE_ENVELOPE_OVERHEAD_BYTES;
-  let outputBytes = 0;
-
-  const assertOutputBytes = (observedBytes: number, field: string): void => {
-    if (observedBytes <= maxOutputBytes) return;
-    throw modelResponseLimitError({
-      limitKind: "output",
-      field,
-      maxOutputTokens,
-      maxBytes: maxOutputBytes,
-      observedBytes,
-    });
-  };
-
-  return {
-    maxOutputTokens,
-    maxOutputBytes,
-    maxResponseBytes,
-    addOutputBytes(value, field) {
-      outputBytes += Buffer.byteLength(value);
-      assertOutputBytes(outputBytes, field);
-    },
-    replaceOutputBytes(previous, value, field) {
-      outputBytes = Math.max(0, outputBytes - Buffer.byteLength(previous)) + Buffer.byteLength(value);
-      assertOutputBytes(outputBytes, field);
-    },
-    assertEventBytes(value) {
-      const observedBytes = Buffer.byteLength(value);
-      if (observedBytes <= maxResponseBytes) return;
-      throw modelResponseLimitError({
-        limitKind: "stream_event",
-        field: "event",
-        maxOutputTokens,
-        maxBytes: maxResponseBytes,
-        observedBytes,
-      });
-    },
-    assertResponse(response) {
-      assertOutputBytes(modelResponseOutputBytes(response), "response");
-    },
-  };
-}
-
-function modelResponseOutputBytes(response: ModelResponse): number {
-  let bytes = Buffer.byteLength(response.content);
-  if (response.reasoningContent !== undefined) bytes += Buffer.byteLength(response.reasoningContent);
-  for (const call of response.toolCalls) bytes += Buffer.byteLength(safeJsonStringify(call.arguments));
-  return bytes;
-}
-
-function safeJsonStringify(value: unknown): string {
-  try {
-    return JSON.stringify(value) ?? String(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function modelResponseLimitError(input: {
-  readonly limitKind: "output" | "response" | "stream_event";
-  readonly field: string;
-  readonly maxOutputTokens: number;
-  readonly maxBytes: number;
-  readonly observedBytes: number;
-}): AppError {
-  return new AppError("MODEL_ERROR", "Model provider response exceeded the configured output budget", 502, {
-    limitKind: input.limitKind,
-    field: input.field,
-    maxOutputTokens: input.maxOutputTokens,
-    maxBytes: input.maxBytes,
-    observedBytes: input.observedBytes,
-  });
-}
-
-async function readJsonResponseWithinLimit(response: Response, budget: ModelResponseBudget): Promise<unknown> {
-  const declaredLength = response.headers.get("content-length");
-  if (declaredLength !== null) {
-    const observedBytes = Number(declaredLength);
-    if (Number.isFinite(observedBytes) && observedBytes > budget.maxResponseBytes) {
-      await response.body?.cancel().catch(() => undefined);
-      throw modelResponseLimitError({
-        limitKind: "response",
-        field: "body",
-        maxOutputTokens: budget.maxOutputTokens,
-        maxBytes: budget.maxResponseBytes,
-        observedBytes,
-      });
-    }
-  }
-  // Keep compatibility with injected/fake Responses that expose json() but no
-  // ReadableStream while using the bounded reader for real fetch responses.
-  if (response.body == null) return await response.json() as unknown;
-
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let observedBytes = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      observedBytes += value.byteLength;
-      if (observedBytes > budget.maxResponseBytes) {
-        await reader.cancel().catch(() => undefined);
-        throw modelResponseLimitError({
-          limitKind: "response",
-          field: "body",
-          maxOutputTokens: budget.maxOutputTokens,
-          maxBytes: budget.maxResponseBytes,
-          observedBytes,
-        });
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-}
-
-function isJsonResponse(response: Response): boolean {
-  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-  return /\bapplication\/(?:[a-z0-9.+-]+\+)?json\b/u.test(contentType);
-}
-
-function providerRequestIdentity(response: Response): ModelProviderIdentity {
-  const providerRequestId = response.headers.get("x-request-id")?.trim();
-  const providerGatewayRequestId = response.headers.get("x-oneapi-request-id")?.trim();
-  return {
-    ...(providerRequestId ? { providerRequestId } : {}),
-    ...(providerGatewayRequestId ? { providerGatewayRequestId } : {}),
-  };
-}
-
-function providerResponseIdentity(payload: unknown): ModelProviderIdentity {
-  if (payload === null || typeof payload !== "object") return {};
-  const id = (payload as { id?: unknown }).id;
-  return typeof id === "string" && id.trim().length > 0 ? { providerResponseId: id } : {};
-}
-
-function withProviderRequestIdentity(error: AppError, response: Response): AppError {
-  const identity = providerRequestIdentity(response);
-  if (Object.keys(identity).length === 0) return error;
-  return new AppError(error.code, error.message, error.status, { ...error.details, ...identity });
-}
-
-async function providerHttpError(response: Response, request: ModelRequestLogContext): Promise<AppError> {
-  const bodyText = await safeResponseBodyPreview(response);
-  return new AppError("MODEL_ERROR", `Model provider returned HTTP ${response.status}`, 502, {
-    status: response.status,
-    ...providerRequestIdentity(response),
-    request,
-    ...(bodyText === undefined ? {} : { providerErrorBody: bodyText }),
-  });
-}
-
-function unreadableStreamingResponse(error: unknown, attempts: number, request: ModelRequestLogContext): AppError {
-  const streamError = error instanceof StreamConsumptionError ? error : undefined;
-  const cause = streamError?.cause ?? error;
-  return new AppError("MODEL_ERROR", "Model provider returned an unreadable streaming response", 502, {
-    attempts,
-    causeName: errorName(cause),
-    causeMessage: safeErrorMessage(cause),
-    causeCode: transportCauseCode(cause),
-    ...(streamError === undefined
-      ? {}
-      : {
-          streamFailureStage: streamError.stage,
-          streamEventsSeen: streamError.diagnostics.eventsSeen,
-          ...(streamError.diagnostics.streamReceipt === undefined
-            ? {}
-            : { streamReceipt: streamError.diagnostics.streamReceipt }),
-          ...(streamError.diagnostics.lastEvent === undefined
-            ? {}
-            : { lastStreamEvent: streamError.diagnostics.lastEvent }),
-        }),
-    request,
-  });
-}
-
-async function safeResponseBodyPreview(response: Response): Promise<string | undefined> {
-  try {
-    const text = await response.text();
-    const compact = text.replace(/\s+/g, " ").trim();
-    if (compact.length === 0) return undefined;
-    return compact.length <= 500 ? compact : `${compact.slice(0, 497)}...`;
-  } catch {
-    return undefined;
-  }
-}
-
-function streamFailureAnomalyReasons(
-  error: unknown,
-  diagnostics: StreamFailureDiagnostics,
-): string[] {
-  const failureStage = error instanceof AppError && typeof error.details?.streamFailureStage === "string"
-    ? error.details.streamFailureStage
-    : undefined;
-  const reasons = [failureStage === "provider_error_event"
-    ? "provider_error_event"
-    : failureStage === "missing_terminal_event"
-      ? "missing_terminal_event"
-      : error instanceof AppError && /protocol|payload/u.test(error.message.toLowerCase())
-        ? "provider_protocol_mismatch"
-        : "stream_consumption_failed"];
-  if (diagnostics.nonJsonEventCount > 0) reasons.push("non_json_sse_data");
-  if (diagnostics.unrecognizedJsonEventCount > 0) reasons.push("unrecognized_json_event");
-  if (diagnostics.unterminatedFinalEventBytes > 0) reasons.push("unterminated_final_sse_event");
-  return reasons;
-}
-
-function streamAnomalyReasons(
-  response: ModelResponse,
-  diagnostics: StreamFailureDiagnostics,
-): string[] {
-  const reasons: string[] = [];
-  const hasProviderOutput = response.content.length > 0
-    || (response.reasoningContent?.length ?? 0) > 0
-    || response.toolCalls.length > 0;
-  if (response.finishReason === "stop" && response.content.trim().length === 0 && response.toolCalls.length === 0) {
-    reasons.push("empty_stop_completion");
-  }
-  if (!diagnostics.hadSinkEmission) reasons.push("no_stream_delta");
-  if (!diagnostics.finishReasonObserved) reasons.push("missing_finish_reason");
-  if (diagnostics.nonJsonEventCount > 0) reasons.push("non_json_sse_data");
-  if (diagnostics.unrecognizedJsonEventCount > 0) reasons.push("unrecognized_json_event");
-  if (diagnostics.unterminatedFinalEventBytes > 0) reasons.push("unterminated_final_sse_event");
-  if ((response.usage?.outputTokens ?? 0) > 0 && !hasProviderOutput) reasons.push("usage_output_without_payload");
-  if (response.usage?.outputTokens === 0 && hasProviderOutput) reasons.push("zero_output_usage_with_payload");
-  return reasons;
-}
-
-function summarizeStreamEvent(data: string): StreamEventSummary {
-  const trimmed = data.trim();
-  if (trimmed === "[DONE]") {
-    return { dataKind: "done", byteLength: Buffer.byteLength(data, "utf8") };
-  }
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    return {
-      dataKind: "json",
-      byteLength: Buffer.byteLength(data, "utf8"),
-      ...(parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-        ? { shape: Object.keys(parsed).sort().slice(0, 12) }
-        : {}),
-    };
-  } catch {
-    return { dataKind: "non-json", byteLength: Buffer.byteLength(data, "utf8") };
-  }
-}
-
-function errorName(error: unknown): string | undefined {
-  return error instanceof Error && error.name.length > 0 ? error.name : undefined;
-}
-
-function safeErrorMessage(error: unknown): string | undefined {
-  if (!(error instanceof Error) || error.message.length === 0) return undefined;
-  const compact = error.message.replace(/\s+/g, " ").trim();
-  if (compact.length === 0) return undefined;
-  return compact.length <= 200 ? compact : `${compact.slice(0, 197)}...`;
-}
-
-function isRetryableStatus(status: number): boolean {
-  // 400 is included so a transient provider-side rejection (malformed upstream
-  // schema check, momentary quota gate) is retried within the same bounded
-  // attempt budget instead of failing the Run immediately.
-  return status === 400 || status === 408 || status === 429 || status >= 500;
-}
-
-interface StreamingModelTimeout {
-  readonly signal: AbortSignal;
-  readonly aborted: boolean;
-  readonly abortReason: ModelAbortReason | undefined;
-  recordActivity(): void;
-  details(): Readonly<Record<string, unknown>>;
-  dispose(): void;
-}
-
-type ModelAbortReason = "request_timeout" | "stream_idle_timeout" | "stream_wall_timeout" | "cancelled";
-
-function isRetryableStreamingAbort(reason: ModelAbortReason | undefined): boolean {
-  return reason === "request_timeout";
-}
-
-function streamOperationTimeoutMs(timeoutMs: number): number {
-  return Math.min(timeoutMs * STREAM_WALL_TIMEOUT_FACTOR, STREAM_WALL_TIMEOUT_MAX_MS);
-}
-
-function createStreamingModelTimeout(timeoutMs: number, externalSignal?: AbortSignal): StreamingModelTimeout {
-  const controller = new AbortController();
-  const wallTimeoutMs = streamOperationTimeoutMs(timeoutMs);
-  let abortReason: ModelAbortReason | undefined;
-  let idleTimer: ReturnType<typeof setTimeout> | undefined;
-  let wallTimer: ReturnType<typeof setTimeout> | undefined;
-  let sawStreamActivity = false;
-
-  const clearIdleTimer = (): void => {
-    if (idleTimer !== undefined) clearTimeout(idleTimer);
-    idleTimer = undefined;
-  };
-  const abort = (reason: ModelAbortReason): void => {
-    if (controller.signal.aborted) return;
-    abortReason = reason;
-    clearIdleTimer();
-    if (wallTimer !== undefined) clearTimeout(wallTimer);
-    wallTimer = undefined;
-    controller.abort(reason);
-  };
-  const scheduleIdleTimer = (): void => {
-    clearIdleTimer();
-    const reason = sawStreamActivity ? "stream_idle_timeout" : "request_timeout";
-    idleTimer = setTimeout(() => abort(reason), timeoutMs);
-    (idleTimer as { unref?: () => void }).unref?.();
-  };
-  const onExternalAbort = (): void => abort("cancelled");
-
-  if (externalSignal?.aborted) {
-    abort("cancelled");
-  } else {
-    externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
-    scheduleIdleTimer();
-    wallTimer = setTimeout(() => abort("stream_wall_timeout"), wallTimeoutMs);
-    (wallTimer as { unref?: () => void }).unref?.();
-  }
-
-  return {
-    signal: controller.signal,
-    get aborted() {
-      return controller.signal.aborted;
-    },
-    get abortReason() {
-      return abortReason ?? (controller.signal.aborted ? "request_timeout" : undefined);
-    },
-    recordActivity: () => {
-      sawStreamActivity = true;
-      scheduleIdleTimer();
-    },
-    details: () => ({
-      abortReason: abortReason ?? "request_timeout",
-      idleTimeoutMs: timeoutMs,
-      wallTimeoutMs,
-    }),
-    dispose: () => {
-      clearIdleTimer();
-      if (wallTimer !== undefined) clearTimeout(wallTimer);
-      wallTimer = undefined;
-      externalSignal?.removeEventListener("abort", onExternalAbort);
-    },
-  };
-}
-
-function modelRequestAborted(reason?: ModelAbortReason, details?: Readonly<Record<string, unknown>>): AppError {
-  if (reason === "cancelled") {
-    return new AppError("CANCELLED", "Model request was cancelled", 409, details);
-  }
-  return new AppError("MODEL_ERROR", "Model request timed out", 502, details);
-}
-
-function transportCauseCode(error: unknown): string | undefined {
-  if (error === null || typeof error !== "object") return undefined;
-  if ("code" in error && typeof error.code === "string") return error.code;
-  if ("cause" in error) return transportCauseCode(error.cause);
-  return undefined;
-}
-
-async function retryAfter(
-  onRetry: ModelRetryReporter | undefined,
-  maxAttempts: number,
-  retryDelayMs: number,
-  attempt: number,
-  signal: AbortSignal,
-  status?: number,
-  request?: ModelRequestLogContext,
-  providerFailure?: ModelProviderIdentity & Readonly<{ providerErrorBody?: string }>,
-): Promise<void> {
-  const delayMs = retryDelayMs * attempt;
-  await onRetry?.({
-    attempt,
-    maxAttempts,
-    ...(status === undefined ? {} : { status }),
-    ...providerFailure,
-    delayMs,
-    ...(request === undefined ? {} : { request }),
-  });
-  await waitForRetry(delayMs, signal);
-}
-
-async function retryableProviderFailure(response: Response): Promise<ModelProviderIdentity & Readonly<{ providerErrorBody?: string }>> {
-  const identity = providerRequestIdentity(response);
-  const providerErrorBody = await safeResponseBodyPreview(response);
-  return {
-    ...identity,
-    ...(providerErrorBody === undefined ? {} : { providerErrorBody }),
-  };
-}
-
-function missingResponsesTerminalEvent(
-  request: ModelRequestLogContext,
-  diagnostics: StreamFailureDiagnostics,
-): AppError {
-  return new AppError("MODEL_ERROR", "Responses Provider stream ended without a terminal response event", 502, {
-    streamFailureStage: "missing_terminal_event",
-    streamEventsSeen: diagnostics.eventsSeen,
-    ...(diagnostics.lastEvent === undefined ? {} : { lastStreamEvent: diagnostics.lastEvent }),
-    request,
-  });
-}
-
-async function waitForRetry(milliseconds: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) throw modelRequestAborted();
-  await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, milliseconds);
-    const onAbort = (): void => {
-      clearTimeout(timeout);
-      reject(modelRequestAborted());
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-function parseToolCall(
-  call: { id?: string; function?: { name?: string; arguments?: unknown } },
-  index: number,
-): ModelToolCall {
-  const id = call.id;
-  const name = call.function?.name;
-  if (id === undefined || name === undefined) {
-    throw new AppError("MODEL_ERROR", `Model provider returned an invalid tool call at index ${index}`, 502);
-  }
-  const rawArguments = call.function?.arguments ?? "{}";
-  return { id, name, arguments: parseToolArguments(rawArguments === "" ? "{}" : rawArguments) };
-}
-
-function parseAccumulatedToolCall(id: string, name: string, rawArguments: string, rawArgumentValue?: unknown): ModelToolCall {
-  return {
-    id,
-    name,
-    arguments: rawArgumentValue === undefined ? parseToolArguments(rawArguments === "" ? "{}" : rawArguments) : parseToolArguments(rawArgumentValue),
-  };
-}
-
-function streamingToolArgumentsDelta(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (value === undefined || value === null) return "";
-  try {
-    return JSON.stringify(value) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function parseToolArguments(rawArguments: unknown): unknown {
-  let argumentsValue = rawArguments;
-  // Providers occasionally encode function arguments more than once (for
-  // example, a JSON string inside a JSON string). Normalize the transport
-  // representation here so every protocol reaches Runtime with the same
-  // object-or-invalid-value contract. Keep the bound to avoid chasing an
-  // arbitrary string chain supplied by a provider.
-  for (let depth = 0; depth < 4 && typeof argumentsValue === "string"; depth += 1) {
-    const decodedValue = parseToolArgumentsJson(argumentsValue);
-    if (decodedValue === undefined) break;
-    argumentsValue = decodedValue;
-  }
-  return argumentsValue;
-}
-
-function parseToolArgumentsJson(rawArguments: string): unknown | undefined {
-  try {
-    return JSON.parse(rawArguments);
-  } catch {
-    return undefined;
-  }
-}
-
-function normalizeFinishReason(reason: string | undefined, toolCallCount: number): ModelResponse["finishReason"] {
-  if (reason === "length") return "length";
-  if (reason === "tool_calls" || toolCallCount > 0) return "tool_calls";
-  if (reason === "stop" || reason === undefined) return "stop";
-  return "error";
+export class ResponsesModel extends AiSdkModel {
+  constructor(options: OpenAICompatibleModelOptions) { super(options, "responses"); }
 }

@@ -1,4 +1,5 @@
 import { AppError, badRequest } from "../shared/errors.ts";
+import { nullableJsonSchema } from "../shared/json-schema.ts";
 import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 import { requireRecord, requireString, requireStringArray } from "../shared/validation.ts";
 import type { ModelAdapter, ModelInvocation, ModelToolCall, RuntimeContextSnapshot, RuntimeEventSink } from "../runtime/contracts.ts";
@@ -135,8 +136,8 @@ const OUTCOME_LEAF_SCHEMA = {
     role: { type: "string", enum: ["fact_acquisition", "produce", "deliver", "repair"] },
     skillIds: { type: "array", items: { type: "string" } },
     requiredCapabilities: { type: "array", items: { type: "string" } },
-    sourceConstraint: {
-      type: ["object", "null"],
+    sourceConstraint: nullableJsonSchema({
+      type: "object",
       additionalProperties: false,
       required: ["bindings"],
       properties: {
@@ -154,9 +155,9 @@ const OUTCOME_LEAF_SCHEMA = {
           },
         },
       },
-    },
-    evidenceContract: {
-      type: ["object", "null"],
+    }),
+    evidenceContract: nullableJsonSchema({
+      type: "object",
       additionalProperties: false,
       required: ["requiredKinds", "caveatPolicy"],
       properties: {
@@ -168,7 +169,7 @@ const OUTCOME_LEAF_SCHEMA = {
         },
         caveatPolicy: { type: "string", enum: CAVEAT_POLICY_VALUES },
       },
-    },
+    }),
     targetIds: {
       type: "array",
       description: TARGET_OWNERSHIP_GUIDANCE,
@@ -1546,8 +1547,8 @@ function sourceConstraintSchemaForTask(task: TaskSpec): Record<string, unknown> 
     });
   }
   if (variants.length === 0) return { type: "null" };
-  return {
-    type: ["object", "null"],
+  return nullableJsonSchema({
+    type: "object",
     additionalProperties: false,
     required: ["bindings"],
     properties: {
@@ -1558,7 +1559,7 @@ function sourceConstraintSchemaForTask(task: TaskSpec): Record<string, unknown> 
         items: variants.length === 1 ? variants[0] : { oneOf: variants },
       },
     },
-  };
+  });
 }
 
 function planningCapabilitiesForTask(task: TaskSpec): readonly PlanningCapability[] {

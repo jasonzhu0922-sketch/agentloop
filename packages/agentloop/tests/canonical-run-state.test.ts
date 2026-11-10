@@ -125,8 +125,10 @@ test("an open repair gap retains concerns without reclassifying all provenance a
   assert.ok(gap.evidenceRefs.includes("rr_00000000-0000-4000-8000-000000000001"));
   assert.deepEqual(gap.reusableEvidenceRefs, []);
   assert.deepEqual(gap.evidenceConcerns, [concern]);
-  assert.throws(() => recordCanonicalAssessment(result, { id: "unjustified", stepId: "produce", approved: true, criteria: [] }, evidence(), 5),
-    /evidence concerns remain unresolved/);
+  const accepted = recordCanonicalAssessment(result, { id: "matching-reply", stepId: "produce", approved: true, criteria: [] }, evidence(), 5);
+  assert.equal(accepted.steps.produce!.status, "satisfied");
+  assert.equal(accepted.gaps.find((item) => item.id === gap.id)?.status, "resolved");
+  assert.deepEqual(accepted.gaps.find((item) => item.id === gap.id)?.evidenceConcerns, [concern]);
   const next = recordCanonicalAssessment(result, { id: "assessment-2", stepId: "produce", approved: false, criteria: [],
     failedBoundary: { stepId: "produce", missingEvidenceKinds: [], violatedSkillRequirements: [], reusableEvidenceRefs: [],
       suggestedRepairShape: "repair_leaf" } }, evidence(), 5);
