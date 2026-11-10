@@ -5,6 +5,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startDesktop } from "../src/application.ts";
 import { claimInstance } from "../src/platform/instance-lock.ts";
+import { desktopStartupErrorMessage } from "../src/main.ts";
+
+test("startup diagnostics identify missing data markers without exposing arbitrary errors", () => {
+  assert.match(desktopStartupErrorMessage(new Error("desktop_data_directory_not_empty")), /缺少 Desktop 身份标记/);
+  assert.match(desktopStartupErrorMessage(new Error("desktop_instance_unavailable")), /实例锁/);
+  assert.doesNotMatch(desktopStartupErrorMessage(new Error("secret-provider-token")), /secret-provider-token/);
+});
 
 test("packaged hosts require explicit authentication and prebuilt resources before claiming data", async () => {
   const root = await mkdtemp(join(tmpdir(), "desktop-packaged-configuration-"));

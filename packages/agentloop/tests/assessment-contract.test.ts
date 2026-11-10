@@ -3,7 +3,9 @@ import test from "node:test";
 import { ModelStepAssessor } from "../src/planning/assessor.ts";
 import type { StepAssessmentInput } from "../src/planning/contracts.ts";
 import type { ModelInvocation, RuntimeEvent } from "../src/runtime/contracts.ts";
-import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
+import { amendCanonicalIntent, createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
+import { ModelPlanRevisionAssessor } from "../src/runtime/recovery-planning.ts";
+import type { PlanRevisionAssessmentInput } from "../src/planning/contracts.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { AppDatabase } from "../src/storage/database.ts";
@@ -13,6 +15,35 @@ import { singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers
 
 const userInput = "Reply with exactly: browser production smoke passed";
 const output = "browser production smoke passed";
+
+test("plan revision assessment uses the ordered amended intent without waiving unchanged constraints", async () => {
+  const original = "List the APIs with details, using only the authorized catalog.";
+  const steer = "Just the API list; I no longer need details.";
+  const state = amendCanonicalIntent(createCanonicalRunState({ runId: "steer-assessment", userInput: original,
+    understanding: understandTask({ objective: original }), now: 1 }), {
+    messageId: "steer-1", seq: 1, text: steer, explanation: "The user no longer requires details.",
+    understanding: understandTask({ objective: "List APIs using only the authorized catalog.", userConstraints: ["Use only the authorized catalog"] }),
+  }, 2);
+  const input = { runId: state.runId, userInput: state.intent.userInput, canonicalState: state,
+    currentPlan: { id: "plan", version: 1 }, proposal: { goal: "List APIs", steps: [] }, retiredStepIds: [],
+    recoveryAction: { id: "action", kind: "planning", replayPolicy: "safe", metadata: { reason: "steer" } },
+  } as unknown as PlanRevisionAssessmentInput;
+  let calls = 0;
+  const result = await new ModelPlanRevisionAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
+    calls++;
+    assert.match(request.systemPrompt, /later amendment can replace or relax an earlier requirement/);
+    assert.match(request.systemPrompt, /never infer a waiver from silence/);
+    assert.equal(request.messages[0]!.content, state.intent.userInput);
+    const context = JSON.parse(request.runtimeContext!.content);
+    assert.equal(context.canonicalState.intent.originalUserInput, original);
+    assert.equal(context.canonicalState.intent.amendments[0].text, steer);
+    assert.ok(JSON.stringify(context.canonicalState.intent.understanding).includes("authorized catalog"));
+    return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "assessment", name: "submit_plan_revision_assessment",
+      arguments: { approved: true, feedback: "The current request and source constraint are covered.", evidenceRefs: [] } }] };
+  } }).assess(input);
+  assert.equal(calls, 1);
+  assert.equal(result.approved, true);
+});
 
 function assessmentInput(): StepAssessmentInput {
   return {

@@ -50,6 +50,20 @@ export function desktopLaunchOptions(args: readonly string[]): { dataDirectory?:
   }
   return { ...(dataDirectory === undefined ? {} : { dataDirectory }), openBrowser };
 }
+export function desktopStartupErrorMessage(error: unknown): string {
+  if ((error as NodeJS.ErrnoException)?.code === "EADDRINUSE") return `Desktop 启动失败：固定端口 ${DESKTOP_DEVELOPMENT_PORT} 已被占用。请先停止该端口上的进程。`;
+  const message = error instanceof Error ? error.message : "";
+  const reasons: Record<string, string> = {
+    desktop_data_directory_not_empty: "数据目录非空，但缺少 Desktop 身份标记 .desktop-data.json。请恢复原标记，或使用新的空数据目录；现有数据未被修改。",
+    desktop_data_marker_invalid: "数据目录的 Desktop 身份标记无效，或与当前启动模式不匹配。请检查原标记和启动模式；现有数据未被修改。",
+    desktop_instance_unavailable: "数据目录的实例锁无法确认归属，Desktop 不会自动接管。请检查原实例及锁文件。",
+    desktop_model_configuration_incomplete: "模型环境配置不完整：模型地址、模型名和 API Key 必须同时提供。",
+    desktop_requires_explicit_development_mode: "开发模式必须显式传入 --development。",
+    desktop_data_directory_must_be_absolute: "数据目录必须使用绝对路径。",
+    desktop_argument_invalid: "启动参数无效，请检查命令行参数。",
+  };
+  return `Desktop 启动失败：${reasons[message] ?? "请检查开发模式、模型配置、数据目录和实例状态。"}`;
+}
 async function main(): Promise<void> {
   const { dataDirectory, openBrowser } = desktopLaunchOptions(process.argv.slice(2));
   const authUrl = process.env.AGENTLOOP_DESKTOP_AUTH_BASE_URL;
@@ -81,7 +95,6 @@ async function main(): Promise<void> {
 }
 // No raw exceptions: initialization/provider messages can contain secrets.
 if (import.meta.main) void main().catch(error => {
-  if ((error as NodeJS.ErrnoException).code === "EADDRINUSE") console.error(`Desktop 启动失败：固定端口 ${DESKTOP_DEVELOPMENT_PORT} 已被占用。请先停止该端口上的进程。`);
-  else console.error("Desktop 启动失败。请检查显式 --development 参数、模型配置、独立数据目录或实例锁；不会自动接管旧锁。");
+  console.error(desktopStartupErrorMessage(error));
   process.exitCode = 1;
 });

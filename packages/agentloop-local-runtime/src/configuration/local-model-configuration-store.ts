@@ -86,7 +86,10 @@ export class LocalModelConfigurationStore {
 
   async read(): Promise<LocalModelConfigurationInput> {
     const row = await this.row();
-    return row === undefined ? { reuseCloudModels: true, providers: [] } : configurationWithoutLegacyDefaults(row.configuration_json);
+    if (row === undefined) return { reuseCloudModels: true, providers: [] };
+    const configuration = configurationWithoutLegacyDefaults(row.configuration_json);
+    return row.secret_storage_key !== null ? configuration : { ...configuration,
+      providers: configuration.providers.map(provider => ({ ...provider, credentialConfigured: false })) };
   }
 
   async write(value: LocalModelConfigurationInput): Promise<LocalModelConfigurationInput> {
@@ -159,7 +162,7 @@ export class LocalModelConfigurationStore {
     if (environment === undefined) throw new Error("local_model_credentials_missing");
     return {
       configured: true, reuseCloudModels: config.reuseCloudModels,
-      registryConfig: registryConfiguration(config), environment,
+      registryConfig: row.secret_storage_key === null ? undefined : registryConfiguration(config), environment,
     };
   }
 

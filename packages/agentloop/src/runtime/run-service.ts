@@ -3217,30 +3217,62 @@ export class RunService {
               result: step.evidence!.publishedResult!.ref, relation: "continue_prior" as const }))];
             const toolSourceIds = [...new Set(completed.flatMap(step => (step.executionBinding.requiredToolSourceIds ?? [])))];
             const kinds = [...new Set(completed.flatMap(step => step.evidence!.toolCalls.filter(call => !call.isError).flatMap(call => call.admittedEvidenceKinds ?? [])))].filter((kind): kind is import("../planning/contracts.ts").EvidenceKind => (importedEvidenceKinds as readonly string[]).includes(kind));
-            const proposal = await this.plannerFactory(input.model).plan({ runId: input.runId, canonicalState: amended,
-              availableSkills: input.privateSkills, availableToolNames: [...input.rootGrant.allowedToolNames], availableTools: tools,
-              availableCapabilities: [...planningCapabilitiesFromTools(tools, input.sources), ...planningCapabilitiesFromSkills(input.privateSkills)],
-              visibleDirectories: input.visibleDirectories, sources: input.sources, roundResultBindings: bindings,
-              reusableRoundEvidence: { kinds, toolSourceIds }, planningExtensionContexts: [{ schema: "agentloop.planningExtensionContext/v1",
-                extensionName: "runtime-input", kind: "steer", content: { message, previousPlan: basePlan,
-                  actions, instruction: "Plan only the remaining work under the amended intent. Previous Steps are archived; reuse their published Results and recorded Tool receipts. Never repeat a confirmed external action or assume an unknown action succeeded." } }],
-            }, input.signal, event => this.appendRunEvent(input.runId, event));
-            // New contracts have new identities. Archived completed facts remain readable through explicit bindings.
-            const prefix = `steer${message.seq}.`;
-            const namespaced = { ...proposal, steps: proposal.steps.map(step => ({ ...step, id: prefix + step.id,
-              ...(step.parentId === undefined ? {} : { parentId: prefix + step.parentId }), dependencies: step.dependencies.map(id => prefix + id) })) };
-            admitted = admitPlan({ runId: input.runId, proposal: bindRequiredSkillCompanions(namespaced, input.privateSkills), canonicalState: amended,
-              availableSkills: input.privateSkills, availableToolNames: input.rootGrant.allowedToolNames, availableTools: tools,
-              availableCapabilities: planningCapabilitiesForAdmittedProposal(namespaced, input.privateSkills, tools, input.sources),
-              availableUploadedSourceIds: input.sources.map(source => source.id), availableVisibleDirectoryIds: input.visibleDirectories.map(directory => directory.id),
-              resultBindings: bindings, reusableEvidenceKinds: kinds, reusableToolSourceIds: toolSourceIds,
-            });
-            retiredStepIds = basePlan.steps.filter(step => step.retiredAt === undefined).map(step => step.id);
-            const assessment = await this.planRevisionAssessorFactory(input.model).assess({ runId: input.runId, userInput: amended.intent.userInput,
-              canonicalState: amended, currentPlan: basePlan, proposal: namespaced, retiredStepIds,
-              recoveryAction: { id: actionId, kind: "planning", replayPolicy: "safe", metadata: { reason: "steer", messageId: message.id,
-                unresolvedActionEffects: await this.unresolvedUnsafeEffects(input.runId, basePlan.id) } } });
-            if (!assessment.approved) throw new AppError("PLAN_NOT_ADMITTED", "Steer Plan revision was not approved", 422);
+            const retired = basePlan.steps.filter(step => step.retiredAt === undefined).map(step => step.id);
+            const revisionFeedback: { feedback: string; evidenceRefs: readonly string[]; proposal?: PlanProposal }[] = [];
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                const proposal = await this.plannerFactory(input.model).plan({ runId: input.runId, canonicalState: amended,
+                  availableSkills: input.privateSkills, availableToolNames: [...input.rootGrant.allowedToolNames], availableTools: tools,
+                  availableCapabilities: [...planningCapabilitiesFromTools(tools, input.sources), ...planningCapabilitiesFromSkills(input.privateSkills)],
+                  visibleDirectories: input.visibleDirectories, sources: input.sources, roundResultBindings: bindings,
+                  reusableRoundEvidence: { kinds, toolSourceIds }, planningExtensionContexts: [{ schema: "agentloop.planningExtensionContext/v1",
+                    extensionName: "runtime-input", kind: "steer", content: { message, previousPlan: basePlan,
+                      actions, revisionFeedback, instruction: "Plan only the remaining work under the amended intent. Previous Steps are archived; reuse their published Results and recorded Tool receipts. Never repeat a confirmed external action or assume an unknown action succeeded. Address the independent assessment feedback from previous revision attempts." } }],
+                }, input.signal, event => this.appendRunEvent(input.runId, event));
+                // New contracts have new identities. Archived completed facts remain readable through explicit bindings.
+                const prefix = `steer${message.seq}.`;
+                const namespaced = { ...proposal, steps: proposal.steps.map(step => ({ ...step, id: prefix + step.id,
+                  ...(step.parentId === undefined ? {} : { parentId: prefix + step.parentId }), dependencies: step.dependencies.map(id => prefix + id) })) };
+                admitted = admitPlan({ runId: input.runId, proposal: bindRequiredSkillCompanions(namespaced, input.privateSkills), canonicalState: amended,
+                  availableSkills: input.privateSkills, availableToolNames: input.rootGrant.allowedToolNames, availableTools: tools,
+                  availableCapabilities: planningCapabilitiesForAdmittedProposal(namespaced, input.privateSkills, tools, input.sources),
+                  availableUploadedSourceIds: input.sources.map(source => source.id), availableVisibleDirectoryIds: input.visibleDirectories.map(directory => directory.id),
+                  resultBindings: bindings, reusableEvidenceKinds: kinds, reusableToolSourceIds: toolSourceIds,
+                });
+                const assessment = await this.planRevisionAssessorFactory(input.model).assess({ runId: input.runId, userInput: amended.intent.userInput,
+                  canonicalState: amended, currentPlan: basePlan, proposal: namespaced, retiredStepIds: retired,
+                  recoveryAction: { id: actionId, kind: "planning", replayPolicy: "safe", metadata: { reason: "steer", messageId: message.id,
+                    unresolvedActionEffects: await this.unresolvedUnsafeEffects(input.runId, basePlan.id) } } });
+                await this.appendRunEvent(input.runId, { type: "plan.steer_revision_assessed", data: {
+                  messageId: message.id, planId: basePlan.id, attempt, approved: assessment.approved,
+                  feedback: assessment.feedback, evidenceRefs: assessment.evidenceRefs, proposal: namespaced,
+                } });
+                if (assessment.approved) { retiredStepIds = retired; break; }
+                admitted = undefined;
+                revisionFeedback.push({ feedback: assessment.feedback, evidenceRefs: assessment.evidenceRefs, proposal: namespaced });
+              } catch (error) {
+                if (!(error instanceof AppError) || !["PLANNING_ERROR", "PLAN_NOT_ADMITTED", "ASSESSMENT_ERROR"].includes(error.code)) throw error;
+                admitted = undefined;
+                revisionFeedback.push({ feedback: error.message, evidenceRefs: [] });
+                await this.appendRunEvent(input.runId, { type: "plan.steer_revision_attempt_failed", data: {
+                  messageId: message.id, planId: basePlan.id, attempt, code: error.code, feedback: error.message,
+                } });
+              }
+            }
+            if (admitted === undefined) {
+              const explanation = "我已收到您的补充要求，但多次调整后仍未能确认后续计划满足要求，执行已暂停。请补充说明希望如何继续，或要求我重新尝试。";
+              let request: HumanLoopRequest | undefined;
+              await queue.finish(message, token, "needs_clarification", { kind: "clarify", explanation,
+                reason: "steer_revision_not_approved", assessments: revisionFeedback.map(({ feedback, evidenceRefs }) => ({ feedback, evidenceRefs })) }, async () => {
+                request = await this.humanLoops.create({ runId: input.runId, planId: basePlan.id,
+                  origin: "assessor", kind: "input", title: "需要确认如何继续", prompt: explanation,
+                  rationale: "补充要求已保留；在后续计划确认前不会继续执行原计划。", evidenceRefs: [message.id],
+                  responseSchema: { type: "form", fields: [{ id: "clarification", label: "如何继续", valueType: "textarea", required: true, maxLength: 4000 }] },
+                  resume: { mode: "run_input" } });
+              });
+              await this.appendRunEvent(input.runId, { type: "run.waiting_user", data: { runId: input.runId, requestId: request!.id, kind: request!.kind, request } });
+              throw new AppError("HUMAN_LOOP_REQUIRED", explanation, 409, { inputMessageId: message.id });
+            }
           }
           await queue.finish(message, token, "applied", { kind: "amend", explanation: decision.explanation,
             basedOnCanonicalRevision: baseState.revision, intentRevision: amended.intent.revision,

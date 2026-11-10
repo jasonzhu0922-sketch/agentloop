@@ -7,6 +7,7 @@ import { RunService } from "../src/runtime/run-service.ts";
 import { ModelPlanner } from "../src/planning/planner.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { TerminalCommitter } from "../src/runtime/terminal-committer.ts";
+import { AppError } from "../src/shared/errors.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
 
 async function seed(db: AppDatabase) {
@@ -234,5 +235,59 @@ test("Steer replans a follow-up with its existing prior Result exactly once", as
     assert.equal(plan.resultBindings?.length, 1);
     assert.equal(plan.resultBindings?.[0]?.relation, "refine_prior");
     assert.equal(steerPlans, 1);
+  } finally { await db.close(); }
+});
+
+for (const scenario of ["rejected", "exhausted", "invalid_plan"] as const) test(`Steer revision ${scenario}`, async () => {
+  const db = new AppDatabase(":memory:");
+  let runs: RunService, injected = false, assessments = 0, plans = 0, allowResume = false;
+  const base = singleStepTestPlanner();
+  const intent = { schema: "agentloop.conversationTaskIntent/v1", operation: "answer", requiresExecution: true,
+    deliverables: [{ targetId: "answer", purpose: "Answer the question", expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] };
+  try {
+    runs = new RunService({ database: db, skills: new SkillService(db), assessorFactory: approvingTestAssessor,
+      plannerFactory: () => ({ plan: async task => {
+        if (task.planningExtensionContexts?.some(context => context.kind === "steer")) {
+          plans++;
+          const content = task.planningExtensionContexts[0]!.content as { revisionFeedback: { feedback: string }[] };
+          if (content.revisionFeedback.length) assert.equal(content.revisionFeedback.at(-1)?.feedback, scenario === "invalid_plan" ? "Missing required source" : "Preserve the requested scope");
+          if (scenario === "invalid_plan" && plans === 1) throw new AppError("PLAN_NOT_ADMITTED", "Missing required source", 422);
+        }
+        return base.plan(task);
+      } }),
+      planRevisionAssessorFactory: () => ({ assess: async () => ({ approved: allowResume || scenario === "invalid_plan" || (scenario !== "exhausted" && ++assessments > 1),
+        feedback: "Preserve the requested scope", evidenceRefs: ["evidence-1"] }) }),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+        if (request.runId.startsWith("conversation-turn:")) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "intent", name: "resolve_conversation_turn", arguments: {
+          mode: "execute", relation: "new_goal", inputMode: "none", effectiveGoal: "Answer the question.", taskIntent: intent,
+          evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [], memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
+        } }] };
+        if (request.tools.some(tool => tool.name === "submit_run_input_decision")) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "decision", name: "submit_run_input_decision", arguments: {
+          kind: "amend", explanation: "Use the shorter answer.", effectiveGoal: "Answer briefly.", userConstraints: ["Be brief"], taskIntent: intent,
+        } }] };
+        if (!injected) { injected = true; await runs.submitInput("owner", request.runId, { requestId: "steer", text: "Be brief" }); }
+        return { content: "A brief answer.", finishReason: "stop", toolCalls: [] };
+      } }),
+    });
+    const run = await runs.executeConversation("owner", "Answer the question.");
+    const events = await runs.events("owner", run.id);
+    assert.equal(plans, scenario === "exhausted" ? 3 : 2);
+    assert.equal(events.filter(event => event.type === "plan.steer_revision_assessed" || event.type === "plan.steer_revision_attempt_failed").length, plans);
+    assert.equal((await runs.inputMessages("owner", run.id))[0]?.status, scenario === "exhausted" ? "needs_clarification" : "applied");
+    assert.equal(run.status, scenario === "exhausted" ? "running" : "completed");
+    if (scenario === "exhausted") {
+      const request = await runs.currentHumanLoop("owner", run.id);
+      assert.equal(request?.resume.mode, "run_input");
+      assert.equal((await runs.plan("owner", run.id)).plan.version, 1);
+      assert.ok(!events.some(event => event.type === "run.failed"));
+      allowResume = true;
+      await runs.respondHumanLoop("owner", run.id, request!.id, { clarification: "Please try again" }, request!.revision);
+      let resumed = await runs.get("owner", run.id);
+      for (let attempt = 0; attempt < 100 && resumed.status === "running"; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 5)); resumed = await runs.get("owner", run.id);
+      }
+      assert.equal(resumed.status, "completed");
+      assert.deepEqual((await runs.inputMessages("owner", run.id)).map(message => message.status), ["needs_clarification", "applied"]);
+    }
   } finally { await db.close(); }
 });

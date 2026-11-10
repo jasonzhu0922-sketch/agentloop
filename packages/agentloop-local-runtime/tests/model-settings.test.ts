@@ -99,6 +99,23 @@ test("missing vault key never silently generates a new key for existing cipherte
   assert.deepEqual(await readFile(join(root, `${reference}.json`)), encrypted); assert.equal((await readdir(root)).includes("master.key"), false);
 });
 
+test("a model profile awaiting replacement credentials stays visible and cannot be used until repaired", async t => {
+  const { manager, root, reopen } = await setup(t);
+  const initial = await manager.modelConfiguration();
+  await manager.configureModels(configuration("https://provider.example/v1"), initial.revision);
+  const database = new DatabaseSync(join(root, "supervisor.db"));
+  database.prepare("UPDATE local_model_configuration SET secret_storage_key = NULL WHERE singleton = 1").run();
+  database.close();
+  const recovered = await reopen();
+  const pending = await recovered.modelConfiguration();
+  assert.equal(pending.configuration.providers[0]?.credentialConfigured, false);
+  assert.equal(pending.configuration.providers[0]?.models[0]?.key, "reasoner");
+  assert.deepEqual(await recovered.runtime("default").models(), []);
+  const restored = await recovered.configureModels(configuration("https://provider.example/v1"), pending.revision);
+  assert.equal(restored.configuration.providers[0]?.credentialConfigured, true);
+  assert.deepEqual(await recovered.runtime("default").models(), ["local:reasoner"]);
+});
+
 test("a SQLite write failure keeps the previous catalog and removes only the uncommitted credential", async t => {
   const { manager, secrets, root } = await setup(t); const initial = await manager.modelConfiguration();
   const saved = await manager.configureModels(configuration("https://old.example/v1"), initial.revision);
