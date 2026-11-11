@@ -717,12 +717,12 @@ test("the runtime, not model prose, enforces the step budget", async () => {
       && "code" in error
       && (error as { code: unknown }).code === "RUN_LIMIT_EXCEEDED",
   );
-  assert.equal(events.filter((event) => event.type === "tool.completed").length, 1);
+  assert.equal(events.filter((event) => event.type === "tool.completed").length, 2);
   assert.equal(events.filter((event) => event.type === "loop.convergence_requested").length, 1);
-  assert.equal(events.filter((event) => event.type === "tool.rejected").length, 1);
+  assert.equal(events.filter((event) => event.type === "tool.rejected").length, 0);
 });
 
-test("the final budgeted turn converges without tools and submits existing evidence for assessment", async () => {
+test("the final budgeted turn retains tools and submits existing evidence for assessment", async () => {
   let executions = 0;
   const tool: RuntimeTool<unknown> = {
     name: "collect_evidence",
@@ -763,7 +763,7 @@ test("the final budgeted turn converges without tools and submits existing evide
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
 });
 
-test("current-step evidence completion forces the next model turn to be tool-free", async () => {
+test("current-step evidence completion requests a candidate while keeping authorized tools available", async () => {
   let modelCalls = 0;
   const source = receiptTool("collect_source", ["source_summary"]);
   const grant = makeGrant(["collect_source"]);
@@ -780,7 +780,7 @@ test("current-step evidence completion forces the next model turn to be tool-fre
           assert.equal(request.tools.some((tool) => tool.name === "collect_source"), true);
           return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "source", name: "collect_source", arguments: {} }] };
         }
-        assert.equal(request.tools.length, 0);
+        assert.ok(request.tools.length > 0);
         return { content: "current source step complete", finishReason: "stop", toolCalls: [] };
       },
     },
@@ -800,7 +800,7 @@ test("current-step evidence completion forces the next model turn to be tool-fre
   ), true);
 });
 
-test("completion preparation exposes only bounded evidence observers and assesses after the exact read", async () => {
+test("completion preparation retains the Run catalog and assesses after the exact observation", async () => {
   let modelCalls = 0;
   let readExecutions = 0;
   let effectExecutions = 0;
@@ -843,7 +843,7 @@ test("completion preparation exposes only bounded evidence observers and assesse
         if (modelCalls === 1) {
           return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "source", name: "collect_source", arguments: {} }] };
         }
-        assert.deepEqual(request.tools.map((tool) => tool.name), ["read_result"]);
+        assert.deepEqual(request.tools.map((tool) => tool.name), ["collect_source", "read_result", "future_step_work"]);
         if (modelCalls === 2) {
           return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "read", name: "read_result", arguments: {} }] };
         }
@@ -873,7 +873,7 @@ test("completion preparation exposes only bounded evidence observers and assesse
   ), true);
 });
 
-test("completion preparation reopens the full Run catalog for an authorized Tool it cannot execute", async () => {
+test("completion preparation executes an exposed Run-authorized call without reopening", async () => {
   let modelCalls = 0;
   let effectExecutions = 0;
   let assessments = 0;
@@ -914,9 +914,10 @@ test("completion preparation reopens the full Run catalog for an authorized Tool
           return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "source", name: "collect_source", arguments: {} }] };
         }
         if (modelCalls === 2) {
-          assert.deepEqual(request.tools.map((tool) => tool.name), ["read_result"]);
-          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "hidden", name: "future_step_work", arguments: {} }] };
+          assert.deepEqual(request.tools.map((tool) => tool.name), ["collect_source", "read_result", "future_step_work"]);
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "authorized", name: "future_step_work", arguments: {} }] };
         }
+        assert.equal(request.messages.some((message) => message.role === "tool" && message.toolCallId === "authorized"), true);
         return { content: "source summary complete", finishReason: "stop", toolCalls: [] };
       },
     },
@@ -934,18 +935,14 @@ test("completion preparation reopens the full Run catalog for an authorized Tool
   assert.equal(result.output, "source summary complete");
   assert.deepEqual(catalogs, [
     ["collect_source", "future_step_work", "read_result"],
-    ["read_result"],
+    ["collect_source", "future_step_work", "read_result"],
     ["collect_source", "future_step_work", "read_result"],
   ]);
-  assert.equal(effectExecutions, 0);
+  assert.equal(effectExecutions, 1);
   assert.equal(assessments, 1);
   assert.equal(events.some((event) =>
     event.type === "loop.convergence_reopened"
-    && event.data.reason === "authorized_tool_requested_during_completion_preparation"
-    && Array.isArray(event.data.toolNames)
-    && event.data.toolNames.includes("future_step_work")
-    && event.data.requestedToolCallCount === 1
-  ), true);
+  ), false);
   assert.equal(events.some((event) => event.type === "candidate.rejected"), false);
   assert.equal(events.some((event) =>
     event.type === "tool.rejected" && event.data.toolName === "future_step_work"
@@ -971,7 +968,7 @@ test("completion-preparation metadata cannot authorize an effectful or result-pu
   );
 });
 
-test("Assessment rejection reopens the full Run-authorized catalog for one repair turn", async () => {
+test("Assessment rejection retains the full Run-authorized catalog for repair", async () => {
   let modelCalls = 0;
   let assessments = 0;
   const source = receiptTool("collect_source", ["source_summary"]);
@@ -1004,14 +1001,14 @@ test("Assessment rejection reopens the full Run-authorized catalog for one repai
           return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "source", name: "collect_source", arguments: {} }] };
         }
         if (modelCalls === 2) {
-          assert.equal(request.tools.length, 0);
+          assert.ok(request.tools.length > 0);
           return { content: "first candidate", finishReason: "stop", toolCalls: [] };
         }
         if (modelCalls === 3) {
           assert.deepEqual(request.tools.map((tool) => tool.name).sort(), ["collect_source", "future_step_work"]);
           return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "repair", name: "future_step_work", arguments: {} }] };
         }
-        assert.equal(request.tools.length, 0);
+        assert.ok(request.tools.length > 0);
         return { content: "repaired candidate", finishReason: "stop", toolCalls: [] };
       },
     },
@@ -1274,7 +1271,7 @@ test("automatic artifact acceptance derives a Word profile from the final path i
           toolCalls: [{ id: "write-report", name: "computer_write_file", arguments: { path: "risk-report.docx" } }],
         };
       }
-      assert.equal(request.tools.length, 0);
+      assert.ok(request.tools.length > 0);
       return { content: "risk-report.docx 已完成并通过验收。", finishReason: "stop", toolCalls: [] };
     },
   };
@@ -1491,7 +1488,7 @@ test("automatic artifact acceptance skips command stdout when the admitted targe
           ],
         };
       }
-      assert.equal(request.tools.length, 0);
+      assert.ok(request.tools.length > 0);
       return { content: "outputs/merged.pdf 已完成并通过验收。", finishReason: "stop", toolCalls: [] };
     },
   };
@@ -2225,7 +2222,7 @@ test("structured source candidates wait for required artifact acceptance evidenc
         assert.equal(runtimeStepSemanticState(request.runtimeContext?.content ?? "").nextAction, "produce_artifact");
         return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "write", name: "computer_write_file", arguments: { path: "employee-profile-api.html", content: "<html></html>" } }] };
       }
-      assert.equal(request.tools.length, 0);
+      assert.ok(request.tools.length > 0);
       return { content: "employee-profile-api.html 已完成并通过验收。", finishReason: "stop", toolCalls: [] };
     },
   };
@@ -2345,7 +2342,7 @@ test("a declared Skill workflow fact must precede the accepted artifact that con
         assert.equal(state.workProduct.status, "process_artifact_available");
         return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "report", name: "computer_write_file", arguments: {} }] };
       }
-      assert.equal(request.tools.length, 0);
+      assert.ok(request.tools.length > 0);
       return { content: "trend.html 已完成并通过验收。", finishReason: "stop", toolCalls: [] };
     },
   };
@@ -2488,7 +2485,7 @@ test("conflicting structured tool observations require one synthesis turn instea
             ],
           };
         }
-        assert.deepEqual(request.tools, []);
+        assert.ok(request.tools.length > 0);
         assert.match(request.runtimeContext?.content ?? "", /runtime_structured_observation_synthesis/);
         assert.match(request.runtimeContext?.content ?? "", /\"match_count\":9/);
         assert.match(request.runtimeContext?.content ?? "", /\"match_count\":0/);
@@ -2925,7 +2922,7 @@ test("a length-truncated execution turn with tools receives a forward-action rep
           toolCalls: [{ id: "collect", name: "collect_evidence", arguments: { value: 1 } }],
         };
       }
-      assert.deepEqual(request.tools, []);
+      assert.ok(request.tools.length > 0);
       return { content: "evidence collected", finishReason: "stop", toolCalls: [] };
     },
   };
@@ -3196,7 +3193,7 @@ test("prepare-stage argument rejection receives a schema repair directive", asyn
           }],
         };
       }
-      assert.deepEqual(request.tools, []);
+      assert.ok(request.tools.length > 0);
       return { content: "report written", finishReason: "stop", toolCalls: [] };
     },
   };
@@ -4059,8 +4056,8 @@ test("artifact execution keeps multi-tool provider choice auto while Runtime evi
         };
       }
       if (calls === 2) {
-        assert.equal(request.toolChoice, undefined);
-        assert.equal(request.tools.length, 0);
+        assert.equal(request.toolChoice, "auto");
+        assert.ok(request.tools.length > 0);
         return { content: "Done and verified for the current step.\nArtifact: poster.png.", finishReason: "stop", toolCalls: [] };
       }
       throw new Error(`unexpected model call ${calls}`);
@@ -4705,7 +4702,7 @@ test("failed setup does not divert requested code from automatic acceptance", as
           toolCalls: [{ id: "write-player", name: "computer_write_file", arguments: { path: "play_wanfeng.py" } }],
         };
       }
-      assert.equal(request.tools.length, 0);
+      assert.ok(request.tools.length > 0);
       return { content: "play_wanfeng.py 已完成并通过验收。", finishReason: "stop", toolCalls: [] };
     },
   };
@@ -5078,7 +5075,7 @@ test("artifact progress policy allows diagnostic-driven intermediate source repa
         };
       }
       if (calls === 5) {
-        assert.equal(request.tools.length, 0);
+        assert.ok(request.tools.length > 0);
         return { content: "poster.png accepted", finishReason: "stop", toolCalls: [] };
       }
       throw new Error(`unexpected model call ${calls}`);
@@ -5414,7 +5411,7 @@ test("artifact progress policy allows a targeted rebase read after patch precond
         };
       }
       if (calls === 6) {
-        assert.equal(request.tools.length, 0);
+        assert.ok(request.tools.length > 0);
         return { content: "poster.png accepted", finishReason: "stop", toolCalls: [] };
       }
       throw new Error(`unexpected model call ${calls}`);
@@ -5883,16 +5880,16 @@ test("a looping model reaches the real hard limit when it repeats authorized too
       && (error as { code: unknown }).code === "RUN_LIMIT_EXCEEDED"
       && (error as unknown as { message: string }).message.includes("Run exceeded its 6-step limit"),
   );
-  // The sixth and final turn is reserved for no-tool convergence; all five
-  // preceding authorized repeated calls still execute.
-  assert.equal(executions, 5);
+  // All six authorized calls execute, including the final convergence turn;
+  // repeated production calls do not receive an observer continuation.
+  assert.equal(executions, 6);
   assert.equal(events.filter((event) => event.type === "loop.no_progress").length, 0);
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 1);
   const limitEvent = events.find((event) => event.type === "loop.limit_exceeded");
   assert.equal(limitEvent?.data.stalled, false);
 });
 
-test("a converged turn that emits an unexecuted tool invocation gets one no-tool repair before assessment", async () => {
+test("a converged turn that emits an unexecuted tool invocation gets one candidate repair before assessment", async () => {
   let executions = 0;
   let assessments = 0;
   const tool: RuntimeTool<unknown> = {
@@ -5937,7 +5934,7 @@ test("a converged turn that emits an unexecuted tool invocation gets one no-tool
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
 });
 
-test("a converged Kimi-style text tool invocation gets one no-tool repair before assessment", async () => {
+test("a converged Kimi-style text tool invocation gets one candidate repair before assessment", async () => {
   let executions = 0;
   let assessments = 0;
   const tool: RuntimeTool<unknown> = {
@@ -6131,7 +6128,7 @@ test("an invalid final convergence candidate receives bounded repair grace befor
           toolCalls: [{ id: "read-1", name: "read_evidence", arguments: {} }],
         };
       }
-      assert.deepEqual(request.tools, []);
+      assert.ok(request.tools.length > 0);
       if (calls < 4) {
         return { content: internalMarkup, finishReason: "stop", toolCalls: [] };
       }
@@ -6237,7 +6234,7 @@ test("convergence keeps tools available until every receipt-backed evidence obli
           toolCalls: [{ id: "aggregate-1", name: "aggregate_table", arguments: {} }],
         };
       }
-      assert.deepEqual(request.tools, []);
+      assert.ok(request.tools.length > 0);
       return {
         content: "已按责任人完成任务数聚合，并保留了数据范围说明。",
         finishReason: "stop",
@@ -6421,7 +6418,7 @@ test("per-tool search quota rejects excess searches and converges from the bound
           })),
         };
       }
-      assert.deepEqual(request.tools, []);
+      assert.ok(request.tools.length > 0);
       return { content: "已基于三轮检索结果完成摘要，并标注尚未核实的部分。", finishReason: "stop", toolCalls: [] };
     },
   };
@@ -6778,7 +6775,7 @@ test("progress policy advises after an intermediate artifact read without vetoin
         return { content: "", finishReason: "tool_calls", toolCalls: [call] };
       }
       if (calls === 4) {
-        assert.equal(request.tools.length, 0);
+        assert.ok(request.tools.length > 0);
         return { content: "poster.png accepted", finishReason: "stop", toolCalls: [] };
       }
       throw new Error(`unexpected model call ${calls}`);
@@ -6905,7 +6902,7 @@ class ConvergenceScenarioModel implements ModelAdapter {
         toolCalls: [{ id: "collect-1", name: "collect_evidence", arguments: {} }],
       };
     }
-    assert.deepEqual(request.tools, []);
+    assert.ok(request.tools.length > 0);
     assert.match(request.runtimeContext?.content ?? "", /runtime_convergence/);
     assert.equal(request.maxOutputTokens, 4_096);
     const evidence = request.messages.find((message) => message.role === "tool" && message.name === "collect_evidence");
@@ -6940,7 +6937,7 @@ class FinalEvidenceAtLimitModel implements ModelAdapter {
         toolCalls: [{ id: "accept-1", name: "verify_artifact_acceptance", arguments: { artifactPath: "poster.png" } }],
       };
     }
-    assert.deepEqual(request.tools, []);
+    assert.ok(request.tools.length > 0);
     assert.match(request.runtimeContext?.content ?? "", /runtime_convergence/);
     return {
       content: "poster.png accepted with artifact_acceptance evidence",
@@ -6964,7 +6961,7 @@ class LengthCompletionRepairModel implements ModelAdapter {
       };
     }
     if (this.calls === 2) {
-      assert.deepEqual(request.tools, []);
+      assert.ok(request.tools.length > 0);
       return {
         content: "long incomplete candidate",
         finishReason: "length",
@@ -7009,7 +7006,7 @@ class EmptyThenConvergedModel implements ModelAdapter {
         toolCalls: [{ id: "collect-1", name: "collect_evidence", arguments: {} }],
       };
     }
-    assert.deepEqual(request.tools, []);
+    assert.ok(request.tools.length > 0);
     assert.equal(request.maxOutputTokens, 4_096);
     if (this.calls === 2) {
       return { content: "", finishReason: "stop", toolCalls: [] };
@@ -7101,7 +7098,7 @@ class EarlyConvergenceModel implements ModelAdapter {
         toolCalls: [{ id: "render-1", name: "render", arguments: {} }],
       };
     }
-    assert.deepEqual(request.tools, []);
+    assert.ok(request.tools.length > 0);
     assert.match(request.runtimeContext?.content ?? "", /runtime_convergence/);
     return {
       content: "poster artifact ready; evidence: render",
@@ -7148,7 +7145,7 @@ class ConvergedToolInvocationModel implements ModelAdapter {
         toolCalls: [{ id: "render-1", name: "render", arguments: {} }],
       };
     }
-    assert.deepEqual(request.tools, []);
+    assert.ok(request.tools.length > 0);
     if (this.calls === 2) {
       assert.match(request.runtimeContext?.content ?? "", /runtime_convergence/);
     }

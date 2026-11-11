@@ -110,6 +110,11 @@ test("computer_read_json returns structured pointer windows for durable artifact
     }, null, 2));
     const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
     const allowed = registry.materialize(grant(["computer_read_json"]));
+    const schema = allowed.definitions[0]!.inputSchema as {
+      properties: { queries: { items: { properties: { pointer: { minLength: number; pattern: string } } } } };
+    };
+    assert.equal(schema.properties.queries.items.properties.pointer.minLength, 0);
+    assert.equal(new RegExp(schema.properties.queries.items.properties.pointer.pattern).test(""), true);
     const prepared = allowed.prepare({
       id: "read-json",
       name: "computer_read_json",
@@ -150,11 +155,59 @@ test("computer_read_json returns structured pointer windows for durable artifact
     assert.equal(result.queries[1]?.sourceRange, "/files/0/sheets/0/records[1:2]");
     assert.deepEqual(result.queries[1]?.value, [{ row: 3, values: { Name: "Bob", Score: 82 } }]);
     assert.match(result.caveats.join("\n"), /returned 1 of 2 array items/);
-    assert.throws(() => allowed.prepare({
+    const rootRead = allowed.prepare({
       id: "read-json-root",
       name: "computer_read_json",
       arguments: { path: ".agentloop/table-extractions/aa/artifact.json", queries: [{ pointer: "" }] },
-    }), /pointer must contain at least 1 characters/);
+    });
+    const rootResult = await rootRead.tool.execute(grantContext(["computer_read_json"]), rootRead.input) as {
+      queries: Array<{ sourcePointer: string; resultPointer: string; found: boolean; value: { schema: string } }>;
+    };
+    assert.equal(rootResult.queries[0]?.sourcePointer, "");
+    assert.equal(rootResult.queries[0]?.resultPointer, "/queries/0/value");
+    assert.equal(rootResult.queries[0]?.found, true);
+    assert.equal(rootResult.queries[0]?.value.schema, "agentloop.visibleTableExtraction/v1");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_read_json distinguishes root values from profiles and preserves bounded root windows", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-json-root-"));
+  try {
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_read_json"]));
+    const read = async (path: string, queries?: Array<{ pointer: string; offset?: number; limit?: number }>) => {
+      const prepared = allowed.prepare({ id: "read-root", name: "computer_read_json", arguments: { path, ...(queries === undefined ? {} : { queries }) } });
+      return await prepared.tool.execute(grantContext(["computer_read_json"]), prepared.input) as {
+        queries: Array<{ value: unknown; returned?: number; totalItems?: number; sourcePointer: string }>;
+        caveats: string[];
+      };
+    };
+    await fs.writeFile(join(root, "object.json"), JSON.stringify({ rows: Array.from({ length: 60 }, (_, index) => index), text: "x".repeat(5000), "": "empty key", " ": "space key", "tail ": "trailing key" }));
+    assert.deepEqual((await read("object.json")).queries, []);
+    const object = await read("object.json", [{ pointer: "" }]);
+    const value = object.queries[0]!.value as { rows: unknown[]; text: string };
+    assert.equal(value.rows.length, 50);
+    assert.equal(value.text.length, 4003);
+    assert.match(object.caveats.join("\n"), /truncated to 50 of 60/);
+    assert.match(object.caveats.join("\n"), /truncated to 4000/);
+    assert.equal((await read("object.json", [{ pointer: "/" }])).queries[0]?.value, "empty key");
+    assert.equal((await read("object.json", [{ pointer: "/ " }])).queries[0]?.value, "space key");
+    assert.equal((await read("object.json", [{ pointer: "/tail " }])).queries[0]?.value, "trailing key");
+    await fs.writeFile(join(root, "array.json"), JSON.stringify([10, 20, 30, 40]));
+    const array = await read("array.json", [{ pointer: "", offset: 1, limit: 2 }]);
+    assert.deepEqual(array.queries[0]?.value, [20, 30]);
+    assert.equal(array.queries[0]?.returned, 2);
+    assert.equal(array.queries[0]?.totalItems, 4);
+    assert.match(array.caveats.join("\n"), /returned 2 of 4/);
+    for (const primitive of [null, 12, false, "原始文本"]) {
+      await fs.writeFile(join(root, "primitive.json"), JSON.stringify(primitive));
+      assert.equal((await read("primitive.json", [{ pointer: "" }])).queries[0]?.value, primitive);
+    }
+    for (const pointer of [undefined, null, 0, " ", "dataset/rows", "/".repeat(1001)]) {
+      assert.throws(() => allowed.prepare({ id: "bad-pointer", name: "computer_read_json", arguments: { path: "object.json", queries: [{ pointer }] } }), /pointer/);
+    }
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

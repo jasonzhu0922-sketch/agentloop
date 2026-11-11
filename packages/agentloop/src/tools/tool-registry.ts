@@ -57,9 +57,11 @@ export interface RuntimeTool<TInput = unknown> {
   readonly executionMode: "parallel" | "exclusive";
   readonly replaySafe: boolean;
   /**
-   * A completion-preparation observer may consume already committed Runtime
-   * evidence after production Tools have been fenced off. It must be replay
-   * safe and must not publish a second Runtime Result identity.
+   * Identifies a preferred bounded observer for already committed Runtime
+   * evidence during completion preparation. It must be replay safe and must
+   * not publish a second Result identity. This hint does not narrow the Run
+   * catalog; it also permits one bounded final-candidate continuation after
+   * an exact observation at the step limit.
    */
   readonly availableDuringCompletionPreparation?: boolean;
   /**

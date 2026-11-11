@@ -238,7 +238,7 @@ export function createComputerTools(
       description: [
         "Read structured data from a JSON file under the configured workspace root or an authorized read-only @skills/<skill-name> root.",
         "Use this for durable JSON artifacts such as .agentloop/table-extractions/*.json before falling back to computer_search_text or line-window computer_read_file.",
-        "queries are source JSON Pointer selectors; omit queries to get a compact profile. Each returned query also includes a resultPointer rooted in this persisted result envelope for follow-up read_result calls. For array targets, offset is 0-indexed and limit returns a bounded window.",
+        "queries are source JSON Pointer selectors; omit queries to get a compact profile without values. Use pointer=\"\" to select the root value with the same content bounds and caveats as other selectors. Each returned query also includes a resultPointer rooted in this persisted result envelope for follow-up read_result calls. For array targets, offset is 0-indexed and limit returns a bounded window.",
         "The result includes schema, path, sha256, root profile, selected values, source pointers, counts, and caveats without interpreting business semantics.",
       ].join(" "),
       inputSchema: objectSchema(["path"], {
@@ -252,10 +252,11 @@ export function createComputerTools(
             additionalProperties: false,
             required: ["pointer"],
             properties: {
-              // The root profile is requested by omitting `queries`; an empty
-              // JSON Pointer is not a supported selector and must be rejected
-              // consistently by both the exposed schema and parser.
-              pointer: { type: "string", minLength: 1, maxLength: JSON_READ_MAX_POINTER_LENGTH },
+              pointer: {
+                type: "string", minLength: 0, maxLength: JSON_READ_MAX_POINTER_LENGTH,
+                pattern: "^(?:/|$)",
+                description: "Source JSON Pointer. The empty string selects the root value; / selects a property whose key is empty. Omit queries for a profile without values.",
+              },
               offset: { type: "integer", minimum: 0 },
               limit: { type: "integer", minimum: 1, maximum: JSON_READ_MAX_ARRAY_LIMIT },
             },
@@ -817,7 +818,12 @@ function parseJsonReadQueries(value: unknown): JsonReadQuery[] | undefined {
   }
   return value.map((item, index) => {
     const record = requireRecord(item, `queries[${index}]`);
-    const pointer = requireString(record.pointer, `queries[${index}].pointer`, { max: JSON_READ_MAX_POINTER_LENGTH });
+    // JSON Pointer tokens are exact object keys: trimming can change /name<space>
+    // or turn a whitespace-only invalid selector into the valid root selector.
+    const pointer = record.pointer;
+    if (typeof pointer !== "string" || pointer.length > JSON_READ_MAX_POINTER_LENGTH) {
+      throw badRequest(`queries[${index}].pointer must be a string of at most ${JSON_READ_MAX_POINTER_LENGTH} characters`);
+    }
     if (pointer !== "" && !pointer.startsWith("/")) {
       throw badRequest(`queries[${index}].pointer must be an empty string or a JSON Pointer beginning with /`);
     }

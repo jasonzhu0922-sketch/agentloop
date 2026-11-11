@@ -7,6 +7,7 @@ export interface StepExecutionInput {
   readonly modelStep: number;
   readonly maxSteps: number;
   readonly hardLimit: number;
+  /** Prefer a completion candidate; this never narrows the Run-authorized catalog. */
   readonly convergenceOnly: boolean;
   readonly availableTools: readonly ModelToolDefinition[];
   readonly priorToolEvidence: readonly AgentLoopToolEvidence[];
@@ -264,7 +265,7 @@ export class DefaultLoopStepPolicy implements LoopStepPolicy {
       currentStage: {
         objective: loopCurrentStageObjective(mode, input.priorToolEvidence.length),
         toolUsePolicy: input.convergenceOnly
-          ? "No tools are available in this stage; return a completion candidate from existing evidence."
+          ? "Prefer a completion candidate from existing evidence. The Run-authorized catalog remains available for a bounded read or required missing evidence; consume its results before completing."
           : input.currentDecisionView !== undefined
             ? input.currentDecisionView.instruction
           : input.workProductContext !== undefined
@@ -312,14 +313,7 @@ export class DefaultToolExposurePolicy implements ToolExposurePolicy {
   selectTools(input: StepExecutionInput): ToolCatalogDecision {
     const availableToolNames = input.availableTools.map((tool) => tool.name);
     if (input.convergenceOnly) {
-      return {
-        schema: "agentloop.toolCatalogDecision/v2",
-        policyId: this.id,
-        mode: "none",
-        availableToolNames: [],
-        preferredToolNames: [],
-        deprioritizedToolGroups: [],
-      };
+      return fullToolCatalog(this.id, availableToolNames);
     }
     if (input.stepEvidenceState === undefined) {
       return fullToolCatalog(this.id, availableToolNames);
@@ -394,7 +388,7 @@ export class FullCatalogToolExposurePolicy implements ToolExposurePolicy {
   readonly id = "agentloop.fullCatalogToolExposurePolicy/v1";
 
   selectTools(input: StepExecutionInput): ToolCatalogDecision {
-    const availableToolNames = input.convergenceOnly ? [] : input.availableTools.map((tool) => tool.name);
+    const availableToolNames = input.availableTools.map((tool) => tool.name);
     return fullToolCatalog(this.id, availableToolNames);
   }
 }

@@ -444,23 +444,22 @@ function isToolCallForPath(call: ModelToolCall, path: string): boolean {
 
 const CONVERGENCE_PROMPT = [
   "<runtime_convergence>",
-  "This is the final model step allowed by the current step budget.",
-  "No execution tools are available on this turn.",
+  "Prepare a completion candidate for the current Plan step within the remaining step budget.",
+  "The full Run-authorized tool catalog remains available; completion preparation does not change tool authorization.",
   "Use the canonical tool results already present in the conversation to submit one concise completion candidate.",
   "Return 1-3 short sentences. Name what was completed, cite the concrete evidence or tool results used, and state any unmet criterion truthfully.",
   "Never return an empty response.",
   "This response is only a candidate: the independent assessor and Terminal Committer remain authoritative.",
-  "Do not request or emit tool calls.",
+  "Reuse existing evidence first. If exact content or required facts are still missing, make one bounded authorized tool batch, consume its results, and then submit the candidate. Do not repeat successful acquisition merely to increase confidence.",
   "</runtime_convergence>",
 ].join("\n");
 
-function completionPreparationPrompt(toolNames: readonly string[]): string {
+function completionPreparationPrompt(prompt: string, toolNames: readonly string[]): string {
   return [
+    prompt,
     "<runtime_completion_preparation>",
-    "The current Plan step has enough receipt-backed evidence to prepare a completion candidate.",
-    "Effectful execution and new source-acquisition tools are fenced off on this turn.",
-    `Only these bounded, read-only evidence observers remain available: ${toolNames.join(", ")}.`,
-    "Use them only when exact values omitted from the current prompt projection are required to form the candidate.",
+    `Prefer these bounded observers when reading existing Runtime Results: ${toolNames.join(", ")}.`,
+    "For omitted file content, use an authorized file or JSON reader directly. An observer reads a Runtime result envelope, which may contain only a file reference rather than the source data.",
     "Otherwise submit one concise user-visible completion candidate now. The independent assessor and Terminal Committer remain authoritative.",
     "</runtime_completion_preparation>",
   ].join("\n");
@@ -494,7 +493,9 @@ function emptyCandidateRepairDirective(input: {
     "The previous completion candidate was empty, so it cannot be assessed.",
     "Return a non-empty completion candidate in 1-3 short sentences.",
     "Name the completed work, cite the concrete evidence or tool results used, and state any unmet criterion truthfully.",
-    "No execution tools are available on this turn; do not request or emit tool calls.",
+    input.toolAvailable
+      ? "Authorized tools remain available for a bounded read or required missing evidence; consume the result before resubmitting the candidate."
+      : "No tools are authorized for this Run; use the existing evidence and state any unmet criterion truthfully.",
     "</runtime_candidate_repair>",
   ].join("\n");
 }
@@ -550,7 +551,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let evidenceProgressBoundary: CandidateCompletionEvaluation["failedBoundary"];
   let evidenceProgressFeedback: string | undefined;
   let completionFencePending = false;
-  let executionCatalogRequiredAfterConvergence = false;
   let pendingCandidateRepairDirective: string | undefined;
   let pendingStructuredObservationSynthesisDirective: string | undefined;
   const rejectedStructuredCandidateOutputs = new Set(
@@ -941,8 +941,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     throwIfAborted(options.signal);
     const inGrace = step > options.maxSteps;
     const hardLimit = currentLimit();
-    // A convergence turn removes every executable Tool.  It is only sound
-    // when the current step has no remaining receipt-backed obligation.  A
+    // Completion preparation is a strategy, not a second authorization
+    // boundary. Prefer it only after receipt-backed obligations are met. A
     // caller-specific heuristic (for example, a complete source extraction)
     // may say that exploration is no longer useful, but it cannot bypass a
     // still-missing hard evidence kind.
@@ -979,8 +979,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         latestToolEvidence: toolEvidence,
         activatedSkillNames: [...activatedSkillNames],
       });
-    const convergenceOnly = !executionCatalogRequiredAfterConvergence
-      && !humanLoopRepairPending
+    const convergenceOnly = !humanLoopRepairPending
       && toolEvidence.length > 0
       && canConvergeFromCurrentEvidence
       && (
@@ -988,10 +987,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         || requestedConvergenceReason !== undefined
         || (step === hardLimit && finalConvergenceAllowed)
       );
-    // A Run-authorized call requested during completion preparation consumes
-    // exactly one subsequent execution turn. Do not let a retained
-    // convergence hint immediately re-fence that resumed turn.
-    if (executionCatalogRequiredAfterConvergence) executionCatalogRequiredAfterConvergence = false;
     // Materialize before selecting the completion boundary so the same grant
     // snapshot owns both model visibility and call preparation.
     const grantedMaterialized = options.tools.materialize(options.grant, {
@@ -1010,7 +1005,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         ?? pendingStructuredObservationSynthesisDirective
         ?? (completionPreparationDefinitions.length === 0
           ? convergencePrompt
-          : completionPreparationPrompt(completionPreparationDefinitions.map((tool) => tool.name)));
+          : completionPreparationPrompt(convergencePrompt, completionPreparationDefinitions.map((tool) => tool.name)));
       pendingCandidateRepairDirective = undefined;
       pendingStructuredObservationSynthesisDirective = undefined;
       contextAssembler.setRuntimeDirective(directive);
@@ -1066,7 +1061,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       maxSteps: options.maxSteps,
       hardLimit,
       convergenceOnly,
-      availableTools: convergenceOnly ? [] : grantedMaterialized.definitions,
+      availableTools: grantedMaterialized.definitions,
       priorToolEvidence: toolEvidence,
       stepEvidenceState,
       stepSemanticFrame: options.stepSemanticFrame,
@@ -1079,7 +1074,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     });
     const stepProgressSignatureBefore = currentStepProgressSignature(stepEvidenceState, options.progressPolicy);
     validateToolRecommendations(
-      convergenceOnly ? [] : grantedMaterialized.definitions,
+      grantedMaterialized.definitions,
       stepExecutionDecision,
     );
     // Recommendations order the model-visible catalog; they never rewrite the
@@ -1088,9 +1083,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       grantedMaterialized.definitions,
       stepExecutionDecision.toolCatalog.preferredToolNames,
     );
-    const modelStepDefinitions = convergenceOnly
-      ? completionPreparationDefinitions
-      : executionDefinitions;
+    const modelStepDefinitions = executionDefinitions;
     const modelStepToolNames = new Set(modelStepDefinitions.map((tool) => tool.name));
     const prepareForModelStep = (call: ModelToolCall): PreparedToolCall => {
       if (!modelStepToolNames.has(call.name)) {
@@ -1349,11 +1342,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         // Each ready call is admitted against the same per-Tool ceiling as a
         // completed response. Later calls beyond that ceiling are rejected;
         // they never roll back a valid, already-dispatched earlier call.
-        // A completion-preparation turn may expose a bounded observer, but it
-        // is still a candidate-only turn. Wait for the complete response so a
-        // call to another Run-authorized Tool can reopen execution below
-        // rather than being prematurely rejected as an unavailable Tool.
-        allowEarlyDispatch: !convergenceOnly,
+        // The same exposed Run catalog and grant own dispatch in both
+        // execution and completion preparation. Do not discard a valid read
+        // and spend another model turn requesting it again.
+        allowEarlyDispatch: true,
       }, earlyOutcomes);
       await options.checkpoint?.();
       if (
@@ -1659,50 +1651,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     pendingCandidateRepairDirective = undefined;
     contextAssembler.setRuntimeDirective(undefined);
 
-    // Completion preparation is deliberately a single tool-free candidate
-    // boundary, not a second authorization boundary. Some providers can emit
-    // a native call that was not in the reduced preparation catalog even when
-    // the prompt asks for a candidate. If that call is already authorized by
-    // the Run, do not execute it without its schema having been exposed, and
-    // do not label it a policy denial. Its presence means this candidate turn
-    // did not converge: restore the complete Run catalog on the next turn so
-    // the model can make the bounded acquisition it judged necessary.
-    const deferredAuthorizedConvergenceCalls = convergenceOnly
-      ? response.toolCalls.filter((call) =>
-        grantedMaterialized.definitions.some((tool) => tool.name === call.name)
-        && !modelStepToolNames.has(call.name))
-      : [];
-    if (deferredAuthorizedConvergenceCalls.length > 0) {
-      completionFencePending = false;
-      requestedConvergenceReason = undefined;
-      executionCatalogRequiredAfterConvergence = true;
-      const toolNames = [...new Set(deferredAuthorizedConvergenceCalls.map((call) => call.name))];
-      const feedback = [
-        "The candidate-only completion turn returned a Tool that is already authorized by this Run.",
-        `The Tool was not executed because its schema was not exposed on that reduced turn: ${toolNames.join(", ")}.`,
-        "Resume execution with the complete Run-authorized catalog. Use one bounded call only if it materially improves the current step's factual coverage, then return a completion candidate.",
-      ].join(" ");
-      await emit({
-        type: "loop.convergence_reopened",
-        data: {
-          step,
-          toolNames,
-          reason: "authorized_tool_requested_during_completion_preparation",
-          requestedToolCallCount: deferredAuthorizedConvergenceCalls.length,
-        },
-      });
-      setCandidateRepairDirective(feedback);
-      continue;
-    }
-
     // Progress evaluation informs the next model turn, but does not turn a
     // predicted next action into a second authorization boundary. An already
     // authorized call can still be the model's needed state-acquisition step.
     const toolProgressStateBeforeTurn = toolProgressState;
     let progressHint: string | undefined;
     if (
-      !convergenceOnly
-      && response.finishReason !== "length"
+      response.finishReason !== "length"
       && response.toolCalls.length > 0
     ) {
       const progressDecision = evaluateRuntimeToolProgress({
@@ -1717,31 +1672,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
 
     let outcomes: ToolOutcome[];
-    if (convergenceOnly && completionPreparationDefinitions.length === 0) {
-      outcomes = response.toolCalls.map((call) => ({
-        call,
-        content: "Tool call was not executed because the Runtime reserved this final step for convergence",
-        invocationStatus: "rejected",
-        operationStatus: "unknown",
-        isError: true,
-        failurePhase: "runtime",
-      }));
-      for (const outcome of outcomes) {
-        await emit({
-          type: "tool.rejected",
-          data: {
-            step,
-            toolCallId: outcome.call.id,
-            toolName: outcome.call.name,
-            reason: outcome.content,
-            invocationStatus: "rejected",
-            operationStatus: "unknown",
-            isError: true,
-            failurePhase: "runtime",
-          },
-        });
-      }
-    } else if (response.finishReason === "length") {
+    if (response.finishReason === "length") {
       // A truncated response may carry syntactically valid but incomplete tool
       // arguments. Calls whose arguments completed before truncation (per-item
       // done) were already dispatched and keep their real outcome; the rest are
@@ -2085,7 +2016,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     consecutivePrepareRejectionSteps = 0;
 
     const successfulCompletionObservation = convergenceOnly
-      && outcomes.some((outcome) => !outcome.isError && modelStepToolNames.has(outcome.call.name));
+      && outcomes.some((outcome) => !outcome.isError
+        && completionPreparationDefinitions.some((tool) => tool.name === outcome.call.name));
     if (
       successfulCompletionObservation
       && step === currentLimit()

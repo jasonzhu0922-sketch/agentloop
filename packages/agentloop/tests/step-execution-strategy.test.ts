@@ -108,6 +108,21 @@ test("full-catalog step execution profile keeps all granted tools visible", () =
   ]);
 });
 
+for (const profile of ["action-aware", "full-catalog"] as const) {
+  test(`${profile} completion preparation preserves the catalog and reports its actual tool count`, () => {
+    const names = ["computer_read_json", "computer_read_file", "read_result", "computer_write_file"];
+    const decision = createStepExecutionStrategyProfile(profile).prepareModelStep({
+      modelStep: 2, maxSteps: 4, hardLimit: 4,
+      convergenceOnly: true, availableTools: tools(names), priorToolEvidence: [],
+    });
+    assert.equal(decision.toolCatalog.mode, "full");
+    assert.deepEqual(decision.toolCatalog.availableToolNames, names);
+    assert.equal(decision.loopStepFrame.mode, "terminal_candidate");
+    assert.equal(decision.loopStepFrame.currentStage.availableToolCount, names.length);
+    assert.match(decision.loopStepFrame.currentStage.toolUsePolicy, /Run-authorized catalog remains available/);
+  });
+}
+
 test("default step execution strategy keeps every Plan-granted tool visible", () => {
   const strategy = new DefaultStepExecutionStrategy();
   const decision = strategy.prepareModelStep({
