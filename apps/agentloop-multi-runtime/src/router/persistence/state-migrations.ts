@@ -100,6 +100,7 @@ const MIGRATIONS: readonly SchemaMigration[] = [{
     if (database.dialect === "sqlite") {
       await database.exec("DROP TABLE IF EXISTS mr_identity_sessions");
       await database.exec("DROP TABLE IF EXISTS mr_identity_memberships");
+      await database.exec("DROP TABLE IF EXISTS mr_identity_profiles");
       await database.exec("DROP TABLE IF EXISTS mr_identity_users");
       await database.exec("DROP TABLE IF EXISTS mr_identity_tenants");
     }

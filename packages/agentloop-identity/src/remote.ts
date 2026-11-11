@@ -13,8 +13,8 @@ export class RemoteIdentityService {
     if (typeof password !== "string" || password.length > 256) throw new IdentityError(400, "invalid_password");
     return { email, password };
   }
-  async register(email: unknown, password: unknown) {
-    const input = this.credentials(email, password); return this.client.authenticate("register", input.email, input.password);
+  async register(email: unknown, password: unknown, displayName?: string) {
+    const input = this.credentials(email, password); return this.client.authenticate("register", input.email, input.password, displayName);
   }
   async login(email: unknown, password: unknown) {
     const input = this.credentials(email, password); return this.client.authenticate("login", input.email, input.password);

@@ -24,8 +24,8 @@ test("Desktop uses the standalone cloud service for registration, login, revocat
   t.after(async () => { await new Promise<void>(resolve => { cloud.close(() => resolve()); cloud.closeAllConnections(); }); await cloudDb.close(); });
   const issued: CloudSession[] = [];
   class ObservedAuth extends CloudAccountAuth {
-    override async authenticate(mode: "login" | "register", email: string, password: string) {
-      const session = await super.authenticate(mode, email, password); issued.push(session); return session;
+    override async authenticate(mode: "login" | "register", email: string, password: string, displayName?: string) {
+      const session = await super.authenticate(mode, email, password, displayName); issued.push(session); return session;
     }
   }
   const skills = join(root, "skills"); await mkdir(skills);
@@ -40,11 +40,12 @@ test("Desktop uses the standalone cloud service for registration, login, revocat
       ...(body === undefined ? {} : { Origin: origin, "Content-Type": "application/json", ...(csrf && auth ? { "X-Desktop-CSRF": auth.csrf } : {}) }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  const credentials = { email: "alice@example.test", password: "synthetic-alice-password-123" };
-  async function login(mode: "login" | "register", input = credentials) {
-    const response = await call(`/api/auth/${mode}`, undefined, input); const body = await response.json();
+  const credentials = { email: "alice@example.test", password: "synthetic-alice-password-123", displayName: "玄武的伙伴" };
+  async function login(mode: "login" | "register", input: { email: string; password: string } = credentials) {
+    const response = await call(`/api/auth/${mode}`, undefined, mode === "register" ? { ...input, displayName: credentials.displayName } : { email: input.email, password: input.password }); const body = await response.json();
     assert.equal(response.status, 200, JSON.stringify(body));
     assert.equal(body.mode, "cloud"); assert.equal(body.user.email, input.email);
+    assert.equal(body.user.displayName, credentials.displayName, "nickname survives cloud transport, login and restart");
     assert.equal("token" in body, false); assert.equal("cloudToken" in body, false);
     const setCookie = response.headers.get("set-cookie")!; assert.match(setCookie, /HttpOnly; SameSite=Strict/);
     return { cookie: setCookie.split(";")[0]!, csrf: body.csrfToken as string, accountId: body.accountId as string };
@@ -76,7 +77,7 @@ test("Desktop uses the standalone cloud service for registration, login, revocat
   assert.equal((await call(`/api/runs/${run.id}/artifacts`, bob)).status, 404);
   assert.equal((await call(`/api/conversations/${run.conversationId}`, bob)).status, 404);
   assert.equal((await call("/api/auth/logout", bob, {})).status, 200);
-  const wrong = await call("/api/auth/login", undefined, { ...credentials, password: "wrong-password" });
+  const wrong = await call("/api/auth/login", undefined, { email: credentials.email, password: "wrong-password" });
   assert.equal(wrong.status, 401); assert.deepEqual(await wrong.json(), { error: "invalid_credentials" });
   const duplicate = await call("/api/auth/register", undefined, credentials); assert.equal(duplicate.status, 409);
   const again = await login("login"); assert.equal(again.accountId, alice.accountId);

@@ -10,7 +10,7 @@ export class CloudAccountAuth extends AccountServiceClient {
       throw new HttpError(503, "cloud_auth_unavailable");
     }
   }
-  override authenticate(mode: "login" | "register", email: string, password: string) { return this.translated(() => super.authenticate(mode, email, password)); }
+  override authenticate(mode: "login" | "register", email: string, password: string, displayName?: string) { return this.translated(() => super.authenticate(mode, email, password, displayName)); }
   override current(token: string) { return this.translated(() => super.current(token)); }
   override logout(token: string) { return this.translated(() => super.logout(token)); }
 }

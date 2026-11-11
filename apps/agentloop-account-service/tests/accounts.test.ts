@@ -19,8 +19,15 @@ test("independent accounts persist one authority for Desktop and Router without 
   t.after(async () => { await new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }); await database.close(); });
   const desktop = new AccountServiceClient(origin), router = new RemoteIdentityService(origin);
   const email = "Owner@Example.test", password = "fixture-account-password-12";
-  const registered = await desktop.authenticate("register", email, password);
+  const registered = await desktop.authenticate("register", email, password, "  玄武伙伴  ");
   assert.equal(registered.principal.email, "owner@example.test");
+  assert.equal(registered.principal.displayName, "玄武伙伴");
+  for (const displayName of ["", "a", "a".repeat(41), "hi\nthere", null, 42]) {
+    const invalid = await fetch(`${origin}/v1/auth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "invalid@example.test", password, displayName }) });
+    assert.equal(invalid.status, 400);
+    assert.deepEqual(await invalid.json(), { error: "invalid_display_name" });
+  }
+  assert.equal(await database.prepare("SELECT id FROM mr_identity_users WHERE email = ?").get("invalid@example.test"), undefined);
   await assert.rejects(desktop.authenticate("register", email, password), error => error instanceof IdentityError && error.code === "email_registered");
   await assert.rejects(router.login(email, "wrong-password"), error => error instanceof IdentityError && error.code === "invalid_credentials");
   const fromRouter = await router.login(email, password);
@@ -33,7 +40,7 @@ test("independent accounts persist one authority for Desktop and Router without 
   assert.equal((await fetch(`${origin}/v1/auth/login`, { method: "POST", headers: { "content-type": "application/json" }, body: "x".repeat(9000) })).status, 413);
   assert.equal((await fetch(`${origin}/v1/conversations`)).status, 404);
   const tables = await database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all<{ name: string }>();
-  assert.deepEqual(tables.map(row => row.name).sort(), ["mr_identity_memberships", "mr_identity_sessions", "mr_identity_tenants", "mr_identity_users"]);
+  assert.deepEqual(tables.map(row => row.name).sort(), ["mr_identity_memberships", "mr_identity_profiles", "mr_identity_sessions", "mr_identity_tenants", "mr_identity_users"]);
   const user = await database.prepare("SELECT password_hash FROM mr_identity_users").get<{ password_hash: string }>();
   assert.match(user!.password_hash, /^scrypt\$/); assert.equal(user!.password_hash.includes(password), false);
   await new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }); await database.close();

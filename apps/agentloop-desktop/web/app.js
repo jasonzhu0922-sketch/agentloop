@@ -430,7 +430,8 @@ try {
   steerAccount = session.accountId;
   preferences = createComposerPreferences(localStorage, session.accountId);
   conversationId = crypto.randomUUID();
-  element('account-identity').textContent = session.user.email;
+  element('account-identity').textContent = session.user.displayName || session.user.email;
+  element('account-identity').title = session.user.email;
   await loadRuntimes(); await loadConnectors();
   const models = await refreshModels();
   await conversations(); status(models.length ? (element('model').value ? '请选择任务并发送。' : '请选择本机模型后发送。') : '尚未配置本机模型。请在本机能力设置中添加 Provider 和模型。');

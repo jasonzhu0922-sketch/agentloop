@@ -3,30 +3,82 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#dfd6eb" />
     <link rel="icon" type="image/png" href="/assets/xuanwu-mascot-icon.png" />
-    <title>登录 AgentLoop</title>
+    <title>登录玄武</title>
     <link rel="stylesheet" href="/login.css" />
   </head>
   <body>
     <main class="auth-page">
-      <section class="auth-intro" aria-label="AgentLoop 产品说明">
-        <div class="brand"><img class="logo logo-image" src="/assets/xuanwu-mascot-icon.png" alt="玄武" /><strong>玄武</strong></div>
-        <div class="intro-copy">
-          <p class="eyebrow">Multi Agent</p>
-          <h1>云端统一账号<br />任务在本机执行</h1>
-          <p>个性化运行时 专业私有化智能体</p>
+      <section class="auth-intro" aria-label="玄武产品说明">
+        <header class="brand-row">
+          <a class="brand" href="/login" aria-label="玄武登录首页">
+            <img class="brand-symbol" src="/assets/xuanwu-mascot-icon.png" alt="玄武" />
+            <span class="brand-name">玄武</span>
+          </a>
+          <span class="desktop-label">DESKTOP</span>
+        </header>
+        <div class="intro-content">
+          <p class="eyebrow"><span></span> YOUR PERSONAL AGENT WORKSPACE</p>
+          <h1>从一个目标，<br />到真正<span class="hero-accent">完成。</span></h1>
+          <p class="intro-description">让智能体规划、执行、验证。<br />连接你的工具，在自己的工作空间里推进每一步。</p>
+          <div class="loop-scene" role="img" aria-label="玄武工作闭环：围绕目标规划、执行、验证，再持续推进">
+            <div class="scene-label"><span class="brand-name">玄武 · 任务闭环</span><span>01 — ∞</span></div>
+            <svg class="loop-orbit" viewBox="0 0 600 300" fill="none" aria-hidden="true">
+              <defs>
+                <linearGradient id="orbit-rear" x1="70" y1="60" x2="530" y2="180" gradientUnits="userSpaceOnUse"><stop stop-color="var(--orbit-rear-start)"/><stop offset=".5" stop-color="var(--orbit-rear-mid)"/><stop offset="1" stop-color="var(--orbit-rear-end)"/></linearGradient>
+                <radialGradient id="aura"><stop stop-color="var(--orbit-aura)" stop-opacity=".16"/><stop offset="1" stop-color="var(--orbit-aura)" stop-opacity="0"/></radialGradient>
+                <filter id="rear-glow" x="-50%" y="-100%" width="200%" height="300%"><feGaussianBlur stdDeviation="4"/></filter>
+              </defs>
+              <ellipse cx="300" cy="155" rx="285" ry="145" fill="url(#aura)"/>
+              <ellipse cx="300" cy="140" rx="258" ry="103" stroke="var(--orbit-guide)" stroke-opacity=".45" stroke-dasharray="2 8" transform="rotate(-12 300 140)"/>
+              <g transform="rotate(-12 300 140)">
+                <path d="M62 140A238 86 0 0 1 538 140" stroke="var(--orbit-glow)" stroke-opacity=".42" stroke-width="9" filter="url(#rear-glow)"/>
+                <path d="M62 140A238 86 0 0 1 538 140" stroke="url(#orbit-rear)" stroke-width="1.5"/>
+                <path d="m295 50 8 4-8 4" stroke="var(--orbit-arrow)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle class="orbit-spark" r="2.5" fill="var(--orbit-spark)"><animateMotion dur="16s" repeatCount="indefinite" path="M62 140A238 86 0 1 1 538 140A238 86 0 1 1 62 140Z"/></circle>
+              </g>
+            </svg>
+            <img class="hero-mascot" src="/assets/xuanwu-mascot-icon.png" alt="可爱的玄武智能体，陪你把目标变成成果" width="512" height="512" />
+            <svg class="loop-front" viewBox="0 0 600 300" fill="none" aria-hidden="true">
+              <defs>
+                <linearGradient id="orbit-front" x1="62" y1="140" x2="538" y2="220" gradientUnits="userSpaceOnUse"><stop stop-color="var(--orbit-front-start)"/><stop offset=".36" stop-color="var(--orbit-front-peak)"/><stop offset=".7" stop-color="var(--orbit-front-mid)"/><stop offset="1" stop-color="var(--orbit-front-end)"/></linearGradient>
+                <filter id="front-glow" x="-50%" y="-100%" width="200%" height="300%"><feGaussianBlur stdDeviation="5"/></filter>
+                <filter id="front-bloom" x="-50%" y="-100%" width="200%" height="300%"><feGaussianBlur stdDeviation="1.6"/></filter>
+              </defs>
+              <g transform="rotate(-12 300 140)">
+                <path d="M538 140A238 86 0 0 1 62 140" stroke="var(--orbit-front-glow)" stroke-opacity=".38" stroke-width="11" filter="url(#front-glow)"/>
+                <path d="M538 140A238 86 0 0 1 62 140" stroke="var(--orbit-front-bloom)" stroke-opacity=".75" stroke-width="4" filter="url(#front-bloom)"/>
+                <path d="M538 140A238 86 0 0 1 62 140" stroke="var(--orbit-front-rim)" stroke-width="5"/>
+                <path d="M538 140A238 86 0 0 1 62 140" stroke="url(#orbit-front)" stroke-width="2"/>
+                <path d="m303 222-8 4 8 4" stroke="var(--orbit-front-arrow)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              </g>
+            </svg>
+            <span class="orbit-node node-plan"><i>01</i> 规划 <small>PLAN</small></span>
+            <span class="orbit-node node-act"><i>02</i> 执行 <small>ACT</small></span>
+            <span class="orbit-node node-verify"><i>03</i> 验证 <small>VERIFY</small></span>
+            <span class="goal-caption"><i></i> 玄武已就位，和你一起完成</span>
+          </div>
+          <div class="capabilities"><span><b>01</b> 多智能体协作</span><span><b>02</b> 自有工具与技能</span><span><b>03</b> 本机执行任务</span></div>
         </div>
+        <footer class="intro-footer"><span class="brand-name">玄武 · Desktop</span><span>THINK. ACT. COMPLETE.</span></footer>
       </section>
-      <section class="auth-card-wrap">
-        <form id="auth-form" class="auth-card" data-mode="login" autocomplete="on">
-          <div class="auth-heading"><h2 id="auth-title">欢迎回来</h2></div>
-          <label>邮箱<input id="auth-email" type="email" autocomplete="email" placeholder="name@example.com" required /></label>
-          <label>密码<input id="auth-password" type="password" autocomplete="current-password" placeholder="至少 12 位" minlength="12" required /></label>
-          <p id="auth-service" class="auth-service" role="status">正在连接账号服务…</p>
-          <p id="auth-error" class="auth-error" role="alert" hidden></p>
-          <button id="auth-submit" class="auth-submit" type="submit">登录</button>
-          <p class="auth-switch"><span id="auth-switch-copy">还没有账号？</span> <a id="auth-mode-toggle" href="/register">创建账号</a></p>
-        </form>
+      <section class="auth-panel" aria-label="账号登录与注册">
+        <header class="panel-header"><span class="workspace-label"><span></span> 你的智能体工作空间</span><span class="panel-index" aria-hidden="true">A / 01</span></header>
+        <div class="auth-card-wrap">
+          <form id="auth-form" class="auth-card" data-mode="login" autocomplete="on" novalidate>
+            <div class="auth-heading"><div class="form-mascot"><img src="/assets/xuanwu-mascot-icon.png" alt="玄武欢迎你" width="80" height="80" /><span>嗨，准备好一起开工了吗？</span></div><p class="form-eyebrow" id="auth-eyebrow">WELCOME BACK</p><h2 id="auth-title">欢迎回来</h2><p id="auth-description">登录玄武，继续推进你的目标。</p></div>
+            <div class="field" id="name-field" hidden><label for="auth-name">昵称</label><input id="auth-name" name="displayName" type="text" autocomplete="nickname" placeholder="怎么称呼你？" minlength="2" maxlength="40" disabled aria-describedby="name-error" /><p id="name-error" class="field-error" hidden></p></div>
+            <div class="field"><label for="auth-email">邮箱</label><input id="auth-email" name="email" type="email" autocomplete="email" inputmode="email" spellcheck="false" autocapitalize="none" placeholder="name@example.com" maxlength="254" required aria-describedby="email-error" /><p id="email-error" class="field-error" hidden></p></div>
+            <div class="field"><label for="auth-password">密码</label><div class="password-input"><input id="auth-password" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" maxlength="256" required aria-describedby="password-hint password-error" /><button class="password-toggle" type="button" data-password-target="auth-password" aria-label="显示密码" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/></svg></button></div><p id="password-hint" class="field-hint" hidden>12–256 位，建议混合字母、数字或符号。</p><p id="password-error" class="field-error" hidden></p></div>
+            <div class="field" id="confirm-field" hidden><label for="auth-confirm">确认密码</label><div class="password-input"><input id="auth-confirm" name="passwordConfirmation" type="password" autocomplete="new-password" placeholder="请再次输入密码" maxlength="256" disabled aria-describedby="confirm-error" /><button class="password-toggle" type="button" data-password-target="auth-confirm" aria-label="显示确认密码" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/></svg></button></div><p id="confirm-error" class="field-error" hidden></p></div>
+            <p id="auth-error" class="auth-error" role="alert" hidden></p>
+            <button id="auth-submit" class="auth-submit" type="submit" disabled><span id="auth-submit-copy">登录工作空间</span><span class="submit-arrow" aria-hidden="true">↗</span></button>
+            <p class="auth-switch"><span id="auth-switch-copy">还没有账号？</span> <a id="auth-mode-toggle" href="/register">创建账号 <span aria-hidden="true">→</span></a></p>
+            <div class="auth-assurance"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 2 4 4.5V10c0 4 6 7 6 7s6-3 6-7V4.5L10 2Z" stroke="currentColor" stroke-width="1.3"/><path d="m7.5 9.5 2 2 3-3.5" stroke="currentColor" stroke-width="1.3"/></svg><span>统一账号登录 · 独立的本机工作空间</span></div>
+          </form>
+        </div>
+        <footer class="panel-footer"><p id="auth-service" class="auth-service" role="status" aria-live="polite">正在连接账号服务…</p><span class="brand-name">玄武 DESKTOP</span></footer>
       </section>
     </main>
     <script type="module" src="/login.js"></script>

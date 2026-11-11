@@ -8,20 +8,21 @@ function json(response: ServerResponse, status: number, body?: unknown) {
 }
 function sessionBody(session: IdentitySession) {
   return { token: session.token, expiresAt: session.expiresAt,
-    user: { id: session.principal.userId, email: session.principal.email }, tenant: { id: session.principal.tenantId } };
+    user: { id: session.principal.userId, email: session.principal.email, displayName: session.principal.displayName }, tenant: { id: session.principal.tenantId } };
 }
-async function credentials(request: IncomingMessage): Promise<{ email: string; password: string }> {
+async function credentials(request: IncomingMessage, registering: boolean): Promise<{ email: string; password: string; displayName?: string }> {
   if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(request.headers["content-type"] ?? "")) throw new IdentityError(415, "json_required", "JSON required");
   let size = 0; const chunks: Buffer[] = [];
   // Drain oversized requests without retaining their contents or aborting the response socket.
   for await (const chunk of request) { size += chunk.length; if (size <= 8192) chunks.push(chunk); }
   if (size > 8192) throw new IdentityError(413, "body_too_large", "Request too large");
   let body: unknown; try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new IdentityError(400, "json_invalid", "Invalid JSON"); }
-  if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some(key => !["email", "password"].includes(key))) throw new IdentityError(400, "credentials_invalid", "Invalid credentials fields");
-  const { email, password } = body as Record<string, unknown>;
+  if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some(key => !(registering ? ["email", "password", "displayName"] : ["email", "password"]).includes(key))) throw new IdentityError(400, "credentials_invalid", "Invalid credentials fields");
+  const { email, password, displayName } = body as Record<string, unknown>;
   if (typeof email !== "string" || email.length > 254) throw new IdentityError(400, "invalid_email", "Invalid email");
   if (typeof password !== "string" || password.length > 256) throw new IdentityError(400, "invalid_password", "Invalid password");
-  return { email, password };
+  if (displayName !== undefined && typeof displayName !== "string") throw new IdentityError(400, "invalid_display_name");
+  return { email, password, ...(displayName === undefined ? {} : { displayName: displayName as string }) };
 }
 /** Deploy behind an HTTPS ingress. No Router, Runtime, business APIs, cookies or credential logs. */
 export function createAccountServer(identity: Pick<IdentityService, "register" | "login" | "authenticate" | "revoke">) {
@@ -36,14 +37,14 @@ export function createAccountServer(identity: Pick<IdentityService, "register" |
         if (attempts >= 120 || inFlight >= 4) { json(response, 429, { error: "rate_limited" }); return; }
         attempts++; inFlight++;
         try {
-          const body = await credentials(request);
-          const session = path === "/v1/auth/register" ? await identity.register(body.email, body.password) : await identity.login(body.email, body.password);
+          const body = await credentials(request, path === "/v1/auth/register");
+          const session = path === "/v1/auth/register" ? await identity.register(body.email, body.password, body.displayName) : await identity.login(body.email, body.password);
           json(response, path === "/v1/auth/register" ? 201 : 200, sessionBody(session)); return;
         } finally { inFlight--; }
       }
       if (request.method === "GET" && path === "/v1/auth/me") {
         const principal = await identity.authenticate(request.headers.authorization);
-        json(response, 200, { user: { id: principal.userId, email: principal.email }, tenant: { id: principal.tenantId } }); return;
+        json(response, 200, { user: { id: principal.userId, email: principal.email, displayName: principal.displayName }, tenant: { id: principal.tenantId } }); return;
       }
       if (request.method === "POST" && path === "/v1/auth/logout") {
         await identity.authenticate(request.headers.authorization); await identity.revoke(request.headers.authorization);

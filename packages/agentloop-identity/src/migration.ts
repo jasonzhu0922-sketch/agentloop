@@ -5,6 +5,7 @@ interface User { id: string; email: string; password_hash: string; created_at: n
 interface Tenant { id: string; name: string; created_at: number }
 interface Membership { tenant_id: string; user_id: string; role: string; created_at: number }
 interface Session { id: string; user_id: string; token_hash: string; expires_at: number; created_at: number }
+interface Profile { user_id: string; display_name: string }
 
 export interface IdentityMigrationResult {
   readonly users: number;
@@ -25,6 +26,7 @@ export async function migrateIdentityRows(source: SqlConnection, destination: Sq
   const tenants = await readRows<Tenant>(source, "SELECT id, name, created_at FROM mr_identity_tenants");
   const memberships = await readRows<Membership>(source, "SELECT tenant_id, user_id, role, created_at FROM mr_identity_memberships");
   const sessions = await readRows<Session>(source, "SELECT id, user_id, token_hash, expires_at, created_at FROM mr_identity_sessions");
+  const profiles = await readRows<Profile>(source, "SELECT user_id, display_name FROM mr_identity_profiles");
   await installIdentitySchema(destination);
   const destinationUsers = await readRows<User>(destination, "SELECT id, email, password_hash, created_at FROM mr_identity_users");
   const destinationTenants = await readRows<Tenant>(destination, "SELECT id, name, created_at FROM mr_identity_tenants");
@@ -74,6 +76,11 @@ export async function migrateIdentityRows(source: SqlConnection, destination: Sq
       if (existing) { if (existing.token_hash !== row.token_hash) throw new Error("identity_session_id_conflict"); continue; }
       await destination.prepare("INSERT INTO mr_identity_sessions(id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)").run(row.id, userIdMap[row.user_id]!, row.token_hash, row.expires_at, row.created_at);
     }
+    for (const row of profiles) {
+      const userId = userIdMap[row.user_id]!;
+      const existing = await destination.prepare("SELECT 1 FROM mr_identity_profiles WHERE user_id = ?").get(userId);
+      if (!existing) await destination.prepare("INSERT INTO mr_identity_profiles(user_id, display_name) VALUES (?, ?)").run(userId, row.display_name);
+    }
   });
   return { users: users.length, tenants: tenants.length, memberships: memberships.length, sessions: sessions.length, userIdMap, tenantIdMap };
 }
@@ -94,10 +101,12 @@ export async function rewriteIdentityReferences(source: SqlConnection, mapping: 
 }
 
 export async function clearLegacyIdentityRows(source: SqlConnection): Promise<void> {
+  const profiles = await readRows<Profile>(source, "SELECT user_id, display_name FROM mr_identity_profiles");
   await source.exec("PRAGMA foreign_keys = OFF");
   await source.transaction(async () => {
     await source.prepare("DELETE FROM mr_identity_sessions").run();
     await source.prepare("DELETE FROM mr_identity_memberships").run();
+    if (profiles.length) await source.prepare("DELETE FROM mr_identity_profiles").run();
     await source.prepare("DELETE FROM mr_identity_users").run();
     await source.prepare("DELETE FROM mr_identity_tenants").run();
   });

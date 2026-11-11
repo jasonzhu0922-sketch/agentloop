@@ -119,13 +119,16 @@ export class DesktopApi {
           if (!(error instanceof HttpError) || error.status !== 401) throw error;
         }
         if (authenticated) throw new HttpError(409, "logout_before_account_switch");
-        const body = await readJson(request); fields(body, ["email", "password"]);
+        const registering = url.pathname.endsWith("register");
+        const body = await readJson(request); fields(body, registering ? ["email", "password", "displayName"] : ["email", "password"]);
         const email = text(body, "email", 254).trim(), password = text(body, "password", 256);
+        if (body.displayName !== undefined && (typeof body.displayName !== "string" || body.displayName.trim().length < 2 || body.displayName.trim().length > 40 || /[\u0000-\u001f\u007f-\u009f]/u.test(body.displayName))) throw new HttpError(400, "invalid_display_name");
+        const displayName = typeof body.displayName === "string" ? body.displayName.trim() : undefined;
         this.#loginAttempts = this.#loginAttempts.filter(time => Date.now() - time < 60_000);
         if (this.#loginInFlight >= 2 || this.#loginAttempts.length >= 10) throw new HttpError(429, "cloud_auth_rate_limited");
         this.#loginAttempts.push(Date.now()); this.#loginInFlight++;
         try {
-          const cloud = await this.#cloud.authenticate(url.pathname.endsWith("register") ? "register" : "login", email, password);
+          const cloud = await this.#cloud.authenticate(registering ? "register" : "login", email, password, displayName);
           await this.accounts.forOwner(localAccountId(this.#cloud.issuer, cloud.principal));
           const session = this.#sessions.issue(response, this.#cloud.issuer, cloud);
           json(response, 200, this.sessionView(session)); return;
@@ -332,7 +335,7 @@ export class DesktopApi {
   }
 
   private sessionView(session: ReturnType<AccountSessions["require"]>) {
-    return { mode: "cloud", user: { id: session.principal.userId, email: session.principal.email }, tenant: { id: session.principal.tenantId },
+    return { mode: "cloud", user: { id: session.principal.userId, email: session.principal.email, displayName: session.principal.displayName }, tenant: { id: session.principal.tenantId },
       accountId: session.ownerUserId, csrfToken: session.csrf, expiresAt: session.expiresAt,
       migration: this.accounts?.migration(session.ownerUserId) };
   }

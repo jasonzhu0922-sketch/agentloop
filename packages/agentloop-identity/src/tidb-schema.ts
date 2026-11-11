@@ -10,6 +10,10 @@ CREATE TABLE IF NOT EXISTS mr_identity_tenants (
     name LONGTEXT NOT NULL,
     created_at BIGINT NOT NULL
   );
+CREATE TABLE IF NOT EXISTS mr_identity_profiles (
+    user_id VARCHAR(191) PRIMARY KEY REFERENCES mr_identity_users(id) ON DELETE CASCADE,
+    display_name VARCHAR(160) NOT NULL
+  );
 CREATE TABLE IF NOT EXISTS mr_identity_memberships (
     tenant_id VARCHAR(191) NOT NULL REFERENCES mr_identity_tenants(id) ON DELETE CASCADE,
     user_id VARCHAR(191) NOT NULL REFERENCES mr_identity_users(id) ON DELETE CASCADE,

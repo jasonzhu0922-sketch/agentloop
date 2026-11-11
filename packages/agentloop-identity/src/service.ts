@@ -19,6 +19,10 @@ const IDENTITY_SCHEMA_SQL = `
     name TEXT NOT NULL,
     created_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS mr_identity_profiles (
+    user_id TEXT PRIMARY KEY REFERENCES mr_identity_users(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS mr_identity_memberships (
     tenant_id TEXT NOT NULL REFERENCES mr_identity_tenants(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES mr_identity_users(id) ON DELETE CASCADE,
@@ -41,6 +45,7 @@ export interface Principal {
   readonly userId: string;
   readonly tenantId: string;
   readonly email: string;
+  readonly displayName?: string;
 }
 
 export interface IdentitySession {
@@ -74,10 +79,11 @@ export class IdentityService {
     await (this.initialize?.() ?? installIdentitySchema(this.database));
   }
 
-  async register(emailInput: unknown, passwordInput: unknown): Promise<IdentitySession> {
+  async register(emailInput: unknown, passwordInput: unknown, displayNameInput?: unknown): Promise<IdentitySession> {
     await this.ready();
     const email = normalizeEmail(emailInput);
     const password = validatePassword(passwordInput);
+    const displayName = validateDisplayName(displayNameInput);
     const passwordHash = await hashPassword(password);
     const userId = `user_${randomUUID()}`;
     const tenantId = `tenant_${randomUUID()}`;
@@ -86,6 +92,7 @@ export class IdentityService {
       await this.database.transaction(async () => {
         await this.database.prepare("INSERT INTO mr_identity_users(id, email, password_hash, created_at) VALUES (?, ?, ?, ?)")
           .run(userId, email, passwordHash, now);
+        if (displayName !== undefined) await this.database.prepare("INSERT INTO mr_identity_profiles(user_id, display_name) VALUES (?, ?)").run(userId, displayName);
         await this.database.prepare("INSERT INTO mr_identity_tenants(id, name, created_at) VALUES (?, ?, ?)")
           .run(tenantId, `${email} workspace`, now);
         await this.database.prepare("INSERT INTO mr_identity_memberships(tenant_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)")
@@ -95,7 +102,7 @@ export class IdentityService {
       if (String(error).includes("UNIQUE constraint failed")) throw new IdentityError(409, "email_registered", "Email is already registered");
       throw error;
     }
-    return this.issueSession({ userId, tenantId, email });
+    return this.issueSession({ userId, tenantId, email, ...(displayName === undefined ? {} : { displayName }) });
   }
 
   async login(emailInput: unknown, passwordInput: unknown): Promise<IdentitySession> {
@@ -103,16 +110,17 @@ export class IdentityService {
     const email = normalizeEmail(emailInput);
     if (typeof passwordInput !== "string") throw new IdentityError(401, "invalid_credentials", "Invalid email or password");
     const user = await this.database.prepare(`
-      SELECT u.id, u.email, u.password_hash, m.tenant_id
+      SELECT u.id, u.email, u.password_hash, m.tenant_id, p.display_name
       FROM mr_identity_users u
+      LEFT JOIN mr_identity_profiles p ON p.user_id = u.id
       JOIN mr_identity_memberships m ON m.user_id = u.id
       WHERE u.email = ? AND m.role = 'owner'
       ORDER BY m.created_at ASC LIMIT 1
-    `).get(email) as { id: string; email: string; password_hash: string; tenant_id: string } | undefined;
+    `).get(email) as { id: string; email: string; password_hash: string; tenant_id: string; display_name: string | null } | undefined;
     if (user === undefined || !(await verifyPassword(passwordInput, user.password_hash))) {
       throw new IdentityError(401, "invalid_credentials", "Invalid email or password");
     }
-    return this.issueSession({ userId: user.id, tenantId: user.tenant_id, email: user.email });
+    return this.issueSession({ userId: user.id, tenantId: user.tenant_id, email: user.email, ...(user.display_name === null ? {} : { displayName: user.display_name }) });
   }
 
   async authenticate(authorization: string | string[] | undefined): Promise<Principal> {
@@ -121,15 +129,16 @@ export class IdentityService {
     const match = header?.match(/^Bearer\s+([A-Za-z0-9_-]{32,})$/i);
     if (match === undefined || match === null) throw new IdentityError(401, "authentication_required", "Authentication required");
     const row = await this.database.prepare(`
-      SELECT u.id, u.email, m.tenant_id
+      SELECT u.id, u.email, m.tenant_id, p.display_name
       FROM mr_identity_sessions s
       JOIN mr_identity_users u ON u.id = s.user_id
+      LEFT JOIN mr_identity_profiles p ON p.user_id = u.id
       JOIN mr_identity_memberships m ON m.user_id = u.id AND m.role = 'owner'
       WHERE s.token_hash = ? AND s.expires_at > ?
       ORDER BY m.created_at ASC LIMIT 1
-    `).get(hashToken(match[1]), Date.now()) as { id: string; email: string; tenant_id: string } | undefined;
+    `).get(hashToken(match[1]), Date.now()) as { id: string; email: string; tenant_id: string; display_name: string | null } | undefined;
     if (row === undefined) throw new IdentityError(401, "session_invalid", "Session is invalid or expired");
-    return { userId: row.id, tenantId: row.tenant_id, email: row.email };
+    return { userId: row.id, tenantId: row.tenant_id, email: row.email, ...(row.display_name === null ? {} : { displayName: row.display_name }) };
   }
 
   async revoke(authorization: string | string[] | undefined): Promise<void> {
@@ -168,6 +177,14 @@ function validatePassword(value: unknown): string {
   if (value.length < 12) throw new IdentityError(400, "invalid_password", "password must contain at least 12 characters");
   if (value.length > 256) throw new IdentityError(400, "invalid_password", "password must contain at most 256 characters");
   return value;
+}
+
+function validateDisplayName(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.trim().length < 2 || value.trim().length > 40 || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) {
+    throw new IdentityError(400, "invalid_display_name");
+  }
+  return value.trim();
 }
 
 async function hashPassword(password: string): Promise<string> {
