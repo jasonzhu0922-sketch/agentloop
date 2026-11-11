@@ -5,7 +5,7 @@ import { rm } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type { LocalModelConfigurationStore } from "./local-model-configuration-store.ts";
 import {
-  discoverSkillDirectory,
+  scanSkillDirectory,
   detectSkillDeclaration,
   inspectSkillPackage,
   parseSkillDeclaration,
@@ -15,6 +15,7 @@ import {
   type McpServersConfig,
   type McpServerRegistration,
   type ToolSourceCapability,
+  type SkillLoadDiagnostic,
 } from "@zhujun/agentloop";
 import type { WebToolsOptions } from "@zhujun/agentloop";
 
@@ -171,6 +172,8 @@ export interface ResolvedLocalWebSearchConfiguration {
   readonly searchProvider?: WebToolsOptions["searchProvider"];
   readonly searchEndpoint?: string;
   readonly credentialConfigured: boolean;
+  /** Search alone is unavailable; the saved opt-in and Runtime remain intact. */
+  readonly unavailableReason?: "web_search_credentials_missing";
 }
 
 interface LocalRuntimeConfigurationStorageInput {
@@ -530,13 +533,30 @@ export class LocalRuntimeConfigurationStore {
   async synchronizeCustomDirectories(directories: readonly string[]): Promise<readonly LocalSkillPackageSummary[]> {
     const now = Date.now();
     const discoveredPackageIds = new Set<string>();
+    let hasLoadFailures = false;
     await this.database.prepare(`
       UPDATE local_skill_packages
       SET validation_status = 'invalid', validation_detail = 'skill_package_not_available', updated_at = ?
       WHERE source_kind = 'custom_directory'
     `).run(now);
     for (const directory of directories) {
-      for (const entry of await discoverSkillDirectory(directory)) {
+      const scan = await scanSkillDirectory(directory);
+      hasLoadFailures ||= scan.diagnostics.length > 0;
+      for (const diagnostic of scan.diagnostics) {
+        if (diagnostic.skillName === undefined) continue;
+        const storageKey = `custom:${createHash("sha256").update(resolve(directory)).digest("hex")}:${diagnostic.skillName}`;
+        const packageId = `local_skill_${createHash("sha256").update(storageKey).digest("hex").slice(0, 32)}`;
+        this.packageRoots.delete(packageId);
+        await this.database.prepare(`
+          INSERT INTO local_skill_packages(
+            package_id, skill_name, display_name, source_kind, storage_key, manifest_json,
+            validation_status, validation_detail, created_at, updated_at
+          ) VALUES (?, ?, ?, 'custom_directory', ?, '{}', 'invalid', ?, ?, ?)
+          ON CONFLICT(package_id) DO UPDATE SET
+            validation_status = 'invalid', validation_detail = excluded.validation_detail, updated_at = excluded.updated_at
+        `).run(packageId, diagnostic.skillName, diagnostic.skillName, storageKey, diagnostic.message, now, now);
+      }
+      for (const entry of scan.entries) {
         const storageKey = `custom:${createHash("sha256").update(resolve(directory)).digest("hex")}:${entry.inspection.name}`;
         const packageId = `local_skill_${createHash("sha256").update(storageKey).digest("hex").slice(0, 32)}`;
         discoveredPackageIds.add(packageId);
@@ -577,6 +597,9 @@ export class LocalRuntimeConfigurationStore {
     `).all() as Array<{ package_id: string }>;
     for (const row of staleRows) {
       if (discoveredPackageIds.has(row.package_id)) continue;
+      this.packageRoots.delete(row.package_id);
+      // Invalid scans do not authorize deleting the user's Runtime bindings.
+      if (hasLoadFailures) continue;
       await this.database.transaction(async () => {
         await this.database.prepare("DELETE FROM local_runtime_skill_bindings WHERE package_id = ?").run(row.package_id);
         await this.database.prepare("DELETE FROM local_skill_packages WHERE package_id = ?").run(row.package_id);
@@ -1235,17 +1258,22 @@ export class LocalRuntimeConfigurationStore {
 
   async resolve(runtimeId: string): Promise<ResolvedLocalRuntimeConfiguration> {
     const packageRows = await this.database.prepare(`
-      SELECT p.package_id, p.validation_status
+      SELECT p.package_id, p.skill_name, p.validation_status, p.validation_detail
       FROM local_runtime_skill_bindings b
       JOIN local_skill_packages p ON p.package_id = b.package_id
       WHERE b.runtime_id = ? ORDER BY p.package_id
-    `).all(runtimeId) as Array<{ package_id: string; validation_status: string }>;
-    const customSkillDirectories = packageRows.map((row) => {
-      if (row.validation_status !== "valid") throw new LocalRuntimeConfigurationStoreError(409, "skill_package_invalid");
+    `).all(runtimeId) as Array<{ package_id: string; skill_name: string; validation_status: string; validation_detail: string | null }>;
+    const skillDiagnostics: SkillLoadDiagnostic[] = [];
+    const customSkillDirectories: string[] = [];
+    for (const row of packageRows) {
       const root = this.packageRoots.get(row.package_id);
-      if (root === undefined) throw new LocalRuntimeConfigurationStoreError(409, "skill_package_not_available");
-      return root;
-    });
+      if (row.validation_status !== "valid" || root === undefined) {
+        skillDiagnostics.push({ sourceDirectory: root ?? row.package_id, skillName: row.skill_name,
+          stage: "discovery", code: "SKILL_PACKAGE_INVALID", message: row.validation_detail ?? "skill_package_not_available" });
+        continue;
+      }
+      customSkillDirectories.push(root);
+    }
     const environment: Record<string, string | undefined> = {};
     const mcpServers: McpServerRegistration[] = [];
     for (const row of await this.mcpRows(runtimeId)) {
@@ -1256,7 +1284,7 @@ export class LocalRuntimeConfigurationStore {
     const memory = await this.deviceMemory();
     await this.assertValidMemoryConfiguration(memory);
     const webSearch = await this.resolvedWebSearch();
-    return { customSkillDirectories, mcpServers, integrationEnvironment: environment,
+    return { customSkillDirectories, ...(skillDiagnostics.length === 0 ? {} : { skillDiagnostics }), mcpServers, integrationEnvironment: environment,
       ...(webSearch === undefined ? {} : { webSearch }), memory,
       ...(this.modelConfigurations === undefined ? {} : { modelConfiguration: await this.modelConfigurations.resolve() }) };
   }
@@ -1335,20 +1363,27 @@ export class LocalRuntimeConfigurationStore {
   }
 
   private async resolvedWebSearch(): Promise<WebToolsOptions | undefined> {
-    const row = await this.database.prepare(`SELECT configuration_json, secret_storage_key FROM local_web_search_configuration WHERE singleton = 1`).get() as { configuration_json: string; secret_storage_key: string | null } | undefined;
-    if (row === undefined) return undefined;
-    const config = JSON.parse(row.configuration_json) as { enabled: boolean; searchProvider?: WebToolsOptions["searchProvider"]; searchEndpoint?: string };
-    if (!config.enabled) return undefined;
-    const values = row.secret_storage_key === null ? undefined : await this.webSearchSecrets.read(row.secret_storage_key);
-    if (row.secret_storage_key !== null && values === undefined) throw new LocalRuntimeConfigurationStoreError(409, "web_search_credentials_missing");
-    return { ...(config.searchProvider === undefined ? {} : { searchProvider: config.searchProvider }), ...(config.searchEndpoint === undefined ? {} : { searchEndpoint: config.searchEndpoint }), ...(values?.WEB_SEARCH_API_KEY === undefined ? {} : { searchApiKey: values.WEB_SEARCH_API_KEY }) };
+    return (await this.webSearchResolution()).options;
   }
 
   private async publicWebSearch(): Promise<ResolvedLocalWebSearchConfiguration> {
+    return (await this.webSearchResolution()).configuration;
+  }
+
+  private async webSearchResolution(): Promise<{ configuration: ResolvedLocalWebSearchConfiguration; options?: WebToolsOptions }> {
     const row = await this.database.prepare(`SELECT configuration_json, secret_storage_key FROM local_web_search_configuration WHERE singleton = 1`).get() as { configuration_json: string; secret_storage_key: string | null } | undefined;
-    if (row === undefined) return { enabled: false, credentialConfigured: false };
+    if (row === undefined) return { configuration: { enabled: false, credentialConfigured: false } };
     const config = JSON.parse(row.configuration_json) as { enabled: boolean; searchProvider?: WebToolsOptions["searchProvider"]; searchEndpoint?: string };
-    return { enabled: config.enabled, ...(config.searchProvider === undefined ? {} : { searchProvider: config.searchProvider }), ...(config.searchEndpoint === undefined ? {} : { searchEndpoint: config.searchEndpoint }), credentialConfigured: row.secret_storage_key !== null };
+    const values = row.secret_storage_key === null ? undefined : await this.webSearchSecrets.read(row.secret_storage_key);
+    const key = values?.WEB_SEARCH_API_KEY?.trim();
+    const target = { ...(config.searchProvider === undefined ? {} : { searchProvider: config.searchProvider }), ...(config.searchEndpoint === undefined ? {} : { searchEndpoint: config.searchEndpoint }) };
+    // A saved credential reference is not proof that its secret still exists.
+    // Do not load unauthenticated tools or switch providers when a key is lost;
+    // preserve the user's configuration and isolate the loss to search.
+    const credentialsMissing = config.enabled && !key && (row.secret_storage_key !== null || config.searchProvider === "bocha");
+    const configuration: ResolvedLocalWebSearchConfiguration = { enabled: config.enabled, ...target, credentialConfigured: Boolean(key),
+      ...(credentialsMissing ? { unavailableReason: "web_search_credentials_missing" } : {}) };
+    return { configuration, ...(!config.enabled || credentialsMissing ? {} : { options: { ...target, ...(key ? { searchApiKey: key } : {}) } }) };
   }
 
   private async assertValidMemoryConfiguration(memory: ResolvedLocalMemoryConfiguration): Promise<void> {
@@ -1401,6 +1436,9 @@ export class LocalRuntimeConfigurationStore {
         continue;
       }
       this.packageRoots.set(row.package_id, inspection.root);
+      await this.database.prepare(`
+        UPDATE local_skill_packages SET validation_status = 'valid', validation_detail = NULL WHERE package_id = ?
+      `).run(row.package_id);
     }
   }
 

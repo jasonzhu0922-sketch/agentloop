@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 import { SkillService } from "../src/skills/skill-service.ts";
+import { removeSkillPackage } from "../src/skills/skill-package.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 
 test("discovered Skill snapshots are persisted, versioned, and reconciled", async () => {
@@ -159,6 +160,7 @@ test("startup Skill directory sync removes same-name legacy package records whos
     assert.deepEqual(skills.discovered().map((skill) => skill.name), ["legacy-demo"]);
   } finally {
     await database.close();
+    await removeSkillPackage(resolve(root, "managed-packages"));
     await fs.rm(root, { recursive: true, force: true });
   }
 });

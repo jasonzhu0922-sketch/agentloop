@@ -15,6 +15,12 @@ function safePath(value: string): string {
   if (parts.some(p => !p || p === "." || p === ".." || /[. ]$/.test(p) || /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(p) || [".git", "node_modules"].includes(p))) return fail();
   return parts.join("/");
 }
+// Finder ZIPs contain an additional top-level tree of AppleDouble sidecars.
+// Validate every input first, then exclude only well-known packaging metadata.
+function isMacMetadataPath(path: string): boolean {
+  const parts = path.split("/");
+  return parts[0] === "__MACOSX" || parts.at(-1) === ".DS_Store";
+}
 function crc32(bytes: Buffer): number {
   let value = 0xffffffff;
   for (const byte of bytes) { value ^= byte; for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0); }
@@ -63,13 +69,13 @@ export function readSkillZip(bytes: Buffer): SkillImportFile[] {
 /** Each installed package is content-addressed. Only staging paths are removed on failure. */
 export async function importSkillFiles(library: string, files: readonly SkillImportFile[]) {
   if (!Array.isArray(files) || !files.length || files.length > MAX_FILES) return fail();
-  let total = 0; const paths = new Set<string>(), folded = new Set<string>();
+  let total = 0; const folded = new Set<string>();
   const normalized = files.map(file => {
     const path = safePath(file.path); total += file.content.length;
     if (!Buffer.isBuffer(file.content) || file.content.length > MAX_FILE || total > MAX_TOTAL || folded.has(path.toLowerCase())) return fail();
-    folded.add(path.toLowerCase()); paths.add(path); return { path, content: file.content };
-  });
-  const roots = [...paths].filter(p => p === "SKILL.md" || p.endsWith("/SKILL.md")).map(p => p.slice(0, -8));
+    folded.add(path.toLowerCase()); return { path, content: file.content };
+  }).filter(file => !isMacMetadataPath(file.path));
+  const roots = normalized.map(file => file.path).filter(p => p === "SKILL.md" || p.endsWith("/SKILL.md")).map(p => p.slice(0, -8));
   if (!roots.length || normalized.some(f => roots.filter(root => f.path.startsWith(root)).length !== 1)) return fail();
   await mkdir(library, { recursive: true, mode: 0o700 });
   const staging = await mkdtemp(join(library, ".import-"));

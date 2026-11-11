@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, realpathSync } from "node:fs";
 import { promises as fs } from "node:fs";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import type { SqlConnection } from "../storage/connection.ts";
 import { SqlSkillStore } from "../storage/stores/sqlite-skill-store.ts";
 import type {
@@ -22,8 +22,9 @@ import {
 } from "./skill-package.ts";
 import { discoveredSkillId } from "./skill-identity.ts";
 import type { SkillAgentLoopMetadata } from "./skill-package.ts";
-import { discoverSkillDirectory, discoverSkillPackageRoot } from "./skill-directory.ts";
-import type { SkillDirectoryEntry } from "./skill-directory.ts";
+import { readSkillExecutionManifest } from "./skill-execution-manifest.ts";
+import { scanSkillDirectory, discoverSkillPackageRoot, skillLoadDiagnostic } from "./skill-directory.ts";
+import type { SkillDirectoryEntry, SkillLoadDiagnostic } from "./skill-directory.ts";
 
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SOURCE_REVISION_PATTERN = /^[0-9a-f]{40}$/;
@@ -71,8 +72,8 @@ export interface SkillServiceOptions {
   readonly skillDirectory?: string;
   /**
    * Skill discovery directories whose packages are merged into one catalog.
-   * Names must be unique across every configured directory; duplicates fail
-   * closed at discovery time.
+   * Invalid packages and all candidates with duplicate names are excluded
+   * from the available catalog and reported through loadDiagnostics().
    */
   readonly skillDirectories?: readonly string[];
   /**
@@ -121,6 +122,7 @@ export interface DiscoveredSkillSummary {
 
 export interface SkillDirectorySyncResult {
   readonly discoveredSkills: readonly DiscoveredSkillSummary[];
+  readonly diagnostics: readonly SkillLoadDiagnostic[];
   readonly prunedLegacySkillCount: number;
   readonly refreshedInstalledSkillCount: number;
 }
@@ -133,6 +135,9 @@ export class SkillService {
   private readonly configuredSkillPackageRoots: readonly string[];
   private readonly selectVisibleSkills: SkillServiceOptions["selectVisibleSkills"];
   private directoryEntries: readonly SkillDirectoryEntry[] = [];
+  private discoveryDiagnostics: readonly SkillLoadDiagnostic[] = [];
+  private installedDiagnostics: readonly SkillLoadDiagnostic[] = [];
+  private readonly rejectedInstalledSkillIds = new Set<string>();
 
   constructor(database?: SqlConnection, options: SkillServiceOptions = {}) {
     if (options.skillStore !== undefined) {
@@ -154,13 +159,13 @@ export class SkillService {
     ];
     const directoriesByPath = new Map<string, string>();
     for (const directory of configuredDirectories) {
-      const canonical = realpathSync(resolve(directory));
+      const canonical = discoveryPath(directory);
       if (!directoriesByPath.has(canonical)) directoriesByPath.set(canonical, canonical);
     }
     this.configuredSkillDirectories = [...directoriesByPath.values()];
     const packageRootsByPath = new Map<string, string>();
     for (const packageRoot of options.skillPackageRoots ?? []) {
-      const canonical = realpathSync(resolve(packageRoot));
+      const canonical = discoveryPath(packageRoot);
       if (!packageRootsByPath.has(canonical)) packageRootsByPath.set(canonical, canonical);
     }
     this.configuredSkillPackageRoots = [...packageRootsByPath.values()];
@@ -190,16 +195,39 @@ export class SkillService {
 
   async refreshSkillDirectory(): Promise<DiscoveredSkillSummary[]> {
     const entries: SkillDirectoryEntry[] = [];
+    const diagnostics: SkillLoadDiagnostic[] = [];
     for (const directory of this.configuredSkillDirectories) {
-      entries.push(...await discoverSkillDirectory(directory));
+      const result = await scanSkillDirectory(directory);
+      entries.push(...result.entries);
+      diagnostics.push(...result.diagnostics);
     }
     for (const packageRoot of this.configuredSkillPackageRoots) {
-      entries.push(await discoverSkillPackageRoot(packageRoot));
+      try { entries.push(await discoverSkillPackageRoot(packageRoot)); }
+      catch (error) { diagnostics.push(skillLoadDiagnostic(packageRoot, "discovery", error, basename(packageRoot))); }
     }
-    assertUniqueDiscoveredNames(entries);
-    this.directoryEntries = await this.materializeDirectoryExecutionRoots(entries);
-    await this.syncDiscoveryPersistence(entries);
+    const byName = new Map<string, SkillDirectoryEntry[]>();
+    for (const entry of entries) {
+      const group = byName.get(entry.inspection.name) ?? [];
+      group.push(entry);
+      byName.set(entry.inspection.name, group);
+    }
+    const unique: SkillDirectoryEntry[] = [];
+    for (const [name, group] of byName) {
+      if (group.length === 1) { unique.push(group[0]!); continue; }
+      for (const entry of group) diagnostics.push(skillLoadDiagnostic(entry.sourceDirectory, "discovery",
+        new AppError("SKILL_PACKAGE_INVALID", `Skill name "${name}" is discovered in multiple configured directories`, 422), name));
+    }
+    const materialized = await this.materializeDirectoryExecutionRoots(unique, diagnostics);
+    // Persist only usable entries. A previously valid package must disappear
+    // from both planning and the persisted catalog when it becomes invalid.
+    await this.syncDiscoveryPersistence(materialized);
+    this.directoryEntries = materialized;
+    this.discoveryDiagnostics = diagnostics;
     return this.discovered();
+  }
+
+  loadDiagnostics(): readonly SkillLoadDiagnostic[] {
+    return [...this.discoveryDiagnostics, ...this.installedDiagnostics];
   }
 
   /**
@@ -210,34 +238,41 @@ export class SkillService {
    */
   private async materializeDirectoryExecutionRoots(
     entries: readonly SkillDirectoryEntry[],
+    diagnostics: SkillLoadDiagnostic[],
   ): Promise<readonly SkillDirectoryEntry[]> {
     if (this.packageStore === undefined) return entries;
     const discoveredStore = resolve(this.packageStore, "discovered");
     assertPathInside(discoveredStore, this.packageStore, "Discovered Skill package store");
     await fs.mkdir(discoveredStore, { recursive: true, mode: 0o700 });
-    return await Promise.all(entries.map(async (entry) => {
-      const destination = resolve(discoveredStore, entry.inspection.packageHash);
-      assertPathInside(destination, discoveredStore, "Discovered Skill package root");
-      const existing = await fs.stat(destination).then(() => true).catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return false;
-        throw error;
-      });
-      const executionInspection = existing
-        ? await inspectSkillPackage(destination)
-        : await copySkillPackage(entry.inspection, destination);
-      if (
-        executionInspection.packageHash !== entry.inspection.packageHash
-        || executionInspection.name !== entry.inspection.name
-      ) {
-        throw new AppError(
-          "SKILL_PACKAGE_MUTATED",
-          `Runtime-owned copy for discovered Skill ${entry.inspection.name} does not match its source package`,
-          409,
-        );
+    const materialized: SkillDirectoryEntry[] = [];
+    for (const entry of entries) {
+      try {
+        const destination = resolve(discoveredStore, entry.inspection.packageHash);
+        assertPathInside(destination, discoveredStore, "Discovered Skill package root");
+        const existing = await fs.stat(destination).then(() => true).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return false;
+          throw error;
+        });
+        const executionInspection = existing
+          ? await inspectSkillPackage(destination)
+          : await copySkillPackage(entry.inspection, destination);
+        if (
+          executionInspection.packageHash !== entry.inspection.packageHash
+          || executionInspection.name !== entry.inspection.name
+        ) {
+          throw new AppError(
+            "SKILL_PACKAGE_MUTATED",
+            `Runtime-owned copy for discovered Skill ${entry.inspection.name} does not match its source package`,
+            409,
+          );
+        }
+        await makeSkillPackageReadOnly(executionInspection);
+        materialized.push({ ...entry, executionDirectory: executionInspection.root });
+      } catch (error) {
+        diagnostics.push(skillLoadDiagnostic(entry.sourceDirectory, "materialization", error, entry.inspection.name));
       }
-      await makeSkillPackageReadOnly(executionInspection);
-      return { ...entry, executionDirectory: executionInspection.root };
-    }));
+    }
+    return materialized;
   }
 
   /**
@@ -250,7 +285,7 @@ export class SkillService {
     const discoveredSkills = await this.refreshSkillDirectory();
     const prunedLegacySkillCount = await this.pruneLegacyDirectoryPackageSkills();
     const refreshedInstalledSkillCount = await this.refreshInstalledPackageMetadata();
-    return { discoveredSkills, prunedLegacySkillCount, refreshedInstalledSkillCount };
+    return { discoveredSkills, diagnostics: this.loadDiagnostics(), prunedLegacySkillCount, refreshedInstalledSkillCount };
   }
 
   /**
@@ -278,6 +313,9 @@ export class SkillService {
     const discoveredNames = new Set(this.directoryEntries.map((entry) => entry.inspection.name));
     const staleRecords: SkillRecord[] = [];
     for (const record of await this.store.listPackageSkillsWithoutSourceProvenance()) {
+      // A load failure is not proof that a source was deliberately removed.
+      // Preserve installed data for repair instead of reclaiming it.
+      if (this.discoveryDiagnostics.some(issue => issue.skillName === undefined || issue.skillName === record.name)) continue;
       if (
         !discoveredNames.has(record.name)
         || this.isOutsideCurrentPackageStore(record.packageRoot)
@@ -495,6 +533,9 @@ export class SkillService {
     // Return the same response for a missing and a foreign-owned skill to avoid
     // turning identifiers into an ownership oracle.
     if (record === undefined) throw notFound("Skill");
+    if (this.rejectedInstalledSkillIds.has(skillId)) {
+      throw new AppError("SKILL_PACKAGE_INVALID", `Skill package ${record.name} is unavailable; inspect Skill load diagnostics`, 409);
+    }
     return toPrivateSkill(record);
   }
 
@@ -529,9 +570,19 @@ export class SkillService {
 
   async refreshInstalledPackageMetadata(): Promise<number> {
     let updated = 0;
+    const diagnostics: SkillLoadDiagnostic[] = [];
+    this.rejectedInstalledSkillIds.clear();
     for (const record of await this.store.listPackageSkills()) {
-      const packageSource = parsePackageSource(record);
-      const current = await inspectSkillPackage(packageSource.root);
+      let current: Awaited<ReturnType<typeof inspectSkillPackage>>;
+      try {
+        const packageSource = parsePackageSource(record);
+        current = await inspectSkillPackage(packageSource.root);
+        await readSkillExecutionManifest(current.root);
+      } catch (error) {
+        this.rejectedInstalledSkillIds.add(record.id);
+        diagnostics.push(skillLoadDiagnostic(record.packageRoot ?? record.id, "installed", error, record.name));
+        continue;
+      }
       if (
         record.name === current.name
         && record.description === current.description
@@ -555,13 +606,15 @@ export class SkillService {
       });
       updated += 1;
     }
+    this.installedDiagnostics = diagnostics;
     return updated;
   }
 
   private async availableForOwner(ownerUserId: string): Promise<PrivateSkill[]> {
     const discoveredNames = new Set(this.directoryEntries.map((entry) => entry.inspection.name));
-    const privateSkills = await this.getMany(ownerUserId, (await this.list(ownerUserId))
-      .filter((skill) => !discoveredNames.has(skill.name))
+    const privateSkills = await this.getMany(ownerUserId, (await this.store.listByOwner(ownerUserId))
+      .filter((skill) => !discoveredNames.has(skill.name) && !this.rejectedInstalledSkillIds.has(skill.id)
+        && !this.discoveryDiagnostics.some(issue => issue.skillName === skill.name))
       .map((skill) => skill.id));
     const candidates = [...privateSkills, ...this.discoveredPrivateSkills(ownerUserId)]
       .sort((left, right) => left.name.localeCompare(right.name, "en"));
@@ -616,19 +669,13 @@ export class SkillService {
   }
 }
 
-function assertUniqueDiscoveredNames(entries: readonly SkillDirectoryEntry[]): void {
-  const byName = new Map<string, string>();
-  for (const entry of entries) {
-    const name = entry.inspection.name;
-    const existingDirectory = byName.get(name);
-    if (existingDirectory !== undefined) {
-      throw new AppError(
-        "SKILL_PACKAGE_INVALID",
-        `Skill name "${name}" is discovered in multiple configured directories: ${existingDirectory} and ${entry.sourceDirectory}`,
-        422,
-      );
-    }
-    byName.set(name, entry.sourceDirectory);
+function discoveryPath(path: string): string {
+  try { return realpathSync(resolve(path)); }
+  catch (error) {
+    if (!["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    // Missing/inaccessible configured sources are diagnosed by discovery,
+    // rather than preventing construction of the entire Skill service.
+    return resolve(path);
   }
 }
 

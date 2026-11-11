@@ -419,6 +419,16 @@ button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid va
 .skill-package-card>.skill-package-state.confirmed { color:var(--ok); }
 .skill-package-card>.skill-package-actions { grid-column:2; grid-row:1 / span 3; align-self:center; }
 .skill-package-actions button { border-color:var(--border)!important; color:var(--brand); white-space:nowrap; }
+.desktop-settings-content.agent-settings-content .skill-metadata-card { grid-template-columns:minmax(0,1fr); min-width:0; gap:14px; padding:16px; background:var(--bg); }
+.skill-metadata-heading { display:flex; align-items:center; flex-wrap:wrap; gap:10px; min-width:0; }
+.skill-metadata-heading strong { min-width:0; overflow-wrap:anywhere; font-size:14px; }
+.skill-metadata-badge { flex:none; padding:3px 7px; border-radius:5px; background:var(--brand-soft); color:var(--brand); font-size:10px; }
+.skill-metadata-card .capability-field { min-width:0; gap:8px; }
+.skill-metadata-card .desktop-json { display:block; width:100%; min-width:0; height:clamp(280px,48dvh,560px); min-height:220px; max-height:none; padding:12px 14px; font-size:12px; line-height:1.65; tab-size:2; resize:vertical; }
+.skill-metadata-card .desktop-json:focus { outline:2px solid var(--brand); outline-offset:2px; }
+.skill-metadata-footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px 16px; padding-top:12px; border-top:1px solid var(--border); }
+.skill-metadata-actions { flex:none; margin-left:auto; }
+.skill-metadata-actions button { white-space:nowrap; }
 .connector-section-heading { display:grid; gap:5px; padding:2px 0 4px; }
 .connector-section-heading strong { font-size:13px; }
 .connector-section-heading p { margin:0; color:var(--text-2); font-size:11px; line-height:1.5; }

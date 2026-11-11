@@ -1,7 +1,7 @@
 import { LocalRuntimeSupervisorError } from "../contracts/host.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
-import type { AppDatabase } from "@zhujun/agentloop";
+import type { AppDatabase, SkillLoadDiagnostic } from "@zhujun/agentloop";
 import {
   LocalRuntimeConfigurationStore,
   type LegacyLocalRuntimeConfigurationMigration,
@@ -20,6 +20,7 @@ export type { LocalRuntimeDefinition, LocalRuntimeControl } from "../contracts/h
 import type { LocalRuntimeDefinition, LocalRuntimeControl } from "../contracts/host.ts";
 
 export interface LocalRuntimeSummary extends LocalRuntimeDefinition {
+  readonly skillDiagnostics?: readonly SkillLoadDiagnostic[];
   readonly iconKey: string;
   readonly status: LocalRuntimeLifecycleStatus;
   readonly activeRunCount: number;
@@ -179,6 +180,8 @@ export class LocalRuntimeSupervisor {
       const configuration = await this.configurations.configuration(row.runtime_id);
       return {
         ...toDefinition(row),
+        ...(this.instances.get(row.runtime_id)?.skillDiagnostics?.length
+          ? { skillDiagnostics: this.instances.get(row.runtime_id)!.skillDiagnostics } : {}),
         iconKey: configuration.iconKey,
         status: row.status,
         activeRunCount: (this.instances.get(row.runtime_id)?.activeRunIds.size ?? 0) + (this.pendingAdmissions.get(row.runtime_id) ?? 0),

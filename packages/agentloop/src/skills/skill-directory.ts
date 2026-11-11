@@ -27,6 +27,33 @@ export interface SkillDirectoryEntry {
   readonly inspection: SkillPackageInspection;
 }
 
+export interface SkillLoadDiagnostic {
+  readonly sourceDirectory: string;
+  readonly skillName?: string;
+  readonly stage: "discovery" | "materialization" | "installed";
+  readonly code: string;
+  readonly message: string;
+}
+
+export function skillLoadDiagnostic(
+  sourceDirectory: string,
+  stage: SkillLoadDiagnostic["stage"],
+  error: unknown,
+  skillName?: string,
+): SkillLoadDiagnostic {
+  return {
+    sourceDirectory, stage,
+    ...(skillName === undefined ? {} : { skillName }),
+    code: error instanceof AppError ? error.code : (error as NodeJS.ErrnoException)?.code ?? "SKILL_PACKAGE_INVALID",
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
+export interface SkillDirectoryScanResult {
+  readonly entries: readonly SkillDirectoryEntry[];
+  readonly diagnostics: readonly SkillLoadDiagnostic[];
+}
+
 interface SkillSourceLock {
   readonly schema: string;
   readonly repository: string;
@@ -46,53 +73,70 @@ interface SkillSourceLock {
  * changing the package bytes or acting as an admission requirement.
  */
 export async function discoverSkillDirectory(directory: string): Promise<SkillDirectoryEntry[]> {
-  const root = await fs.realpath(resolve(directory)).catch(() => {
-    throw invalidDirectory("Configured Skill directory does not exist");
-  });
-  const stat = await fs.stat(root);
-  if (!stat.isDirectory()) throw invalidDirectory("Configured Skill directory must be a directory");
+  const result = await scanSkillDirectory(directory);
+  if (result.diagnostics.length > 0) throw invalidDirectory(result.diagnostics[0]!.message);
+  return [...result.entries];
+}
 
-  const children = (await fs.readdir(root, { withFileTypes: true }))
-    .filter((entry) => !entry.name.startsWith("."))
-    .sort((left, right) => left.name.localeCompare(right.name, "en"));
+/** Runtime catalog loading isolates each rejected package; authoring callers
+ * may still require the strict discovery API above. Both use the same checks. */
+export async function scanSkillDirectory(directory: string): Promise<SkillDirectoryScanResult> {
+  const diagnostics: SkillLoadDiagnostic[] = [];
   const discovered: SkillDirectoryEntry[] = [];
-  for (const child of children) {
-    if (child.isSymbolicLink()) throw invalidDirectory("Skill directory entries must not be symbolic links");
-    if (!child.isDirectory()) continue;
-    if (await isExplicitlyDisabled(root, child.name)) continue;
-    const sourceDirectory = resolve(root, child.name);
-    const inspection = await inspectSkillPackage(sourceDirectory).catch((error) => {
-      if (error instanceof AppError) {
-        throw invalidDirectory(`Invalid Skill package at ${sourceDirectory}: ${error.message}`);
-      }
-      throw error;
+  try {
+    const root = await fs.realpath(resolve(directory)).catch(() => {
+      throw invalidDirectory("Configured Skill directory does not exist");
     });
-    if (inspection.name !== child.name) {
-      throw invalidDirectory(
-        `Skill directory ${child.name} does not match SKILL.md name ${inspection.name}`,
-      );
-    }
-    await readSkillExecutionManifest(inspection.root).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      throw invalidDirectory(`Invalid Skill execution manifest at ${sourceDirectory}: ${message}`);
-    });
-    const source = await readVerifiedSourceLock(
-      resolve(root, `${child.name}.source.json`),
-      inspection,
-      child.name,
-    );
-    discovered.push({
-      sourceDirectory: inspection.root,
-      inspection,
-      ...(source === undefined ? {} : source),
-    });
-  }
+    const stat = await fs.stat(root);
+    if (!stat.isDirectory()) throw invalidDirectory("Configured Skill directory must be a directory");
 
-  const names = discovered.map((entry) => entry.inspection.name);
-  if (new Set(names).size !== names.length) {
-    throw invalidDirectory("Configured Skill directory contains duplicate Skill names");
+    const children = (await fs.readdir(root, { withFileTypes: true }))
+      .filter((entry) => !entry.name.startsWith("."))
+      .sort((left, right) => left.name.localeCompare(right.name, "en"));
+    for (const child of children) {
+      const sourceDirectory = resolve(root, child.name);
+      try {
+        if (child.isSymbolicLink()) throw invalidDirectory("Skill directory entries must not be symbolic links");
+        if (!child.isDirectory()) continue;
+        if (await isExplicitlyDisabled(root, child.name)) continue;
+        const inspection = await inspectSkillPackage(sourceDirectory).catch((error) => {
+          if (error instanceof AppError) {
+            throw invalidDirectory(`Invalid Skill package at ${sourceDirectory}: ${error.message}`);
+          }
+          throw error;
+        });
+        if (inspection.name !== child.name) {
+          throw invalidDirectory(
+            `Skill directory ${child.name} does not match SKILL.md name ${inspection.name}`,
+          );
+        }
+        await readSkillExecutionManifest(inspection.root).catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          throw invalidDirectory(`Invalid Skill execution manifest at ${sourceDirectory}: ${message}`);
+        });
+        const source = await readVerifiedSourceLock(
+          resolve(root, `${child.name}.source.json`),
+          inspection,
+          child.name,
+        );
+        discovered.push({
+          sourceDirectory: inspection.root,
+          inspection,
+          ...(source === undefined ? {} : source),
+        });
+      } catch (error) {
+        diagnostics.push(skillLoadDiagnostic(sourceDirectory, "discovery", error, child.name));
+      }
+    }
+
+    const names = discovered.map((entry) => entry.inspection.name);
+    if (new Set(names).size !== names.length) {
+      throw invalidDirectory("Configured Skill directory contains duplicate Skill names");
+    }
+  } catch (error) {
+    diagnostics.push(skillLoadDiagnostic(resolve(directory), "discovery", error));
   }
-  return discovered;
+  return { entries: discovered, diagnostics };
 }
 
 /**

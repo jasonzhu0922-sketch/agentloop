@@ -244,7 +244,12 @@ export class LocalRuntimeFactory {
         skillDirectories: packaged?.length ? packaged : bundledSkillDirectories(),
         skillPackageRoots: configuration.customSkillDirectories,
       });
-      await skills.syncSkillDirectories();
+      const skillSync = await skills.syncSkillDirectories();
+      for (const diagnostic of [...(configuration.skillDiagnostics ?? []), ...skillSync.diagnostics]) {
+        // Operational log: avoid reflecting package-controlled messages or
+        // paths into the terminal; full diagnostics stay in the account API.
+        this.input.runEventLogSink?.(definition, `Local Runtime Skill excluded (${diagnostic.stage}: ${diagnostic.code})`);
+      }
       const policy = await this.input.loadExecutionPolicy?.();
       const connectorConfiguration = this.connectorConfigurations === undefined
         ? undefined
@@ -346,6 +351,7 @@ export class LocalRuntimeFactory {
       }, 10_000);
       planningRecoveryTimer.unref();
       return { ...definition, database, scopes, runs,
+        get skillDiagnostics() { return [...(configuration.skillDiagnostics ?? []), ...skills.loadDiagnostics()]; },
         ...(memory === undefined || memoryTenantId === undefined ? {} : { memory: { store: memory.store, tenantId: memoryTenantId } }),
         close: async () => {
           if (settlementTimer !== undefined) clearInterval(settlementTimer);

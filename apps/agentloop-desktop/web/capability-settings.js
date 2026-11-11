@@ -131,6 +131,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     const result = await api('/api/web-search-configuration');
     const config = result.webSearch;
     const section = card('联网搜索服务', '保存后会重载当前账号的本机 Runtime；API Key 只写入账号专属的加密 Secret Store，不会回显。'); section.classList.add('web-search-card');
+    if (config.unavailableReason) section.append(el('p', `${errors[config.unavailableReason] || config.unavailableReason} 联网搜索暂不可用，其他本机任务可继续使用。`, 'capability-help'));
     const enabled = input('', 'checkbox'); enabled.checked = config.enabled === true;
     const provider = el('select'); for (const [value, title] of [['bocha', 'Bocha'], ['baidu', 'Baidu'], ['bing', 'Bing']]) { const option = el('option', title); option.value = value; provider.append(option); } provider.value = config.searchProvider ?? 'bocha';
     const endpoint = input(config.searchEndpoint ?? ''); endpoint.maxLength = 4096; endpoint.placeholder = 'https://api.example.com/v1/web-search'; endpoint.autocomplete = 'url';
@@ -174,9 +175,18 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
       const actions = el('div', undefined, 'capability-actions skill-package-actions'); actions.append(button('维护元数据', async () => {
         if (dirty) throw new Error('请先保存或放弃更改');
         const meta = await api(`/api/skills/${p.packageId}/metadata`); const editor = jsonEditor(meta.declaration, 16);
-        c.replaceChildren(el('strong', p.displayName || p.skillName), el('p', '编辑当前账号的本机库中的声明元数据，不改写原始 Skill 内容；保存后需重启使用此包的 Runtime。'), editor);
+        c.classList.replace('skill-package-card', 'skill-metadata-card');
+        const heading = el('div', undefined, 'skill-metadata-heading');
+        heading.append(el('strong', p.displayName || p.skillName), el('span', meta.editable ? '维护元数据' : '只读', 'skill-metadata-badge'));
+        editor.setAttribute('aria-label', `${p.displayName || p.skillName} 声明 JSON`);
         editor.disabled = !meta.editable;
-        c.append(button('保存声明', async () => { await api(`/api/skills/${p.packageId}/metadata`, { declaration: JSON.parse(editor.value) }); dirty = false; await load(); message('声明已保存，请重启使用此 Skill 的 Runtime。'); }));
+        const actions = el('div', undefined, 'capability-actions skill-metadata-actions');
+        const saveButton = button('保存声明', async () => { await api(`/api/skills/${p.packageId}/metadata`, { declaration: JSON.parse(editor.value) }); dirty = false; await load(); message('声明已保存，请重启使用此 Skill 的 Runtime。'); });
+        saveButton.classList.add('primary'); saveButton.disabled = !meta.editable;
+        actions.append(button('取消编辑', async () => { dirty = false; await load(); }), saveButton);
+        const footer = el('div', undefined, 'skill-metadata-footer');
+        footer.append(el('p', meta.editable ? '保存后需重启使用此 Skill 的 Runtime。' : '此 Skill 的声明仅供查看。'), actions);
+        c.replaceChildren(heading, el('p', '编辑当前账号本机库中的声明元数据，不改写原始 Skill 内容。'), field('声明 JSON', editor), footer);
       })); if (p.sourceKind === 'uploaded') { const remove = button('移除', async () => { if (dirty) throw new Error('请先保存或放弃更改'); if (!confirm(`移除“${p.displayName || p.skillName}”及其本机文件？`)) return; await api(`/api/skills/${p.packageId}/remove`, {}); dirty = false; await load(); await changed(); message('Skill 已移除。'); }, true); remove.setAttribute('aria-label', `移除 ${p.displayName || p.skillName}`); actions.append(remove); } c.append(state, actions);
     }
   }
@@ -193,6 +203,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
       title.append(el('span', runtime.status === 'ready' ? '就绪' : runtime.status === 'stopped' ? '已停止' : runtime.status, `runtime-tag ${runtime.status}`));
       const activity = runtime.activeRunCount ? `当前 ${runtime.activeRunCount} 个活动任务` : '当前无活动任务';
       main.append(title, el('p', activity), el('small', `${runtime.extensionSkillCount} 个扩展 Skill · ${runtime.mcpServerCount} 个 MCP`));
+      if (runtime.skillDiagnostics?.length) main.append(el('p', `${runtime.skillDiagnostics.length} 项 Skill 加载异常，已隔离；可查看详情。`, 'capability-status error'));
       const actions = runtimeActionMenu(runtime);
       actions.prepend(button('查看', () => openRuntimeDetail(runtime, 'view')));
       item.append(main, actions); list.append(item);
@@ -265,6 +276,10 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
   }
   function renderRuntimeReadOnly(panel, runtime) {
     const tabs = runtimeCapabilityTabs(panel, 'Runtime 扩展详情');
+    if (runtime.skillDiagnostics?.length) {
+      const diagnostics = cardInto(tabs.skills, 'Skill 加载异常', '以下 Skill 已隔离，其他可用 Skill 和 Runtime 继续运行。修复后可重启 Runtime 重新加载。');
+      for (const issue of runtime.skillDiagnostics) diagnostics.append(el('p', `${issue.skillName || 'Skill 目录'}：${issue.message}`, 'capability-status error'));
+    }
     const iconCard = cardInto(tabs.skills, 'Runtime 形象', '会话历史、输入框入口和对话流都会使用这个标识。');
     const icon = RUNTIME_ICONS.find(item => item.key === (runtime.iconKey || snapshot.configuration.iconKey)) || RUNTIME_ICONS[0];
     const image = document.createElement('img'); image.className = 'runtime-detail-icon'; image.src = runtimeIconUrl(icon.key); image.alt = icon.name;
@@ -273,7 +288,10 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     const selectedSkills = packages.filter(pkg => enabledSkillIds.has(pkg.packageId));
     const skills = cardInto(tabs.skills, '已选择的扩展 Skills', '内核 Skills 默认加载；以下为该 Runtime 专属启用的扩展包。');
     if (!selectedSkills.length) skills.append(el('p', '未选择扩展 Skill。'));
-    else for (const pkg of selectedSkills) skills.append(el('div', `${pkg.displayName || pkg.skillName} · 已启用`, 'runtime-detail-choice'));
+    else for (const pkg of selectedSkills) {
+      const unavailable = pkg.validationStatus !== 'valid' || runtime.skillDiagnostics?.some(issue => issue.skillName === pkg.skillName);
+      skills.append(el('div', `${pkg.displayName || pkg.skillName} · ${unavailable ? '加载异常，已隔离' : '已启用'}`, 'runtime-detail-choice'));
+    }
     const servers = snapshot.configuration.mcpServers;
     const mcp = cardInto(tabs.mcp, '已配置的 MCP Servers', '当前账号共享的 MCP；凭据不会回显。');
     if (!servers.length) mcp.append(el('p', '未配置 MCP Server。'));

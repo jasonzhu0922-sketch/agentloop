@@ -286,8 +286,8 @@ export type {
   SkillSummary,
   SkillVisibilityContext,
 } from "./skills/skill-service.ts";
-export { discoverSkillDirectory, discoverSkillPackageRoot } from "./skills/skill-directory.ts";
-export type { SkillDirectoryEntry } from "./skills/skill-directory.ts";
+export { discoverSkillDirectory, discoverSkillPackageRoot, scanSkillDirectory } from "./skills/skill-directory.ts";
+export type { SkillDirectoryEntry, SkillDirectoryScanResult, SkillLoadDiagnostic } from "./skills/skill-directory.ts";
 export { copySkillPackage, inspectSkillPackage, makeSkillPackageReadOnly, removeSkillPackage } from "./skills/skill-package.ts";
 export type { SkillPackageInspection } from "./skills/skill-package.ts";
 export {

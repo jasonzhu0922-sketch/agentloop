@@ -610,7 +610,7 @@ test("Skill packages from multiple directories merge into one global catalog", a
   }
 });
 
-test("duplicate Skill names across directories fail discovery closed", async () => {
+test("duplicate Skill names across directories are all excluded and diagnosed", async () => {
   const fixture = await createDirectoryFixture();
   const conflictRoot = await fs.mkdtemp(resolve(tmpdir(), "agentloop-skill-directory-dup-"));
   const database = new AppDatabase(":memory:");
@@ -627,11 +627,17 @@ test("duplicate Skill names across directories fail discovery closed", async () 
       "CONFLICTING-BODY",
       "",
     ].join("\n"));
+    const unrelated = resolve(conflictDirectory, "unrelated");
+    await fs.mkdir(unrelated);
+    await fs.writeFile(resolve(unrelated, "SKILL.md"), "---\nname: unrelated\ndescription: Valid unrelated Skill\n---\n\nInstructions.\n");
     const skills = new SkillService(database, {
       packageStoreRoot: fixture.packageStore,
       skillDirectories: [fixture.skillDirectory, conflictDirectory],
     });
-    await assert.rejects(() => skills.refreshSkillDirectory(), /multiple configured directories/);
+    assert.deepEqual((await skills.refreshSkillDirectory()).map(skill => skill.name), ["unrelated"]);
+    assert.equal(skills.loadDiagnostics().length, 2);
+    assert.ok(skills.loadDiagnostics().every(issue => issue.message.includes("multiple configured directories")));
+    assert.deepEqual((await skills.listAvailable("owner")).map(skill => skill.name), ["unrelated"]);
   } finally {
     await database.close();
     await removeSkillPackage(fixture.packageStore).catch(() => undefined);

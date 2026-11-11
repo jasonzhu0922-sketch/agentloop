@@ -1,4 +1,4 @@
-import type { AppDatabase, ModelAdapter, ModelFactory, ModelRetryReporter, RunService, McpServerRegistration, WebToolsOptions } from "@zhujun/agentloop";
+import type { AppDatabase, ModelAdapter, ModelFactory, ModelRetryReporter, RunService, McpServerRegistration, WebToolsOptions, SkillLoadDiagnostic } from "@zhujun/agentloop";
 import type { MemoryStore } from "@zhujun/agentloop-memory";
 import type { ConnectorConnection } from "@zhujun/agentloop-connector-sdk";
 import type { ConnectorConnectionRuntime, ConnectorModuleRegistration } from "../connectors/index.ts";
@@ -41,6 +41,7 @@ export interface LocalConnectorConfigurationPort {
 }
 
 export interface ResolvedLocalRuntimeConfiguration {
+  readonly skillDiagnostics?: readonly SkillLoadDiagnostic[];
   readonly modelConfiguration?: ResolvedLocalModelConfiguration;
   readonly customSkillDirectories: readonly string[];
   readonly mcpServers: readonly McpServerRegistration[];
@@ -60,6 +61,7 @@ export interface LocalRuntimeDefinition {
 
 /** Transitional trusted-host API for the existing Supervisor, not a UI API. */
 export interface LocalRuntimeControl extends LocalRuntimeDefinition {
+  readonly skillDiagnostics?: readonly SkillLoadDiagnostic[];
   readonly database: AppDatabase;
   readonly runs: RunService;
   readonly scopes: LocalDirectoryScopeStore;
