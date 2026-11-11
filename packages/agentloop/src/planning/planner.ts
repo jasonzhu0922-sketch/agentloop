@@ -901,6 +901,9 @@ function resolveCapabilityRecovery(
     ? resolveSourceGroundingGap({
       catalog: task.capabilityRecovery,
       evidenceDemand: turnResolution.evidenceDemand,
+      proposal,
+      currentSkills: task.availableSkills,
+      currentCapabilities,
     })
     : undefined;
   const gaps = [...evidenceGaps, ...(sourceGroundingGap === undefined ? [] : [sourceGroundingGap])];

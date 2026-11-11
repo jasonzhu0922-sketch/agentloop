@@ -6258,11 +6258,6 @@ export function selectPlanningSkillRoles(
       })
       .sort((left, right) => right.score - left.score || left.index - right.index)[0]
     : undefined;
-  const domainSourceCandidate = sourceWorkRequested
-    ? scored
-      .filter((entry) => roleBySkillId.get(entry.skill.id)?.role === "source_provider" && entry.semanticAffinity > 0)
-      .sort((left, right) => right.semanticAffinity - left.semanticAffinity || right.score - left.score || left.index - right.index)[0]
-    : undefined;
   const outputArtifactCandidate = requestsArtifactBuild(artifactSignal)
     ? scored
       .filter((entry) => matchesRequestedArtifactKind(
@@ -6274,7 +6269,11 @@ export function selectPlanningSkillRoles(
   // Preserve both required work surfaces without exceeding the bounded
   // candidate budget. The lowest-ranked incidental candidate gives way to a
   // missing domain-analysis or output-artifact owner.
-  const requiredSurfaceCandidates = [domainAnalysisCandidate, domainSourceCandidate, outputArtifactCandidate]
+  // Acquisition may already belong to the domain workflow itself. Independent
+  // providers compete through ordinary relevance ranking; a source_provider
+  // role alone must not force a second source into every analysis. Declared
+  // provider dependencies are expanded below regardless of their lexical rank.
+  const requiredSurfaceCandidates = [domainAnalysisCandidate, outputArtifactCandidate]
     .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined)
     .filter((entry, index, entries) => entries.findIndex((other) => other.skill.id === entry.skill.id) === index);
   if (requiredSurfaceCandidates.length > 0) {

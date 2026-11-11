@@ -19,7 +19,8 @@
   },
   "workflow": {
     "roles": [
-      "primary_builder"
+      "primary_builder",
+      "source_provider"
     ],
     "artifactKinds": [
       "none"

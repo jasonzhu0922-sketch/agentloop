@@ -86,11 +86,38 @@ export function resolveCapabilityGaps(input: {
 export function resolveSourceGroundingGap(input: {
   readonly catalog: CapabilityRecoveryCatalog;
   readonly evidenceDemand: "lookup_lite" | "source_grounded" | "strict_user_source";
+  readonly proposal: PlanProposal;
+  readonly currentSkills: readonly PrivateSkill[];
+  readonly currentCapabilities: readonly PlanningCapability[];
 }): CapabilityGap | undefined {
   const sourceProviderSkillIds = sourceProviderSkillsByCapability(input.catalog.availableSkills);
+  const currentById = new Map(input.currentCapabilities.map((capability) => [capability.id, capability]));
+  const acquisitionSteps = input.proposal.steps.some((step) => step.role === "fact_acquisition")
+    ? input.proposal.steps.filter((step) => step.role === "fact_acquisition")
+    : input.proposal.steps;
   const candidates = input.catalog.availableCapabilities
     .filter((capability) => capability.produces.includes("source_summary"))
-    .filter((capability) => input.evidenceDemand !== "lookup_lite" || capability.sourceKinds.includes("web"))
+    // Evidence strength does not choose a source channel. Repair the missing
+    // binding within the acquisition leaf's existing source ownership instead
+    // of recommending a different provider merely for a generic receipt kind.
+    .filter((capability) => acquisitionSteps.some((step) => {
+      const boundCapabilities = new Set(step.requiredCapabilities);
+      const ownerSkillIds = new Set<string>();
+      for (const skill of input.currentSkills) {
+        if (!step.skillIds.includes(skill.id)) continue;
+        const capabilityIds = sourceProviderCapabilityIds(skill);
+        if (capabilityIds.length > 0) ownerSkillIds.add(skill.id);
+        for (const id of capabilityIds) boundCapabilities.add(id);
+      }
+      if (ownerSkillIds.size > 0 && !(sourceProviderSkillIds.get(capability.id) ?? [])
+        .some((id) => ownerSkillIds.has(id))) return false;
+      const requiredToolSourceIds = step.sourceConstraint?.requiredToolSourceIds ?? [];
+      if (requiredToolSourceIds.length > 0 && !capability.sourceIds?.some((id) => requiredToolSourceIds.includes(id))) return false;
+      return compatibleWithSourceConstraint(
+        capability, step.sourceConstraint, boundCapabilities, currentById,
+        boundSourceProviderKinds(step, input.currentSkills, currentById),
+      );
+    }))
     .map((capability) => ({
       capabilityId: capability.id,
       ...(capability.label === undefined ? {} : { label: capability.label }),
@@ -101,8 +128,8 @@ export function resolveSourceGroundingGap(input: {
     .sort((left, right) => left.capabilityId.localeCompare(right.capabilityId));
   if (candidates.length === 0) return undefined;
   return {
-    stepId: "source_grounding",
-    missingEvidenceKinds: input.evidenceDemand === "lookup_lite" ? ["source_summary", "source_urls"] : ["source_summary"],
+    stepId: acquisitionSteps.length === 1 ? acquisitionSteps[0]!.id : "source_grounding",
+    missingEvidenceKinds: ["source_summary"],
     candidates,
   };
 }
