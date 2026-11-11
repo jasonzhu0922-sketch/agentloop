@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
+import { projectCommandResult } from "./command-result-projection.ts";
 import { ARTIFACT_RECEIPT_SCHEMA, CONTEXT_ARTIFACT_PROJECTION_SCHEMA } from "./artifact-receipt.ts";
 import { CONTENT_REFERENCE_READ_INSTRUCTION, CONTENT_REFERENCE_WINDOW_CHARACTERS } from "./content-reference.ts";
 import type {
@@ -1457,6 +1458,9 @@ function prunedToolMarker(record: PrunedToolResult): string {
 function structuredToolEvidenceProjection(content: string): string | undefined {
   const value = parseJsonRecord(content);
   if (value === undefined) return undefined;
+  const commandView = projectCommandResult(value);
+  if (commandView !== undefined) return JSON.stringify(commandView);
+  if (value.schema === "agentloop.contextCommandResult/v1") return undefined;
   const receipt = recordValue(value.evidenceReceipt);
   if (receipt === undefined) return undefined;
   const sourceRefs = Array.isArray(receipt.sourceRefs) ? receipt.sourceRefs : [];
@@ -1722,6 +1726,8 @@ function uploadedSourceProjection(value: Record<string, unknown>): unknown {
 function structuredToolResultProjection(toolName: string, content: string): string | undefined {
   const value = parseJsonRecord(content);
   if (value === undefined) return undefined;
+  const commandView = projectCommandResult(value);
+  if (commandView !== undefined) return JSON.stringify(commandView);
   const stdoutRecord = parseJsonRecord(value.stdout);
   if (stdoutRecord !== undefined && stringValue(stdoutRecord.schema) === "agentloop.artifactAcceptance/v1") {
     return artifactAcceptanceProjection(stdoutRecord);
@@ -2617,6 +2623,16 @@ function resultContextSelectors(
   value: Record<string, unknown> | undefined,
 ): readonly Readonly<Record<string, unknown>>[] | undefined {
   if (value === undefined) return undefined;
+  if (toolName === "computer_run_command") {
+    return ["stdout", "stderr"].flatMap((name) => {
+      const stream = Array.isArray(value.streams)
+        ? value.streams.map(recordValue).find((item) => item?.pointer === `/${name}`)
+        : undefined;
+      const characters = numberValue(stream?.characters)
+        ?? (typeof value[name] === "string" ? (value[name] as string).length : undefined);
+      return characters === undefined || characters === 0 ? [] : [{ pointer: `/${name}`, characters }];
+    });
+  }
   if (toolName === "computer_read_json" && Array.isArray(value.queries)) {
     return value.queries.slice(0, 24).flatMap((query) => {
       const record = recordValue(query);

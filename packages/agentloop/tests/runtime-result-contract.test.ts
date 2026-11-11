@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ComputerExecutor } from "../src/computer/computer-executor.ts";
 import { admitPlan } from "../src/planning/admission.ts";
+import { ModelStepAssessor } from "../src/planning/assessor.ts";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { ContextAssembler } from "../src/runtime/context-assembler.ts";
@@ -30,6 +35,76 @@ import { singleStepTestPlanner, testOwner } from "./runtime-test-helpers.ts";
 const runId = "tool-result-ref-run";
 const planId = "tool-result-ref-plan";
 const stepId = "inspect-values";
+
+test("command Result owns original streams before projection and exact reads survive removal of the audit file", async () => {
+  const database = new AppDatabase(":memory:");
+  const workspace = await fs.mkdtemp(join(tmpdir(), "unified-command-result-"));
+  try {
+    await seedRun(database);
+    const payload = { schema: "example.query/v1", content_complete: true,
+      content: { dataset: { rows: [{ month: "2026-01", amount: 2056259.64 }, { month: "2026-02", amount: 2533324.36 }] } },
+      evidenceReceipt: { schema: "agentloop.toolEvidenceReceipt/v1", evidenceKinds: { satisfied: ["record_counts"], caveated: [], failed: [] } },
+      padding: "\\\"\n明细".repeat(5000) };
+    const stdout = JSON.stringify(payload);
+    const executor = new ComputerExecutor(workspace, { executableAliases: { "trusted-node": process.execPath } });
+    await fs.writeFile(join(workspace, "query.mjs"), `process.stdout.write(${JSON.stringify(stdout)});process.stderr.write('diagnostic only');`);
+    let resultRef: RuntimeResultRef | undefined;
+    const command = await new RuntimeActionRepository(database).execute({
+      runId, planId, stepId, kind: "tool_call", replayPolicy: "safe", deadlineMs: 5000,
+      metadata: { toolCallId: "query", toolName: "computer_run_command" },
+      prepareResult: async (value, action) => {
+        const record = createRuntimeResult({ kind: "tool", producer: { actionId: action.id, runId, planId, stepId,
+          toolCallId: "query", toolName: "computer_run_command" }, value, publication: { status: "committed" } });
+        resultRef = record.ref;
+        return record;
+      },
+    }, () => executor.runCommand({ command: "trusted-node", args: ["query.mjs"], cwd: ".", timeoutMs: 2000 }));
+    assert.ok(resultRef);
+    assert.equal(command.stdout, stdout);
+    assert.ok(command.stdoutRef);
+    await fs.unlink(join(workspace, command.stdoutRef.path));
+
+    const assembler = new ContextAssembler({ runId, systemPrompt: "test", runtimeContext: { phase: "execution", content: "state" },
+      model: { limits: { contextWindowTokens: 64_000, maxOutputTokens: 4096 }, async complete() { throw new Error("no model needed"); } } });
+    const messages: ModelMessage[] = [
+      { role: "assistant", content: "", toolCalls: [{ id: "query", name: "computer_run_command", arguments: {} }] },
+      { role: "tool", name: "computer_run_command", toolCallId: "query", isError: false, content: JSON.stringify({ ...command, resultRef }) },
+    ];
+    const projected = await assembler.assemble(messages, []);
+    const view = JSON.parse(projected.messages.find(message => message.role === "tool")!.content.split("\n\n")[0]!);
+    assert.equal(view.schema, "agentloop.contextCommandResult/v1");
+    assert.deepEqual(view.resultRef, resultRef);
+    assert.ok(view.stdout.length < stdout.length);
+    assert.match(view.instruction, /read_result/);
+    assert.equal(view.contentLocation, undefined);
+    assert.equal(view.stdoutRef, undefined);
+    assert.match(projected.runtimeContext.content, /"pointer":"\/stdout"/);
+
+    const reader = createResultTool(new RuntimeResultRepository(database));
+    const grant = createCapabilityGrant({ actorUserId: testOwner().user.id, runId, planId, stepId, depth: 0,
+      allowedToolNames: ["read_result"], allowedSkillIds: [] });
+    let recovered = "";
+    let offset: number | null = 0;
+    while (offset !== null) {
+      const window = await reader.execute({ grant }, reader.parse({ resultId: resultRef.resultId,
+        pointer: "/stdout", characterOffset: offset, characterLimit: 12000 })) as Record<string, any>;
+      assert.deepEqual(window.sourceResultRef, resultRef);
+      assert.equal(window.pointer, "/stdout");
+      assert.equal(window.pointerApplied, true);
+      assert.ok(window.returnedCharacters <= 12000);
+      recovered += window.content;
+      offset = window.nextCharacterOffset;
+    }
+    assert.equal(recovered, stdout);
+    assert.deepEqual(JSON.parse(recovered).content.dataset.rows, payload.content.dataset.rows);
+    const stderr = await reader.execute({ grant }, reader.parse({ resultId: resultRef.resultId, pointer: "/stderr" })) as Record<string, any>;
+    assert.equal(stderr.content, "diagnostic only");
+    assert.equal((await new RuntimeActionRepository(database).list(runId)).length, 1, "reads do not mint new Results");
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
 
 test("Result bindings and context cards preserve one global Result identity", () => {
   const ref = { schema: "agentloop.resultRef/v1" as const, resultId: "rr_00000000-0000-4000-8000-000000000099" };
@@ -839,6 +914,98 @@ test("an assessed Step result becomes the next Step's formal readable input", as
     assert.ok(second.evidence?.publishedResult?.inputs.some((ref) => ref.resultId === dependencyResultId));
   } finally {
     await database.close();
+  }
+});
+
+test("original command rows flow through assessed fact Result and ResultBinding into the delivery", async () => {
+  const database = new AppDatabase(":memory:");
+  const workspace = await fs.mkdtemp(join(tmpdir(), "command-facts-delivery-"));
+  const rows = [{ month: "2026-01", amount: 2056259.64 }, { month: "2026-02", amount: 2533324.36 }];
+  const stdout = JSON.stringify({ schema: "example.query/v1", rows, padding: "original-row-evidence ".repeat(200),
+    evidenceReceipt: { schema: "agentloop.toolEvidenceReceipt/v1", evidenceKinds: { satisfied: ["source_summary", "record_counts"], caveated: [], failed: [] } } });
+  const commandScript = `const result=${JSON.stringify({ ...JSON.parse(stdout), padding: "" })};result.padding="original-row-evidence ".repeat(200);process.stdout.write(JSON.stringify(result));`;
+  try {
+    const owner = testOwner();
+    const scopes: string[] = [];
+    let commandResultId = "";
+    let dependencyResultId = "";
+    const runs = new RunService({ database, skills: new SkillService(database), workspaceRoot: workspace,
+      computerExecutableAliases: { "trusted-node": process.execPath }, maxSteps: 5,
+      plannerFactory: () => ({ async plan(task) { return {
+        schema: "agentloop.outcomePlan/v2", shape: "fact_then_produce", goal: task.canonicalState.intent.userInput,
+        selectedSkillIds: [], selectedSkillRoles: [], steps: [
+          { id: "collect-months", role: "fact_acquisition", objective: "Publish the requested monthly facts for downstream consumption.",
+            dependencies: [], skillIds: [], requiredCapabilities: ["conversation_delivery"], recommendedToolNames: ["computer_run_command"],
+            successCriteria: [{ id: "facts", description: "The reusable result contains both months and their amounts.", source: "planner" }] },
+          { id: "deliver-months", role: "deliver", objective: "Read the bound fact Result and list the monthly amounts.",
+            dependencies: ["collect-months"], skillIds: [], requiredCapabilities: ["conversation_delivery"],
+            successCriteria: [{ id: "answer", description: "List both monthly amounts in the reply.", source: "planner" }] },
+        ],
+      }; } }),
+      assessorFactory: model => new ModelStepAssessor(model),
+      modelFactory: () => ({ limits: { contextWindowTokens: 64000, maxOutputTokens: 4096 }, async complete(request) {
+        const context = request.runtimeContext?.content ?? "";
+        if (request.phase === "assessment") {
+          const view = JSON.parse(context.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+          scopes.push(view.assessmentPolicy.scope);
+          assert.equal(view.assessmentPolicy.scope, view.step.id === "collect-months" ? "fact_result" : "user_delivery");
+          for (const row of rows) assert.ok(view.evidence.candidateOutput.includes(String(row.amount)));
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "assess", name: "submit_assessment", arguments: {
+            criteria: view.step.successCriteria.map((criterion: any) => ({ criterionId: criterion.id, satisfied: true,
+              rationale: "The current owned result contains the requested amounts.", evidenceRefs: ["candidateOutput"],
+              contractCheck: { status: "valid", rationale: "These facts answer the original request within this Step's scope." } })),
+            skills: [], feedback: "The owned result is complete.", failedBoundary: null, concernResolutions: [],
+          } }] };
+        }
+        const read = request.messages.findLast(message => message.role === "tool" && message.name === "read_result");
+        if (context.includes('"id":"collect-months"')) {
+          if (read?.role === "tool") {
+            const result = JSON.parse(read.content);
+            assert.equal(result.sourceResultRef.resultId, commandResultId);
+            assert.deepEqual(JSON.parse(result.content).rows, rows);
+            return { content: `${JSON.stringify(rows)}\nSource Result: ${commandResultId}`, finishReason: "stop", toolCalls: [] };
+          }
+          const command = request.messages.findLast(message => message.role === "tool" && message.name === "computer_run_command");
+          if (command?.role === "tool") {
+            const result = JSON.parse(command.content.split("\n\n")[0]!);
+            commandResultId = result.resultRef.resultId;
+            assert.equal(result.schema, "agentloop.contextCommandResult/v1");
+            return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "read-command", name: "read_result",
+              arguments: { resultId: commandResultId, pointer: "/stdout" } }] };
+          }
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "query", name: "computer_run_command",
+            arguments: { command: "trusted-node", args: ["-e", commandScript], cwd: ".", timeoutMs: 2000 } }] };
+        }
+        if (read?.role === "tool") {
+          const result = JSON.parse(read.content);
+          assert.equal(result.sourceResultRef.resultId, dependencyResultId);
+          return { content: `Monthly amounts: ${result.content}`, finishReason: "stop", toolCalls: [] };
+        }
+        const match = /"resultId":"(rr_[0-9a-f-]{36})"/.exec(context);
+        assert.ok(match);
+        dependencyResultId = match[1]!;
+        return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "consume-facts", name: "read_result",
+          arguments: { resultId: dependencyResultId } }] };
+      } }),
+    });
+    const run = await runs.execute(owner.user.id, "Read the prepared monthly series and list each month's amount.");
+    assert.equal(run.status, "completed", run.output);
+    assert.deepEqual(scopes, ["fact_result", "user_delivery"]);
+    for (const row of rows) assert.ok(run.output?.includes(String(row.amount)));
+    const plan = await new PlanRepository(database).getByRun(run.id);
+    const facts = plan.steps.find(step => step.id === "collect-months")!.evidence!.publishedResult!;
+    const delivery = plan.steps.find(step => step.id === "deliver-months")!.evidence!.publishedResult!;
+    assert.equal(facts.ref.resultId, dependencyResultId);
+    assert.ok(facts.inputs.some(ref => ref.resultId === commandResultId));
+    assert.ok(delivery.inputs.some(ref => ref.resultId === facts.ref.resultId));
+    const events = await runs.events(owner.user.id, run.id);
+    const command = events.find(event => event.type === "tool.completed" && event.data.toolName === "computer_run_command")!;
+    assert.equal(JSON.parse(command.data.result as string).stdout, stdout);
+    assert.equal(events.filter(event => event.type === "tool.completed" && event.data.toolName === "computer_run_command").length, 1);
+    assert.equal(events.some(event => event.type === "tool.completed" && ["computer_read_file", "computer_read_json"].includes(event.data.toolName as string)), false);
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
   }
 });
 

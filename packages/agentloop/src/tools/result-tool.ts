@@ -24,6 +24,7 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
       "Read exact values from a committed Tool result, an assessed dependency Step result, an explicitly bound earlier Round result, or an explicitly bound completed Run result through one opaque Runtime result ref.",
       "Pass resultId from agentloop.resultRef/v1; never supply a filesystem path or digest.",
       "For JSON results, use a pointer rooted in the persisted result envelope and optional array offset/limit. For agentloop.jsonRead/v1, use the returned resultPointer such as /queries/0/value; the displayed sourcePointer belongs to the original file and must not be passed to read_result. Omit pointer for a bounded serialized character window. If a pointer is accidentally sent for a text result, Runtime returns the exact text window with pointerApplied=false and a repair diagnostic; do not retry another pointer.",
+      "For command output, pointer /stdout or /stderr selects the original stream in this same Result. String selections support characterOffset/characterLimit and nextCharacterOffset; no file path or digest is needed.",
     ].join(" "),
     inputSchema: {
       type: "object",
@@ -45,6 +46,8 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
       },
     },
     executionMode: "parallel",
+    // The selected window is bounded before JSON escaping adds transport bytes.
+    maxResultCharacters: MAX_RESULT_WINDOW_CHARACTERS * 6 + 32_000,
     replaySafe: true,
     availableDuringCompletionPreparation: true,
     publishesRuntimeResult: false,
@@ -110,6 +113,13 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
         throw error;
       }
       const selectedArray = Array.isArray(selected) ? selected : undefined;
+      if (typeof selected === "string") {
+        return {
+          ...readTextWindow(selected, record.ref, source, input.characterOffset, input.characterLimit),
+          pointer: input.pointer,
+          pointerApplied: true,
+        };
+      }
       const array = selectedArray !== undefined;
       const value = selectedArray === undefined
         ? selected

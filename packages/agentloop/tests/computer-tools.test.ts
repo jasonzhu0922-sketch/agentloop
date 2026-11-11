@@ -2534,7 +2534,7 @@ test("computer_run_command stores large stdout as reusable content-addressed evi
     })));
     const allowed = registry.materialize(grant(["computer_run_command"]));
     const definition = allowed.definitions.find((tool) => tool.name === "computer_run_command");
-    assert.match(definition?.description ?? "", /stdoutRef\/stderrRef/);
+    assert.match(definition?.description ?? "", /same resultRef using read_result/);
     const prepared = allowed.prepare({
       id: "large-output",
       name: "computer_run_command",
@@ -2553,9 +2553,7 @@ test("computer_run_command stores large stdout as reusable content-addressed evi
     assert.equal(result.exitCode, 0);
     assert.ok(result.stdoutRef !== undefined);
     assert.equal(result.stdoutRef.characters, "row-data\n".repeat(1200).length);
-    assert.ok(result.stdout.length < result.stdoutRef.characters);
-    assert.match(result.stdout, /stored as content-addressed evidence/);
-    assert.match(result.stdout, new RegExp(result.stdoutRef.sha256));
+    assert.equal(result.stdout, "row-data\n".repeat(1200));
     assert.equal(await fs.readFile(join(root, result.stdoutRef.path), "utf8"), "row-data\n".repeat(1200));
   } finally {
     await fs.rm(root, { recursive: true, force: true });
@@ -2686,11 +2684,8 @@ test("computer_run_command preserves validated HIL signals from a registered Ski
       stdoutRef?: { path: string };
     };
     assert.ok(result.stdoutRef !== undefined);
-    const projection = JSON.parse(result.stdout) as {
-      schema: string;
-      controlSignals?: Array<{ schema: string; kind: string; requirement: { title: string } }>;
-    };
-    assert.equal(projection.schema, "agentloop.commandOutputProjection/v1");
+    const projection = result as unknown as { controlSignals?: unknown };
+    assert.deepEqual(JSON.parse(result.stdout).humanLoopRequirement, requirement);
     assert.deepEqual(projection.controlSignals, [{
       schema: "agentloop.runtimeControlSignal/v1",
       kind: "human_loop",
@@ -2732,12 +2727,13 @@ test("computer_run_command does not promote workspace stdout to a control signal
     });
     const result = await prepared.tool.execute(grantContext(["computer_run_command"]), prepared.input) as { stdout: string };
     assert.deepEqual(JSON.parse(result.stdout), payload);
+    assert.equal((result as { controlSignals?: unknown }).controlSignals, undefined);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
 });
 
-test("computer_run_command preserves structured delivery candidates when stdout is referenced", async () => {
+test("computer_run_command preserves complete structured stdout before Runtime Result commit", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-structured-ref-"));
   try {
     const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root, {
@@ -2781,29 +2777,12 @@ test("computer_run_command preserves structured delivery candidates when stdout 
     assert.equal(result.exitCode, 0);
     assert.equal(result.truncated, false);
     assert.ok(result.stdoutRef !== undefined);
-    const projected = JSON.parse(result.stdout) as {
-      schema: string;
-      sourceSchema: string;
-      deliveryCandidate: { output: string };
-      assessmentProjection: { primary_api_id: string };
-      evidenceReceipt: { schema: string; receiptId: string };
-      contentLocation: { kind: string; path: string; sha256: string; instruction: string };
-      rawRows?: string;
-      stdoutReferenceNotice: string;
-    };
-    assert.equal(projected.schema, "agentloop.commandOutputProjection/v1");
-    assert.equal(projected.sourceSchema, "api_catalog_result/v1");
-    assert.match(projected.deliveryCandidate.output, /countNum/);
-    assert.equal(projected.assessmentProjection.primary_api_id, "M_ADS_FACT_MDYG_USER_TRIP_LABEL.D_A_BSTAMDYG_CL002");
-    assert.equal(projected.evidenceReceipt.schema, "agentloop.toolEvidenceReceipt/v1");
-    assert.equal(projected.evidenceReceipt.receiptId, "api-receipt-1");
-    assert.equal(projected.contentLocation.kind, "content_addressed");
-    assert.equal(projected.contentLocation.path, result.stdoutRef.path);
-    assert.equal(projected.contentLocation.sha256, result.stdoutRef.sha256);
-    assert.match(projected.contentLocation.instruction, /use evidenceReceipt first/);
-    assert.equal(projected.rawRows, undefined);
-    assert.match(projected.stdoutReferenceNotice, /stored as content-addressed evidence/);
-    assert.match(projected.stdoutReferenceNotice, new RegExp(result.stdoutRef.sha256));
+    const original = JSON.parse(result.stdout);
+    assert.equal(original.schema, "api_catalog_result/v1");
+    assert.match(original.deliveryCandidate.output, /countNum/);
+    assert.equal(original.assessmentProjection.primary_api_id, "M_ADS_FACT_MDYG_USER_TRIP_LABEL.D_A_BSTAMDYG_CL002");
+    assert.equal(original.evidenceReceipt.receiptId, "api-receipt-1");
+    assert.equal(original.rawRows.length, 120_000);
     const stored = JSON.parse(await fs.readFile(join(root, result.stdoutRef.path), "utf8")) as { rawRows?: string };
     assert.equal(stored.rawRows?.length, 120_000);
   } finally {
@@ -2811,7 +2790,7 @@ test("computer_run_command preserves structured delivery candidates when stdout 
   }
 });
 
-test("computer_run_command preserves oversized structured delivery candidates when stdout is referenced", async () => {
+test("computer_run_command preserves oversized delivery candidates and their original rows", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-large-candidate-ref-"));
   try {
     const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root, {
@@ -2856,24 +2835,13 @@ test("computer_run_command preserves oversized structured delivery candidates wh
 
     assert.equal(result.exitCode, 0);
     assert.ok(result.stdoutRef !== undefined);
-    const projected = JSON.parse(result.stdout) as {
-      schema: string;
-      sourceSchema: string;
-      deliveryCandidate?: { output: string; format?: string };
-      assessmentProjection?: { primary_api_id: string };
-      evidenceReceipt?: { receiptId: string };
-      contentLocation?: { path: string; sha256: string };
-      rawRows?: string;
-    };
-    assert.equal(projected.schema, "agentloop.commandOutputProjection/v1");
-    assert.equal(projected.sourceSchema, "api_catalog_result/v1");
-    assert.equal(projected.deliveryCandidate?.output, delivery);
-    assert.equal(projected.deliveryCandidate?.format, "markdown");
-    assert.equal(projected.assessmentProjection?.primary_api_id, "M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001");
-    assert.equal(projected.evidenceReceipt?.receiptId, "api-receipt-large-candidate");
-    assert.equal(projected.contentLocation?.path, result.stdoutRef.path);
-    assert.equal(projected.contentLocation?.sha256, result.stdoutRef.sha256);
-    assert.equal(projected.rawRows, undefined);
+    const original = JSON.parse(result.stdout);
+    assert.equal(original.schema, "api_catalog_result/v1");
+    assert.equal(original.deliveryCandidate.output, delivery);
+    assert.equal(original.deliveryCandidate.format, "markdown");
+    assert.equal(original.assessmentProjection.primary_api_id, "M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001");
+    assert.equal(original.evidenceReceipt.receiptId, "api-receipt-large-candidate");
+    assert.equal(original.rawRows.length, 20_000);
     const stored = JSON.parse(await fs.readFile(join(root, result.stdoutRef.path), "utf8")) as { rawRows?: string };
     assert.equal(stored.rawRows?.length, 20_000);
   } finally {
@@ -2925,19 +2893,8 @@ test("computer_run_command promotes structured stdout evidence receipts to the t
     assert.equal(result.evidenceReceipt?.schema, "agentloop.toolEvidenceReceipt/v1");
     assert.equal(result.evidenceReceipt?.receiptId, "api-receipt-small");
     assert.ok(result.stdoutRef !== undefined);
-    const projected = JSON.parse(result.stdout) as {
-      schema: string;
-      sourceSchema: string;
-      evidenceReceipt: { receiptId: string };
-      contentLocation: { kind: string; path: string; sha256: string; instruction: string };
-    };
-    assert.equal(projected.schema, "agentloop.commandOutputProjection/v1");
-    assert.equal(projected.sourceSchema, "source_result/v1");
-    assert.equal(projected.evidenceReceipt.receiptId, "api-receipt-small");
-    assert.equal(projected.contentLocation.kind, "content_addressed");
-    assert.equal(projected.contentLocation.path, result.stdoutRef.path);
-    assert.equal(projected.contentLocation.sha256, result.stdoutRef.sha256);
-    assert.match(projected.contentLocation.instruction, /use evidenceReceipt first/);
+    assert.deepEqual(JSON.parse(result.stdout), payload);
+    assert.equal(await fs.readFile(join(root, result.stdoutRef.path), "utf8"), result.stdout);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

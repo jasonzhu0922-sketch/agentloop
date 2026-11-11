@@ -457,7 +457,7 @@ test("a repeatedly malformed request_human_loop call fails closed after its boun
   assert.equal(events.some((event) => event.type === "human_loop.required"), false);
 });
 
-test("a projected Skill command HIL signal pauses before the next model call", async () => {
+test("a server-promoted Skill command HIL signal pauses before the next model call", async () => {
   const grant = createCapabilityGrant({ actorUserId: "user-hil", runId: "run-hil-command", depth: 0, allowedToolNames: ["computer_run_command"], allowedSkillIds: [] });
   const requirement = {
     kind: "selection" as const,
@@ -473,11 +473,8 @@ test("a projected Skill command HIL signal pauses before the next model call", a
     parse: () => ({}),
     execute: async () => ({
       exitCode: 0,
-      stdout: JSON.stringify({
-        schema: "agentloop.commandOutputProjection/v1",
-        stream: "stdout",
-        controlSignals: [{ schema: "agentloop.runtimeControlSignal/v1", kind: "human_loop", requirement }],
-      }),
+      stdout: JSON.stringify({ humanLoopRequirement: requirement }),
+      controlSignals: [{ schema: "agentloop.runtimeControlSignal/v1", kind: "human_loop", requirement }],
     }),
   };
   const events: RuntimeEvent[] = [];

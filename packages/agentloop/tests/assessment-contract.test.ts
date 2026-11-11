@@ -87,6 +87,36 @@ function assertStrictObjects(schema: any): void {
   if (types.includes("array")) assertStrictObjects(schema.items);
 }
 
+for (const scope of ["fact_result", "user_delivery"] as const) {
+  for (const hasFacts of [true, false]) {
+    test(`${scope} assesses its owned result without substituting file existence; facts=${hasFacts}`, async () => {
+      const base = assessmentInput();
+      const question = "List the amounts for each month in the prepared series.";
+      const input: StepAssessmentInput = { ...base,
+        canonicalState: createCanonicalRunState({ runId: base.runId, userInput: question,
+          understanding: understandTask({ objective: question }), now: 1 }),
+        step: { ...base.step,
+        role: scope === "fact_result" ? "fact_acquisition" : "deliver",
+        objective: scope === "fact_result" ? "Publish reusable monthly facts for the delivery Step." : "Present monthly amounts to the user.",
+        successCriteria: [{ ...base.step.successCriteria[0]!, description: "Contain the requested monthly amounts." }],
+      }, evidence: { ...base.evidence, candidateOutput: hasFacts
+        ? "2026-01: 2056259.64; 2026-02: 2533324.36. Source: committed query result."
+        : "The query succeeded and the result is stored in facts.json." } };
+      const assessed = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
+        const context = JSON.parse(request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+        assert.equal(context.assessmentPolicy.scope, scope);
+        assert.equal(context.step.role, input.step.role);
+        assert.match(request.systemPrompt, /merely saying that a file exists or that a query succeeded is not a fact result/);
+        assert.match(request.systemPrompt, /Do not demand the final conversational table/);
+        const response = submission(input);
+        response.toolCalls[0]!.arguments.criteria[0]!.satisfied = hasFacts;
+        return response;
+      } }).assess(input);
+      assert.equal(assessed.approved, hasFacts);
+    });
+  }
+}
+
 test("assessment uses one strict explicit-state schema, including nullable failure and an exact current step ID", async () => {
   const input = assessmentInput();
   await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {

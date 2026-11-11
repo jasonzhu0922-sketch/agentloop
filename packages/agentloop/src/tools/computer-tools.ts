@@ -607,7 +607,7 @@ export function createComputerTools(
         "Command arguments must not reference filesystem paths outside the workspace root, the current command root, or another authorized command root.",
         "Do not use a structured data artifact such as .json, .csv, .tsv, .xlsx, .doc, .docx, .pptx, or .pdf as a Python, Node, shell, or other interpreter entry point.",
         "Do not pass multi-line or large inline programs through command arguments; write reusable scripts with computer_write_file, then run the script with a short command.",
-        "Large stdout/stderr is returned as a short preview plus stdoutRef/stderrRef path, sha256, and size; inspect that referenced file instead of rerunning the same command solely to recover prior output.",
+        "Original stdout/stderr belongs to the committed Runtime Result. The model-visible view may contain previews; read exact output through the same resultRef using read_result with pointer /stdout or /stderr and bounded character windows. Do not reopen a file or rerun the command solely to recover omitted output.",
         "The result includes bounded fileChanges for workspace files created, modified, or deleted by the command; use that structured receipt instead of inferring artifacts from stdout text.",
         "For a command that creates final user deliverables, outputBindings may declare the admitted targetId for each exact output path. Runtime validates this mapping after result commit; it does not create targets or trust stdout declarations.",
         "computationInputs identifies immutable data files consumed by the command; never include the interpreter entrypoint, executable source file, or package-owned Skill script itself.",

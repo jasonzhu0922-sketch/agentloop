@@ -4,6 +4,7 @@ import { isArtifactAcceptanceKind } from "../acceptance/artifact-acceptance.ts";
 import { createConcurrencyLimiter, mapWithConcurrencyLimit } from "../shared/concurrency.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import { ContextAssembler, type ContextPolicy } from "./context-assembler.ts";
+import { isCommandResult } from "./command-result-projection.ts";
 import { appendDeliveryCandidateCaveats, buildRuntimeDeliveryCandidate, normalizeDeliveryCandidate } from "./delivery-candidate.ts";
 import type {
   AgentLoopResult,
@@ -3266,8 +3267,12 @@ async function executePrepared(
       }, execute);
     const value = tracked.value;
     const operationOutcome = classifyToolOperationOutcome(value);
-    const canonicalContent = serializeToolResult(value, tool.maxResultCharacters ?? maxCharacters);
-    const content = serializeToolResult(value, tool.maxResultCharacters ?? maxCharacters, tracked.resultRef);
+    const canonicalContent = serializeToolResult(value, Number.POSITIVE_INFINITY);
+    // The transcript/evidence retain the same original command Result. Only
+    // ContextAssembler projects its streams for a model invocation.
+    const content = serializeToolResult(value,
+      isCommandResult(value) ? Number.POSITIVE_INFINITY : tool.maxResultCharacters ?? maxCharacters,
+      tracked.resultRef);
     const operationFailed = operationOutcome.status === "failed";
     const metrics = toolEvidenceMetrics(call.name, canonicalContent);
     await emit({
@@ -3526,14 +3531,11 @@ function humanLoopRequirementFromEvidence(evidence: readonly AgentLoopToolEviden
       : undefined;
     if (direct !== undefined) return { toolCallId: item.toolCallId, requirement: direct.requirement as unknown as Record<string, unknown> };
 
-    // Command stdout can carry a signal only after Computer has validated it
-    // and projected it from an immutable, registered Skill command root. In
+    // Computer promotes signals only from an immutable, registered Skill root. In
     // particular, never inspect computer_read_file.content: user files are
     // content, not Runtime control-plane input.
-    if (item.toolName !== "computer_run_command" || typeof parsed.stdout !== "string") continue;
-    const projection = parseJsonRecord(parsed.stdout);
-    if (projection?.schema !== "agentloop.commandOutputProjection/v1" || projection.stream !== "stdout") continue;
-    const commandSignal = firstHumanLoopControlSignal(projection.controlSignals);
+    if (item.toolName !== "computer_run_command") continue;
+    const commandSignal = firstHumanLoopControlSignal(parsed.controlSignals);
     if (commandSignal !== undefined) return { toolCallId: item.toolCallId, requirement: commandSignal.requirement as unknown as Record<string, unknown> };
   }
   return undefined;

@@ -19,9 +19,7 @@ import {
 import { mapWithConcurrencyLimit } from "../shared/concurrency.ts";
 import { CONTENT_REFERENCE_WINDOW_CHARACTERS, type ContentReference } from "../runtime/content-reference.ts";
 
-const COMMAND_OUTPUT_REFERENCE_THRESHOLD = 8_000;
 const COMMAND_OUTPUT_REFERENCE_PREVIEW = 2_000;
-const STRUCTURED_STDOUT_PROJECTION_THRESHOLD = 8_000;
 const EXECUTABLE_NAME_PATTERN = /^[A-Za-z0-9._+-]+$/;
 const ENVIRONMENT_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const SENSITIVE_ENVIRONMENT_NAME_PATTERN = /(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|COOKIE|AUTH|CREDENTIAL)/;
@@ -1479,6 +1477,7 @@ export class ComputerExecutor {
     stdout: string;
     stderr: string;
     stdoutRef?: CommandOutputReference;
+    controlSignals?: readonly HumanLoopControlSignal[];
     stderrRef?: CommandOutputReference;
     fileChanges: CommandFileChange[];
     outputBindings?: readonly { readonly targetId: string; readonly path: string }[];
@@ -1542,6 +1541,7 @@ export class ComputerExecutor {
     stdout: string;
     stderr: string;
     stdoutRef?: CommandOutputReference;
+    controlSignals?: readonly HumanLoopControlSignal[];
     stderrRef?: CommandOutputReference;
     fileChanges: CommandFileChange[];
     fileChangesTruncated: boolean;
@@ -1655,8 +1655,9 @@ export class ComputerExecutor {
             // later file reads remain ordinary content, never control-plane
             // input.
             const allowControlSignals = cwdResolution.readOnlyRoot?.id.startsWith("@skills/") === true;
-            const stdoutProjection = await this.projectCommandOutput("stdout", stdout, { allowControlSignals });
-            const stderrProjection = await this.projectCommandOutput("stderr", stderr);
+            const stdoutReference = await this.storeCommandOutput("stdout", stdout);
+            const stderrReference = await this.storeCommandOutput("stderr", stderr);
+            const controlSignals = commandControlSignals(stdout, allowControlSignals);
             const evidenceReceipt = extractStdoutEvidenceReceipt(stdout);
             const computationEvidence = await this.bindCommandComputationEvidence({
               inputs: computationInputs,
@@ -1666,7 +1667,7 @@ export class ComputerExecutor {
               signal,
               truncated: false,
               stdout,
-              stdoutRef: stdoutProjection.reference,
+              stdoutRef: stdoutReference,
             });
             const workflowEvidence = await this.bindSkillWorkflowEvidence({
               binding: input.workflowEvidenceBinding,
@@ -1677,15 +1678,16 @@ export class ComputerExecutor {
               signal,
               truncated: false,
               stdout,
-              stdoutRef: stdoutProjection.reference,
+              stdoutRef: stdoutReference,
             });
             resolvePromise({
               exitCode,
               signal,
-              stdout: stdoutProjection.content,
-              stderr: stderrProjection.content,
-              ...(stdoutProjection.reference === undefined ? {} : { stdoutRef: stdoutProjection.reference }),
-              ...(stderrProjection.reference === undefined ? {} : { stderrRef: stderrProjection.reference }),
+              stdout,
+              stderr,
+              ...(stdoutReference === undefined ? {} : { stdoutRef: stdoutReference }),
+              ...(stderrReference === undefined ? {} : { stderrRef: stderrReference }),
+              ...(controlSignals === undefined ? {} : { controlSignals }),
               fileChanges: fileChangeSummary.changes,
               ...(input.outputBindings === undefined ? {} : { outputBindings: input.outputBindings }),
               fileChangesTruncated: fileChangeSummary.truncated,
@@ -1884,17 +1886,12 @@ export class ComputerExecutor {
     };
   }
 
-  private async projectCommandOutput(
+  /** Store an audit copy without changing the canonical Tool Result's streams. */
+  private async storeCommandOutput(
     kind: "stdout" | "stderr",
     content: string,
-    options: { readonly allowControlSignals?: boolean } = {},
-  ): Promise<{
-    content: string;
-    reference?: CommandOutputReference;
-  }> {
-    if (content.length === 0) {
-      return { content };
-    }
+  ): Promise<CommandOutputReference | undefined> {
+    if (content.length === 0) return undefined;
     const sha256 = createHash("sha256").update(content).digest("hex");
     const directory = resolve(this.workspaceRoot, ".agentloop", "tool-results", sha256.slice(0, 2));
     this.assertContained(directory);
@@ -1908,23 +1905,7 @@ export class ComputerExecutor {
     });
     const path = relative(this.workspaceRoot, target);
     const bytes = Buffer.byteLength(content);
-    return {
-      content: content.length <= COMMAND_OUTPUT_REFERENCE_THRESHOLD && structuredCommandOutput(content, kind, options) === undefined
-        ? content : projectReferencedCommandOutput(kind, content, {
-        path,
-        sha256,
-        bytes,
-        characters: content.length,
-        previewCharacters: COMMAND_OUTPUT_REFERENCE_PREVIEW,
-      }, options),
-      reference: {
-        path,
-        sha256,
-        bytes,
-        characters: content.length,
-        previewCharacters: COMMAND_OUTPUT_REFERENCE_PREVIEW,
-      },
-    };
+    return { path, sha256, bytes, characters: content.length, previewCharacters: COMMAND_OUTPUT_REFERENCE_PREVIEW };
   }
 
   private async snapshotWorkspaceFiles(): Promise<{
@@ -2271,114 +2252,12 @@ export class ComputerExecutor {
   }
 }
 
-function projectReferencedCommandOutput(
-  kind: "stdout" | "stderr",
-  content: string,
-  reference: CommandOutputReference,
-  options: { readonly allowControlSignals?: boolean },
-): string {
-  const structured = structuredStdoutProjection(kind, content, reference, options);
-  if (structured !== undefined) return structured;
-  return [
-    content.slice(0, COMMAND_OUTPUT_REFERENCE_PREVIEW),
-    "",
-    commandOutputReferenceNotice(kind, reference),
-  ].join("\n");
-}
-
-function structuredStdoutProjection(
-  kind: "stdout" | "stderr",
-  content: string,
-  reference: CommandOutputReference,
-  options: { readonly allowControlSignals?: boolean },
-): string | undefined {
-  const structured = structuredCommandOutput(content, kind, options);
-  if (structured === undefined) return undefined;
-  const { parsed, deliveryCandidate, evidenceReceipt, controlSignals, decisionClaim } = structured;
-  const contentLocation = {
-    kind: "content_addressed",
-    stream: kind,
-    path: reference.path,
-    sha256: reference.sha256,
-    bytes: reference.bytes,
-    characters: reference.characters,
-    previewCharacters: reference.previewCharacters,
-    instruction: "Read this path only when exact raw command output is needed; use evidenceReceipt first for assessment facts.",
-  };
-  const projection = {
-    schema: "agentloop.commandOutputProjection/v1",
-    stream: kind,
-    ...(typeof parsed.schema === "string" ? { sourceSchema: parsed.schema } : {}),
-    ...(deliveryCandidate === undefined ? {} : { deliveryCandidate }),
-    ...(typeof parsed.delivery_markdown === "string" ? { delivery_markdown: parsed.delivery_markdown } : {}),
-    ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
-    ...(controlSignals === undefined ? {} : { controlSignals }),
-    ...(decisionClaim === undefined ? {} : { decisionClaim }),
-    ...(parsed.assessmentProjection === undefined ? {} : { assessmentProjection: parsed.assessmentProjection }),
-    ...(parsed.assessment_summary === undefined ? {} : { assessment_summary: parsed.assessment_summary }),
-    contentLocation,
-    stdoutRef: reference,
-    stdoutReferenceNotice: commandOutputReferenceNotice(kind, reference),
-  };
-  const serialized = JSON.stringify(projection, null, 2);
-  if (serialized.length <= STRUCTURED_STDOUT_PROJECTION_THRESHOLD) return serialized;
-  // The delivery candidate is the Skill-authored semantic result, not raw rows.
-  // Preserve it even when unrelated structured payload fields force the command
-  // stdout through the content-addressed projection path.
-  return JSON.stringify({
-    schema: "agentloop.commandOutputProjection/v1",
-    stream: kind,
-    ...(typeof parsed.schema === "string" ? { sourceSchema: parsed.schema } : {}),
-    ...(deliveryCandidate === undefined ? {} : { deliveryCandidate }),
-    ...(parsed.assessmentProjection === undefined ? {} : { assessmentProjection: parsed.assessmentProjection }),
-    ...(parsed.assessment_summary === undefined ? {} : { assessment_summary: parsed.assessment_summary }),
-    ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
-    ...(controlSignals === undefined ? {} : { controlSignals }),
-    ...(decisionClaim === undefined ? {} : { decisionClaim }),
-    contentLocation,
-    stdoutRef: reference,
-    stdoutReferenceNotice: commandOutputReferenceNotice(kind, reference),
-  }, null, 2);
-}
-
-function structuredCommandOutput(
-  content: string,
-  kind: "stdout" | "stderr",
-  options: { readonly allowControlSignals?: boolean } = {},
-): {
-  readonly parsed: Record<string, unknown>;
-  readonly deliveryCandidate?: Record<string, unknown>;
-  readonly evidenceReceipt?: Record<string, unknown>;
-  readonly controlSignals?: readonly HumanLoopControlSignal[];
-  readonly decisionClaim?: Record<string, unknown>;
-} | undefined {
-  if (kind !== "stdout") return undefined;
+/** Promote control only after the command root has supplied Skill provenance. */
+function commandControlSignals(content: string, allowControlSignals: boolean): readonly HumanLoopControlSignal[] | undefined {
+  if (!allowControlSignals) return undefined;
   const parsed = parseJsonRecord(content);
-  if (parsed === undefined) return undefined;
-  const deliveryCandidate = isPlainRecord(parsed.deliveryCandidate)
-    ? parsed.deliveryCandidate
-    : undefined;
-  const hasDeliveryOutput = typeof deliveryCandidate?.output === "string"
-    && deliveryCandidate.output.trim().length > 0;
-  const hasDeliveryMarkdown = typeof parsed.delivery_markdown === "string"
-    && parsed.delivery_markdown.trim().length > 0;
-  const evidenceReceipt = extractEvidenceReceipt(parsed);
-  const humanLoopSignal = options.allowControlSignals === true
-    ? createHumanLoopControlSignal(parsed.humanLoopRequirement)
-    : undefined;
-  const decisionClaim = isPlainRecord(parsed.decisionClaim) ? parsed.decisionClaim : undefined;
-  if (!hasDeliveryOutput && !hasDeliveryMarkdown && evidenceReceipt === undefined && humanLoopSignal === undefined && decisionClaim === undefined) return undefined;
-  return {
-    parsed,
-    ...(deliveryCandidate === undefined ? {} : { deliveryCandidate }),
-    ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
-    ...(humanLoopSignal === undefined ? {} : { controlSignals: [humanLoopSignal] }),
-    ...(decisionClaim === undefined ? {} : { decisionClaim }),
-  };
-}
-
-function commandOutputReferenceNotice(kind: "stdout" | "stderr", reference: CommandOutputReference): string {
-  return `[${kind} stored as content-addressed evidence; path=${reference.path}; sha256=${reference.sha256}; originalCharacters=${reference.characters}; bytes=${reference.bytes}. Reuse this path/hash instead of rerunning the command solely to recover this output.]`;
+  const signal = createHumanLoopControlSignal(parsed?.humanLoopRequirement);
+  return signal === undefined ? undefined : [signal];
 }
 
 function parseJsonRecord(value: string): Record<string, unknown> | undefined {

@@ -1,7 +1,7 @@
 # AgentLoop 统一 Runtime Result 契约
 
-版本：v1.1
-日期：2026-09-22
+版本：v1.2
+日期：2026-11-11
 状态：已实现全局语义收敛阶段
 范围：Tool Action、Plan Step、Run Outcome、上下文压缩、恢复、跨 Step 与跨 Run 读取
 
@@ -128,6 +128,10 @@ Tool 调用成功后，Runtime 在同一个 Action 成功事务中：
 
 操作语义失败、Action 失败或 lease 丢失时不得提交 Tool Result。
 
+命令执行器返回完整、未经投影替换的 `stdout` / `stderr`，由 Action 原子提交到同一个 Runtime Result。内容寻址文件可以保留作审计副本，但不能成为正文的另一个读取权威。禁止在 Result 提交前用预览、结构摘要或文件路径替换原始输出。
+
+`ContextAssembler` 只为模型调用生成 `agentloop.contextCommandResult/v1` 视图，保留同一 ResultRef 和 `/stdout`、`/stderr` 选择器。原始事件、恢复转录和 Result payload 仍保留原文。模型通过 `read_result` 读取同一 Result 的原始流，不需要重新打开审计文件或重新执行命令。经过来源校验的 Skill HIL 控制信号由命令执行器在结果顶层发布，不能从原始 stdout 或模型视图中猜测控制权限。
+
 ### 3.2 Step Result
 
 Step 候选不能直接成为正式成果。唯一发布入口是 `StepResultCommitter`：
@@ -150,6 +154,8 @@ candidate output
 
 - 依赖 Step 已发布的 ResultRef；
 - 当前 Step 成功 Tool Action 的 ResultRef。
+
+没有交付目标所有权的 `fact_acquisition` Step 按中间事实成果验收：候选成果应包含下游可复用的具体事实、来源引用和明确缺口，不能只声称“已查询”或“结果在文件中”。它不承担最终对话表格或成稿格式的职责。交付 Step 仍必须通过 ResultBinding 消费已发布的事实 Result，并在最终答复中呈现用户要求的内容；中间事实通过验收不意味着最终交付通过验收。
 
 ### 3.3 Run Result
 
@@ -219,6 +225,8 @@ read_result({
 ```
 
 JSON Result 支持 JSON Pointer 与数组窗口；文本或完整序列化内容支持字符窗口。单次读取有固定上限，防止大结果重新淹没上下文。若调用方误将 pointer 传给文本 Result，Runtime 返回同一 Result 的字符窗口并标记 `pointerApplied=false`，同时给出修复提示；不会把文本伪装成 JSON，也不会为读取创建新的 Result 身份。
+
+当 JSON Pointer 选中字符串（例如命令 Result 的 `/stdout`）时，`characterOffset` / `characterLimit` 作用于该原始字符串，返回 `content`、`nextCharacterOffset` 和同一 `sourceResultRef`。字符串可以按窗口读完整，不因超过单次上限而改走文件路径协议。
 
 ## 6. 完整性与恢复
 
