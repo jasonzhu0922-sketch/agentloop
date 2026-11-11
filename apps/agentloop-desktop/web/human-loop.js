@@ -6,8 +6,10 @@ export function renderHumanLoop(request) {
   const schema = request.responseSchema;
   if (!schema) return '<p role="status">正在读取待回答的问题…</p>';
   let controls;
+  let hint = '';
   if (schema.type === 'select') {
-    controls = `<p class="human-loop-hint">请选择 ${schema.minSelections === schema.maxSelections ? schema.minSelections : `${schema.minSelections}–${schema.maxSelections}`} 项</p><div class="human-loop-options">${schema.options.map((option, index) => `<label><input type="${schema.maxSelections === 1 ? 'radio' : 'checkbox'}" name="choice" value="${index}"><span><strong>${escape(option.label)}</strong>${option.description ? `<small>${escape(option.description)}</small>` : ''}</span></label>`).join('')}</div>`;
+    hint = `<span class="human-loop-hint">请选择 ${schema.minSelections === schema.maxSelections ? schema.minSelections : `${schema.minSelections}–${schema.maxSelections}`} 项</span>`;
+    controls = `<div class="human-loop-options">${schema.options.map((option, index) => `<label><input type="${schema.maxSelections === 1 ? 'radio' : 'checkbox'}" name="choice" value="${index}"><span><strong>${escape(option.label)}</strong>${option.description ? `<small>${escape(option.description)}</small>` : ''}</span></label>`).join('')}</div>`;
   } else if (schema.type === 'form') {
     controls = `<div class="human-loop-fields">${schema.fields.map((field, index) => {
       const attrs = `name="field-${index}"${field.required ? ' required' : ''} maxlength="${Number.isSafeInteger(field.maxLength) && field.maxLength > 0 ? field.maxLength : 20000}"`;
@@ -17,7 +19,7 @@ export function renderHumanLoop(request) {
   } else if (schema.type === 'confirm') {
     controls = `<div class="human-loop-options"><label><input type="radio" name="decision" value="accept" required><span>${escape(schema.acceptLabel)}</span></label><label><input type="radio" name="decision" value="reject" required><span>${escape(schema.rejectLabel)}</span></label></div><label class="human-loop-reason">说明${schema.requireReasonOnReject ? '（拒绝时必填）' : '（选填）'}<textarea name="reason" rows="2" maxlength="20000"></textarea></label>`;
   } else return '<p role="alert">当前问题的回答格式不受支持，请更新客户端。</p>';
-  return `<form class="human-loop" data-human-loop="${escape(request.id)}" data-request-revision="${request.revision}" aria-label="等待你的输入"><header><strong>${escape(request.title)}</strong><span>等待你的输入</span></header><p class="human-loop-prompt">${escape(request.prompt)}</p><details><summary>为什么需要你的输入</summary><p>${escape(request.rationale)}</p></details><fieldset>${controls}<button type="submit" class="human-loop-submit">提交回答并继续</button></fieldset><p class="human-loop-feedback" role="status" aria-live="polite"></p></form>`;
+  return `<form class="human-loop" data-human-loop="${escape(request.id)}" data-request-revision="${request.revision}" aria-label="等待你的输入"><header><strong>${escape(request.title)}</strong><span>等待你的输入</span></header><p class="human-loop-prompt">${escape(request.prompt)}</p><div class="human-loop-meta"><details><summary>为什么需要你的输入</summary><p>${escape(request.rationale)}</p></details>${hint}</div><fieldset>${controls}<button type="submit" class="human-loop-submit">提交回答并继续</button></fieldset><p class="human-loop-feedback" role="status" aria-live="polite"></p></form>`;
 }
 
 export function readHumanLoopResponse(request, form) {

@@ -551,25 +551,29 @@
 
 .msg.assistant.selected .live-card { border-color: color-mix(in srgb, var(--brand) 55%, var(--border)); box-shadow: 0 0 0 2px var(--brand-soft); }
 
-.human-loop { margin: 18px 0; padding: 18px; border: 1px solid var(--brand); border-radius: 14px; background: var(--bg); color: var(--text); }
-.human-loop header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+.human-loop { display: grid; gap: 8px; min-width: 0; margin: 4px 0; padding: 12px 14px; border: 1px solid var(--brand); border-radius: 10px; background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.5; }
+.human-loop header { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; justify-content: space-between; overflow-wrap: anywhere; }
+.human-loop header > strong { font-size: 14px; }
 .human-loop header > span { color: var(--brand); font-size: 12px; }
-.human-loop p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
-.human-loop details { margin: 10px 0; font-size: 13px; color: var(--text-2); }
+.human-loop p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.human-loop-meta { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; min-width: 0; }
+.human-loop details { flex: 1 1 180px; min-width: 0; font-size: 12px; color: var(--text-2); }
+.human-loop details p { margin-top: 4px; }
 .human-loop summary { cursor: pointer; }
-.human-loop fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
-.human-loop-options, .human-loop-fields { display: grid; gap: 10px; margin: 12px 0; }
-.human-loop-options label { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; cursor: pointer; }
+.human-loop fieldset { display: grid; gap: 10px; border: 0; padding: 0; margin: 0; min-width: 0; }
+.human-loop-options, .human-loop-fields { display: grid; gap: 6px; min-width: 0; }
+.human-loop-options label { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; cursor: pointer; }
 .human-loop-options label:has(input:checked) { border-color: var(--brand); background: var(--brand-soft); }
-.human-loop-options input { margin-top: 4px; accent-color: var(--brand); }
-.human-loop-options span, .human-loop-fields label, .human-loop-reason { display: grid; gap: 5px; min-width: 0; overflow-wrap: anywhere; }
-.human-loop small, .human-loop-hint { color: var(--text-2); font-size: 13px; }
-.human-loop-fields input, .human-loop textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--bg-2); color: var(--text); font: inherit; }
+.human-loop-options input { flex: none; margin: 3px 0 0; accent-color: var(--brand); }
+.human-loop-options span, .human-loop-fields label, .human-loop-reason { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.human-loop small, .human-loop-hint { color: var(--text-2); font-size: 12px; }
+.human-loop-hint { flex: none; }
+.human-loop-fields input, .human-loop textarea { width: 100%; min-width: 0; box-sizing: border-box; border: 1px solid var(--border); border-radius: 7px; padding: 7px 9px; background: var(--bg-2); color: var(--text); font: inherit; }
 .human-loop textarea { resize: vertical; }
-.human-loop :is(input,textarea,button):focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
-.human-loop-submit { margin-top: 14px; padding: 10px 16px; border: 0; border-radius: 9px; background: var(--brand); color: white; cursor: pointer; font: inherit; }
+.human-loop :is(input,textarea,button,summary):focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.human-loop-submit { justify-self: start; padding: 7px 12px; border: 0; border-radius: 7px; background: var(--brand); color: white; cursor: pointer; font: inherit; }
 .human-loop fieldset:disabled { opacity: .65; }
-.human-loop-feedback { margin-bottom: 0; font-size: 13px; }
+.human-loop-feedback { font-size: 12px; }
 .human-loop-feedback:empty { display: none; }
 
 /* Drafts stay adjacent to the composer; accepted inputs live in the transcript. */
