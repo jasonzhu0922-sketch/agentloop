@@ -3652,6 +3652,7 @@ export class RunService {
           this.systemPrompt,
           stepTaskProfile,
           turnResolution?.mode === "clarify",
+          !activeLeafSteps(plan).some((step) => step.dependencies.includes(activeStep.id)),
         ),
         stepSemanticFrame,
         ...(requiresSourceBackedConversationSynthesis ? { requireStructuredCandidateSynthesis: true } : {}),
@@ -8238,10 +8239,11 @@ function executionArtifactFormatForStep(
   return undefined;
 }
 
-function buildStepSystemPrompt(
+export function buildStepSystemPrompt(
   systemPrompt: string,
   taskProfile: TaskProfile,
   clarificationOnly = false,
+  finalDelivery = false,
 ): string {
   return buildDynamicSystemPrompt({
     phase: "execution",
@@ -8256,7 +8258,12 @@ function buildStepSystemPrompt(
       "Before any next action, assess its expected marginal benefit to an unmet current-step success criterion. Take an authorized action only when it materially improves the available evidence or acceptance state; otherwise directly submit a concise completion candidate with explicit caveats rather than continuing for its own sake.",
       "For research and analysis, use relevant available source material to answer within its supported scope. Separate source statements from your inference and disclose material limitations. Search further for a consequential missing fact, contradiction, freshness need, or explicit source/verification constraint, not merely to independently verify every source statement or fill optional background fields.",
       "Your response without tool calls is only a completion candidate and may be rejected with repair feedback.",
-      "A completion candidate must be non-empty: summarize the completed work in 2-4 short sentences and cite the concrete evidence or tool results used.",
+      ...(finalDelivery && !clarificationOnly ? [
+        "This step produces the final user-facing summary. Its completion candidate must be non-empty, self-contained, and fulfill the user's requested content and scope. Consider richer Markdown expression (tables or charts) only in that final completion candidate, when useful for the user's needs; keep tool-call commentary and progress updates concise. Do not force a chart for every answer or reduce a substantive answer to a 2-4 sentence status summary. For a workspace artifact, a concise delivery summary is sufficient. Cite the concrete evidence or tool results used.",
+        'Conversation Markdown supports inline charts using a fenced chart block containing JSON: {"type":"line|bar|pie","title":"...","xLabel":"...","yLabel":"...","labels":["..."],"series":[{"name":"...","values":[1]}]}. Use one actual type value. Every series must align with labels; line values may be null for missing observations. Pie requires one series of nonnegative values with a positive total. Supported limits: 48 labels, 6 series, 120 characters per label or axis/series name, 160 per title. Use only observed or reproducibly computed data and retain units, scope, missing values, and source references in accompanying text. Put the chart block directly in the final completion candidate; describing a chart or linking a JSON file does not display it. Do not use Mermaid, HTML, or JavaScript for these statistical charts.',
+      ] : [
+        "A completion candidate must be non-empty: summarize the current step's completed work concisely and cite the concrete evidence or tool results used. Preserve reusable facts for downstream steps. Do not add presentation charts or elaborate formatting to intermediate step summaries; richer expression is considered only in the final user-facing summary.",
+      ]),
       "For every user-facing delivery target owned by this step, directly fulfill its stated purpose. Source records, field tables, excerpts, and citations are supporting evidence; synthesize them into the requested answer, explanation, conclusion, or other result instead of presenting the source material itself as completion.",
       "Use only currently exposed tools. Tool success alone does not prove the step is complete.",
       ...(clarificationOnly ? [

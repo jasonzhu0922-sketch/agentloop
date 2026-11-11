@@ -129,6 +129,14 @@ class AgentLoopMarkdownRenderer extends Renderer {
   override code({ text, lang }: Tokens.Code): string {
     const language = lang?.trim().split(/\s+/, 1)[0]?.replace(/[^a-z0-9_+-]/gi, "");
     const languageClass = language ? ` class="language-${escapeHtml(language)}"` : "";
+    if (language?.toLowerCase() === "chart") {
+      try {
+        return renderMarkdownChart(text);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "无效图表";
+        return `<div class="md-chart-error" role="status">图表未显示：${escapeHtml(reason)}</div><pre class="md-code"><code${languageClass}>${escapeHtml(text)}</code></pre>\n`;
+      }
+    }
     return `<pre class="md-code"><code${languageClass}>${escapeHtml(text)}</code></pre>\n`;
   }
 
@@ -168,6 +176,128 @@ markdown.setOptions({
 /** Renders model- or artifact-supplied GFM while escaping embedded HTML. */
 export function renderMarkdown(raw: unknown): string {
   return markdown.parse(String(raw ?? ""), { async: false });
+}
+
+/** A bounded declarative chart surface: no model-supplied markup or executable options. */
+function renderMarkdownChart(source: string): string {
+  if (source.length > 64_000) throw new Error("图表数据超过大小限制");
+  const value = JSON.parse(source);
+  const fail = (message: string): never => { throw new Error(message); };
+  const label = (item: unknown, limit = 120): string => {
+    if (typeof item !== "string" || item.length > limit) return fail("标题、标签或系列名称无效");
+    return item;
+  };
+  if (!value || !["line", "bar", "pie"].includes(value.type)) fail("支持的图表类型为 line、bar、pie");
+  const type: "line" | "bar" | "pie" = value.type;
+  const title = label(value.title ?? "", 160);
+  const xLabel = label(value.xLabel ?? "");
+  const yLabel = label(value.yLabel ?? "");
+  if (!Array.isArray(value.labels) || value.labels.length < 1 || value.labels.length > 48) fail("需要 1–48 个标签，请明确聚合或使用表格");
+  const labels: string[] = value.labels.map((item: unknown) => label(item));
+  if (!Array.isArray(value.series) || value.series.length < 1 || value.series.length > 6) fail("需要 1–6 个系列");
+  const series: { name: string; values: (number | null)[] }[] = value.series.map((item: any) => {
+    if (!item || !Array.isArray(item.values) || item.values.length !== labels.length) fail("每个系列的数值必须与标签一一对应");
+    return {
+      name: label(item.name ?? ""),
+      values: item.values.map((number: unknown) => {
+        if (number === null && type === "line") return null;
+        if (typeof number !== "number" || !Number.isFinite(number) || Math.abs(number) > 1e100) return fail("数值必须有限；仅折线图允许用 null 表示缺失观测");
+        return number;
+      }),
+    };
+  });
+  const colors = ["#2563eb", "#e76f00", "#008577", "#a13cc5", "#be3466", "#64748b"];
+  const color = (index: number): string => colors[index] ?? `hsl(${(index * 137.508) % 360} 65% 42%)`;
+  const numberText = (number: number | null): string => number === null ? "缺失" : String(number);
+  const text = (x: number, y: number, content: string, extra = ""): string =>
+    `<text x="${x}" y="${y}" ${extra}>${escapeHtml(content)}</text>`;
+  const tip = (content: string): string => `<title>${escapeHtml(content)}</title>`;
+  const caption = title || { line: "折线图", bar: "柱状图", pie: "饼图" }[type];
+  let drawing = "";
+  let width = 720;
+  let height = 390;
+  let pieTotal = 0;
+  if (type === "pie") {
+    if (series.length !== 1) fail("饼图只接受一个系列");
+    const values = series[0]!.values as number[];
+    const total = values.reduce((sum, number) => sum + number, 0);
+    if (values.some((number) => number < 0) || total <= 0) fail("饼图需要非负数值且总和大于零");
+    pieTotal = total;
+    height = 350;
+    let angle = -Math.PI / 2;
+    values.forEach((number, index) => {
+      const fraction = number / total;
+      const next = angle + fraction * Math.PI * 2;
+      const detail = `${labels[index]}: ${numberText(number)} (${(fraction * 100).toFixed(1)}%)`;
+      if (fraction === 1) drawing += `<circle cx="360" cy="175" r="135" fill="${color(index)}">${tip(detail)}</circle>`;
+      else if (fraction > 0) {
+        const start = [360 + 135 * Math.cos(angle), 175 + 135 * Math.sin(angle)];
+        const end = [360 + 135 * Math.cos(next), 175 + 135 * Math.sin(next)];
+        drawing += `<path d="M360,175 L${start.join(",")} A135,135 0 ${fraction > .5 ? 1 : 0},1 ${end.join(",")} Z" fill="${color(index)}" stroke="var(--bg, white)">${tip(detail)}</path>`;
+      }
+      angle = next;
+    });
+  } else {
+    const observed = series.flatMap((item) => item.values.filter((number): number is number => number !== null));
+    if (!observed.length) fail("没有可绘制的观测值");
+    let min = Math.min(...observed, ...(type === "bar" ? [0] : []));
+    let max = Math.max(...observed, ...(type === "bar" ? [0] : []));
+    if (min === max) { const padding = Math.abs(min) * .1 || 1; min -= padding; max += padding; }
+    const longestLabel = Math.max(...labels.map((item) => [...item].reduce((sum, character) => sum + (character.charCodeAt(0) > 255 ? 12 : 7), 0)));
+    const labelDepth = longestLabel * .6;
+    height = Math.max(390, 320 + labelDepth);
+    const left = Math.max(95, longestLabel * .83 + 20);
+    width = Math.max(720, labels.length * 44 + left + 40);
+    const right = width - 40, top = 35, bottom = 260;
+    const y = (number: number): number => bottom - (number - min) / (max - min) * (bottom - top);
+    const slot = (right - left) / labels.length;
+    const x = (index: number): number => left + slot * (index + .5);
+    drawing += `<g stroke="currentColor" opacity=".25">`;
+    for (let tick = 0; tick <= 4; tick++) {
+      const position = top + (bottom - top) * tick / 4;
+      drawing += `<line x1="${left}" y1="${position}" x2="${right}" y2="${position}"/>`;
+    }
+    drawing += `</g>`;
+    for (let tick = 0; tick <= 4; tick++) {
+      const number = max - (max - min) * tick / 4;
+      drawing += text(left - 10, top + (bottom - top) * tick / 4 + 4, Number(number.toPrecision(5)).toString(), 'text-anchor="end"');
+    }
+    labels.forEach((item, index) => {
+      // Display every label; long/category-dense axes can scroll instead of silently dropping labels.
+      drawing += text(x(index), bottom + 16, item, `text-anchor="end" transform="rotate(-35 ${x(index)} ${bottom + 16})"`);
+    });
+    series.forEach((item, seriesIndex) => {
+      if (type === "line") {
+        let segment: string[] = [];
+        const flush = (): void => {
+          if (segment.length) drawing += `<polyline points="${segment.join(" ")}" fill="none" stroke="${color(seriesIndex)}" stroke-width="2.5"/>`;
+          segment = [];
+        };
+        item.values.forEach((number, index) => {
+          if (number === null) { flush(); return; }
+          segment.push(`${x(index)},${y(number)}`);
+        });
+        flush();
+      }
+      item.values.forEach((number, index) => {
+        if (number === null) return;
+        const detail = `${item.name} · ${labels[index]}: ${numberText(number)}`;
+        if (type === "line") drawing += `<circle cx="${x(index)}" cy="${y(number)}" r="3.5" fill="${color(seriesIndex)}">${tip(detail)}</circle>`;
+        else {
+          const width = slot * .75 / series.length;
+          drawing += `<rect x="${x(index) - slot * .375 + seriesIndex * width}" y="${Math.min(y(0), y(number))}" width="${width}" height="${Math.abs(y(number) - y(0))}" fill="${color(seriesIndex)}">${tip(detail)}</rect>`;
+        }
+      });
+    });
+    drawing += text(left, 18, yLabel);
+    drawing += text(right, height - 12, xLabel, 'text-anchor="end"');
+  }
+  const legend = type === "pie"
+    ? labels.map((item, index) => `<span><i style="background:${color(index)}"></i>${escapeHtml(item)}: ${numberText(series[0]!.values[index]!)} (${(series[0]!.values[index]! / pieTotal * 100).toFixed(1)}%)</span>`).join("")
+    : series.map((item, index) => `<span><i style="background:${color(index)}"></i>${escapeHtml(item.name)}</span>`).join("");
+  const head = `<tr><th>${escapeHtml(xLabel || "类别")}</th>${series.map((item) => `<th>${escapeHtml(item.name || yLabel || "数值")}</th>`).join("")}</tr>`;
+  const rows = labels.map((item, index) => `<tr><th>${escapeHtml(item)}</th>${series.map((entry) => `<td>${numberText(entry.values[index]!)}</td>`).join("")}</tr>`).join("");
+  return `<figure class="md-chart"><figcaption>${escapeHtml(caption)}</figcaption><div class="md-chart-scroll"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" style="min-width:${width}px" role="img" aria-label="${escapeHtml(caption)}" class="md-chart-svg">${drawing}</svg></div><div class="md-chart-legend">${legend}</div><details><summary>查看图表数据</summary><div class="md-table-wrap"><table><thead>${head}</thead><tbody>${rows}</tbody></table></div></details></figure>\n`;
 }
 
 export function artifactMimeBase(mimeType: string): string {
