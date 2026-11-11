@@ -417,6 +417,18 @@ export function admitPlan(input: {
       reject(`Selected Skill ${skillId} is not bound to any Plan step`);
     }
   }
+  // A user-named Skill is an execution requirement, not merely an available
+  // catalog entry. Enforce it on the initial whole-goal Plan; prerequisite
+  // Rounds and recovery patches have their own scoped execution contracts.
+  if (!recoveryPlan && roundScope === undefined) {
+    const required = (input.canonicalState.intent.turnResolution?.requiredCapabilityReferences ?? [])
+      .filter((item) => item.kind === "skill");
+    for (const reference of required) {
+      const skill = availableSkills.get(reference.reference);
+      if (skill === undefined) reject(`User-required Skill ${reference.reference} is unavailable for this Plan`);
+      if (!boundSkillIds.has(skill.id)) reject(`Plan does not bind user-required Skill ${skill.id} to a concrete step`);
+    }
+  }
   if (admittedSteps.every((step) => step.kind !== "leaf")) {
     reject("Plan must contain at least one executable leaf step");
   }

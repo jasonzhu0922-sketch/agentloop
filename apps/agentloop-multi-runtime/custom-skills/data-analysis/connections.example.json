@@ -1,0 +1,11 @@
+{
+  "catalog_database_url": "postgresql://<catalog-user>:<password>@<host>:5432/<catalog-database>",
+  "query_databases": {
+    "<scenario-id>": {
+      "query_url": "postgresql://<readonly-user>:<password>@<host>:5432/<business-database>",
+      "allowed_relations": [
+        "<schema>.<table>"
+      ]
+    }
+  }
+}

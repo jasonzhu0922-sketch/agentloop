@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { RequiredCapabilityReference } from "../src/planning/contracts.ts";
 import { parseRequiredCapabilityReferences, resolveCapabilityRequirements } from "../src/planning/capability-requirements.ts";
-import { requiredToolSourceIdsForConversationTurn } from "../src/planning/step-execution-binding.ts";
+import { planningCapabilitiesFromSkills, planningCapabilitiesFromTools, requiredToolSourceIdsForConversationTurn } from "../src/planning/step-execution-binding.ts";
 import { RunService } from "../src/runtime/run-service.ts";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
@@ -16,6 +16,9 @@ import { ToolRegistry } from "../src/tools/tool-registry.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { loadMcpToolsFromConfigWithFactory } from "../src/mcp/mcp-loader.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
+import { admitPlan } from "../src/planning/admission.ts";
+import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
+import { understandTask } from "../src/runtime/task-intent.ts";
 
 test("required resources remain independent of catalog availability and cannot be invented by the resolver", () => {
   const requirements: RequiredCapabilityReference[] = [
@@ -42,6 +45,120 @@ test("only the authorized catalog resolves required Skill names, source aliases 
     { name: "first", description: "", source: { id: "one", aliases: ["shared"], capabilities: [] } },
     { name: "second", description: "", source: { id: "two", aliases: ["shared"], capabilities: [] } },
   ]).missing.length, 1);
+});
+
+test("an explicitly required Skill without optional role metadata reaches planning", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "agentloop-explicit-skill-"));
+  const database = new AppDatabase(":memory:");
+  const goal = "用 data-analysis 分析2026 年 6 月份各区域的销售额分布";
+  try {
+    const skills = new SkillService(database);
+    const requested = await skills.create("owner", { name: "data-analysis", description: "分析业务数据", instructions: "分析已授权数据源。" });
+    assert.equal(requested.agentLoop, undefined);
+    let reached = false;
+    const model: ModelAdapter = { limits: TEST_MODEL_LIMITS, async complete() {
+      return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "resolve", name: "resolve_conversation_turn", arguments: {
+        mode: "execute", relation: "new_goal", inputMode: "none", effectiveGoal: goal,
+        taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "analysis", requiresExecution: true,
+          deliverables: [{ targetId: "answer", purpose: goal, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
+        evidenceStrategy: "source_grounded", sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+        userConstraints: [], memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [{ kind: "skill", reference: "data-analysis" }],
+      } }] };
+    } };
+    const runs = new RunService({ database, skills, workspaceRoot: workspace, modelFactory: () => model,
+      plannerFactory: () => ({ plan: async (task) => {
+        reached = true;
+        assert.ok(task.availableSkills.some((skill) => skill.id === requested.id));
+        throw new AppError("PLANNING_ERROR", "explicit skill reached planning", 422);
+      } }),
+    });
+    await assert.rejects(runs.executeConversation("owner", goal), /explicit skill reached planning/);
+    assert.equal(reached, true);
+  } finally {
+    await database.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a named metadata-free Skill is bound and actually loaded by the execution leaf", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "agentloop-explicit-skill-load-"));
+  const database = new AppDatabase(":memory:");
+  const goal = "用 data-analysis 分析2026 年 6 月份各区域的销售额分布";
+  try {
+    const skills = new SkillService(database);
+    const skill = await skills.create("owner", { name: "data-analysis", description: "分析业务数据", instructions: "分析已授权数据源。" });
+    let executionCalls = 0;
+    const model: ModelAdapter = { limits: TEST_MODEL_LIMITS, async complete(invocation) {
+      if (invocation.runId.startsWith("conversation-turn:")) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "resolve", name: "resolve_conversation_turn", arguments: {
+        mode: "execute", relation: "new_goal", inputMode: "none", effectiveGoal: goal,
+        taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "analysis", requiresExecution: true,
+          deliverables: [{ targetId: "answer", purpose: goal, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
+        evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+        userConstraints: [], memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [{ kind: "skill", reference: "data-analysis" }],
+      } }] };
+      executionCalls++;
+      if (executionCalls === 1) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "load", name: "load_skill", arguments: { name: "data-analysis" } }] };
+      assert.ok(invocation.messages.some((message) => message.role === "tool" && message.name === "load_skill"));
+      return { content: "已加载指定的分析技能。", finishReason: "stop", toolCalls: [] };
+    } };
+    const runs = new RunService({ database, skills, workspaceRoot: workspace, modelFactory: () => model,
+      plannerFactory: () => singleStepTestPlanner(), assessorFactory: () => approvingTestAssessor() });
+    const run = await runs.executeConversation("owner", goal);
+    const plan = (await runs.plan("owner", run.id)).plan;
+    assert.ok(plan.selectedSkillIds.includes(skill.id));
+    assert.ok(plan.steps.some((step) => step.skillIds.includes(skill.id)));
+    const events = await runs.events("owner", run.id);
+    assert.ok(events.some((event) => event.type === "tool.completed" && event.data.toolName === "load_skill"));
+  } finally {
+    await database.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("whole-goal admission rejects a plan that substitutes another Skill for a user-required Skill", () => {
+  const runId = "run-explicit-skill";
+  const skill = { id: "discovered:data-analysis", name: "data-analysis", description: "分析业务数据" } as any;
+  const other = { id: "discovered:hr-report-analysis", name: "hr-report-analysis", description: "分析人事数据" } as any;
+  const goal = "用 data-analysis 分析销售额";
+  const taskIntent = {
+    schema: "agentloop.conversationTaskIntent/v1", operation: "analysis", requiresExecution: true,
+    deliverables: [{ targetId: "answer", purpose: "分析销售额", expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }],
+  } as const;
+  const understanding = understandTask({ objective: goal, resolvedTaskIntent: taskIntent });
+  const canonicalState = createCanonicalRunState({ runId, userInput: goal, understanding, now: 1,
+    turnResolution: { taskIntent, requiredCapabilityReferences: [{ kind: "skill", reference: "data-analysis" }] } as any });
+  const proposal = { goal, selectedSkillIds: [other.id], steps: [{ id: "answer", objective: "分析销售额", dependencies: [], role: "deliver" as const,
+    skillIds: [other.id], targetIds: ["answer"], requiredCapabilities: ["conversation_delivery"],
+    successCriteria: [{ id: "answer", description: "完成分析", source: "planner" as const }] }] };
+  const base = { runId, canonicalState, availableSkills: [skill, other], availableToolNames: new Set(["load_skill"]) };
+  assert.throws(() => admitPlan({ ...base, proposal }), /Plan does not bind user-required Skill discovered:data-analysis/);
+  const plan = admitPlan({ ...base, proposal: { ...proposal, selectedSkillIds: [skill.id], steps: [{ ...proposal.steps[0]!, skillIds: [skill.id] }] } });
+  assert.deepEqual(plan.selectedSkillIds, [skill.id]);
+  assert.deepEqual(plan.steps[0]!.skillIds, [skill.id]);
+});
+
+test("an end-to-end primary analysis Skill can bind its own verified API source capability", () => {
+  const runId = "run-primary-analysis-source";
+  const goal = "用 data-analysis 分析销售额";
+  const skill = { id: "discovered:data-analysis", name: "data-analysis", description: "分析业务数据",
+    agentLoop: { roles: ["primary_builder", "source_provider"], artifactKinds: ["none"], sourceKinds: ["api"], qaKinds: [],
+      executionProfiles: ["local_script"], producesEvidenceKinds: ["source_summary", "explicit_caveats"] } } as any;
+  const taskIntent = { schema: "agentloop.conversationTaskIntent/v1", operation: "analysis", requiresExecution: true,
+    deliverables: [{ targetId: "answer", purpose: "分析销售额", expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] } as const;
+  const understanding = understandTask({ objective: goal, evidenceDemand: "source_grounded", resolvedTaskIntent: taskIntent });
+  const canonicalState = createCanonicalRunState({ runId, userInput: goal, understanding, now: 1,
+    turnResolution: { taskIntent, requiredCapabilityReferences: [{ kind: "skill", reference: "data-analysis" }] } as any });
+  const tools = [{ name: "load_skill", description: "Load Skill" }, { name: "computer_run_command", description: "Run Skill script" }];
+  const capability = `skill_source_provider.api.${skill.id}`;
+  const plan = admitPlan({ runId, canonicalState, availableSkills: [skill], availableTools: tools,
+    availableToolNames: new Set(tools.map((tool) => tool.name)),
+    availableCapabilities: [...planningCapabilitiesFromTools(tools), ...planningCapabilitiesFromSkills([skill])],
+    proposal: { goal, selectedSkillIds: [skill.id], selectedSkillRoles: [{ skillId: skill.id, role: "primary_builder", reason: "Owns the analysis" }],
+      steps: [{ id: "answer", objective: "查询并分析销售额", dependencies: [], role: "deliver", skillIds: [skill.id], targetIds: ["answer"],
+        requiredCapabilities: [capability, "conversation_delivery"], evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "mark_unverified_facts" },
+        successCriteria: [{ id: "answer", description: "完成有来源的分析", source: "planner" }] }] } });
+  assert.ok(plan.steps[0]!.executionBinding.evidenceProducers.some((item) => item.evidenceKind === "source_summary" && item.skillId === skill.id));
+  assert.ok(plan.steps[0]!.executionBinding.resolvedToolNames.includes("computer_run_command"));
 });
 
 test("source-native tool references require an unambiguous authorized identity and honor requested sources", () => {

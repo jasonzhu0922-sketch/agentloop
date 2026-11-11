@@ -1448,6 +1448,7 @@ function planningRuntimeContext(
             "do not submit plan patches",
             "do not create QA or repair leaves unless TaskProfile.planShape is recovery_patch",
             "candidateSkillRoles are suggestions only; do not copy them into selectedSkillRoles unless a concrete leaf binds and executes that Skill",
+            "A Skill explicitly required by the user's canonical turn must be selected and bound to a concrete leaf, even if it has no optional role metadata; do not substitute another Skill for it.",
             "initial selectedSkillRoles may use any declared role when the Skill is bound to and executed by a concrete leaf",
             "every initially selected Skill, regardless of role, must be bound to a concrete leaf that uses it",
           ],

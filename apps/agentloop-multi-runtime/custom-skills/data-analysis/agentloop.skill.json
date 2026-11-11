@@ -1,0 +1,45 @@
+{
+  "schema": "agentloop.skillDeclaration/v1",
+  "identity": {
+    "name": "data-analysis",
+    "description": "先由用户明确指定或通过结构化 HIL 选择数据场景，再由当前 Agent 完成意图理解、领域规划、SQL 生成、受控只读查询、结果核对和分析交付。适用于业务指标、趋势、排名、分布和比较，不用于数据写入或数据库管理。"
+  },
+  "activation": {
+    "semanticTags": [
+      "data-analysis",
+      "nl2sql",
+      "business-metrics",
+      "data-query"
+    ],
+    "intentExamples": [
+      "查询某组织某月的员工人数。",
+      "分析各区域销售趋势及排名。",
+      "比较已配置数据场景中的业务指标并说明口径。"
+    ]
+  },
+  "workflow": {
+    "roles": [
+      "primary_builder"
+    ],
+    "artifactKinds": [
+      "none"
+    ],
+    "sourceKinds": [
+      "database"
+    ],
+    "qaKinds": [],
+    "requiredSkills": []
+  },
+  "execution": {
+    "manifest": "agentloop.executors.json"
+  },
+  "compatibility": {
+    "executionProfiles": [
+      "local_script"
+    ],
+    "producesEvidenceKinds": [
+      "source_summary",
+      "record_counts"
+    ]
+  }
+}

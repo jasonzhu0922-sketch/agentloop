@@ -1,0 +1,6 @@
+interface:
+  display_name: "数据查询与分析"
+  short_description: "由当前 Agent 规划、生成 SQL、查询并分析真实数据"
+  default_prompt: "Use $data-analysis to resolve the question from current business metadata, generate SQL, execute it through the read-only data gateway, and analyze the evidence in this Run."
+policy:
+  allow_implicit_invocation: true

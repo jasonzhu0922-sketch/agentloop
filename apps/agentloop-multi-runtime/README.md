@@ -287,6 +287,8 @@ Host 会强制覆盖 `enabled=true`、`observeEnabled=true`、`mode=observe` 和
 }
 ```
 
+`data-analysis` 位于 `custom-skills/data-analysis/`，作为本应用的扩展 Skill 提供，不随 `@zhujun/agentloop-skills` 内置目录分发。数据源连接由该 Skill 根目录的 `connections.json` 配置（参考 `connections.example.json`，凭据文件不入库）；Python 路径由 `config/deployment.json` 配置。Local Agent 需通过 Runtime 配置页上传该 Skill 后选择使用。
+
 所有云端 Host 必须能读取同一组目录，否则 Router 的能力路由无法判断某个实例是否缺少某个 Skill；不存在目录、非法 Skill 包或跨目录重名都会在 Host 启动同步时明确失败。Local Agent 不读取云端或仓库的 `custom-skills/`，只加载用户通过 Runtime 配置页上传并保存的 Skill 包。
 
 ### Enterprise Info 直连配置

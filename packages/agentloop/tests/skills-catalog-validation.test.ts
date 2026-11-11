@@ -30,9 +30,7 @@ const EXPECTED_BUILTIN_SKILL_NAMES = [
 const EXPECTED_CUSTOM_SKILL_NAMES = [
   "api-query",
   "city-carbon-ai-assessment",
-  "dq-platform",
-  "dq-report",
-  "html-skill-effectiveness-main",
+  "pdf-image-text-extractor",
   "review-contract",
   "statistical-analysis",
 ] as const;
@@ -127,6 +125,24 @@ test("every checked-in Skill package is discoverable, exact, and progressively d
   }
 });
 
+test("data-analysis belongs to the multi-runtime custom catalog rather than bundled Skills", async () => {
+  const builtin = await discoverSkillDirectory(SKILL_DIRECTORY);
+  assert.equal(builtin.some((entry) => entry.inspection.name === "data-analysis"), false);
+  await assert.rejects(fs.stat(resolve(SKILL_DIRECTORY, "data-analysis.zip")), { code: "ENOENT" });
+
+  const applicationRoot = resolve(import.meta.dirname, "../../../apps/agentloop-multi-runtime");
+  const config = JSON.parse(await fs.readFile(resolve(applicationRoot, "config/skill-directories.json"), "utf8"));
+  assert.ok(config.customSkillDirectories.includes("./custom-skills"));
+  const customRoot = resolve(applicationRoot, "custom-skills/data-analysis");
+  const skill = await inspectSkillPackage(customRoot);
+  assert.equal(skill.name, "data-analysis");
+  assert.ok(skill.agentLoop);
+  assert.ok(skill.files.includes("scripts/data_client.py"));
+  assert.ok(skill.files.includes("references/input-contract.md"));
+  const entrypoints = await readSkillExecutionManifest(customRoot);
+  assert.ok(entrypoints.length > 0);
+});
+
 test("theme-factory persists both packaged-theme selection and custom-theme approval as HIL", async () => {
   const themeFactory = await inspectSkillPackage(resolve(SKILL_DIRECTORY, "theme-factory"));
 
@@ -172,8 +188,8 @@ test("loaded package Skills show the Runtime path contract before Skill instruct
     loaded.indexOf("Runtime execution cwd for this Skill:") < loaded.indexOf(source.instructions),
     "Runtime package path contract must precede loaded Skill instructions",
   );
-  assert.match(loaded, /cannot be used as computer_run_command\.cwd/);
-  assert.match(loaded, /execution_context\.workspace\.root/);
+  assert.match(loaded, /set cwd to "@skills\/pdf"/);
+  assert.match(loaded, /AGENTLOOP_WORKSPACE_ROOT/);
 });
 
 test("a package execution manifest exposes an action interface without putting command details in Skill prose", async () => {

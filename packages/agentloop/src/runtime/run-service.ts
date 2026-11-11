@@ -2341,6 +2341,7 @@ export class RunService {
           revision: canonicalState.revision,
         },
       });
+      let explicitlyRequiredSkillIds: readonly string[] = [];
       if (!responseOnly) {
         const reusesPriorSource = turnResolution?.inputMode === "prior_result"
           && turnResolution.targetResult !== undefined && turnResolution.evidenceDemand === "none";
@@ -2350,6 +2351,7 @@ export class RunService {
           privateSkills,
           allowedToolSummaries,
         );
+        explicitlyRequiredSkillIds = availability.skillIds;
         if (availability.missing.length > 0) {
           const output = unavailableCapabilityOutput(availability.missing, input);
           await emit({
@@ -2439,6 +2441,11 @@ export class RunService {
         memoryProjection?.target === "planner" ? memoryProjection : undefined,
       );
       const planningSkills = [...new Map([
+        // Explicit user requirements are authoritative even when a package
+        // lacks optional role metadata or does not score in lexical recall.
+        ...privateSkills
+          .filter((skill) => explicitlyRequiredSkillIds.includes(skill.id))
+          .map((skill) => [skill.id, skill] as const),
         ...planningSkillRoles.map((item) => [item.skill.id, item.skill] as const),
         ...privateSkills
           .filter((skill) => continuationSkillIds.includes(skill.id))
