@@ -1,4 +1,4 @@
-import type { AppDatabase, ModelAdapter, ModelFactory, ModelRetryReporter, RunService, McpServerRegistration, WebToolsOptions, SkillLoadDiagnostic } from "@zhujun/agentloop";
+import type { AppDatabase, ModelAdapter, ModelFactory, ModelRetryReporter, RunService, McpServerRegistration, WebToolsOptions, SkillLoadDiagnostic, SkillServiceOptions } from "@zhujun/agentloop";
 import type { MemoryStore } from "@zhujun/agentloop-memory";
 import type { ConnectorConnection } from "@zhujun/agentloop-connector-sdk";
 import type { ConnectorConnectionRuntime, ConnectorModuleRegistration } from "../connectors/index.ts";
@@ -44,6 +44,7 @@ export interface ResolvedLocalRuntimeConfiguration {
   readonly skillDiagnostics?: readonly SkillLoadDiagnostic[];
   readonly modelConfiguration?: ResolvedLocalModelConfiguration;
   readonly customSkillDirectories: readonly string[];
+  readonly skillPackageDeclarations?: SkillServiceOptions["skillPackageDeclarations"];
   readonly mcpServers: readonly McpServerRegistration[];
   readonly integrationEnvironment: Readonly<Record<string, string | undefined>>;
   /** Account-scoped web search configuration. The API key is resolved only

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout } from "node:timers/promises";
 import test from "node:test";
-import { removeSkillPackage } from "@zhujun/agentloop";
+import { removeSkillPackage, type SkillDeclaration } from "@zhujun/agentloop";
 import { createLocalRuntimeManager } from "@zhujun/agentloop-local-runtime";
 import { modelPort } from "./fixtures/models.ts";
 
@@ -20,6 +20,47 @@ async function fixture(t: test.TestContext) {
   };
   return { root, bundled, writeSkill };
 }
+
+test("saved uploaded Skill declarations reach the Runtime catalog after restart without rewriting package bytes", async t => {
+  const { root, bundled } = await fixture(t);
+  const options = { dataDirectory: root, defaultRuntimeId: "default", models: modelPort(), bundledSkillDirectories: [bundled] };
+  let manager = await createLocalRuntimeManager(options);
+  t.after(() => manager.close());
+  const original: SkillDeclaration = {
+    schema: "agentloop.skillDeclaration/v1",
+    identity: { name: "regional-analysis", description: "Analyze regional records" },
+    activation: { semanticTags: ["regional-analysis"], intentExamples: [] },
+    workflow: { roles: ["primary_builder"], artifactKinds: ["none"], sourceKinds: ["database"], qaKinds: [], requiredSkills: [] },
+    compatibility: { producesEvidenceKinds: ["source_summary", "record_counts"] },
+  };
+  const sidecar = JSON.stringify(original);
+  const [skill] = await manager.importSkills({ files: [
+    { path: "SKILL.md", content: Buffer.from("---\nname: regional-analysis\ndescription: Analyze regional records\n---\n\nAnalyze the requested regional records.\n") },
+    { path: "agentloop.skill.json", content: Buffer.from(sidecar) },
+  ] });
+  await manager.stopRuntime("default");
+  await manager.configureRuntime("default", { skillPackageIds: [skill!.packageId], mcpServerIds: [] });
+  const before = await manager.skillMetadata(skill!.packageId);
+  await manager.updateSkillMetadata(skill!.packageId, {
+    ...original, workflow: { ...original.workflow, roles: ["primary_builder", "source_provider"] },
+  });
+  const assertCatalog = () => {
+    const db = new DatabaseSync(join(root, "runtime.db"), { readOnly: true });
+    try {
+      const row = db.prepare("SELECT agent_loop_json, package_hash FROM discovered_skills WHERE name = ?").get("regional-analysis") as { agent_loop_json: string; package_hash: string };
+      assert.deepEqual(JSON.parse(row.agent_loop_json).roles, ["primary_builder", "source_provider"]);
+      assert.equal(row.package_hash, before.packageHash);
+    } finally { db.close(); }
+  };
+  await manager.startRuntime("default");
+  assertCatalog();
+  await manager.close();
+  manager = await createLocalRuntimeManager(options);
+  assertCatalog();
+  assert.equal((await manager.skillMetadata(skill!.packageId)).revision, 2);
+  const [directory] = await readdir(join(root, "skill-library"));
+  assert.equal(await readFile(join(root, "skill-library", directory!, "agentloop.skill.json"), "utf8"), sidecar);
+});
 
 test("a bad bundled Skill leaves the Runtime ready, diagnosed, and able to complete a Run", async t => {
   const { root, bundled, writeSkill } = await fixture(t);

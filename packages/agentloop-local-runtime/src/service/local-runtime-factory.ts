@@ -243,6 +243,7 @@ export class LocalRuntimeFactory {
         packageStoreRoot: this.input.skillPackageStoreRoot,
         skillDirectories: packaged?.length ? packaged : bundledSkillDirectories(),
         skillPackageRoots: configuration.customSkillDirectories,
+        skillPackageDeclarations: configuration.skillPackageDeclarations,
       });
       const skillSync = await skills.syncSkillDirectories();
       for (const diagnostic of [...(configuration.skillDiagnostics ?? []), ...skillSync.diagnostics]) {

@@ -10,7 +10,50 @@ import { RunService } from "../src/runtime/run-service.ts";
 import { copySkillPackage, inspectSkillPackage, removeSkillPackage } from "../src/skills/skill-package.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
+import { planningCapabilitiesFromSkills } from "../src/planning/step-execution-binding.ts";
+import type { SkillDeclaration } from "../src/skills/skill-declaration.ts";
 import { TEST_MODEL_LIMITS, testOwner } from "./runtime-test-helpers.ts";
+
+test("Host declarations drive planner capabilities only for the exact bound package", async () => {
+  const fixture = await createDirectoryFixture();
+  const database = new AppDatabase(":memory:");
+  try {
+    const inspection = await inspectSkillPackage(fixture.sourcePackage);
+    const declaration: SkillDeclaration = {
+      schema: "agentloop.skillDeclaration/v1",
+      identity: { name: inspection.name, description: inspection.description },
+      activation: { semanticTags: ["records"], intentExamples: [] },
+      workflow: { roles: ["primary_builder", "source_provider"], artifactKinds: ["none"], sourceKinds: ["database"], qaKinds: [], requiredSkills: [] },
+      compatibility: { producesEvidenceKinds: ["source_summary"] },
+    };
+    for (const mismatch of ["none", "hash", "identity"] as const) {
+      const skills = new SkillService(database, {
+        packageStoreRoot: fixture.packageStore,
+        skillPackageRoots: [fixture.sourcePackage],
+        skillPackageDeclarations: [{ packageRoot: fixture.sourcePackage,
+          packageHash: mismatch === "hash" ? "0".repeat(64) : fixture.packageHash,
+          declaration: mismatch === "identity" ? { ...declaration, identity: { ...declaration.identity, name: "other-skill" } } : declaration }],
+      });
+      await skills.syncSkillDirectories();
+      const available = await skills.resolveForConversation("owner");
+      if (mismatch !== "none") {
+        assert.deepEqual(available, []);
+        assert.equal(skills.loadDiagnostics()[0]?.code, "SKILL_PACKAGE_INVALID");
+        continue;
+      }
+      assert.deepEqual(available[0]?.agentLoop?.roles, ["primary_builder", "source_provider"]);
+      assert.deepEqual(planningCapabilitiesFromSkills(available).map(capability => capability.id),
+        ["skill_source_provider.database.discovered:directory-demo"]);
+      assert.equal(available[0]?.package?.packageHash, fixture.packageHash);
+      assert.equal((await inspectSkillPackage(available[0]!.package!.root)).packageHash, fixture.packageHash);
+      assert.deepEqual((await inspectSkillPackage(fixture.sourcePackage)).agentLoop?.roles, ["primary_builder"]);
+    }
+  } finally {
+    await database.close();
+    await removeSkillPackage(fixture.packageStore);
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
 
 test("Agent Loop discovers from an unlocked directory but executes an immutable Runtime-owned package copy", async () => {
   const fixture = await createDirectoryFixture();

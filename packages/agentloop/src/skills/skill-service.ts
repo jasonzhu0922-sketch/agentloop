@@ -22,6 +22,7 @@ import {
 } from "./skill-package.ts";
 import { discoveredSkillId } from "./skill-identity.ts";
 import type { SkillAgentLoopMetadata } from "./skill-package.ts";
+import { parseSkillDeclaration, projectSkillAgentLoopMetadata, type SkillDeclaration } from "./skill-declaration.ts";
 import { readSkillExecutionManifest } from "./skill-execution-manifest.ts";
 import { scanSkillDirectory, discoverSkillPackageRoot, skillLoadDiagnostic } from "./skill-directory.ts";
 import type { SkillDirectoryEntry, SkillLoadDiagnostic } from "./skill-directory.ts";
@@ -81,6 +82,13 @@ export interface SkillServiceOptions {
    * packages are discovered; sibling packages are not enumerated.
    */
   readonly skillPackageRoots?: readonly string[];
+  /** Active Host-owned declarations, bound to exact immutable package bytes.
+   * These replace the package's declaration in the Runtime catalog only. */
+  readonly skillPackageDeclarations?: readonly {
+    readonly packageRoot: string;
+    readonly packageHash: string;
+    readonly declaration: SkillDeclaration;
+  }[];
   /**
    * Host-controlled visibility filter applied to the merged candidate set
    * (global directory Skills plus user-private Skills). The filtered output is
@@ -127,6 +135,10 @@ export interface SkillDirectorySyncResult {
   readonly refreshedInstalledSkillCount: number;
 }
 
+interface ResolvedSkillDirectoryEntry extends SkillDirectoryEntry {
+  readonly agentLoop: SkillAgentLoopMetadata | undefined;
+}
+
 export class SkillService {
   private readonly store: SkillStore;
   private readonly packageStore?: string;
@@ -134,7 +146,8 @@ export class SkillService {
   private readonly configuredSkillDirectories: readonly string[];
   private readonly configuredSkillPackageRoots: readonly string[];
   private readonly selectVisibleSkills: SkillServiceOptions["selectVisibleSkills"];
-  private directoryEntries: readonly SkillDirectoryEntry[] = [];
+  private directoryEntries: readonly ResolvedSkillDirectoryEntry[] = [];
+  private readonly packageDeclarations: ReadonlyMap<string, NonNullable<SkillServiceOptions["skillPackageDeclarations"]>[number]>;
   private discoveryDiagnostics: readonly SkillLoadDiagnostic[] = [];
   private installedDiagnostics: readonly SkillLoadDiagnostic[] = [];
   private readonly rejectedInstalledSkillIds = new Set<string>();
@@ -148,6 +161,8 @@ export class SkillService {
       throw new TypeError("SkillService requires either a database connection or a skillStore");
     }
     this.selectVisibleSkills = options.selectVisibleSkills;
+    this.packageDeclarations = new Map((options.skillPackageDeclarations ?? [])
+      .map(binding => [discoveryPath(binding.packageRoot), binding]));
     if (options.packageStoreRoot !== undefined) {
       mkdirSync(resolve(options.packageStoreRoot), { recursive: true, mode: 0o700 });
       this.packageStore = realpathSync(resolve(options.packageStoreRoot));
@@ -217,7 +232,26 @@ export class SkillService {
       for (const entry of group) diagnostics.push(skillLoadDiagnostic(entry.sourceDirectory, "discovery",
         new AppError("SKILL_PACKAGE_INVALID", `Skill name "${name}" is discovered in multiple configured directories`, 422), name));
     }
-    const materialized = await this.materializeDirectoryExecutionRoots(unique, diagnostics);
+    const resolved: ResolvedSkillDirectoryEntry[] = [];
+    for (const entry of unique) {
+      try {
+        const binding = this.packageDeclarations.get(entry.sourceDirectory);
+        let agentLoop = entry.inspection.agentLoop;
+        if (binding !== undefined) {
+          const declaration = parseSkillDeclaration(binding.declaration);
+          if (binding.packageHash !== entry.inspection.packageHash
+            || declaration.identity.name !== entry.inspection.name
+            || declaration.identity.description !== entry.inspection.description) {
+            throw new AppError("SKILL_PACKAGE_INVALID", "Active Skill declaration does not match its immutable package", 422);
+          }
+          agentLoop = projectSkillAgentLoopMetadata(declaration);
+        }
+        resolved.push({ ...entry, agentLoop });
+      } catch (error) {
+        diagnostics.push(skillLoadDiagnostic(entry.sourceDirectory, "discovery", error, entry.inspection.name));
+      }
+    }
+    const materialized = await this.materializeDirectoryExecutionRoots(resolved, diagnostics);
     // Persist only usable entries. A previously valid package must disappear
     // from both planning and the persisted catalog when it becomes invalid.
     await this.syncDiscoveryPersistence(materialized);
@@ -237,14 +271,14 @@ export class SkillService {
    * developer-owned configured directory.
    */
   private async materializeDirectoryExecutionRoots(
-    entries: readonly SkillDirectoryEntry[],
+    entries: readonly ResolvedSkillDirectoryEntry[],
     diagnostics: SkillLoadDiagnostic[],
-  ): Promise<readonly SkillDirectoryEntry[]> {
+  ): Promise<readonly ResolvedSkillDirectoryEntry[]> {
     if (this.packageStore === undefined) return entries;
     const discoveredStore = resolve(this.packageStore, "discovered");
     assertPathInside(discoveredStore, this.packageStore, "Discovered Skill package store");
     await fs.mkdir(discoveredStore, { recursive: true, mode: 0o700 });
-    const materialized: SkillDirectoryEntry[] = [];
+    const materialized: ResolvedSkillDirectoryEntry[] = [];
     for (const entry of entries) {
       try {
         const destination = resolve(discoveredStore, entry.inspection.packageHash);
@@ -293,7 +327,7 @@ export class SkillService {
    * opts in via {@link SkillDiscoveryPersistence}. Stores without the
    * capability keep discovery purely in memory.
    */
-  private async syncDiscoveryPersistence(entries: readonly SkillDirectoryEntry[]): Promise<void> {
+  private async syncDiscoveryPersistence(entries: readonly ResolvedSkillDirectoryEntry[]): Promise<void> {
     const persistence = this.store as Partial<SkillDiscoveryPersistence>;
     if (typeof persistence.syncDiscoveredSkills !== "function") return;
     const syncedAt = Date.now();
@@ -304,7 +338,7 @@ export class SkillService {
       packageHash: entry.inspection.packageHash,
       fileCount: entry.inspection.fileCount,
       totalBytes: entry.inspection.totalBytes,
-      ...(entry.inspection.agentLoop === undefined ? {} : { agentLoop: entry.inspection.agentLoop }),
+      ...(entry.agentLoop === undefined ? {} : { agentLoop: entry.agentLoop }),
       syncedAt,
     })));
   }
@@ -636,7 +670,7 @@ export class SkillService {
       sourceKind: "package",
       version: 1,
       contentHash: entry.inspection.packageHash,
-      ...(entry.inspection.agentLoop === undefined ? {} : { agentLoop: entry.inspection.agentLoop }),
+      ...(entry.agentLoop === undefined ? {} : { agentLoop: entry.agentLoop }),
       updatedAt: 0,
       package: {
         root: entry.executionDirectory ?? entry.sourceDirectory,

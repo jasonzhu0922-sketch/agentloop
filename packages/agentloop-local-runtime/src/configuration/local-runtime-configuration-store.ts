@@ -1265,19 +1265,31 @@ export class LocalRuntimeConfigurationStore {
 
   async resolve(runtimeId: string): Promise<ResolvedLocalRuntimeConfiguration> {
     const packageRows = await this.database.prepare(`
-      SELECT p.package_id, p.skill_name, p.validation_status, p.validation_detail
+      SELECT p.package_id, p.skill_name, p.source_kind, p.validation_status, p.validation_detail
       FROM local_runtime_skill_bindings b
       JOIN local_skill_packages p ON p.package_id = b.package_id
       WHERE b.runtime_id = ? ORDER BY p.package_id
-    `).all(runtimeId) as Array<{ package_id: string; skill_name: string; validation_status: string; validation_detail: string | null }>;
+    `).all(runtimeId) as Array<{ package_id: string; skill_name: string; source_kind: LocalSkillPackageSourceKind; validation_status: string; validation_detail: string | null }>;
     const skillDiagnostics: SkillLoadDiagnostic[] = [];
     const customSkillDirectories: string[] = [];
+    const skillPackageDeclarations: Array<NonNullable<ResolvedLocalRuntimeConfiguration["skillPackageDeclarations"]>[number]> = [];
     for (const row of packageRows) {
       const root = this.packageRoots.get(row.package_id);
       if (row.validation_status !== "valid" || root === undefined) {
         skillDiagnostics.push({ sourceDirectory: root ?? row.package_id, skillName: row.skill_name,
           stage: "discovery", code: "SKILL_PACKAGE_INVALID", message: row.validation_detail ?? "skill_package_not_available" });
         continue;
+      }
+      if (row.source_kind === "uploaded") {
+        try {
+          const metadata = await this.skillMetadata(row.package_id);
+          skillPackageDeclarations.push({ packageRoot: root, packageHash: metadata.packageHash, declaration: metadata.declaration });
+        } catch (error) {
+          if (!(error instanceof LocalRuntimeConfigurationStoreError)) throw error;
+          skillDiagnostics.push({ sourceDirectory: root, skillName: row.skill_name,
+            stage: "discovery", code: "SKILL_PACKAGE_INVALID", message: error.message });
+          continue;
+        }
       }
       customSkillDirectories.push(root);
     }
@@ -1291,7 +1303,7 @@ export class LocalRuntimeConfigurationStore {
     const memory = await this.deviceMemory();
     await this.assertValidMemoryConfiguration(memory);
     const webSearch = await this.resolvedWebSearch();
-    return { customSkillDirectories, ...(skillDiagnostics.length === 0 ? {} : { skillDiagnostics }), mcpServers, integrationEnvironment: environment,
+    return { customSkillDirectories, skillPackageDeclarations, ...(skillDiagnostics.length === 0 ? {} : { skillDiagnostics }), mcpServers, integrationEnvironment: environment,
       ...(webSearch === undefined ? {} : { webSearch }), memory,
       ...(this.modelConfigurations === undefined ? {} : { modelConfiguration: await this.modelConfigurations.resolve() }) };
   }
