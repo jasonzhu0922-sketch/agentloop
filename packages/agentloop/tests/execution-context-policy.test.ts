@@ -113,6 +113,25 @@ test("artifact progress policy retains the admitted concrete format beside its s
   assert.equal(policy?.expectedArtifactFormat, "pdf");
 });
 
+test("an unexecuted acceptance rejection does not diagnose the produced artifact as defective", () => {
+  const step = planStep({ id: "render-image", kind: "leaf", position: 0, objective: "Render the requested image.",
+    dependencies: [], role: "produce", refinementState: "not_refinable", requiredFacts: [], skillIds: [],
+    requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
+    evidenceContract: { requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance"], caveatPolicy: "none" },
+    successCriteria: [], status: "pending" });
+  const policy = buildStepToolProgressPolicy({ step, requiresFileOutput: true,
+    taskProfile: buildTaskProfile({ phase: "execution", intent: "execute", artifactKind: "image" }) });
+  const rendered = artifactEvidence("render", "trend.png", "image", 127199);
+  const state = deriveRuntimeStepEvidenceState({ policy, evidence: [rendered, {
+    toolCallId: "unexecuted-check", toolName: "verify_artifact_acceptance", isError: true,
+    failurePhase: "prepare", invocationStatus: "rejected", operationStatus: "unknown",
+    result: "TOOL_POLICY_DENIED: verify_artifact_acceptance target mismatch: trend.png has no current admitted target/version binding",
+  }] });
+  assert.equal(state?.nextAction, "verify_existing_artifact");
+  assert.equal(state?.workProduct.deliverableArtifacts[0]?.bytes, 127199);
+  assert.equal(state?.missingToolEvidenceKinds.includes("artifact_acceptance"), true);
+});
+
 test("step-local artifact targets require coverage for every canonical target", () => {
   const step = planStep({
     id: "ods-report-qc",

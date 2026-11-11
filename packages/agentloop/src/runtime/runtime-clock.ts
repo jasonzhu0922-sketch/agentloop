@@ -40,7 +40,7 @@ export function withRuntimeClock(invocation: ModelInvocation, clock: RuntimeCloc
     '<runtime_time_context source="server">', JSON.stringify(clock),
     "This is the authoritative reference for relative time in this Run. Use its localDate and timeZone, not model knowledge, historical transcripts, or source timestamps, for today/now. Keep this reference across phases and midnight. A user-supplied historical or hypothetical reference is a task scope, not a change to the runtime clock. Never promote a model-inferred date into an explicit user constraint. Use received/created/modified timestamps according to the declared tool contract; keyword matches do not establish date coverage or exhaustive counts.",
     "</runtime_time_context>",
-    ...(temporalScope === undefined ? [] : ['<resolved_temporal_scope source="server" semantics="derived-not-user-quote">', JSON.stringify(temporalScope), "Use these resolved bounds for evidence acquisition and assessment. Do not replace them with dates in prior outputs. Tool receipts must establish the requested scope and completeness before asserting exhaustive counts or zero results.", "</resolved_temporal_scope>"]),
+    ...(temporalScope === undefined ? [] : ['<resolved_temporal_scope source="server" semantics="derived-not-user-quote">', JSON.stringify(temporalScope), "Use this one interval throughout planning, evidence acquisition, aggregation, artifact production and assessment. Derive query filters and display buckets from the same startInclusive/endExclusive in timeZone; do not independently expand to extra periods, drop a boundary bucket, or switch to another interpretation in a later stage. Retain partial-period and missing-period caveats. Tool receipts must establish the requested scope and completeness before asserting exhaustive counts or zero results.", "</resolved_temporal_scope>"]),
     ...(recurringTime === undefined ? [] : ['<recurring_time_condition source="user-quote">', JSON.stringify(recurringTime), "This is a recurring condition, not a continuous date range. Preserve the quoted condition alongside any separate date range. Resolve ambiguous clock times, time zone and cross-day attribution using the task's authorized context; do not present assumptions as user-provided facts.", "</recurring_time_condition>"]),
   ].join("\n") };
 }
@@ -65,6 +65,7 @@ export interface ResolvedTemporalScope {
   readonly basis: "runtime_clock" | "user_explicit";
   readonly timeZone: string;
   readonly anchorDateTimeIso?: string;
+  readonly alignment?: "calendar_month";
   readonly startInclusive: string;
   readonly endExclusive: string;
 }
@@ -124,11 +125,27 @@ export function resolveTemporalScope(value: unknown, clock: RuntimeClock, userIn
   let end: number;
   if (spec.basis === "runtime_clock") {
     if (timeZone !== clock.timeZone && !userInputs.some((input) => input.includes(timeZone))) throw new Error("A different temporal timeZone must be explicitly requested by the user");
+    if (spec.alignment !== "calendar_month" && (spec.startMonthOffset !== undefined || spec.endMonthOffset !== undefined)) throw new Error("Month offsets require calendar_month alignment");
     if (spec.alignment === "elapsed_seconds") {
       const offsets = [spec.startSecondOffset, spec.endSecondOffset];
       if (!offsets.every((offset) => Number.isSafeInteger(offset) && Math.abs(offset as number) <= 31_622_400_000)) throw new Error("Elapsed ranges require integer startSecondOffset/endSecondOffset");
       start = Date.parse(clock.anchorDateTimeIso) + Number(spec.startSecondOffset) * 1000;
       end = Date.parse(clock.anchorDateTimeIso) + Number(spec.endSecondOffset) * 1000;
+    } else if (spec.alignment === "calendar_month") {
+      if (spec.startDayOffset !== undefined || spec.endDayOffset !== undefined
+        || spec.startSecondOffset !== undefined || spec.endSecondOffset !== undefined) throw new Error("Calendar-month ranges use month offsets only");
+      if (spec.endAtReferenceInstant !== undefined && typeof spec.endAtReferenceInstant !== "boolean") throw new Error("endAtReferenceInstant must be boolean");
+      if (spec.endAtReferenceInstant === true && spec.endMonthOffset !== undefined) throw new Error("Use either endAtReferenceInstant or endMonthOffset, not both");
+      const offsets = [spec.startMonthOffset, ...(spec.endAtReferenceInstant === true ? [] : [spec.endMonthOffset])];
+      if (!offsets.every((offset) => Number.isSafeInteger(offset) && Math.abs(offset as number) <= 12_000)) throw new Error("Relative calendar-month ranges require integer startMonthOffset/endMonthOffset");
+      const reference = new Date(`${localDateAt(Date.parse(clock.anchorDateTimeIso), timeZone).slice(0, 7)}-01T00:00:00Z`);
+      const month = (offset: unknown) => {
+        const date = new Date(reference);
+        date.setUTCMonth(date.getUTCMonth() + Number(offset));
+        return date.toISOString().slice(0, 10);
+      };
+      start = startOfLocalDay(month(spec.startMonthOffset), timeZone);
+      end = spec.endAtReferenceInstant === true ? Date.parse(clock.anchorDateTimeIso) : startOfLocalDay(month(spec.endMonthOffset), timeZone);
     } else {
       if (spec.alignment !== undefined && spec.alignment !== "calendar_day") throw new Error("Unknown temporal alignment");
       if (spec.endAtReferenceInstant !== undefined && typeof spec.endAtReferenceInstant !== "boolean") throw new Error("endAtReferenceInstant must be boolean");
@@ -147,6 +164,7 @@ export function resolveTemporalScope(value: unknown, clock: RuntimeClock, userIn
   if (start >= end) throw new Error("temporalScope must have startInclusive before endExclusive");
   return { expression, basis: spec.basis, timeZone,
     ...(spec.basis === "runtime_clock" ? { anchorDateTimeIso: clock.anchorDateTimeIso } : {}),
+    ...(spec.basis === "runtime_clock" && spec.alignment === "calendar_month" ? { alignment: "calendar_month" as const } : {}),
     startInclusive: new Date(start).toISOString(), endExclusive: new Date(end).toISOString(),
   };
 }

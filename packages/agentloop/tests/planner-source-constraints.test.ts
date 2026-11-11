@@ -886,7 +886,7 @@ test("Recovery Planner retries a duplicate-criterion proposal with parser feedba
           arguments: calls === 1 ? {
             actionId: "recovery-action", expectedActionRevision: 1, decision: "revise_plan",
             rationale: "Repair the malformed proposal.", evidenceRefs: [],
-            planRevision: {
+            planRevision: { retainedStepIds: [],
               goal: fixture.task.canonicalState.intent.userInput,
               shape: "recovery_patch", selectedSkillIds: [],
               steps: [{ id: "repair", objective: "Repair the result.", dependencies: [], skillIds: [],
@@ -954,7 +954,7 @@ test("Recovery Planner retries a blocking execution method before submitting a r
       return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `recovery-${calls}`, name: "submit_recovery_decision",
         arguments: calls === 1 ? {
           actionId: "recovery-action", expectedActionRevision: 1, decision: "revise_plan", rationale: "Repair.", evidenceRefs: [],
-          planRevision: { goal: fixture.task.canonicalState.intent.userInput, shape: "recovery_patch", selectedSkillIds: [], steps: [{
+          planRevision: { retainedStepIds: [], goal: fixture.task.canonicalState.intent.userInput, shape: "recovery_patch", selectedSkillIds: [], steps: [{
             id: "repair", objective: "Repair.", dependencies: [], skillIds: [], requiredCapabilities: [], targetIds: [],
             successCriteria: [{ id: "recheck", description: "Recheck sources.", source: "planner", blocking: true,
               basis: { kind: "execution_method", targetIds: [], rationale: "A search method." } }],
@@ -1164,14 +1164,14 @@ test("Recovery resubmits explicit ownership and downstream fact provenance throu
         assert.equal(Object.hasOwn(stepSchema.properties.requiredFacts.items.properties.basis.properties, "requirement"), false);
         assert.equal(Object.hasOwn(stepSchema.properties.successCriteria.items.properties.basis.properties, "requirement"), false);
         assert.match(request.systemPrompt, /executionBinding.targetIds/);
-        assert.match(request.systemPrompt, /complete replacement proposal/);
+        assert.match(request.systemPrompt, /steps contains only new Step definitions/);
         const context = JSON.parse(request.runtimeContext!.content);
         assert.deepEqual(context.currentPlan.steps.map((step: any) => step.executionBinding.targetIds), [[], ["webpage-summary"]]);
         return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "correct-contract", name: "submit_recovery_decision", arguments: {
           actionId: input.action.id, expectedActionRevision: 1, decision: "revise_plan",
           rationale: "Retain source evidence and repair only the unsupported artifact criterion.", evidenceRefs: ["fetch-result"],
-          planRevision: { goal: plan.goal, shape: "fact_then_produce", selectedSkillIds: [], steps: plan.steps.map((step) => ({
-            id: step.id, objective: step.objective, role: step.role, dependencies: step.dependencies,
+          planRevision: { retainedStepIds: [], goal: plan.goal, shape: "fact_then_produce", selectedSkillIds: [], steps: plan.steps.map((step) => ({
+            id: `${step.id}.replacement`, objective: step.objective, role: step.role, dependencies: step.dependencies.map(id => `${id}.replacement`),
             skillIds: step.skillIds, requiredCapabilities: step.requiredCapabilities,
             ...(binding === "missing" ? {} : { targetIds: binding === "duplicate" ? ["webpage-summary"]
               : binding === "foreign" ? ["foreign-target"] : step.executionBinding.targetIds }),
@@ -1207,7 +1207,7 @@ test("Recovery resubmits explicit ownership and downstream fact provenance throu
     const revised = readmit();
     assert.deepEqual(revised.steps.map((step) => step.executionBinding.targetIds), [[], ["webpage-summary"]]);
     assert.deepEqual(revised.steps.map((step) => step.requiredFacts), plan.steps.map((step) => step.requiredFacts));
-    assert.deepEqual(revised.steps[1]!.dependencies, ["fetch-page"]);
+    assert.deepEqual(revised.steps[1]!.dependencies, ["fetch-page.replacement"]);
     assert.equal(revised.steps[1]!.successCriteria.filter((criterion) => criterion.id === "delivery_target:webpage-summary").length, 1);
   }
 });

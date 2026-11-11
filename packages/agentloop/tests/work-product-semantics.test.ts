@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { deriveWorkProductObservations, type WorkProductToolEvent } from "../src/runtime/work-product-observations.ts";
 import { deriveWorkProductSemantics, workProductDeclarationFromContent, type WorkProductDeclarationEvent } from "../src/runtime/work-product-semantics.ts";
+import { artifactFormatMatchesKind, artifactMatchesExpectedTarget } from "../src/runtime/tool-progress-policy.ts";
 
 const fixture = JSON.parse(readFileSync(new URL("./fixtures/work-product/b.json", import.meta.url), "utf8"));
 const facts = deriveWorkProductObservations(fixture);
@@ -17,6 +18,41 @@ function declaration(step: number, updates: unknown[]): WorkProductDeclarationEv
     modelStep: step, throughSeq: facts.throughSeq, content: `<work_product_progress>${JSON.stringify({ updates })}</work_product_progress>` })!;
 }
 const derive = (declarations: WorkProductDeclarationEvent[]) => deriveWorkProductSemantics({ facts, goalId, declarations });
+
+test("concrete source formats retain their encoding inside the code family", () => {
+  assert.equal(artifactFormatMatchesKind("py", "code"), true);
+  assert.equal(artifactFormatMatchesKind("ts", "code"), true);
+  assert.equal(artifactMatchesExpectedTarget({ path: "script.py" }, "code", "py"), true);
+  assert.equal(artifactMatchesExpectedTarget({ path: "script.ts" }, "code", "py"), false);
+  assert.equal(artifactMatchesExpectedTarget({ path: "script.ts" }, "code", "code"), true);
+});
+
+test("e5a39e3f: the actual PNG receipts bind an image target without inventing a chart file encoding", () => {
+  const path = "monthly_sales_line_chart.png";
+  const sha256 = "0e650b1a25839a338d8095142cfb224305d5deb8badc990b9936cf2f015ec490";
+  assert.equal(artifactFormatMatchesKind("chart", "image"), false);
+  assert.equal(artifactFormatMatchesKind("png", "image"), true);
+  assert.equal(artifactFormatMatchesKind("svg", "image"), true);
+  assert.equal(artifactFormatMatchesKind("pdf", "document"), true);
+  assert.equal(artifactFormatMatchesKind("pdf", "image"), false);
+  for (const explicit of [false, true]) {
+    const facts = deriveWorkProductObservations({ runId: fixture.runId, workspaceId: fixture.workspaceId, events: [{
+      runId: fixture.runId, workspaceId: fixture.workspaceId, seq: explicit ? 685 : 616, evidence: {
+        toolCallId: explicit ? "call_eba8c5a48bca4b55aa4e513c" : "call_ed310d0e621a412792fa9195",
+        toolName: "computer_run_command", operationStatus: "succeeded", isError: false,
+        result: JSON.stringify({ exitCode: 0, fileChangesTruncated: false,
+          fileChanges: [{ path, changeType: explicit ? "modified" : "created", bytes: 127199, sha256 }],
+          ...(explicit ? { outputBindings: [{ targetId: "monthly_sales_line_chart", path }] } : {}) }),
+      },
+    }] });
+    for (const format of [undefined, "png"]) {
+      const state = deriveWorkProductSemantics({ facts, goalId, declarations: [], deliveryTargets: [{
+        targetId: "monthly_sales_line_chart", purpose: "Monthly sales line chart", kind: "image", ...(format === undefined ? {} : { format }),
+      }] });
+      assert.deepEqual(state.deliveryTargets.map(binding => ({ path: binding.path, sha256: binding.sha256, bytes: binding.bytes })), [{ path, sha256, bytes: 127199 }]);
+    }
+  }
+});
 
 test("stage 2: old events remain readable; no declaration means unknown, not filename-based purpose", () => {
   const state = derive([]);

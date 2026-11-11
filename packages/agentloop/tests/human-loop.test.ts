@@ -271,7 +271,7 @@ test("accepted selection, form and confirmation survive resume, independent asse
           return { content: "", finishReason: "tool_calls" as const, toolCalls: [{ id: "recovery", name: "submit_recovery_decision", arguments: {
             actionId: context.recoveryAction.id, expectedActionRevision: context.recoveryAction.revision, decision: "revise_plan",
             rationale: "Write the greeting for the same user-selected branch.", evidenceRefs: [],
-            planRevision: { schema: "agentloop.outcomePlan/v2", shape: "recovery_patch", goal: context.currentPlan.goal,
+            planRevision: { retainedStepIds: [], schema: "agentloop.outcomePlan/v2", shape: "recovery_patch", goal: context.currentPlan.goal,
               selectedSkillIds: [], steps: [{ ...repair, targetIds: repair.targetIds ?? [],
                 successCriteria: repair.successCriteria.map(({ basis, ...criterion }) => ({ ...criterion,
                   ...(basis === undefined ? {} : { basis: { kind: basis.kind, targetIds: basis.targetIds, rationale: basis.rationale } }),

@@ -843,7 +843,7 @@ test("ContextAssembler projects generic written artifact receipts before raw ins
     { role: "assistant", content: "", toolCalls: [{ id: "write", name: "computer_write_file", arguments: { path: "dcmm4-training.html" } }] },
     { role: "tool", toolCallId: "write", name: "computer_write_file", content: toolResult, isError: false },
   ], []);
-  const projected = assembly.messages.find((message) => message.role === "assistant")?.content ?? "";
+  const projected = assembly.runtimeContext.content;
   const serializedRecord = projected.match(/<runtime_evidence_record[^>]*>\n([\s\S]+)\n<\/runtime_evidence_record>/)?.[1];
   assert.ok(serializedRecord);
   const projection = JSON.parse(serializedRecord) as {
@@ -915,7 +915,7 @@ test("ContextAssembler projects generic written artifact receipts before file sa
     { role: "assistant", content: "", toolCalls: [{ id: "write", name: "computer_write_file", arguments: { path: "deliverables/report.md" } }] },
     { role: "tool", toolCallId: "write", name: "computer_write_file", content: toolResult, isError: false },
   ], []);
-  const projected = assembly.messages.find((message) => message.role === "assistant")?.content ?? "";
+  const projected = assembly.runtimeContext.content;
   const serializedRecord = projected.match(/<runtime_evidence_record[^>]*>\n([\s\S]+)\n<\/runtime_evidence_record>/)?.[1];
   assert.ok(serializedRecord);
   const projection = JSON.parse(serializedRecord) as {
@@ -991,20 +991,45 @@ test("ContextAssembler preserves current-Run write ownership without projecting 
   ];
 
   const assembly = await assembler.assemble(canonical, []);
-  const projectedAssistant = assembly.messages.find(
-    (message): message is Extract<ModelMessage, { role: "assistant" }> => message.role === "assistant",
-  );
-  if (projectedAssistant === undefined) assert.fail("Projected assistant message is missing");
-  assert.equal(projectedAssistant.toolCalls, undefined);
-  assert.match(projectedAssistant.content, /runtime_evidence_record source="server" kind="committed_tool_history"/);
-  assert.match(projectedAssistant.content, /agentloop\.committedToolHistory\/v1/);
-  assert.match(projectedAssistant.content, /deliverables\/report\.md/);
-  assert.match(projectedAssistant.content, /completed historical tool result/);
-  assert.match(projectedAssistant.content, /never use an omission marker as file content/);
+  assert.equal(assembly.messages.some(message => message.role === "assistant"), false);
+  const serverEvidence = assembly.runtimeContext.content;
+  assert.match(serverEvidence, /runtime_evidence_record source="server" kind="committed_tool_history"/);
+  assert.match(serverEvidence, /agentloop\.committedToolHistory\/v1/);
+  assert.match(serverEvidence, /deliverables\/report\.md/);
+  assert.match(serverEvidence, /completed historical tool result/);
+  assert.match(serverEvidence, /never use an omission marker as file content/);
   assert.equal(assembly.messages.some((message) => message.role === "tool" && message.toolCallId === "write"), false);
   assert.doesNotMatch(JSON.stringify(assembly.messages), /analysis paragraph analysis paragraph analysis paragraph/);
-  assert.doesNotMatch(projectedAssistant.content, /# Report/);
+  assert.doesNotMatch(serverEvidence, /# Report/);
   assert.equal((canonical[0] as unknown as { toolCalls: [{ arguments: { content: string } }] }).toolCalls[0].arguments.content, generatedMarkdown);
+});
+
+test("server write receipts compact with their exchanges instead of becoming permanent fixed context", async () => {
+  let summaries = 0;
+  const canonical: ModelMessage[] = [{ role: "user", content: "Write the staged results, then continue the task." }];
+  for (let index = 0; index < 24; index += 1) {
+    const id = `write-${index}`;
+    const path = `stage-${index}.json`;
+    canonical.push({ role: "assistant", content: "", toolCalls: [{ id, name: "computer_write_file", arguments: { path, content: '{"total":42}' } }] },
+      { role: "tool", toolCallId: id, name: "computer_write_file", isError: false, content: JSON.stringify({
+        path, artifactReceipt: { schema: "agentloop.artifactReceipt/v1", receiptId: `receipt-${index}`, sourceTool: "computer_write_file",
+          artifact: { path, bytes: 12, sha256: `hash-${index}` }, evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] } },
+      }) });
+  }
+  const before = JSON.stringify(canonical);
+  const assembler = new ContextAssembler({ runId: "receipt-compaction", systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server state" },
+    model: { limits: { contextWindowTokens: 4096, maxOutputTokens: 512 }, complete: async () => {
+      summaries += 1;
+      return { content: structuredSummary("24 stage files were written. Keep their committed hashes and continue the requested work."), finishReason: "stop", toolCalls: [] };
+    } }, policy: { outputReserveTokens: 512, safetyMarginTokens: 128, preserveRecentTokens: 512, summaryTargetTokens: 128, summaryMaxOutputTokens: 512 },
+  });
+  const assembly = await assembler.assemble(canonical, []);
+  assert.ok(summaries > 0);
+  assert.ok(assembly.estimatedInputTokens <= assembly.usableInputTokens);
+  assert.ok(assembler.contextSummary);
+  assert.equal(assembly.messages.some(message => message.role === "assistant" && message.content.includes("runtime_evidence_record")), false);
+  assert.equal(JSON.stringify(canonical), before);
 });
 
 test("ContextAssembler defers proactive compaction after artifact evidence while context fits", async () => {

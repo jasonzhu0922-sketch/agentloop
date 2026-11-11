@@ -198,6 +198,7 @@ import { CanonicalRunStateRepository } from "./canonical-run-state-repository.ts
 import type { AgentLoopMemoryPlugin, CurrentTurnMemoryCommitState, ExplicitMemoryCommitResult, InteractionMemoryProjection, MemoryIntentCandidate, PlanningMemoryProjection } from "./memory-plugin.ts";
 import { assertNoInferredCalendarDates, createRuntimeClock, parseRecurringTimeCondition, parseResolvedTemporalScope, resolveTemporalScope, withRuntimeClock, type RuntimeClock, type ResolvedTemporalScope, type RecurringTimeCondition } from "./runtime-clock.ts";
 import { temporalEvidenceGap } from "./temporal-evidence.ts";
+import { artifactFormatMatchesKind } from "./tool-progress-policy.ts";
 import { decideRoundProgress } from "./round-progress.ts";
 
 export type ModelFactory = (onRetry?: ModelRetryReporter, modelKey?: string) => ModelAdapter;
@@ -3570,6 +3571,19 @@ export class RunService {
         && !fileOutputStep
         && (stepNeedsReusableSourceEvidence(activeStep)
           || stepSkills.some((skill) => skill.agentLoop?.roles.includes("source_provider") === true));
+      // Runtime prerequisites and semantic assessments share one durable
+      // rejection boundary. Recovery must never observe a rejection whose
+      // canonical Gap (or assessment record) has not committed.
+      const commitAssessment = async (assessment: SkillComplianceAssessment, evidence: StepEvidence): Promise<void> => {
+        canonicalState = await this.database.transaction(async () => {
+          await this.plans.saveAssessment(assessment);
+          return this.canonicalStates.commit({
+            expectedRevision: canonicalState.revision,
+            state: recordCanonicalAssessment(canonicalState, assessment, evidence),
+            reason: assessment.approved ? "step_assessment_approved" : "step_assessment_rejected",
+          });
+        });
+      };
       const result = await runAgentLoop({
         runId: input.runId,
         currentDecisionContext: () => ({
@@ -3820,9 +3834,16 @@ export class RunService {
           },
         },
         deferFailureReport: true,
+        failureReportContext: () => this.latestFailureReportContext(input.runId),
         evaluateCandidate: async (candidate) => {
           await new RunInputRepository(this.database).checkpoint(input.runId);
           assessmentAttempt += 1;
+          const evidence: StepEvidence = {
+            candidateOutput: candidate.output,
+            deliveryCandidate: candidate.deliveryCandidate,
+            toolCalls: mergeAssessmentToolEvidence(inheritedAssessmentToolEvidence, candidate.toolEvidence),
+            modelSteps: candidate.modelSteps,
+          };
           const unreadDependencyResultIds = unreadDependencyResultIdsForCandidate(activeStep, plan, candidate.toolEvidence);
           if (unreadDependencyResultIds.length > 0) {
             const feedback = [
@@ -3837,6 +3858,15 @@ export class RunService {
               reusableEvidenceRefs: unreadDependencyResultIds,
               suggestedRepairShape: "repair_leaf",
             };
+            await commitAssessment({
+              id: randomUUID(), planId: plan.id, stepId: activeStep.id, attempt: assessmentAttempt,
+              assessmentProfile: "deterministic", assessmentMethod: "rule", approved: false,
+              criteria: [], skills: [], feedback, failedBoundary,
+              evidenceDigest: createHash("sha256").update(JSON.stringify({
+                unreadDependencyResultIds, toolCalls: candidate.toolEvidence, output: candidate.output,
+              })).digest("hex"),
+              createdAt: Date.now(),
+            }, evidence);
             await input.emit({
               type: "candidate.dependency_results_unread",
               data: {
@@ -3850,12 +3880,6 @@ export class RunService {
             return { approved: false, feedback, requiresEvidenceProgress: true, failedBoundary };
           }
           const activatedStepSkills = activatedSkillsForAssessment(stepSkills, candidate.activatedSkillNames);
-          const evidence: StepEvidence = {
-            candidateOutput: candidate.output,
-            deliveryCandidate: candidate.deliveryCandidate,
-            toolCalls: mergeAssessmentToolEvidence(inheritedAssessmentToolEvidence, candidate.toolEvidence),
-            modelSteps: candidate.modelSteps,
-          };
           const temporalScopeGap = temporalEvidenceGap(canonicalState.intent.turnResolution?.temporalScope, evidence.toolCalls.map((call) => call.result));
           if (temporalScopeGap !== undefined) {
             await input.emit({
@@ -3996,13 +4020,7 @@ export class RunService {
           const admittedAssessment = enforceAdmittedAssessment(assessmentInput, assessed);
           const assessment = assessDecisionBindings({ assessment: admittedAssessment, planId: plan.id, stepId: activeStep.id, ledger: decisionLedger, evidence: evidence.toolCalls });
           assessedCandidates.set(assessmentSignature, assessment);
-          await this.plans.saveAssessment(assessment);
-          const assessedState = recordCanonicalAssessment(canonicalState, assessment, evidence);
-          canonicalState = await this.canonicalStates.commit({
-            expectedRevision: canonicalState.revision,
-            state: assessedState,
-            reason: assessment.approved ? "step_assessment_approved" : "step_assessment_rejected",
-          });
+          await commitAssessment(assessment, evidence);
           await input.emit({
             type: "skill.compliance.assessed",
             data: {
@@ -4112,16 +4130,7 @@ export class RunService {
       .filter((name) => input.run.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)));
     const availableToolSummaries = toolSummaries(allTools, availableToolNames);
     const canonicalState = await this.canonicalStates.get(input.run.id);
-    const failedBoundary = failedBoundaryFromRecoveryAction(input.action, canonicalState);
-    // A model recovery proposal may accidentally reuse the failed Step id
-    // while changing its definition. Convert that narrow case into the
-    // immutable replacement-leaf shape before admission; PlanRepository then
-    // remains the final guard for every other attempted mutation.
-    const normalizedRevision = normalizeRecoveryPlanRevision(
-      input.currentPlan,
-      input.decision.planRevision,
-      failedBoundary?.stepId,
-    );
+    const normalizedRevision = input.decision.planRevision;
     const planRevision = { ...normalizedRevision, ...(normalizedRevision.roundScope !== undefined ? {} : input.currentPlan.roundScope === undefined ? {} : { roundScope: input.currentPlan.roundScope }) };
     const gapId = stringField(input.action.metadata, "canonicalGapId");
     const repairGap = canonicalState.gaps.find((gap) => gap.id === gapId && gap.status === "open");
@@ -4132,6 +4141,7 @@ export class RunService {
     const admitted = admitPlan({
       runId: input.run.id,
       proposal: planRevision,
+      currentPlan: input.currentPlan,
       availableSkills: privateSkills,
       availableToolNames,
       availableTools: availableToolSummaries,
@@ -4172,7 +4182,9 @@ export class RunService {
       canonicalState,
       userAuthority: await this.userAuthority(input.run.id, canonicalState),
       currentPlan: input.currentPlan,
-      proposal: planRevision,
+      // Assess the exact expanded definition that would execute, including
+      // persisted retained Steps, rather than a lossy model proposal.
+      proposal: { ...planRevision, steps: admitted.steps },
       retiredStepIds,
       recoveryAction: {
         id: input.action.id,
@@ -4210,6 +4222,18 @@ export class RunService {
         reason: "plan_revised",
       });
       return { revised, revisedCanonicalState };
+    });
+    await this.appendRunEvent(input.run.id, {
+      type: "recovery.plan_revision_applied",
+      data: {
+        decisionId: input.decision.id,
+        planId: revised.id,
+        fromVersion: input.currentPlan.version,
+        toVersion: revised.version,
+        retainedStepIds: planRevision.retainedStepIds ?? [],
+        createdStepIds: planRevision.steps.map(step => step.id),
+        retiredStepIds,
+      },
     });
     const repairLeaves = revised.steps.filter((step) => step.retiredAt === undefined && step.role === "repair"
       && !input.currentPlan!.steps.some((existing) => existing.id === step.id));
@@ -4443,6 +4467,45 @@ export class RunService {
     return true;
   }
 
+  private async latestFailureReportContext(runId: string) {
+    const state = await this.canonicalStates.get(runId);
+    const plan = await this.plans.getByRun(runId);
+    const events = await this.runtimeEvents(runId);
+    const stepIds = [...new Set(events.flatMap((event) => event.type === "plan.step.started"
+      && typeof event.data.stepId === "string" ? [event.data.stepId] : []))];
+    const transcripts = stepIds.map((stepId) => reconstructRecoveryTranscript({
+      userInput: state.intent.userInput, stepId, events,
+    }));
+    const lastRejection = events.findLast((event) => event.type === "candidate.rejected");
+    const gaps = state.gaps.filter((gap) => gap.status === "open");
+    return {
+      runtimeContext: {
+        phase: "execution" as const,
+        content: JSON.stringify({
+          schema: "agentloop.failureReportContext/v1",
+          throughSeq: events.at(-1)?.seq ?? 0,
+          observedFailures: events.filter(event => event.type === "recovery.decision_rejected"
+            || event.type === "recovery.continuation_failed"
+            || event.type === "tool.failed" || event.type === "model.request.failed")
+            .map(event => ({ seq: event.seq, type: event.type, code: event.data.code, message: event.data.message })),
+          canonicalState: state,
+          plan: { id: plan.id, version: plan.version, steps: plan.steps.map((step) => ({
+            id: step.id, objective: step.objective, status: step.status,
+            ...(step.retiredAt === undefined ? {} : { retiredAt: step.retiredAt }),
+            ...(step.status !== "completed" ? {} : { acceptedOutput: step.output, result: step.evidence?.publishedResult?.ref }),
+          })) },
+          instruction: "This is the latest durable Run evidence across all execution and recovery steps. Report current observed results and accepted checks even when later delivery or recovery failed. A prior failed draft or missing receipt is not proof that a later operation did not occur.",
+        }),
+      },
+      messages: [
+        { role: "user" as const, content: state.intent.userInput },
+        ...transcripts.flatMap((transcript) => transcript.messages.slice(1)),
+      ],
+      feedback: typeof lastRejection?.data.feedback === "string" ? lastRejection.data.feedback : "Execution stopped before final delivery.",
+      missingEvidenceKinds: [...new Set(gaps.flatMap((gap) => gap.missingEvidenceKinds))],
+    };
+  }
+
   private async applyAssessmentRepair(input: {
     actorUserId: string;
     run: RunRecord;
@@ -4603,6 +4666,13 @@ export class RunService {
       const run = await this.get(input.actorUserId, input.run.id);
       if (run.status === "running") {
         const code = error instanceof AppError ? error.code : "ASSESSMENT_REPAIR_FAILED";
+        // Persist the observed terminal cause before building the evidence-only
+        // report. Parser failures need this too: no decision was submitted yet.
+        await this.appendRunEvent(input.run.id, {
+          type: "recovery.continuation_failed",
+          data: { actionId: action.id, ...(decision === undefined ? {} : { decisionId: decision.id }),
+            code, message: error instanceof Error ? error.message : "Assessment repair failed" },
+        });
         // The execution loop defers this one final, evidence-only report while
         // Recovery remains possible. If Recovery becomes terminal, publish it
         // rather than discarding the recorded progress.
@@ -4648,7 +4718,10 @@ export class RunService {
     userResponses?: readonly RecoveryUserResponse[];
   }): Promise<RecoveryDecisionProposal> {
     if (input.proposal.decision !== "revise_plan" || input.plan === undefined || input.proposal.planRevision === undefined) return input.proposal;
-    const proposedStepIds = new Set(input.proposal.planRevision.steps.map((step) => step.id));
+    const proposedStepIds = new Set([
+      ...(input.proposal.planRevision.retainedStepIds ?? []),
+      ...input.proposal.planRevision.steps.map((step) => step.id),
+    ]);
     const retiredStepIds = input.plan.steps
       .filter((step) => step.retiredAt === undefined && !proposedStepIds.has(step.id))
       .map((step) => step.id);
@@ -5729,22 +5802,36 @@ function failedBoundaryRecoveryDecision(
     return undefined;
   }
   const repairStep = repairLeafForFailedBoundary(target, failedBoundary, plan.version);
+  const activeSteps = plan.steps.filter(step => step.retiredAt === undefined);
+  // A dependent's scheduling definition changes too; give it a replacement
+  // identity rather than claiming it was retained unchanged.
+  const replacedIds = new Map([[target.id, repairStep.id]]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const step of activeSteps) {
+      if (replacedIds.has(step.id) || !step.dependencies.some(id => replacedIds.has(id))) continue;
+      replacedIds.set(step.id, repairLeafId(step.id, plan.version));
+      changed = true;
+    }
+  }
   const planRevision: PlanProposal = {
     goal: plan.goal,
     schema: "agentloop.outcomePlan/v2",
     shape: "recovery_patch",
     selectedSkillIds: plan.selectedSkillIds,
     selectedSkillRoles: [],
-    steps: plan.steps
-      .filter((step) => step.retiredAt === undefined)
+    retainedStepIds: activeSteps.filter(step => !replacedIds.has(step.id)).map(step => step.id),
+    steps: activeSteps
+      .filter(step => replacedIds.has(step.id))
       .flatMap((step): PlanStepProposal[] => step.id === target.id
         ? [repairStep]
         : [{
-          id: step.id,
+          id: replacedIds.get(step.id)!,
           kind: step.kind,
           ...(step.parentId === undefined ? {} : { parentId: step.parentId }),
           objective: step.objective,
-          dependencies: step.dependencies.map((dependency) => dependency === target.id ? repairStep.id : dependency),
+          dependencies: step.dependencies.map(dependency => replacedIds.get(dependency) ?? dependency),
           ...(step.role === undefined ? {} : { role: step.role }),
           refinementState: step.refinementState,
           requiredFacts: step.requiredFacts,
@@ -5982,62 +6069,6 @@ export function repairLeafForFailedBoundary(
     ...(target.evidenceContract === undefined ? {} : { evidenceContract: target.evidenceContract }),
     successCriteria: recoveryProposalSuccessCriteria(target.successCriteria),
   };
-}
-
-/**
- * Recovery plans are complete proposals, but an existing Step id is an
- * immutable identity.  Models occasionally return the failed id with a
- * revised objective or binding; turn that one failed boundary into a new
- * repair leaf and rewire dependents before Plan admission.
- */
-export function normalizeRecoveryPlanRevision(
-  current: ExecutionPlan,
-  proposal: PlanProposal,
-  failedStepId: string | undefined,
-): PlanProposal {
-  if (failedStepId === undefined) return proposal;
-  const target = current.steps.find((step) =>
-    step.id === failedStepId && step.retiredAt === undefined && step.status !== "completed",
-  );
-  const proposed = proposal.steps.find((step) => step.id === failedStepId);
-  if (target === undefined || proposed === undefined || !recoveryStepDefinitionChanged(target, proposed)) return proposal;
-  let repairId = repairLeafId(failedStepId, current.version);
-  let offset = 1;
-  while (proposal.steps.some((step) => step.id === repairId)) {
-    offset += 1;
-    repairId = repairLeafId(failedStepId, current.version + offset);
-  }
-  return {
-    ...proposal,
-    steps: proposal.steps.map((step) => ({
-      ...step,
-      ...(step.id === failedStepId ? { id: repairId, role: "repair" as const } : {}),
-      dependencies: step.dependencies.map((dependency) => dependency === failedStepId ? repairId : dependency),
-      ...(step.parentId === failedStepId ? { parentId: repairId } : {}),
-    })),
-  };
-}
-
-function recoveryStepDefinitionChanged(
-  current: ExecutionPlan["steps"][number],
-  proposed: PlanStepProposal,
-): boolean {
-  const comparable = (step: PlanStepProposal | ExecutionPlan["steps"][number], binding?: ExecutionPlan["steps"][number]["executionBinding"]) => JSON.stringify({
-    kind: step.kind ?? "leaf",
-    parentId: step.parentId ?? null,
-    objective: step.objective,
-    dependencies: step.dependencies,
-    role: step.role ?? null,
-    refinementState: step.refinementState ?? "not_refinable",
-    requiredFacts: step.requiredFacts ?? [],
-    skillIds: step.skillIds,
-    requiredCapabilities: step.requiredCapabilities,
-    sourceConstraint: binding === undefined ? step.sourceConstraint ?? null : recoverySourceConstraint(binding).sourceConstraint ?? null,
-    targetIds: binding === undefined ? step.targetIds ?? [] : binding.targetIds,
-    evidenceContract: step.evidenceContract ?? null,
-    successCriteria: step.successCriteria,
-  });
-  return comparable(current, current.executionBinding) !== comparable(proposed);
 }
 
 /** Admission alone derives canonical delivery-target criteria from targetIds. */
@@ -8378,7 +8409,7 @@ function buildRecoveredStepRuntimeContext(
       base.content,
       "<recovery_context source=\"server\">",
       JSON.stringify({
-        contract: "Only complete persisted exchanges were restored into the transcript. Unfinished calls are facts, not results.",
+        contract: "Only complete persisted exchanges were restored into the transcript. Unfinished calls are facts, not results. The repair plan is already admitted: the current Step objective and completionBoundary own this stage. Historical rejection feedback describes the shared goal gap, not additional obligations for this prerequisite. Publish this Step's result once its own boundary is satisfied, then let dependent Steps perform their admitted work.",
         recoveryFacts: promptRecoveryFacts,
       }),
       "</recovery_context>",
@@ -8721,7 +8752,8 @@ function conversationTurnTool(context: ConversationIntentExternalContext): Model
                   expectedArtifactCount: { type: "integer", minimum: 1, maximum: 8 },
                   action: { type: "string", enum: ["none", "create", "modify", "transform"] },
                   kind: { type: "string", enum: ["html", "document", "presentation", "spreadsheet", "image", "audio", "code", "none"] },
-                  format: { type: "string", minLength: 1, maxLength: 32 },
+                  format: { type: "string", minLength: 1, maxLength: 32,
+                    description: "Optional physical file format compatible with kind, such as png, svg, pdf, docx or xlsx. Content or presentation types belong in purpose. Omit when the user did not constrain the physical encoding." },
                   surface: { type: "string", enum: ["conversation", "workspace_artifact"] },
                 },
               },
@@ -8781,16 +8813,18 @@ function conversationTurnTool(context: ConversationIntentExternalContext): Model
         },
         temporalScope: {
           type: "object", additionalProperties: false,
-          description: "A single continuous date/time interval only. For relative calendar-day ranges use runtime_clock and integer day offsets; for explicitly dated intervals use user_explicit and RFC3339 bounds. Omit for recurring times such as nightly or every morning; use recurringTime instead. Both may coexist.",
+          description: "A single continuous date/time interval shared by acquisition, aggregation and presentation. Use runtime_clock with calendar_month and integer month offsets for natural-month scopes, calendar_day and day offsets for day scopes, or elapsed_seconds for elapsed durations. Never approximate calendar months with fixed day counts. Use user_explicit and RFC3339 bounds for explicitly dated intervals. Omit for recurring conditions without a continuous interval; use recurringTime instead.",
           required: ["expression", "basis"],
           properties: {
             expression: { type: "string", minLength: 1, maxLength: 240, description: "Verbatim contiguous quote from the user's time requirement, preserving spaces and punctuation. Do not paraphrase or append derived dates or interpretation." },
             basis: { type: "string", enum: ["runtime_clock", "user_explicit"] },
-            alignment: { type: "string", enum: ["calendar_day", "elapsed_seconds"] },
+            alignment: { type: "string", enum: ["calendar_day", "calendar_month", "elapsed_seconds"] },
             timeZone: { type: "string", maxLength: 100 },
             startDayOffset: { type: "integer", minimum: -366000, maximum: 366000, description: "Inclusive local-day start relative to today: 0=today, -1=yesterday. An N-day calendar window including today starts at -(N-1)." },
             endDayOffset: { type: "integer", minimum: -366000, maximum: 366000, description: "Exclusive local-day boundary: 0=START of today (excludes today), +1=START of tomorrow (includes today). Omit when endAtReferenceInstant=true." },
-            endAtReferenceInstant: { type: "boolean", description: "For a calendar-day window through now, use true and omit endDayOffset. Runtime ends the interval at the immutable Run reference instant; this includes only the current partial day." },
+            startMonthOffset: { type: "integer", minimum: -12000, maximum: 12000, description: "For calendar_month: inclusive local month start relative to the reference month (0=current month). N month buckets including the current month start at -(N-1); N completed months start at -N and end at endMonthOffset=0. Choose according to the user's scope, never a downstream stage's preference." },
+            endMonthOffset: { type: "integer", minimum: -12000, maximum: 12000, description: "For calendar_month: exclusive local month start, 0=START of current month, 1=START of next month. Omit when endAtReferenceInstant=true." },
+            endAtReferenceInstant: { type: "boolean", description: "For a calendar-day or calendar-month window through now, use true and omit the matching end offset. Runtime ends at the immutable Run reference instant, preserving the partial current period." },
             startSecondOffset: { type: "integer" }, endSecondOffset: { type: "integer" },
             startInclusive: { type: "string" }, endExclusive: { type: "string" },
           },
@@ -9794,7 +9828,7 @@ function conversationTurnResolutionAttemptSummary(response: ModelResponse, input
         return typeof reference === "string" && !input.includes(reference.trim());
       }).length,
     } : {}),
-    temporalScopeFields: Object.keys(temporal).filter((key) => ["expression", "basis", "alignment", "startDayOffset", "endDayOffset", "endAtReferenceInstant", "startSecondOffset", "endSecondOffset", "startInclusive", "endExclusive", "timeZone"].includes(key)),
+    temporalScopeFields: Object.keys(temporal).filter((key) => ["expression", "basis", "alignment", "startDayOffset", "endDayOffset", "startMonthOffset", "endMonthOffset", "endAtReferenceInstant", "startSecondOffset", "endSecondOffset", "startInclusive", "endExclusive", "timeZone"].includes(key)),
     recurringTimePresent: value.recurringTime !== undefined,
     ...(typeof value.targetGoalCandidateId === "string" ? { targetGoalCandidateId: value.targetGoalCandidateId } : {}),
     ...(typeof artifact.path === "string" ? { targetArtifactPath: artifact.path } : {}),
@@ -9845,6 +9879,9 @@ function parseConversationTaskIntent(
     }
     if ((expectedArtifactCount as number) > 1 && targetId.length > 126) return reject(`${path}.targetId must be at most 126 characters when expectedArtifactCount is greater than 1, leaving room for per-artifact IDs.`);
     if (format !== undefined && (typeof format !== "string" || format.trim().length === 0 || format.length > 32)) return reject(`${path}.format must be a non-empty string no longer than 32 characters when present.`);
+    if (typeof format === "string" && !artifactFormatMatchesKind(format, kind)) {
+      return reject(`${path}.format=${JSON.stringify(format)} cannot be satisfied by a physical ${kind} artifact. Put content and presentation requirements in purpose. Use a compatible physical file format only when required by the user; otherwise omit format. Do not change the requested content or silently substitute another required encoding.`);
+    }
     targetIds.add(targetId);
     deliverables.push({
       targetId: targetId.trim(),

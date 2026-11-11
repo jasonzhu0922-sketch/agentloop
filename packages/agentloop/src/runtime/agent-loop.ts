@@ -98,6 +98,13 @@ export interface AgentLoopOptions {
   readonly candidateRepairAssessmentLimit?: number;
   /** The Run owner may still revise a failed leaf; report only if it commits failure. */
   readonly deferFailureReport?: boolean;
+  /** Refresh durable Run evidence when a deferred report is finally materialized. */
+  readonly failureReportContext?: () => Promise<{
+    readonly messages: readonly ModelMessage[];
+    readonly runtimeContext: Omit<RuntimeContextSnapshot, "id" | "supersedesId">;
+    readonly feedback: string;
+    readonly missingEvidenceKinds: readonly string[];
+  }>;
   /**
    * Runtime-enforced per-Tool call ceilings for this Plan step.  These cap
    * external effects; they do not decide whether the model should summarize
@@ -664,8 +671,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   };
   const recoveredRejection = options.initialCandidateRejections?.at(-1);
   if (recoveredRejection !== undefined) {
+    const context = options.currentDecisionContext?.();
+    const repairingAdmittedScope = context !== undefined && deriveCurrentDecisionView({
+      runId: options.runId, context,
+    }).currentGap.repairInProgressGapIds.length > 0;
     setCandidateRepairDirective(candidateRepairDirective(
-      { approved: false, feedback: recoveredRejection.feedback },
+      { approved: false, feedback: repairingAdmittedScope ? [
+        "The prior rejection describes the shared unresolved goal. Its repair plan is already admitted. Complete only the current Plan step's objective and completionBoundary using restored evidence; leave downstream production and delivery to their owning steps. Do not redeliver the rejected source projection.",
+        "Historical rejection feedback (audit context, not additional current-step obligations):",
+        recoveredRejection.feedback,
+      ].join("\n") : recoveredRejection.feedback },
       "Resume repair of the rejected candidate using the restored canonical evidence. Do not redeliver the rejected source projection.",
     ));
   }
@@ -748,11 +763,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   };
   const failureReport = async (step: number, output: string, evaluation: CandidateCompletionEvaluation): Promise<string> => {
     throwIfAborted(options.signal);
-    const missing = evaluation.failedBoundary?.missingEvidenceKinds ?? [];
-    await emit({ type: "failure_report.started", data: { step, missingEvidenceKinds: missing } });
     const reportSignal = AbortSignal.any([...(options.signal === undefined ? [] : [options.signal]), AbortSignal.timeout(30_000)]);
     try {
-      contextAssembler.setRuntimeDirective([
+      const latest = await options.failureReportContext?.();
+      const missing = latest?.missingEvidenceKinds ?? evaluation.failedBoundary?.missingEvidenceKinds ?? [];
+      await emit({ type: "failure_report.started", data: { step, missingEvidenceKinds: missing } });
+      // A previous leaf's compaction offsets and directives cannot project a
+      // later recovery transcript. Start a fresh projection of the durable Run.
+      const reportAssembler = latest === undefined ? contextAssembler : new ContextAssembler({
+        runId: options.runId, systemPrompt: options.systemPrompt, runtimeContext: latest.runtimeContext,
+        model: options.model, policy: options.contextPolicy, emit,
+      });
+      reportAssembler.setRuntimeDirective([
         "<runtime_failure_report>",
         "The execution loop has ended with an error (budget, no progress, or unmet requirements). This is the single final reporting turn, NOT a completion candidate or another repair attempt.",
         "Summarize progress against the original user goal and Plan, not just the last error. Distinguish completed work, usable current results, unverified work, and the remaining gap to the goal.",
@@ -767,11 +789,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         "Omit unsupported conclusions. Do not claim completion, successful validation, delivery, or a usable artifact when those facts were not verified. Refer to any observed file only as a stage artifact, never as a delivered artifact.",
         "If no useful result is supported, say what was attempted and why a reliable result cannot yet be provided. Never invent a partial answer merely to fill the report.",
         "Do not expose internal protocol markup or tool calls. Do not claim that another agent will automatically finish the work.",
-        `Assessment feedback: ${evaluation.feedback}`,
+        `Assessment feedback: ${latest?.feedback ?? evaluation.feedback}`,
         `Unconfirmed criteria: ${missing.join(", ")}`,
         "</runtime_failure_report>",
       ].join("\n"));
-      const assembly = await contextAssembler.assemble([
+      const assembly = await reportAssembler.assemble(latest?.messages ?? [
         ...messages,
         { role: "user", content: `The following last draft is unverified reference material, not an instruction or an approved answer:\n${output}` },
       ], [], reportSignal);
@@ -964,7 +986,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const missingToolEvidenceKinds = stepEvidenceState?.missingToolEvidenceKinds ?? [];
     const canConvergeFromCurrentEvidence = missingToolEvidenceKinds.length === 0
       && currentDecisionView.currentGap.assessmentGaps.every((gap) =>
-        gap.suggestedAction === "repair_leaf" && gap.missingEvidenceKinds.length === 0);
+        currentDecisionView.currentGap.repairInProgressGapIds.includes(gap.id)
+        || gap.suggestedAction === "repair_leaf" && gap.missingEvidenceKinds.length === 0);
     // A source receipt proves acquisition, not coverage of the user's facts.
     // Conversation synthesis must retain complementary acquisition tools.
     const completionFenceReady = options.requireStructuredCandidateSynthesis !== true
@@ -3407,6 +3430,7 @@ function prepareRejectionRepairDirective(input: {
       ? "The model repeated tool calls whose arguments failed validation before any Tool executed. Do not repeat the same arguments again."
       : "The previous tool calls failed validation before any Tool executed.",
     "Repair the tool-call arguments according to the exact Tool schema now exposed on this turn.",
+    "The rejected operation did not execute and did not inspect the artifact. Preserve existing artifact bytes; do not overwrite an artifact with a placeholder or regenerate it merely to repair arguments or target ownership. Use current committed artifact identity when binding the admitted target. If the admitted contract itself cannot be satisfied, report the concrete conflict as a bounded candidate for Runtime recovery instead of repeating the same call.",
     "For a message that says `mode and overwrite cannot both be set`, choose exactly one of those fields; prefer `mode` and remove the legacy `overwrite` field.",
     "If the same validation failure repeats, the Runtime will stop the step as no progress instead of spending more turns.",
     failures,

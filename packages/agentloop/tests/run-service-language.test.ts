@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ModelAdapter } from "../src/runtime/contracts.ts";
-import { DEFAULT_MAX_STEPS, DEFAULT_RUNNER_SYSTEM_PROMPT, MAX_SUPPORTED_STEP_TURNS, memorySettlementCommitRef, normalizeRecoveryPlanRevision, recoveryTargetBinding, repairLeafForFailedBoundary, RunService, selectPlanningSkillRoles } from "../src/runtime/run-service.ts";
+import { DEFAULT_MAX_STEPS, DEFAULT_RUNNER_SYSTEM_PROMPT, MAX_SUPPORTED_STEP_TURNS, memorySettlementCommitRef, recoveryTargetBinding, repairLeafForFailedBoundary, RunService, selectPlanningSkillRoles } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import type { PrivateSkill } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
@@ -485,57 +485,6 @@ test("failed-boundary repair leaf preserves the original artifact and source con
     requiredVisibleDirectoryIds: ["visible-brand-assets"],
   });
   assert.deepEqual(repair.successCriteria, target.successCriteria);
-});
-
-test("recovery normalizes a changed failed-step definition into a replacement leaf", () => {
-  const current = {
-    version: 4,
-    steps: [
-      {
-        id: "response",
-        kind: "leaf",
-        objective: "Deliver the requested PPTX.",
-        dependencies: [],
-        role: "deliver",
-        refinementState: "not_refinable",
-        requiredFacts: [],
-        skillIds: ["pptx"],
-        requiredCapabilities: ["conversation_delivery"],
-        executionBinding: { targetIds: ["deck"], requiredToolSourceIds: [], requiredUploadedSourceIds: [], requiredVisibleDirectoryIds: [] },
-        successCriteria: [{ id: "ready", description: "A PPTX is delivered.", source: "task" }],
-        status: "failed",
-      },
-      {
-        id: "publish",
-        kind: "leaf",
-        objective: "Publish the result.",
-        dependencies: ["response"],
-        role: "deliver",
-        refinementState: "not_refinable",
-        requiredFacts: [],
-        skillIds: [],
-        requiredCapabilities: ["conversation_delivery"],
-        executionBinding: { targetIds: [], requiredToolSourceIds: [], requiredUploadedSourceIds: [], requiredVisibleDirectoryIds: [] },
-        successCriteria: [{ id: "published", description: "Published.", source: "task" }],
-        status: "pending",
-      },
-    ],
-  } as never;
-  const proposal = {
-    goal: "Deliver the requested PPTX.",
-    schema: "agentloop.outcomePlan/v2" as const,
-    shape: "recovery_patch" as const,
-    selectedSkillIds: ["pptx"],
-    steps: [
-      { id: "response", kind: "leaf" as const, objective: "Use a different generation workflow.", dependencies: [], role: "deliver" as const, refinementState: "not_refinable" as const, requiredFacts: [], skillIds: ["pptx"], requiredCapabilities: ["conversation_delivery"], targetIds: ["deck"], successCriteria: [{ id: "ready", description: "A PPTX is delivered.", source: "task" as const }] },
-      { id: "publish", kind: "leaf" as const, objective: "Publish the result.", dependencies: ["response"], role: "deliver" as const, refinementState: "not_refinable" as const, requiredFacts: [], skillIds: [], requiredCapabilities: ["conversation_delivery"], targetIds: [], successCriteria: [{ id: "published", description: "Published.", source: "task" as const }] },
-    ],
-  };
-  const normalized = normalizeRecoveryPlanRevision(current, proposal, "response");
-  assert.notEqual(normalized.steps[0]?.id, "response");
-  assert.match(normalized.steps[0]?.id ?? "", /^response\.repair\./);
-  assert.equal(normalized.steps[0]?.role, "repair");
-  assert.deepEqual(normalized.steps[1]?.dependencies, [normalized.steps[0]?.id]);
 });
 
 test("RunService makes Simplified Chinese the default user-facing execution language", async () => {

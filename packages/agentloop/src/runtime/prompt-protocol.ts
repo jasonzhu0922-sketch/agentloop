@@ -29,7 +29,13 @@ export function encodeOpenAICompatiblePrompt(
   const renderToolProtocol = invocation.tools.length > 0;
   const messages: Record<string, unknown>[] = [
     { role: "system", content: systemContent },
-    ...invocation.messages.map((message) => toProviderMessage(message, renderToolProtocol)),
+    ...invocation.messages.flatMap((message) => {
+      // Tool-call commentary is neither an answer nor an observation. Replaying
+      // it as assistant prose teaches a tool-free reporting turn to imitate
+      // internal instructions. Keep only the following committed tool results.
+      if (!renderToolProtocol && message.role === "assistant" && message.toolCalls?.length) return [];
+      return [toProviderMessage(message, renderToolProtocol)];
+    }),
   ];
   if (placement === "user-envelope" && context !== undefined) {
     messages.push({ role: "user", content: context });
@@ -75,17 +81,6 @@ function toProviderMessage(message: ModelMessage, renderToolProtocol: boolean): 
     }
     return { role: "tool", tool_call_id: message.toolCallId, content: message.content };
   }
-  if (!renderToolProtocol && message.toolCalls !== undefined && message.toolCalls.length > 0) {
-    return {
-      role: "assistant",
-      // A no-tool turn must never receive a serialised function invocation.
-      // Some providers imitate such text rather than using the preceding
-      // result to write a candidate. The result is retained in the following
-      // message; call ids, names, and arguments are execution protocol, not
-      // evidence the model needs to deliver to the user.
-      content: completedToolInvocationTranscript(message.content),
-    };
-  }
   return {
     role: "assistant",
     content: renderToolProtocol ? message.content : renderServerEvidenceText(message.content),
@@ -100,13 +95,6 @@ function toProviderMessage(message: ModelMessage, renderToolProtocol: boolean): 
         }),
     ...(message.reasoningContent === undefined ? {} : { reasoning_content: message.reasoningContent }),
   };
-}
-
-function completedToolInvocationTranscript(content: string): string {
-  return [
-    renderServerEvidenceText(content),
-    "The Runtime completed the prior operation. Its result follows as evidence; do not describe or reproduce the operation itself.",
-  ].filter((value) => value.length > 0).join("\n\n");
 }
 
 function completedToolResultTranscript(content: string, isError: boolean): string {

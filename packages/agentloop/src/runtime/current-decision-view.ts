@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { canonicalRunStateRef, type CanonicalRunState, type CanonicalRunStateRef, type CanonicalGoalGap } from "./canonical-run-state.ts";
+import { canonicalGapRepairAttempts, canonicalRunStateRef, type CanonicalRunState, type CanonicalRunStateRef, type CanonicalGoalGap } from "./canonical-run-state.ts";
 import type { ContentReference } from "./content-reference.ts";
 import type { AgentLoopToolEvidence } from "./contracts.ts";
 import type { StepSemanticFrame } from "./step-semantic-frame.ts";
@@ -99,6 +99,8 @@ export interface CurrentDecisionView {
   readonly currentGap: {
     /** Open assessed gaps owned by this Step or its canonical repair scope. */
     readonly assessmentGaps: readonly CanonicalGoalGap[];
+    /** These gaps already have an admitted replacement scope executing this Step. */
+    readonly repairInProgressGapIds: readonly string[];
     readonly receipts: {
       readonly missingRequiredEvidenceKinds: readonly string[];
       readonly missingToolEvidenceKinds: readonly string[];
@@ -207,11 +209,16 @@ export function deriveCurrentDecisionView(input: {
   const evidence = input.evidence;
   const assessmentGaps = state?.gaps.filter((gap) => gap.status === "open" && gap.stepId !== undefined
     && (gap.stepId === input.context!.stepId || gap.repairScopeStepIds?.includes(input.context!.stepId))) ?? [];
-  const nextAction = assessmentGaps.some((gap) => gap.suggestedAction === "fail") ? "stop"
-    : assessmentGaps.some((gap) => gap.suggestedAction === "ask_user") ? "request_input"
-    : assessmentGaps.some((gap) => gap.suggestedAction === "revise_plan") ? "revise_plan"
-    : assessmentGaps.some((gap) => gap.missingEvidenceKinds.length > 0) ? "resolve_evidence_gap"
-    : assessmentGaps.length > 0 ? "revise_completion_candidate"
+  const stepStatus = state?.steps[basis.stepId]?.status;
+  const repairInProgressGapIds = assessmentGaps.filter((gap) => canonicalGapRepairAttempts(gap) > 0
+    && gap.repairScopeStepIds?.includes(basis.stepId)
+    && (stepStatus === "pending" || stepStatus === "running")).map((gap) => gap.id);
+  const awaitingDecision = assessmentGaps.filter((gap) => !repairInProgressGapIds.includes(gap.id));
+  const nextAction = awaitingDecision.some((gap) => gap.suggestedAction === "fail") ? "stop"
+    : awaitingDecision.some((gap) => gap.suggestedAction === "ask_user") ? "request_input"
+    : awaitingDecision.some((gap) => gap.suggestedAction === "revise_plan") ? "revise_plan"
+    : awaitingDecision.some((gap) => gap.missingEvidenceKinds.length > 0) ? "resolve_evidence_gap"
+    : awaitingDecision.length > 0 ? "revise_completion_candidate"
     : evidence?.nextAction ?? input.stepSemanticFrame?.phaseRole ?? "inspect_current_state";
   return {
     schema: "agentloop.currentDecisionView/v1",
@@ -230,6 +237,7 @@ export function deriveCurrentDecisionView(input: {
     },
     currentGap: {
       assessmentGaps,
+      repairInProgressGapIds,
       receipts: {
         missingRequiredEvidenceKinds: evidence?.missingRequiredEvidenceKinds ?? [],
         missingToolEvidenceKinds: evidence?.missingToolEvidenceKinds ?? [],
@@ -278,7 +286,7 @@ export function projectCurrentDecisionView(view: CurrentDecisionView): CurrentDe
     },
     currentGap: view.currentGap,
     nextAction: view.nextAction,
-    instruction: "Use nextAction and currentGap from this committed canonical Run revision. Receipt readiness proves observed operations, not coverage of the requested facts. Open assessmentGaps remain unresolved until Assessment accepts the relevant result; a successful source receipt or a rewritten disclaimer cannot close them. Inspect existing observations or acquire missing evidence when needed; correct interpretation or delivery from existing evidence when sufficient. Tool choice remains within the Run grant. Historical diagnostics are audit material, not current blockers; an unbound diagnostic is not proof that the current object version is faulty.",
+    instruction: "Use nextAction and currentGap from this committed canonical Run revision. Receipt readiness proves observed operations, not coverage of the requested facts. Open assessmentGaps remain unresolved until Assessment accepts the relevant result; a successful source receipt or a rewritten disclaimer cannot close them. repairInProgressGapIds identify admitted repair scopes: execute and assess the current Plan step's completionBoundary, rather than repeating the already admitted plan revision or performing a downstream step's work. The shared gap closes only after its replacement scope is satisfied. Inspect existing observations or acquire missing evidence when needed; correct interpretation or delivery from existing evidence when sufficient. Tool choice remains within the Run grant. Historical diagnostics are audit material, not current blockers; an unbound diagnostic is not proof that the current object version is faulty.",
   };
 }
 

@@ -551,6 +551,8 @@ export interface PlanProposal {
   readonly selectedSkillRoles?: readonly SelectedSkillRole[];
   readonly selectedSkillIds: readonly string[];
   readonly steps: readonly PlanStepProposal[];
+  /** Recovery-only references to persisted immutable Steps, never model-authored copies. */
+  readonly retainedStepIds?: readonly string[];
   /** Explicit current-Round boundary; omission means the full requested target scope. */
   readonly roundScope?: RoundScope;
 }

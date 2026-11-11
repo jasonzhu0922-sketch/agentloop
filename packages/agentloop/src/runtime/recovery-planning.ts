@@ -98,15 +98,15 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
       USER_AUTHORITY_INSTRUCTION,
       "For assessment_failed_boundary, choose revise_plan, ask_user or fail. resume_step is reserved for interrupted execution and cannot restart an exhausted candidate loop.",
       "Choose exactly one structured recovery decision. replayPolicy=unsafe never permits resume_step.",
-      "When choosing revise_plan, submit a complete planRevision in the same decision. If you cannot produce a complete valid replacement Plan, choose fail instead.",
+      "When choosing revise_plan, submit a complete planRevision in the same decision: retainedStepIds references unchanged persisted Steps, and steps contains only new Step definitions. If you cannot produce a complete valid replacement Plan, choose fail instead.",
       "Existing Step definitions are immutable. When replacing the failed boundary, never reuse its Step id with a changed objective, dependencies, bindings, criteria or ownership: create a new repair leaf id (for example <failedStepId>.repair.<version>), omit the old failed Step so Runtime retires it, and rewire dependents to the new id. Unchanged Steps may keep their ids.",
       "A Plan revision retires a Step from future scheduling only. It never erases, authorizes, compensates for, or replays an Action already recorded for that Step. If a retired Action has an unknown external effect, preserve that fact and choose a continuation that neither relies on nor repeats that effect, or fail when no such continuation exists.",
       "If the failed boundary shows the current Plan's evidence contract is wrong for the evidence that actually exists, prefer revise_plan and repair the Plan boundary rather than resubmitting the same step.",
-      "planRevision is a complete replacement proposal, not a patch. Every step must explicitly declare targetIds, dependencies, skillIds, requiredCapabilities and successCriteria. Current bindings are in currentPlan.steps[].executionBinding.targetIds. Preserve every canonical delivery target exactly once on its producing or adopting leaf; use targetIds: [] for a prerequisite that owns no user-visible target. Do not infer ownership from criteria or requiredFacts[].basis.targetIds: those basis references may support targets owned by downstream dependent leaves. Preserve explicitly requested facts and their exact user-input provenance; remove or demote unsupported inferred facts when correcting the contract, without weakening the user's actual request. Runtime regenerates delivery_target criteria from targetIds; omit those derived criteria from the proposal.",
+      "Preserve unchanged Steps only by listing their ids in retainedStepIds; Runtime loads their exact persisted definitions, criteria, provenance and bindings. Never copy or rewrite an existing Step into steps. All completed active Steps must be retained. To change an unfinished Step or its dependencies, omit its id from retainedStepIds and create a new Step id. Every new step must explicitly declare targetIds, dependencies, skillIds, requiredCapabilities and successCriteria. Current bindings are in currentPlan.steps[].executionBinding.targetIds. Preserve every canonical delivery target exactly once on its producing or adopting leaf; use targetIds: [] for a prerequisite that owns no user-visible target. Do not infer ownership from criteria or requiredFacts[].basis.targetIds. Runtime regenerates delivery_target criteria for new Steps; omit those derived criteria from new definitions.",
       "Execution-method criteria must never be blocking. Reuse collected evidence; do not add an extra search or verification step unless it can resolve a material gap or contradiction, or is needed for an explicit user constraint.",
       "Submit basis metadata (kind, targetIds, rationale) only. Omit basis.intentId and basis.requirement, including when copying currentPlan criteria or facts: Runtime binds both from canonicalState.intent. A rationale must justify the condition; binding provenance does not prove that a derived condition is necessary.",
       "Within every revised Step, each success criterion id must appear exactly once. Copy each existing criterion at most once; do not duplicate a criterion while adding or preserving a delivery condition. Runtime derives delivery_target:<targetId> criteria from targetIds, so never submit those criteria in successCriteria.",
-      "currentPlan is an editable projection: successCriteria contains model-authored conditions and basis metadata only. runtimeDerivedSuccessCriteria preserves observed Runtime obligations for review; never copy that field or its entries into planRevision. Canonical targets and targetIds retain those delivery obligations and Runtime regenerates their criteria.",
+      "currentPlan is read-only context. Its projected successCriteria and requiredFacts help design new replacement Steps; they are not a lossless representation for resubmitting an existing Step. runtimeDerivedSuccessCriteria preserves observed Runtime obligations for review; never copy that field or its entries into planRevision. Retained Step definitions are loaded by Runtime; canonical targets and targetIds regenerate delivery obligations only for new Steps.",
       "Use failedBoundary.unmetCriteria to identify the actual result gap and any contractIssue. Choose a continuation that can change that cause, considering previously attempted strategies, available capabilities and the remaining gap budget in runtimeContext. A locally stalled turn does not prove global exhaustion. Never repeat unchanged work or weaken an explicit user requirement to obtain approval.",
       "Evidence concerns distinguish observations from unverified hypotheses. Do not elevate a suggested explanation or action into a proven cause. Reuse references only for the properties they support; a contradiction can affect several results sharing a premise, and repeated results do not independently verify that premise. Bind the relevant evidence for inspection in the repair instead of assuming it proves the requested result.",
       "Do not ask the user to authorize a Plan revision, confirm whether a recorded Action had an effect, or accept a candidate as evidence that it meets a result criterion. Those are Runtime recovery and assessment obligations. Use ask_user only for a concrete, missing input that only the user can supply and that an execution continuation will consume; a missing capability to observe or verify the requested result is not such an input. When the available capabilities cannot change or verify a remaining result gap, choose fail and retain the stage artifact and its evidence.",
@@ -133,7 +133,7 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
         if (response.finishReason === "length" || response.toolCalls.length !== 1 || response.toolCalls[0].name !== SUBMIT_RECOVERY_DECISION_TOOL.name) {
           throw new AppError("PLANNING_ERROR", "Recovery Planner must submit exactly one structured recovery decision", 422);
         }
-        return parseRecoveryDecision(response.toolCalls[0], input.canonicalState);
+        return parseRecoveryDecision(response.toolCalls[0], input.canonicalState, input.plan);
       } catch (error) {
         if (!(error instanceof AppError) || error.code !== "PLANNING_ERROR" || attempt === 2) throw error;
         validationError = error;
@@ -182,7 +182,7 @@ export class ModelPlanRevisionAssessor implements PlanRevisionAssessor {
   }
 }
 
-export function parseRecoveryDecision(call: ModelToolCall, canonicalState: CanonicalRunState): RecoveryDecisionProposal {
+export function parseRecoveryDecision(call: ModelToolCall, canonicalState: CanonicalRunState, currentPlan?: RecoveryPlannerInput["plan"]): RecoveryDecisionProposal {
   try {
     const value = requireRecord(call.arguments, "submit_recovery_decision arguments");
     const decision = requireString(value.decision, "decision", { max: 32 }) as RecoveryDecisionKind;
@@ -192,7 +192,7 @@ export function parseRecoveryDecision(call: ModelToolCall, canonicalState: Canon
     if (!Number.isSafeInteger(value.expectedActionRevision) || (value.expectedActionRevision as number) < 1) {
       throw badRequest("expectedActionRevision must be a positive integer");
     }
-    const planRevision = value.planRevision === undefined ? undefined : parsePlanProposal(value.planRevision, canonicalState);
+    const planRevision = value.planRevision === undefined ? undefined : parsePlanProposal(value.planRevision, canonicalState, currentPlan);
     const question = value.question === undefined ? undefined : requireString(value.question, "question", { max: 8_000 });
     if (decision === "revise_plan" && planRevision === undefined) throw badRequest("planRevision is required for revise_plan");
     if (decision !== "revise_plan" && planRevision !== undefined) throw badRequest("planRevision is only valid for revise_plan");
@@ -304,17 +304,34 @@ function planRevisionRuntimeContext(input: PlanRevisionAssessmentInput): Runtime
   };
 }
 
-function parsePlanProposal(value: unknown, canonicalState: CanonicalRunState): PlanProposal {
+function parsePlanProposal(value: unknown, canonicalState: CanonicalRunState, currentPlan?: RecoveryPlannerInput["plan"]): PlanProposal {
   const record = requireRecord(value, "planRevision");
-  if (!Array.isArray(record.steps) || record.steps.length === 0 || record.steps.length > 100) {
-    throw badRequest("planRevision.steps must contain between 1 and 100 entries");
+  const retainedStepIds = requireStringArray(record.retainedStepIds, "planRevision.retainedStepIds", 100);
+  if (new Set(retainedStepIds).size !== retainedStepIds.length) throw badRequest("planRevision.retainedStepIds must be unique");
+  if (!Array.isArray(record.steps) || record.steps.length + retainedStepIds.length === 0 || record.steps.length + retainedStepIds.length > 100) {
+    throw badRequest("planRevision must contain between 1 and 100 new or retained Steps");
+  }
+  const steps = record.steps.map((step, index) => parseStep(step, index, canonicalState));
+  for (const id of retainedStepIds) {
+    if (!currentPlan?.steps.some(step => step.id === id && step.retiredAt === undefined)) throw badRequest(`Cannot retain unknown or retired Step ${id}`);
+  }
+  for (const step of steps) {
+    if (retainedStepIds.includes(step.id) || currentPlan?.steps.some(old => old.id === step.id)) {
+      throw badRequest(`Existing Step ${step.id} must be referenced in retainedStepIds, not rewritten in steps; use a new id for a replacement`);
+    }
+  }
+  for (const step of currentPlan?.steps ?? []) {
+    if (step.status === "completed" && step.retiredAt === undefined && !retainedStepIds.includes(step.id)) {
+      throw badRequest(`Completed Step ${step.id} must be preserved in retainedStepIds`);
+    }
   }
   return {
     goal: requireString(record.goal, "planRevision.goal", { max: 20_000 }),
-    ...(record.shape === undefined ? {} : { shape: parsePlanShape(record.shape) }),
+    shape: record.shape === undefined ? "recovery_patch" : parsePlanShape(record.shape),
     selectedSkillIds: requireStringArray(record.selectedSkillIds, "planRevision.selectedSkillIds", 100),
     ...(record.selectedSkillRoles === undefined ? {} : { selectedSkillRoles: parseSelectedSkillRoles(record.selectedSkillRoles) }),
-    steps: record.steps.map((step, index) => parseStep(step, index, canonicalState)),
+    retainedStepIds,
+    steps,
   };
 }
 
@@ -490,7 +507,7 @@ function planProposalSchema(): Record<string, unknown> {
   return {
     type: "object",
     additionalProperties: false,
-    required: ["goal", "selectedSkillIds", "steps"],
+    required: ["goal", "selectedSkillIds", "retainedStepIds", "steps"],
     properties: {
       goal: { type: "string" },
       shape: { enum: ["single_leaf", "fact_then_produce", "multi_deliverable", "pipeline", "recovery_patch"] },
@@ -499,7 +516,8 @@ function planProposalSchema(): Record<string, unknown> {
         type: "object", additionalProperties: false, required: ["skillId", "role", "reason"],
         properties: { skillId: { type: "string" }, role: { type: "string", enum: ["primary_builder", "source_provider", "support", "qa"] }, reason: { type: "string" } },
       } },
-      steps: { type: "array", minItems: 1, items: step },
+      retainedStepIds: { type: "array", uniqueItems: true, description: "Unchanged active persisted Step ids. Include all completed Steps. Runtime preserves their exact definitions; do not copy them into steps.", items: { type: "string" } },
+      steps: { type: "array", description: "Only new Steps with new ids. Retained Steps are referenced separately.", items: step },
     },
   };
 }

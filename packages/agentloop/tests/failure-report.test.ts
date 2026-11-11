@@ -9,7 +9,48 @@ import { AppDatabase } from "../src/storage/database.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { RunService } from "../src/runtime/run-service.ts";
 import { CompletionFailure } from "../src/runtime/completion-failure.ts";
+import { OpenAICompatibleModel } from "../src/runtime/models.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS, testOwner } from "./runtime-test-helpers.ts";
+
+test("the failure-report provider sees committed observations without assistant tool scaffolding", async () => {
+  const originalFetch = globalThis.fetch;
+  let reports = 0;
+  let executions = 0;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    const reporting = String(body.messages[0].content).includes("runtime_failure_report");
+    if (reporting) {
+      reports += 1;
+      assert.equal(body.messages.some((message: { role: string }) => message.role === "assistant"), false,
+        "reporting must not imitate tool-call commentary or server-authored assistant placeholders");
+      assert.doesNotMatch(JSON.stringify(body.messages), /FUNDAMENTAL PRIORITY|completed the prior operation|tool_calls|reasoning_content/);
+      assert.match(JSON.stringify(body.messages), /127199/);
+      assert.match(JSON.stringify(body.messages), /current-stage-result/);
+    }
+    return new Response(JSON.stringify({ choices: [{ finish_reason: reporting ? "stop" : "tool_calls", message: reporting
+      ? { content: "已生成阶段图片，尚未完成交付。" }
+      : { content: "FUNDAMENTAL PRIORITY: invoke the tool.", tool_calls: [{ id: "observed", type: "function",
+          function: { name: "observe", arguments: "{}" } }] } }] }), { headers: { "content-type": "application/json" } });
+  };
+  try {
+    const provider = new OpenAICompatibleModel({ baseUrl: "https://provider.example.test/v1", apiKey: "fixture", model: "test",
+      contextWindowTokens: 128000, maxOutputTokens: 8192 });
+    const grant = createCapabilityGrant({ runId: "wire-report", actorUserId: "owner", depth: 0, allowedToolNames: ["observe"], allowedSkillIds: [] });
+    await assert.rejects(runAgentLoop({ runId: grant.runId, grant, input: "生成图片", systemPrompt: "Test", maxSteps: 1,
+      model: { limits: provider.limits, complete: provider.complete.bind(provider) },
+      tools: new ToolRegistry([{ name: "observe", description: "Observe", inputSchema: { type: "object" }, executionMode: "parallel",
+        replaySafe: true, parse: value => value, execute: async () => { executions += 1; return { marker: "current-stage-result", bytes: 127199 }; } }]),
+      emit: () => undefined,
+    }), (error: unknown) => {
+      assert.ok(error instanceof AppError);
+      assert.equal(error.code, "RUN_LIMIT_EXCEEDED");
+      assert.equal(error.details?.partialOutput, "已生成阶段图片，尚未完成交付。");
+      return true;
+    });
+    assert.equal(executions, 1);
+    assert.equal(reports, 1);
+  } finally { globalThis.fetch = originalFetch; }
+});
 
 for (const stop of ["budget", "no_progress"] as const) {
   test(`${stop} exit reports current work against the goal in one extra tool-free turn`, async () => {
@@ -47,7 +88,9 @@ for (const stop of ["budget", "no_progress"] as const) {
       return true;
     });
     assert.equal(reports, 1);
-    assert.equal(executions, 1); // Reserved/final reporting turns execute no tools.
+    // Completion preparation retains the authorized catalog; the final
+    // reporting turn itself is the tool-free boundary asserted above.
+    assert.equal(executions, stop === "budget" ? 2 : 1);
     assert.equal(events.filter((event) => event.type === "failure_report.started").length, 1);
     assert.equal(events.some((event) => event.type === "loop.completed"), false);
   });

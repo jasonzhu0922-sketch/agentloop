@@ -1,4 +1,4 @@
-import { artifactFormatFamilyForPath, canonicalArtifactFormatFamily, isSourceArtifactPath, semanticArtifactFamily } from "../shared/artifact-format.ts";
+import { canonicalArtifactFormatFamily, isSourceArtifactPath, semanticArtifactFamily } from "../shared/artifact-format.ts";
 import type { ArtifactTarget, StepEvidenceProducerBinding } from "../planning/contracts.ts";
 import type { AgentLoopToolEvidence, ModelToolCall } from "./contracts.ts";
 import {
@@ -1503,7 +1503,17 @@ export function artifactMatchesExpectedTarget(
   const effectiveArtifactKind = expectedArtifactKind ?? formatFamily;
   if (effectiveArtifactKind !== undefined && !artifactMatchesExpectedKind(artifact, effectiveArtifactKind)) return false;
   if (expectedArtifactFormat === undefined || formatFamily !== undefined) return true;
-  return artifactFormatFamilyForPath(artifact.path) === canonicalArtifactFormatFamily(expectedArtifactFormat);
+  const extension = pathExtension(artifact.path);
+  return extension !== undefined
+    && canonicalArtifactFormatFamily(extension) === canonicalArtifactFormatFamily(expectedArtifactFormat);
+}
+
+/** A format constraint must admit a physical filename in its declared family. */
+export function artifactFormatMatchesKind(format: string, kind: string): boolean {
+  const extension = format.trim().toLowerCase().replace(/^\./u, "");
+  return /^[a-z0-9][a-z0-9_-]*$/u.test(extension)
+    && semanticArtifactFamily(extension) === undefined
+    && artifactMatchesExpectedTarget({ path: `output.${extension}` }, kind, extension);
 }
 
 function artifactKindMatchesExpected(actual: string, expected: string): boolean {
@@ -1682,6 +1692,9 @@ function isPatchPreconditionDiagnostic(result: string): boolean {
 }
 
 function isActionableDiagnostic(evidence: AgentLoopToolEvidence): boolean {
+  // A prepare rejection has no artifact inspection or execution result.
+  // Changing file bytes cannot repair tool arguments or target ownership.
+  if (evidence.failurePhase === "prepare" || evidence.invocationStatus === "rejected") return false;
   const result = parseToolEvidenceRecord(evidence);
   if (
     evidence.toolName === "computer_run_command"

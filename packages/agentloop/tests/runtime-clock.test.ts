@@ -110,6 +110,32 @@ test("relative calendar bounds use the Run's local date, not UTC or the model's 
   assert.throws(() => resolveTemporalScope({ expression: "notable", basis: "runtime_clock", startDayOffset: -4, endDayOffset: 1 }, clock, ["not able"]), /quote/);
 });
 
+test("calendar-month scopes preserve exact month buckets across year, leap day and DST boundaries", () => {
+  const clock = createRuntimeClock(Date.parse("2026-11-11T13:30:26.475Z"), "Asia/Shanghai");
+  const current = resolveTemporalScope({ expression: "最近12个月", basis: "runtime_clock", alignment: "calendar_month",
+    startMonthOffset: -11, endAtReferenceInstant: true }, clock, ["查询最近12个月各月销售额"]);
+  assert.equal(current.startInclusive, "2025-11-30T16:00:00.000Z");
+  assert.equal(current.endExclusive, clock.anchorDateTimeIso);
+  assert.equal(current.alignment, "calendar_month");
+  const completed = resolveTemporalScope({ expression: "最近12个月", basis: "runtime_clock", alignment: "calendar_month",
+    startMonthOffset: -12, endMonthOffset: 0 }, clock, ["查询最近12个月各月销售额"]);
+  assert.equal(completed.startInclusive, "2025-10-31T16:00:00.000Z");
+  assert.equal(completed.endExclusive, "2026-10-31T16:00:00.000Z");
+  const leap = createRuntimeClock(Date.parse("2024-03-31T12:00:00Z"), "America/New_York");
+  const previous = resolveTemporalScope({ expression: "上个月", basis: "runtime_clock", alignment: "calendar_month",
+    startMonthOffset: -1, endMonthOffset: 0 }, leap, ["统计上个月"]);
+  assert.equal(previous.startInclusive, "2024-02-01T05:00:00.000Z");
+  assert.equal(previous.endExclusive, "2024-03-01T05:00:00.000Z");
+  assert.throws(() => resolveTemporalScope({ expression: "上个月", basis: "runtime_clock", alignment: "calendar_month",
+    startMonthOffset: -1, endMonthOffset: 0, startDayOffset: -30 }, leap, ["上个月"]), /month offsets only/);
+  assert.throws(() => resolveTemporalScope({ expression: "上个月", basis: "runtime_clock", startMonthOffset: -1, endMonthOffset: 0 }, leap, ["上个月"]), /calendar_month alignment/);
+  assert.throws(() => resolveTemporalScope({ expression: "上个月", basis: "runtime_clock", alignment: "elapsed_seconds",
+    startMonthOffset: -1, startSecondOffset: -3600, endSecondOffset: 0 }, leap, ["上个月"]), /calendar_month alignment/);
+  const invocation = withRuntimeClock({ runId: "months", phase: "execution", systemPrompt: "Test", messages: [], tools: [] }, clock, current);
+  assert.match(invocation.systemPrompt, /Derive query filters and display buckets from the same/);
+  assert.match(invocation.systemPrompt, /2025-11-30T16:00:00.000Z/);
+});
+
 test("calendar days preserve DST boundaries and historical references do not mutate the clock", () => {
   const clock = createRuntimeClock(Date.parse("2026-11-01T16:00:00Z"), "America/New_York");
   const scope = resolveTemporalScope({ expression: "today", basis: "runtime_clock", startDayOffset: 0, endDayOffset: 1 }, clock, ["today"]);

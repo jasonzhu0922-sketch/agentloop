@@ -136,6 +136,10 @@ export class RecoveryRepository {
         expectedActionRevision: proposal.expectedActionRevision,
         decision: proposal.decision,
         evidenceRefs: proposal.evidenceRefs,
+        ...(proposal.planRevision === undefined ? {} : {
+          retainedStepIds: proposal.planRevision.retainedStepIds ?? [],
+          proposedNewStepIds: proposal.planRevision.steps.map(step => step.id),
+        }),
       }, now);
     });
     return await this.require(id);

@@ -26,6 +26,75 @@ function intent(goal: string, mode = "execute", kind = "none") {
   };
 }
 
+for (const format of ["chart", "dashboard", "pdf"]) test(`unsatisfiable image format is repaired before canonical target admission (${format})`, async () => {
+  const database = new AppDatabase(":memory:");
+  let attempts = 0;
+  let planned = false;
+  const goal = "绘制折线图，缺失值留空。";
+  try {
+    const service = new RunService({ database, skills: new SkillService(database),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        attempts += 1;
+        if (attempts > 1) assert.match(request.systemPrompt, /cannot be satisfied by a physical image artifact/);
+        const args = intent(goal);
+        return resolve({ ...args, taskIntent: { ...args.taskIntent, operation: "create_artifact",
+          deliverables: [{ targetId: "trend", purpose: goal, expectedArtifactCount: 1,
+            action: "create", kind: "image", surface: "workspace_artifact", ...(attempts === 1 ? { format } : {}) }] } });
+      } }),
+      plannerFactory: () => ({ plan: async (task) => {
+        planned = true;
+        assert.equal(attempts, 2);
+        assert.equal(task.canonicalState.targets.trend.kind, "image");
+        assert.equal(task.canonicalState.targets.trend.format, undefined);
+        assert.equal(task.canonicalState.targets.trend.purpose, goal);
+        throw new AppError("PLANNING_ERROR", "format contract verified before execution", 422);
+      } }),
+    });
+    await assert.rejects(service.executeConversation("owner", goal), /format contract verified before execution/);
+    assert.equal(planned, true);
+  } finally { database.close(); }
+});
+
+test("one calendar-month scope survives resolver admission, planning, execution and persistence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-month-scope-"));
+  const database = new AppDatabase(":memory:");
+  const goal = "统计最近12个月各月销售额，缺失月份留空。";
+  let planned = false;
+  let executed = false;
+  const bounds = { startInclusive: "2025-11-30T16:00:00.000Z", endExclusive: "2026-11-11T10:00:00.000Z" };
+  try {
+    const service = new RunService({ database, skills: new SkillService(database), workspaceRoot: root,
+      clock: () => Date.parse(bounds.endExclusive), timeZone: "Asia/Shanghai",
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+        if (request.runId.startsWith("conversation-turn:")) return resolve({ ...intent(goal),
+          temporalScope: { expression: "最近12个月", basis: "runtime_clock", alignment: "calendar_month",
+            startMonthOffset: -11, endAtReferenceInstant: true } });
+        executed = true;
+        assert.match(request.systemPrompt, /resolved_temporal_scope/);
+        assert.ok(request.systemPrompt.includes(bounds.startInclusive));
+        assert.ok(request.systemPrompt.includes(bounds.endExclusive));
+        return { content: "统计范围覆盖含本月的十二个自然月，本月截至当前参考时刻。", finishReason: "stop", toolCalls: [] };
+      } }),
+      plannerFactory: () => ({ plan: async task => {
+        planned = true;
+        assert.deepEqual(task.canonicalState.intent.turnResolution?.temporalScope, {
+          expression: "最近12个月", basis: "runtime_clock", timeZone: "Asia/Shanghai",
+          anchorDateTimeIso: bounds.endExclusive, alignment: "calendar_month", ...bounds,
+        });
+        return singleStepTestPlanner().plan(task);
+      } }), assessorFactory: () => approvingTestAssessor(),
+    });
+    const run = await service.executeConversation("owner", goal);
+    assert.equal(run.status, "completed");
+    assert.equal(planned && executed, true);
+    const resolved = (await service.events("owner", run.id)).find(event => event.type === "conversation.turn.resolved");
+    assert.deepEqual(resolved?.data.temporalScope, {
+      expression: "最近12个月", basis: "runtime_clock", timeZone: "Asia/Shanghai",
+      anchorDateTimeIso: bounds.endExclusive, alignment: "calendar_month", ...bounds,
+    });
+  } finally { database.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 for (const kind of ["none", "html"]) test(`history reconstruction carries the latest output and exact prior Result to a new Plan (${kind})`, async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-history-reconstruction-"));
   const database = new AppDatabase(":memory:");

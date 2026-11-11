@@ -641,15 +641,18 @@ for (const humanPause of [false, true]) {
           assert.equal(view.identity.canonicalState.revision, state.revision,
             "every model turn must consume the latest committed Run revision");
           const gaps = view.currentGap.assessmentGaps;
+          const repairing = view.identity.stepId === "complete-records";
           if (gaps.length > 0) {
-            assert.equal(view.nextAction, "resolve_evidence_gap");
+            // The admitted replacement follows its own completion boundary;
+            // the original unmet fact remains visible until Assessment accepts it.
+            assert.equal(view.nextAction, repairing ? "submit_completion_candidate" : "resolve_evidence_gap");
+            assert.deepEqual(view.currentGap.repairInProgressGapIds, repairing ? [gapId] : []);
             assert.equal(gaps[0].id, gapId);
             assert.equal(gaps[0].unmetCriteria[0].criterionId, "second-total");
             assert.deepEqual(view.currentGap.receipts.missingToolEvidenceKinds, [], "a source receipt exists but the second total is still unverified");
             assert.ok(request.tools.some((tool) => tool.name === "read_records"));
             assert.doesNotMatch(request.runtimeContext!.content, /Return a complete standalone replacement now/);
           }
-          const repairing = view.identity.stepId === "complete-records";
           if (repairing) sawRepairView = true;
           if (sourceReads === 0 || (repairing && sourceReads === 1)) {
             return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `read-${sourceReads}`, name: "read_records", arguments: {} }] };
@@ -676,7 +679,7 @@ for (const humanPause of [false, true]) {
           return parseRecoveryDecision({ id: "repair-plan", name: "submit_recovery_decision", arguments: {
             actionId: input.action.id, expectedActionRevision: input.action.revision, decision: "revise_plan",
             rationale: "Read the missing second total, preserving existing observations.", evidenceRefs: input.canonicalGap!.evidenceRefs,
-            planRevision: { goal: input.plan!.goal, shape: "recovery_patch" as const, selectedSkillIds: [],
+            planRevision: { retainedStepIds: [], goal: input.plan!.goal, shape: "recovery_patch" as const, selectedSkillIds: [],
               steps: [{ id: "complete-records", objective: failed.objective, role: "repair" as const, dependencies: [], skillIds: [],
                 targetIds: failed.executionBinding.targetIds, requiredCapabilities: failed.requiredCapabilities, sourceConstraint: null,
                 evidenceContract: failed.evidenceContract, successCriteria: recoveryModelCriteria(failed.successCriteria) }] } },
@@ -858,7 +861,7 @@ test("Recovery parsing preserves result criteria, original source identities and
     requiredFacts: [{ id: "totals", description: "The two recorded totals", evidenceKinds: ["source_summary"], basis }] };
   const decision = parseRecoveryDecision({ id: "recovery", name: "submit_recovery_decision", arguments: {
     actionId: "action", expectedActionRevision: 1, decision: "revise_plan", rationale: "Repair the comparison", evidenceRefs: [],
-    planRevision: { ...proposal, shape: "recovery_patch", steps: [{ ...step,
+    planRevision: { retainedStepIds: [], ...proposal, shape: "recovery_patch", steps: [{ ...step,
       successCriteria: recoveryModelCriteria(step.successCriteria),
       requiredFacts: step.requiredFacts.map((fact) => ({ ...fact, basis: basisMetadata })),
     }] },
@@ -876,13 +879,13 @@ test("Recovery parsing treats a null sourceConstraint as absent while rejecting 
     successCriteria: recoveryModelCriteria(proposal.steps[0]!.successCriteria) };
   const decision = parseRecoveryDecision({ id: "recovery-null-source", name: "submit_recovery_decision", arguments: {
     actionId: "action", expectedActionRevision: 1, decision: "revise_plan", rationale: "Repair the comparison", evidenceRefs: [],
-    planRevision: { ...proposal, shape: "recovery_patch", steps: [step] },
+    planRevision: { retainedStepIds: [], ...proposal, shape: "recovery_patch", steps: [step] },
   }}, state);
   assert.equal(decision.planRevision!.steps[0]!.sourceConstraint, undefined);
   for (const malformed of ["records", [], false, 0, { requiredToolSourceIds: null }, { requiredUploadedSourceIds: [12] }]) {
     assert.throws(() => parseRecoveryDecision({ id: "recovery-bad-source", name: "submit_recovery_decision", arguments: {
       actionId: "action", expectedActionRevision: 1, decision: "revise_plan", rationale: "Repair the comparison", evidenceRefs: [],
-      planRevision: { ...proposal, shape: "recovery_patch", steps: [{ ...step, sourceConstraint: malformed }] },
+      planRevision: { retainedStepIds: [], ...proposal, shape: "recovery_patch", steps: [{ ...step, sourceConstraint: malformed }] },
     }}, state), (error: any) => error.code === "PLANNING_ERROR");
   }
 });
@@ -892,16 +895,25 @@ test("Recovery parsing rejects delivery criteria that Admission derives from tar
   const targetId = "delivery-target";
   assert.throws(() => parseRecoveryDecision({ id: "recovery-derived-target", name: "submit_recovery_decision", arguments: {
     actionId: "action", expectedActionRevision: 1, decision: "revise_plan", rationale: "Repair the result", evidenceRefs: [],
-    planRevision: { ...proposal, shape: "recovery_patch", steps: [{ ...proposal.steps[0], id: "repair", targetIds: [targetId],
+    planRevision: { retainedStepIds: [], ...proposal, shape: "recovery_patch", steps: [{ ...proposal.steps[0], id: "repair", targetIds: [targetId],
       successCriteria: [{ id: `delivery_target:${targetId}`, description: "Derived target criterion", source: "task" }] }] },
   } }, state), /Runtime-derived delivery_target:delivery-target/);
 });
 
 test("an invalid Recovery response commits a stopped Outcome and retains the open Gap", async () => {
   const database = new AppDatabase(":memory:");
+  let reports = 0;
   try {
     const runs = new RunService({ database, skills: new SkillService(database), plannerFactory: singleStepTestPlanner, tools: [],
-      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async () => ({ content: "unverified candidate", finishReason: "stop", toolCalls: [] }) }),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
+        if ((request.runtimeContext?.content ?? "").includes("<runtime_failure_report>")) {
+          reports += 1;
+          assert.deepEqual(request.tools, []);
+          assert.match(request.runtimeContext!.content, /agentloop.failureReportContext\/v1/);
+          return { content: "比较未完成，当前没有可交付的结论。", finishReason: "stop", toolCalls: [] };
+        }
+        return { content: "unverified candidate", finishReason: "stop", toolCalls: [] };
+      } }),
       recoveryPlannerFactory: () => ({ decide: async () => { throw new Error("invalid structured recovery response"); } }),
       assessorFactory: () => ({ assess: async (input) => ({ ...await approvingTestAssessor().assess(input), approved: false,
         criteria: input.step.successCriteria.map((criterion) => ({ criterionId: criterion.id, satisfied: false, rationale: "Result is incomplete", evidenceRefs: [] })),
@@ -914,6 +926,7 @@ test("an invalid Recovery response commits a stopped Outcome and retains the ope
     assert.equal(row.delivery_receipt_json, null);
     assert.equal((await runs.events("owner", run.id)).some((event) => event.type === "terminal.delivery_committed"), false);
     assert.match(run.output ?? "", /未完成/);
+    assert.equal(reports, 1);
   } finally { await database.close(); }
 });
 
@@ -1068,7 +1081,7 @@ test("Recovery projects editable criteria separately and Admission alone restore
     assert.equal(context.canonicalState.targets.comparison.purpose, userInput);
     return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "revise", name: "submit_recovery_decision", arguments: {
       actionId: "recovery-action", expectedActionRevision: 1, decision: "revise_plan", rationale: "Repair the result", evidenceRefs: [],
-      planRevision: { goal: userInput, selectedSkillIds: [], steps: [{ id: "answer.repair.2", objective: userInput,
+      planRevision: { retainedStepIds: [], goal: userInput, selectedSkillIds: [], steps: [{ id: "answer.repair.2", objective: userInput,
         dependencies: [], skillIds: [], requiredCapabilities: ["conversation_delivery"], targetIds: step.executionBinding.targetIds,
         requiredFacts: step.requiredFacts, successCriteria: step.successCriteria }] },
     } }] };

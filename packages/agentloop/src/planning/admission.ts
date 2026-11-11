@@ -82,6 +82,8 @@ const SOURCE_PROVIDER_EVIDENCE_KINDS = new Set<EvidenceKind>([
 export function admitPlan(input: {
   runId: string;
   proposal: PlanProposal;
+  /** Persisted recovery authority; retained Steps bypass definition regeneration. */
+  currentPlan?: ExecutionPlan;
   availableSkills: readonly PrivateSkill[];
   availableToolNames: ReadonlySet<string>;
   availableTools?: readonly PlanningToolSummary[];
@@ -115,7 +117,34 @@ export function admitPlan(input: {
   const canonicalTargets = targetScope;
   const taskIntent = taskSemantics.intent;
   const canonicalRequiredToolSourceIds = input.canonicalState.intent.requiredToolSourceIds;
-  const proposal = bindRequiredSkillCompanions(input.proposal, input.availableSkills);
+  const retainedIds = input.proposal.retainedStepIds ?? [];
+  assertUnique(retainedIds, "retained step IDs");
+  const retained = new Map<string, PlanStep>();
+  if (retainedIds.length > 0 && (input.proposal.shape !== "recovery_patch" || input.currentPlan?.runId !== input.runId)) {
+    reject("Retaining Steps requires the persisted current Plan of this Run and a recovery_patch");
+  }
+  for (const id of retainedIds) {
+    const step = input.currentPlan?.steps.find(step => step.id === id && step.retiredAt === undefined);
+    if (step === undefined) reject(`Cannot retain unknown or retired Step ${id}`);
+    retained.set(id, step);
+  }
+  for (const step of input.proposal.steps) {
+    if (input.currentPlan?.steps.some(old => old.id === step.id)) {
+      reject(`Existing Step ${step.id} must be retained by reference; a replacement requires a new Step id`);
+    }
+  }
+  for (const step of input.currentPlan?.steps ?? []) {
+    if (step.status === "completed" && step.retiredAt === undefined && !retained.has(step.id)) {
+      reject(`Completed Step ${step.id} must be retained by reference`);
+    }
+  }
+  const retainedProposals = [...retained.values()].map(step => ({
+    ...step,
+    targetIds: step.executionBinding.targetIds,
+  }));
+  const proposal = bindRequiredSkillCompanions({
+    ...input.proposal, steps: [...retainedProposals, ...input.proposal.steps],
+  }, input.availableSkills);
   assertRuntimeResultBindings(input.resultBindings ?? []);
   if (proposal.steps.length === 0 || proposal.steps.length > 100) {
     reject("Plan must contain between 1 and 100 steps");
@@ -150,6 +179,20 @@ export function admitPlan(input: {
       : planningCapabilitiesFromTools(input.availableTools));
 
   const steps: PlanStep[] = proposal.steps.map((step, position) => {
+    const persisted = retained.get(step.id);
+    if (persisted !== undefined) {
+      for (const id of persisted.dependencies) {
+        if (!stepIdSet.has(id)) reject(`Retained Step ${step.id} has omitted dependency ${id}; replace the dependent with a new Step id`);
+      }
+      if (persisted.parentId !== undefined && !stepIdSet.has(persisted.parentId)) reject(`Retained Step ${step.id} has omitted parent ${persisted.parentId}`);
+      for (const id of persisted.skillIds) {
+        if (!selectedSet.has(id)) reject(`Retained Step ${step.id} binds unselected Skill ${id}`);
+        boundSkillIds.add(id);
+      }
+      // The reference carries no editable fields. Keep the original execution,
+      // evidence and acceptance contract, including its canonical provenance.
+      return persisted;
+    }
     const kind = step.kind ?? "leaf";
     const refinementState = normalizeRefinementState(kind, step.refinementState);
     const requiredFacts = step.requiredFacts ?? [];
@@ -387,7 +430,7 @@ export function admitPlan(input: {
     };
   });
 
-  const admittedSteps = normalizeDependencyEvidenceReuse(steps);
+  const admittedSteps = normalizeDependencyEvidenceReuse(steps, new Set(retainedIds));
   assertDeliveryTargetCoverage(admittedSteps, canonicalTargets);
   assertArtifactTargetCoverage(admittedSteps, taskSemantics, ownedTargetIds);
   assertStructuredCapabilitiesMatchTaskSemantics(admittedSteps, taskSemantics);
@@ -712,11 +755,13 @@ export function bindRequiredSkillCompanions(
  */
 function normalizeDependencyEvidenceReuse(
   steps: readonly PlanStep[],
+  retainedIds: ReadonlySet<string> = new Set(),
 ): readonly PlanStep[] {
   const byId = new Map(steps.map((step) => [step.id, step]));
   return steps.map((step) => {
     if (
-      step.kind !== "leaf"
+      retainedIds.has(step.id)
+      || step.kind !== "leaf"
       || step.role === "repair"
       || step.evidenceContract === undefined
     ) return step;

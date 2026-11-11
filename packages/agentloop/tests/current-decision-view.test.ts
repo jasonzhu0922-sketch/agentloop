@@ -134,3 +134,29 @@ test("canonical gap direction distinguishes evidence, synthesis, plan revision a
     assert.equal(deriveCurrentDecisionView(data).nextAction, expected);
   }
 });
+
+test("an admitted repair follows its current stage while the shared Gap stays open", () => {
+  const data = input();
+  data.context.canonicalState.steps = {
+    build: { stepId: "build", status: "running", targetIds: [], evidenceRefs: [], updatedAt: 4 },
+  };
+  data.context.canonicalState.gaps = [gap({ stepId: "facts", suggestedAction: "revise_plan", missingEvidenceKinds: ["source_summary"],
+    repairAttempts: 1, repairStepIds: ["original", "facts", "build"], repairScopeStepIds: ["facts", "build"] })];
+  const producing = deriveCurrentDecisionView(data);
+  assert.equal(producing.nextAction, "produce_artifact");
+  assert.deepEqual(producing.currentGap.repairInProgressGapIds, ["gap"]);
+  assert.equal(producing.currentGap.assessmentGaps[0].status, "open");
+  assert.deepEqual(producing.currentGap.assessmentGaps[0].missingEvidenceKinds, ["source_summary"]);
+  data.evidence = { ...data.evidence, nextAction: "submit_completion_candidate", missingToolEvidenceKinds: [] };
+  assert.equal(deriveCurrentDecisionView(data).nextAction, "submit_completion_candidate");
+  for (const suggestedAction of ["ask_user", "fail", "repair_leaf"] as const) {
+    data.context.canonicalState.gaps = [{ ...data.context.canonicalState.gaps[0], suggestedAction }];
+    assert.equal(deriveCurrentDecisionView(data).nextAction, "submit_completion_candidate");
+  }
+  data.context.canonicalState.gaps = [{ ...data.context.canonicalState.gaps[0], suggestedAction: "revise_plan" }];
+  // A rejection during this repair requires a new decision, not permanent
+  // exemption from the same canonical Gap.
+  data.context.canonicalState.steps.build.status = "repairable";
+  assert.equal(deriveCurrentDecisionView(data).nextAction, "revise_plan");
+  assert.deepEqual(deriveCurrentDecisionView(data).currentGap.repairInProgressGapIds, []);
+});
