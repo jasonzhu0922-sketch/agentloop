@@ -3,7 +3,7 @@
   "executors": [
     {
       "id": "data-access",
-      "description": "Read metadata or execute caller SQL using the complete deterministic gateway and root connection configuration bundled in this Skill. No external project or model workflow.",
+      "description": "Read metadata or execute caller SQL using the complete deterministic TiDB/MySQL gateway and root connection configuration bundled in this Skill. No external project or model workflow.",
       "command": "python3",
       "script": "scripts/data_client.py",
       "actions": [

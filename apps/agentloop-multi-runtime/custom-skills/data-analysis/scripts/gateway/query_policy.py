@@ -8,13 +8,17 @@ from sqlglot.optimizer.scope import Scope, traverse_scope
 from sqlglot.optimizer.qualify import qualify
 from sqlglot.lineage import lineage
 from .scenarios import current_scenario
+from .query_parameters import parser_sql, tokens
 
 # Names are SQLGlot's normalized function names, not arbitrary database functions.
 SAFE_FUNCTIONS = frozenset('CASE IF COUNT SUM AVG MIN MAX COALESCE NULLIF ROUND ABS CEIL CEILING FLOOR MOD POWER SQRT LOWER UPPER TRIM LTRIM RTRIM LENGTH SUBSTRING REPLACE CONCAT CONCAT_WS SPLIT_PART POSITION EXTRACT DATE_TRUNC TIMESTAMP_TRUNC TIME_TO_STR TIME_TO_DATE STR_TO_DATE TO_CHAR CURRENT_DATE CURRENT_TIMESTAMP NOW CAST TRY_CAST ROW_NUMBER RANK DENSE_RANK LAG LEAD FIRST_VALUE LAST_VALUE NTH_VALUE NTILE PERCENT_RANK CUME_DIST STDDEV STDDEV_POP STDDEV_SAMP VARIANCE VAR_POP VAR_SAMP BOOL_AND BOOL_OR STRING_AGG ARRAY_AGG GREATEST LEAST'.split())
+SAFE_FUNCTIONS |= frozenset('DATE DATE_ADD DATE_SUB DATE_DIFF DATEDIFF TIMESTAMP_DIFF TIMESTAMPDIFF YEAR MONTH DAY DAY_OF_MONTH WEEK LAST_DAY GROUP_CONCAT TS_OR_DS_TO_DATE TS_OR_DS_TO_TIMESTAMP'.split())
 
 
 class QueryPolicyError(ValueError):
-    pass
+    def __init__(self, message, *, phase="query.validate"):
+        super().__init__(message)
+        self.phase = phase
 
 
 def validate_output_fields(sql: str, config: dict) -> None:
@@ -34,15 +38,17 @@ def validate_output_fields(sql: str, config: dict) -> None:
         for namespace in namespaces:
             schema.setdefault(namespace, {})[table['name']] = {c['name']: 'UNKNOWN' for c in table.get('columns', [])}
     try:
-        tree = qualify(sqlglot.parse_one(sql, read='postgres'), dialect='postgres', schema=schema, validate_qualify_columns=True)
+        tree = qualify(sqlglot.parse_one(parser_sql(sql), read='mysql'), dialect='mysql', schema=schema, validate_qualify_columns=True)
         if len(tree.named_selects) != len(set(tree.named_selects)):
             raise QueryPolicyError('查询结果字段名重复，无法验证结果字段')
         for output in tree.named_selects:
-            root = lineage(output, tree, schema=schema, dialect='postgres')
+            root = lineage(output, tree, schema=schema, dialect='mysql')
             def check(node, direct=True):
                 expression = node.expression
                 if isinstance(expression, exp.Table):
-                    column = sqlglot.parse_one(node.name, read='postgres')
+                    # SQLGlot serializes lineage node names in its internal
+                    # dialect (double-quoted identifiers), not MySQL strings.
+                    column = sqlglot.parse_one(node.name)
                     if direct and isinstance(column, exp.Column) and (expression.name, column.name) in excluded:
                         raise QueryPolicyError(f'字段 {expression.name}.{column.name} 未勾选为结果字段，不能直接输出')
                     return
@@ -76,13 +82,17 @@ def validate_query(sql: str) -> None:
     if not isinstance(sql, str) or not sql.strip() or len(sql.encode('utf-8')) > 65536:
         raise QueryPolicyError('SQL 为空或超过长度上限')
     try:
-        parsed = [node for node in sqlglot.parse(sql, read='postgres') if node is not None]
+        if any(token.comments for token in tokens(sql)):
+            raise QueryPolicyError('不允许 SQL 注释或执行提示')
+        parsed = [node for node in sqlglot.parse(parser_sql(sql), read='mysql') if node is not None]
+    except QueryPolicyError:
+        raise
     except Exception as exc:
         raise QueryPolicyError('SQL 语法无法解析') from exc
     if len(parsed) != 1 or not isinstance(parsed[0], (exp.Select, exp.SetOperation)):
         raise QueryPolicyError('只允许单条 SELECT 查询')
     tree = parsed[0]
-    if any(isinstance(n, (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Command, exp.Into, exp.Lock, exp.Operator)) for n in tree.walk()):
+    if any(isinstance(n, (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Command, exp.Into, exp.Lock, exp.Operator, exp.Parameter, exp.SessionParameter, exp.PropertyEQ)) for n in tree.walk()):
         raise QueryPolicyError('查询包含不允许的操作')
     if any(isinstance(n, exp.With) and n.args.get('recursive') for n in tree.walk()):
         raise QueryPolicyError('不允许递归查询')
@@ -90,8 +100,7 @@ def validate_query(sql: str) -> None:
         if isinstance(node, exp.DataType) and node.this == exp.DataType.Type.USERDEFINED:
             raise QueryPolicyError('不允许自定义类型')
         if isinstance(node, exp.Dot) and isinstance(node.expression, exp.Func):
-            if not isinstance(node.this, exp.Identifier) or _identifier_name(node.this) != 'pg_catalog':
-                raise QueryPolicyError('不允许调用非系统 schema 的函数')
+            raise QueryPolicyError('不允许调用数据库限定的函数')
         # SQLGlot models boolean connectors as Func subclasses even though
         # they are SQL operators, not database function calls. Their operands
         # are still visited and checked independently.

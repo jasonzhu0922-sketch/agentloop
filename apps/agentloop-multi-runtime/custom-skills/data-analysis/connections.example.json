@@ -1,10 +1,10 @@
 {
-  "catalog_database_url": "postgresql://<catalog-user>:<password>@<host>:5432/<catalog-database>",
+  "catalog_database_url": "tidb://<catalog-user>:<password>@127.0.0.1:4000/nl2sql_skill",
   "query_databases": {
     "<scenario-id>": {
-      "query_url": "postgresql://<readonly-user>:<password>@<host>:5432/<business-database>",
+      "query_url": "tidb://<readonly-user>:<password>@127.0.0.1:4000/<business-database>",
       "allowed_relations": [
-        "<schema>.<table>"
+        "<database>.<table>"
       ]
     }
   }

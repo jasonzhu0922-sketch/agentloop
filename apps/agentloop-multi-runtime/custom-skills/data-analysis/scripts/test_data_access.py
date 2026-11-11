@@ -65,7 +65,7 @@ class InstalledEntrypointTest(unittest.TestCase):
             saved = json.loads(result.stdout)
             self.assertEqual(saved["status"], "gateway_error")
             self.assertEqual(saved["diagnostic"]["code"], "dependency_unavailable")
-            self.assertEqual(saved["diagnostic"]["module"], "psycopg")
+            self.assertEqual(saved["diagnostic"]["module"], "pymysql")
             self.assertEqual(saved["execution_state"], "not_applicable")
             self.assertEqual(result.stderr, "")
 
@@ -114,7 +114,7 @@ class GatewayTest(unittest.TestCase):
             self.calls.append((sql, params, self.store.current))
             config["_query_audit"]({"run_id": config["_run_id"], "decision": "completed"})
             return {"columns": ["amount"], "rows": [{"amount": 2300}], "row_count": 1}
-        self.gateway = Gateway(self.store, self.store.scope, deepcopy, execute, PolicyError, OSError)
+        self.gateway = Gateway(self.store, self.store.scope, deepcopy, execute, PolicyError)
 
     def test_catalog_progression_preserves_business_domains_without_secrets(self):
         index = self.gateway.catalog("group")
@@ -146,6 +146,20 @@ class GatewayTest(unittest.TestCase):
             self.assertNotIn("dataset", result)
             self.assertNotIn("SECRET", json.dumps(result))
             self.assertIsNone(self.store.current)
+
+    def test_cli_persists_actionable_binding_failure_without_success_evidence(self):
+        from query_errors import QueryParameterError
+        def fail(*args):
+            raise QueryParameterError("unsupported_parameter_style", "Use %s placeholders and params")
+        self.gateway.execute = fail
+        code, saved, receipt = self.invoke(body={
+            "sql": "SELECT amount FROM group.staff WHERE period=$1", "params": ["202606"]})
+        self.assertEqual(code, 1)
+        self.assertEqual(saved["status"], "rejected")
+        self.assertEqual(saved["error"]["diagnostic"]["code"], "unsupported_parameter_style")
+        self.assertEqual(saved["error"]["diagnostic"]["phase"], "query.bind")
+        self.assertEqual(receipt["content"]["error"], saved["error"])
+        self.assertNotIn("evidenceReceipt", receipt)
 
     def test_skill_http_routes_require_scenario_and_refuse_connection_or_model_overrides(self):
         async def check():
@@ -214,8 +228,8 @@ class GatewayTest(unittest.TestCase):
                 self.assertEqual(code, 0)
                 load.assert_called_once_with()
         from data_access import load_gateway
-        configured = {"catalog_database_url": "postgresql://catalog:secret@localhost/catalog",
-                      "query_databases": {"group": {"query_url": "postgresql://readonly:secret@localhost/business", "allowed_relations": ["group.staff"]}}}
+        configured = {"catalog_database_url": "tidb://catalog:secret@localhost/catalog",
+                      "query_databases": {"group": {"query_url": "tidb://readonly:secret@localhost/business", "allowed_relations": ["group.staff"]}}}
         with patch.object(runtime_config, "connections", return_value=configured):
             loaded = load_gateway()
         self.assertEqual(loaded.store.__class__.__module__, "gateway.store")
@@ -223,8 +237,8 @@ class GatewayTest(unittest.TestCase):
         self.assertFalse(any(n == "app" or n.startswith("app.") for n in sys.modules))
 
     def test_runtime_readonly_connection_copy_is_read_without_chmod(self):
-        configured = {"catalog_database_url": "postgresql://catalog:secret@localhost/catalog",
-                      "query_databases": {"group": {"query_url": "postgresql://readonly:secret@localhost/business", "allowed_relations": ["group.staff"]}}}
+        configured = {"catalog_database_url": "tidb://catalog:secret@localhost/catalog",
+                      "query_databases": {"group": {"query_url": "tidb://readonly:secret@localhost/business", "allowed_relations": ["group.staff"]}}}
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary)/"connections.json"
             path.write_text(json.dumps(configured))
@@ -299,7 +313,8 @@ class BundledPolicyTest(unittest.TestCase):
         converted, params = _driver_query(sql, ['%公司%'])
         self.assertEqual(converted, "SELECT '%%s%%', 7 %% 2 FROM group.staff WHERE name ILIKE %s -- 100%%")
         self.assertEqual(params, ['%公司%'])
-        self.assertEqual(_driver_query(sql, []), (sql, None))
+        literal = "SELECT '%s%', 7 % 2 FROM group.staff"
+        self.assertEqual(_driver_query(literal, []), (literal, None))
 
 
 class ScenarioSelectionTest(unittest.TestCase):

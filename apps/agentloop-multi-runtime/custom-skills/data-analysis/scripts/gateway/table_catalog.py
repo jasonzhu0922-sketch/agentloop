@@ -1,4 +1,4 @@
-"""Build the analytics catalog from authorized PostgreSQL base tables."""
+"""Build the analytics catalog from authorized TiDB base tables."""
 from copy import deepcopy
 
 from .database import query_connection, _validate_role
@@ -14,35 +14,43 @@ def physical_catalog(config):
     if len({relation.split('.')[1] for relation in allowed}) != len(allowed):
         raise ValueError('同一场景不能绑定不同 schema 下的同名表')
     with query_connection() as conn:
-        conn.execute('SET TRANSACTION READ ONLY')
         _validate_role(conn)
-        rows = conn.execute("""
-            SELECT n.nspname AS schema, c.relname AS name, c.relkind AS relation_kind, a.attname AS column_name,
-                   pg_catalog.format_type(a.atttypid, a.atttypmod) AS type,
-                   pg_catalog.obj_description(c.oid, 'pg_class') AS description,
-                   pg_catalog.col_description(c.oid, a.attnum) AS column_description
-            FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-            JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
-            WHERE n.nspname = ANY(%s) AND c.relkind IN ('r', 'p')
-              AND a.attnum > 0 AND NOT a.attisdropped
-              AND pg_catalog.has_table_privilege(current_user, c.oid, 'SELECT')
-            ORDER BY c.relname, a.attnum
-        """, (namespaces,)).fetchall()
-        foreign_keys = conn.execute("""
-            SELECT con.conname AS id, ln.nspname AS left_schema, rn.nspname AS right_schema, l.relname AS left_table, r.relname AS right_table,
-                   array_agg(la.attname ORDER BY k.ordinality) AS left_columns,
-                   array_agg(ra.attname ORDER BY k.ordinality) AS right_columns
-            FROM pg_catalog.pg_constraint con
-            JOIN pg_catalog.pg_class l ON l.oid=con.conrelid
-            JOIN pg_catalog.pg_class r ON r.oid=con.confrelid
-            JOIN pg_catalog.pg_namespace ln ON ln.oid=l.relnamespace
-            JOIN pg_catalog.pg_namespace rn ON rn.oid=r.relnamespace
-            JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY k(lkey,rkey,ordinality) ON true
-            JOIN pg_catalog.pg_attribute la ON la.attrelid=l.oid AND la.attnum=k.lkey
-            JOIN pg_catalog.pg_attribute ra ON ra.attrelid=r.oid AND ra.attnum=k.rkey
-            WHERE con.contype='f' AND ln.nspname=ANY(%s) AND rn.nspname=ANY(%s)
-            GROUP BY con.oid, ln.nspname, rn.nspname, l.relname, r.relname ORDER BY con.conname
-        """, (namespaces, namespaces)).fetchall()
+        markers = ','.join(['%s'] * len(namespaces))
+        with conn.cursor() as cursor:
+            cursor.execute(f"""
+                SELECT c.table_schema AS schema_name, c.table_name AS name,
+                       c.column_name, c.column_type AS type,
+                       t.table_comment AS description, c.column_comment AS column_description
+                FROM information_schema.columns c
+                JOIN information_schema.tables t
+                  ON t.table_schema=c.table_schema AND t.table_name=c.table_name
+                WHERE c.table_schema IN ({markers}) AND t.table_type='BASE TABLE'
+                ORDER BY c.table_schema,c.table_name,c.ordinal_position
+            """, namespaces)
+            rows = cursor.fetchall()
+            for row in rows:
+                row['schema'] = row.pop('schema_name')
+                row['relation_kind'] = 'r'
+            cursor.execute(f"""
+                SELECT constraint_name AS id, table_schema AS left_schema,
+                       referenced_table_schema AS right_schema,
+                       table_name AS left_table, referenced_table_name AS right_table,
+                       column_name AS left_column, referenced_column_name AS right_column
+                FROM information_schema.key_column_usage
+                WHERE table_schema IN ({markers}) AND referenced_table_schema IN ({markers})
+                  AND referenced_table_name IS NOT NULL
+                ORDER BY table_schema,table_name,constraint_name,ordinal_position
+            """, namespaces + namespaces)
+            keys = {}
+            for row in cursor.fetchall():
+                key = (row['left_schema'], row['left_table'], row['id'])
+                relationship = keys.setdefault(key, {**row, 'left_columns': [], 'right_columns': []})
+                relationship['left_columns'].append(row['left_column'])
+                relationship['right_columns'].append(row['right_column'])
+            foreign_keys = list(keys.values())
+    found = {row['schema'] + '.' + row['name'] for row in rows}
+    if allowed - found:
+        raise ValueError('场景授权表缺失或不是可读取的 TiDB 实体表')
     old = {t.get('name'): t for t in config.get('tables', [])}
     tables = {}
     for row in rows:

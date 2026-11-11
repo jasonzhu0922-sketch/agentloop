@@ -5,10 +5,12 @@ import hashlib
 import json
 from time import monotonic
 from uuid import uuid4
+from query_errors import QueryParameterError, query_diagnostic
 
 
 def catalog_projection(config, scenario_id):
     value = {"schema": "nl2sql.data-catalog/v1", "scenario_id": scenario_id,
+             "database_engine": "tidb", "sql_dialect": "mysql",
              **{key: config.get(key, []) for key in
                 ("tables", "metrics", "terms", "relationships", "skills", "dimensions", "time_policies")}}
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
@@ -17,9 +19,9 @@ def catalog_projection(config, scenario_id):
 
 
 class Gateway:
-    def __init__(self, store, scope, physical_catalog, execute, policy_error, driver_error):
+    def __init__(self, store, scope, physical_catalog, execute, policy_error):
         self.store, self.scope, self.physical_catalog = store, scope, physical_catalog
-        self.execute, self.policy_error, self.driver_error = execute, policy_error, driver_error
+        self.execute, self.policy_error = execute, policy_error
 
     def scenarios(self):
         # Only identity and business descriptions reach the model.
@@ -61,14 +63,21 @@ class Gateway:
             config["_query_audit"] = self.store.record_query_audit
             try:
                 dataset = self.execute(sql, params, config)
+            except QueryParameterError as exc:
+                result.update(status="rejected", error={"code": "query_parameter_invalid", "message": str(exc),
+                                                       "diagnostic": query_diagnostic(exc)})
             except self.policy_error as exc:
-                result.update(status="rejected", error={"code": "query_policy_rejected", "message": str(exc)})
+                result.update(status="rejected", error={"code": "query_policy_rejected", "message": str(exc),
+                                                       "diagnostic": {"phase": getattr(exc, "phase", "query.validate"),
+                                                                      "code": "query_policy_rejected"}})
             except Exception as exc:
                 result.update(status="failed", error={"code": "query_execution_failed",
                                                       "message": "Read-only query failed; check SQL, field types or gateway availability"})
-                if isinstance(exc, self.driver_error):
-                    result["error"]["sqlstate"] = exc.sqlstate
-                    result["error"]["position"] = exc.diag.statement_position
+                diagnostic = query_diagnostic(exc)
+                result["error"]["diagnostic"] = diagnostic
+                for key in ("sqlstate", "position"):
+                    if key in diagnostic:
+                        result["error"][key] = diagnostic[key]
             else:
                 result.update(status="completed", dataset=dataset, error=None)
         result["duration_ms"] = round((monotonic() - started) * 1000)
@@ -77,7 +86,6 @@ class Gateway:
 
 def load_gateway():
     """Load only code and connection settings contained in this Skill package."""
-    import psycopg
     from runtime_config import connections
     from gateway.store import CatalogStore
     from gateway.scenarios import scenario_scope
@@ -85,4 +93,4 @@ def load_gateway():
     from gateway.database import execute_readonly
     from gateway.query_policy import QueryPolicyError
     return Gateway(CatalogStore(connections()), scenario_scope, physical_catalog,
-                   execute_readonly, QueryPolicyError, psycopg.Error)
+                   execute_readonly, QueryPolicyError)

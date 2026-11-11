@@ -287,7 +287,9 @@ Host 会强制覆盖 `enabled=true`、`observeEnabled=true`、`mode=observe` 和
 }
 ```
 
-`data-analysis` 位于 `custom-skills/data-analysis/`，作为本应用的扩展 Skill 提供，不随 `@zhujun/agentloop-skills` 内置目录分发。数据源连接由该 Skill 根目录的 `connections.json` 配置（参考 `connections.example.json`，凭据文件不入库）；脚本使用 Runtime 提供的 `python3`，依赖由 Skill 根目录 `requirements.txt` 声明。Local Agent 需通过 Runtime 配置页上传该 Skill 后选择使用。
+`data-analysis` 位于 `custom-skills/data-analysis/`，作为本应用的扩展 Skill 提供，不随 `@zhujun/agentloop-skills` 内置目录分发。场景目录、指标口径、术语、关系、分析方法、历史审计和业务查询全部使用 TiDB；根目录 `connections.json` 以 `tidb://` 分别绑定目录库与各场景只读账号（参考 `connections.example.json`，凭据文件不入库）。脚本使用 Runtime 提供的 `python3`，依赖由 Skill 根目录 `requirements.txt` 声明，不依赖 PostgreSQL 驱动。Local Agent 需通过 Runtime 配置页上传该 Skill 后选择使用。
+
+已有 PostgreSQL 目录的一次性迁移工具为 `scripts/migrate-data-analysis-to-tidb.py`，默认只预检；显式 `--apply` 才新建 TiDB 目录库及逐表只读账号、导入目录和审计、核对后切换本地 Skill 连接。工具拒绝覆盖已有目标库或账号，保留源连接私有备份，不修改业务表。此工具的 PostgreSQL 依赖仅用于迁移，不随 Skill 执行。
 
 所有云端 Host 必须能读取同一组目录，否则 Router 的能力路由无法判断某个实例是否缺少某个 Skill；不存在目录、非法 Skill 包或跨目录重名都会在 Host 启动同步时明确失败。Local Agent 不读取云端或仓库的 `custom-skills/`，只加载用户通过 Runtime 配置页上传并保存的 Skill 包。
 

@@ -6,9 +6,11 @@
 
 `connections.json` 位于 Skill 根目录，保存目录数据库与各场景业务数据库的连接凭据、场景授权表清单。本机源文件创建时使用 0600；Runtime 的不可变包副本可能为 0444，这是正常的只读部署，不要求或尝试 chmod。读取权限由宿主隔离控制，不以文件模式推断数据库可用性。不依赖环境变量或项目路径。`connections.example.json` 只说明结构；不要用示例覆盖实际文件。
 
-目录数据库提供已配置的场景业务元数据（`nl2sql_app.scenarios`），审计写入 `nl2sql_app.query_audit`。元数据读取使用只读事务，不读取模型配置、不初始化默认配置。场景绑定来自本包根目录配置；缺少绑定则拒绝，不默认访问其他场景。所有业务连接均检查只读角色及授权范围，不能使用高权限账号。连接配置不通过 CLI 参数传递，不输出原始驱动异常。
+目录数据库提供已配置的场景业务元数据（目录连接所选数据库的 `scenarios` 表），审计写入 同库的 `query_audit`。元数据读取使用只允许读取目录的专用账号，不读取模型配置、不初始化默认配置。场景绑定来自本包根目录配置；缺少绑定则拒绝，不默认访问其他场景。所有业务连接均检查真实 TiDB 身份、表级只读授权及范围，不能使用高权限账号。连接配置不通过 CLI 参数传递，不输出原始驱动异常。
 
-使用 Runtime 提供的 Python 3.10 或更新版本，脚本沿用启动它的解释器。CLI 依赖由根目录 `requirements.txt` 声明（`psycopg`、`psycopg_pool` 和 `sqlglot`）；可选 HTTP 接口还需 `fastapi`、`uvicorn`，包内测试还需 `httpx`。依赖由宿主在对应 Python 环境中安装；缺失时报告 `dependency_unavailable`，不自动安装、搜索开发机解释器或改写只读 Skill 包。
+使用 Runtime 提供的 Python 3.10 或更新版本，脚本沿用启动它的解释器。CLI 依赖由根目录 `requirements.txt` 声明（`PyMySQL` 和 `sqlglot`）；可选 HTTP 接口还需 `fastapi`、`uvicorn`，包内测试还需 `httpx`。依赖由宿主在对应 Python 环境中安装；缺失时报告 `dependency_unavailable`，不自动安装、搜索开发机解释器或改写只读 Skill 包。
+
+TiDB 不支持 `START TRANSACTION READ ONLY`；本包不以 no-op 模式假装只读。业务账号必须仅有配置授权实体表的逐表 `SELECT`，禁止全局权限、通配授权、角色继承、写权限和转授权。查询设置服务端 `max_execution_time=10000`，按 TiDB EXPLAIN 的 `estRows` 限制预计扫描量，并保留 15 秒总时长与 4 MiB 完整结果限制。目录账号仅需 `scenarios` 的 SELECT 和 `query_audit` 的 INSERT；运行期间不创建数据库、账号或表。
 
 ## CLI
 
@@ -29,6 +31,8 @@ python3 scripts/data_client.py execute --scenario-id <id> --request-json '<SQL�
 ```
 
 查询执行器只接收明确 SQL 与有限 JSON 标量参数；禁止传递连接覆盖、模型配置或自然语言问题。占位符与参数分开，不能拼接参数进 SQL。宿主路径别名需要先解析为实际文件路径。
+
+占位符统一为 `%s`，与 `params` 按出现顺序一一对应；重复使用同一值也须重复传入。日期转换使用 `CAST(%s AS DATE)`，不能使用 PostgreSQL 的 `::date`、`DATE %s`、`DATE $1` 或 `$n` 占位符。参数样式和个数在业务查询连接前校验，错误不会通过改写为 SQL 字面量自动重试。
 
 ## 未指定场景时的 HIL
 
@@ -54,5 +58,7 @@ python3 scripts/data_client.py execute --scenario-id <id> --request-json '<SQL�
 `completed`、`rejected`、`failed` 分别表示成功、策略拒绝、执行失败。只有成功才有数据集，零行与 NULL 如实保留。CLI 退出 0 表示取得完整结果，1 表示失败，2 表示参数错误。失败也保存 JSON；不要自动重试或把故障描述为无数据。
 
 `gateway_error` 包含不暴露凭据的 `diagnostic.phase`、`code` 和异常类型。区分配置读取、依赖加载、场景目录读取及查询分发，不能仅凭此状态断定网络、数据库或 VPN 故障。元数据动作的 `execution_state=not_applicable` 表示没有请求 SQL 执行，不代表进程未启动；命令是否启动以宿主工具的 executionReceipt 为准。
+
+查询内部失败的详情位于 `error.diagnostic`：参数错误返回 `status=rejected`、`error.code=query_parameter_invalid`，阶段为 `query.bind`，具体代码为 `unsupported_parameter_style` 或 `parameter_count_mismatch`。SQL 策略拒绝仍为 `query_policy_rejected`。执行阶段区分 `connection.open`、`transaction.configure`、`role.check`、`query.explain`、`query.execute`、`result.fetch` 和 `result.serialize`；驱动提供 MySQL 错误号时附加整数 `vendor_code`（例如 1054 为字段不存在、1142 为权限拒绝）。不输出原始异常消息，不把缺失代码填成一个推测原因，也不把客户端绑定错误解释为数据库不支持参数。
 
 文件回执包含绝对路径、字节数、SHA-256、场景、查询 id、状态与行数。6000 字符内的响应以 `content_complete=true` 和 `content` 原样放进同一次工具返回；大结果保存在完整文件中，按需读取或计算。`evidenceReceipt` 只证明来源和行数，不证明回答正确。目录版本变化时核对受影响字段与口径。

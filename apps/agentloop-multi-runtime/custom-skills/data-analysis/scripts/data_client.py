@@ -120,14 +120,13 @@ def main(argv=None):
             message = str(exc)  # Only fixed, credential-free configuration messages.
         elif isinstance(exc, ImportError):
             diagnostic["code"] = "dependency_unavailable"
-            if exc.name in ("psycopg", "psycopg_pool", "sqlglot"):
+            if exc.name in ("pymysql", "sqlglot"):
                 diagnostic["module"] = exc.name
             message = "Required Python dependency is unavailable in the Runtime; provision the Skill requirements.txt in the host Python environment"
-        elif type(exc).__module__.split(".")[0] == "psycopg":
+        elif type(exc).__module__.split(".")[0] == "pymysql":
             diagnostic["code"] = "database_operation_failed"
-            sqlstate = getattr(exc, "sqlstate", None)
-            if isinstance(sqlstate, str) and len(sqlstate) == 5 and sqlstate.isalnum():
-                diagnostic["sqlstate"] = sqlstate
+            if exc.args and type(exc.args[0]) is int:
+                diagnostic["vendor_code"] = exc.args[0]
         result = {"status": "gateway_error", "operation": args.action, "error": message,
                   "diagnostic": diagnostic,
                   "execution_state": ("unknown" if phase == "query.dispatch" else "not_started")

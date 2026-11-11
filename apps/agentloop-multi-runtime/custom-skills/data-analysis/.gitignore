@@ -1,3 +1,4 @@
 /connections.json
+/.local/
 __pycache__/
 *.pyc
