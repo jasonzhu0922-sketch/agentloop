@@ -127,9 +127,7 @@ export function liveProgressForEvent(event) {
 function failureMessage(data) {
   switch (data.code) {
     case "RUN_LIMIT_EXCEEDED":
-      return terminalFailureReport(data)
-        ? "本轮达到可用轮次上限；以下为已持久化的执行总结，尚非成功交付。"
-        : "本轮达到可用轮次上限，尚未形成最终结果。";
+      return "本轮处理次数已达上限，任务尚未完成。";
     case "STEP_NOT_COMPLETED":
       return "本次结果未通过最终验收。";
     case "ASSESSMENT_ERROR":
@@ -144,7 +142,7 @@ function failureMessage(data) {
     case "CANCELLED":
       return "这次处理已停止，系统没有提交最终结果。";
     default:
-      return "本次未能形成可提交的最终结果。";
+      return "本次处理未完成。";
   }
 }
 

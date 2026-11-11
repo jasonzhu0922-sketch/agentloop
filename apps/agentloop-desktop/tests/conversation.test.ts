@@ -167,9 +167,35 @@ test('durable terminal output is authoritative and a failed report is never rend
   const turn = createTurn(run()); updateTurn(turn, run(), [event(1, 'assistant.streaming', { content: '草稿', reasoning: '临时思考' })]);
   updateTurn(turn, run('failed', '已持久化的失败总结'), [event(2, 'run.failed', { code: 'RUN_LIMIT_EXCEEDED', output: '已持久化的失败总结' })]);
   assert.equal(turn.text, ''); assert.equal(turn.reasoning, ''); assert.equal(turn.partialText, '已持久化的失败总结');
-  const html = renderAssistant(turn); assert.match(html, /尚非成功交付/); assert.match(html, /已持久化的失败总结/); assert.doesNotMatch(html, /class="thinking"/);
+  const html = renderAssistant(turn); assert.match(html, /未完成/); assert.match(html, /已持久化的失败总结/); assert.doesNotMatch(html, /class="thinking"|failure-title|执行总结|尚非成功交付/);
   const empty = createTurn(run()); empty.text = 'interim'; updateTurn(empty, run('completed'));
   assert.equal(empty.text, ''); assert.match(renderAssistant(empty), /未返回文本内容/);
+});
+
+test('failed report renders once without generic notices on event replay or snapshot reload', () => {
+  const report = '已提取 12 条记录，但其中 3 条缺少日期，暂时无法计算月度趋势。';
+  for (const code of ['RUN_LIMIT_EXCEEDED', 'STEP_NOT_COMPLETED', 'UNKNOWN']) {
+    for (const replay of [false, true]) {
+      const turn = createTurn(run());
+      updateTurn(turn, run('failed', report), replay ? [event(1, 'run.failed', { code, output: report })] : []);
+      const html = renderAssistant(turn);
+      assert.match(html, /assistant-state failed/);
+      assert.match(html, /未完成 · 耗时/);
+      assert.equal(html.split(report).length - 1, 1);
+      assert.doesNotMatch(html, /failure-title|执行总结|尚非成功交付|未发布正式交付|阶段性说明|已完成 · 耗时/);
+    }
+  }
+});
+
+test('failed Run without a report retains a concise failure message and never exposes a draft', () => {
+  for (const output of [undefined, '   ']) {
+    const turn = createTurn(run());
+    turn.text = 'UNVERIFIED_DRAFT';
+    updateTurn(turn, run('failed', output));
+    const html = renderAssistant(turn);
+    assert.match(html, /class="failure-title">本次处理未完成。/);
+    assert.doesNotMatch(html, /UNVERIFIED_DRAFT|class="partial-result"|执行总结/);
+  }
 });
 
 test('interrupted safe model streams render a recovery wait instead of a terminal failure', () => {

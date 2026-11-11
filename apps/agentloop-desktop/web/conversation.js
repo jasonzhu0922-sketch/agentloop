@@ -154,7 +154,7 @@ export function renderAssistant(turn, ui = {}) {
   const planning = roundHistory || planToggle ? `<div class="planning-overview"><div class="planning-overview-head">${roundHistory}${planToggle}</div>${planPanel}</div>` : '';
   const reasoning = live && turn.reasoning ? `<details class="live-reasoning"${ui.reasoning !== false ? ' open' : ''}><summary>模型思考</summary><div class="reasoning-body">${lines(turn.reasoning)}</div></details>` : '';
   let output;
-  if (turn.status === 'failed') output = `<div class="failure-title">${escape(turn.error || presentation.emptyText)}</div>${turn.partialText ? `<div class="partial-result"><strong>执行总结 · 尚非成功交付</strong>${renderMarkdown(turn.partialText)}</div>` : ''}`;
+  if (turn.status === 'failed') output = turn.partialText?.trim() ? `<div class="partial-result">${renderMarkdown(turn.partialText)}</div>` : `<div class="failure-title">${escape(turn.error || presentation.emptyText)}</div>`;
   else if (turn.text) output = live ? lines(turn.text) : renderMarkdown(turn.text);
   else output = live ? `<div class="live-progress" role="status">${escape(turn.progress || '正在连接本机 Runtime')}</div>` : `<span class="terminal-empty">${escape((turn.status === 'completed' ? completedArtifactSummary(turn.artifacts) : '') || presentation.emptyText)}</span>`;
   const humanLoop = live && turn.humanLoop?.status === 'open' ? renderHumanLoop(turn.humanLoop) : '';

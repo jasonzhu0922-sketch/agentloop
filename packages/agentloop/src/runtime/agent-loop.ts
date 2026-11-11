@@ -748,11 +748,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const failureReport = async (step: number, output: string, evaluation: CandidateCompletionEvaluation): Promise<string> => {
     throwIfAborted(options.signal);
     const missing = evaluation.failedBoundary?.missingEvidenceKinds ?? [];
-    const notice = [
-      "任务未完成，Runtime 未发布正式交付结果。",
-      ...(missing.length === 0 ? [] : [`尚未确认的验收项：${missing.join("、")}。缺少证据不等于相关操作一定未执行。`]),
-      "下述材料仅记录已观察到的阶段性工作；其中出现的文件、路径或验证描述均不构成正式交付。",
-    ].join("\n");
     await emit({ type: "failure_report.started", data: { step, missingEvidenceKinds: missing } });
     const reportSignal = AbortSignal.any([...(options.signal === undefined ? [] : [options.signal]), AbortSignal.timeout(30_000)]);
     try {
@@ -765,6 +760,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         "A configured timeout is a maximum, not an elapsed duration or proof of a timeout. Report a timeout only when the tool reports one; use measured duration only when it is present in evidence.",
         "Do not claim an authorization restriction unless the actual Runtime capability or binding evidence establishes that restriction.",
         "Write a standalone user-facing report in the user's language: useful supported partial results, concrete limitations and their impact, and what remains to be done.",
+        "Lead with the useful result or the concrete obstacle. Keep the report concise; omit greetings, promises to explain honestly, generic failure preambles, and repeated status or delivery disclaimers. The application already displays the failed Run status.",
+        "Keep Runtime, assessment, acceptance criteria, evidence-kind identifiers, and delivery protocols internal. Explain any relevant gap in ordinary task language, without repeating raw internal field names or inventing a cause from them.",
         "Distinguish missing evidence/receipt from an operation that actually failed. Keep source uncertainty explicit.",
         "Omit unsupported conclusions. Do not claim completion, successful validation, delivery, or a usable artifact when those facts were not verified. Refer to any observed file only as a stage artifact, never as a delivered artifact.",
         "If no useful result is supported, say what was attempted and why a reliable result cannot yet be provided. Never invent a partial answer merely to fill the report.",
@@ -798,7 +795,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         || isTextToolInvocation(response.content) || isInternalEvidenceMarkupCandidate(response.content)) {
         throw new AppError("MODEL_ERROR", "The final failure report was not valid user-facing text", 502);
       }
-      const report = `${notice}\n\n## 阶段性说明（未作为最终交付）\n\n${response.content.trim()}`;
+      // Failure status and diagnostic criteria are structured Runtime facts;
+      // the report body contains only the user-facing explanation.
+      const report = response.content.trim();
       await emit({ type: "failure_report.generated", data: { step, output: report } });
       return report;
     } catch {
@@ -806,7 +805,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       await emit({ type: "failure_report.unavailable", data: { step } });
       // Preserve the original failure, never promote the rejected draft when
       // the reporting provider fails or returns an unusable response.
-      return `${notice}\n\n最后一次结果整理未成功，已有材料未作为最终结果交付。`;
+      return "本次处理未完成，暂时无法提供可靠结果。";
     }
   };
   const completionFailure = async (error: AppError, step: number, output: string, evaluation: CandidateCompletionEvaluation): Promise<AppError> => {

@@ -1713,7 +1713,7 @@ function applyRecoveredRunState(assistant, run) {
   assistant.error = undefined;
   if (run.status === "completed" && typeof run.output === "string") assistant.text = run.output;
   if (run.status === "failed") {
-    assistant.error = recoveredFailureMessage(run) || assistant.error || "本次未能形成可提交的最终结果。";
+    assistant.error = recoveredFailureMessage(run) || assistant.error || "本次处理未完成。";
     // Failed Runs can carry a Runtime-authored final report. It is not a
     // successful answer, but it is the user-facing terminal summary and must
     // survive browser reload just like the live terminal event projection.
@@ -1735,9 +1735,7 @@ function applyRecoveredRunState(assistant, run) {
 function recoveredFailureMessage(run) {
   switch (run?.errorCode) {
     case "RUN_LIMIT_EXCEEDED":
-      return typeof run?.output === "string" && run.output.trim()
-        ? "本轮达到可用轮次上限；以下为已持久化的执行总结，尚非成功交付。"
-        : "本轮达到可用轮次上限，尚未形成最终结果。";
+      return "本轮处理次数已达上限，任务尚未完成。";
     case "STEP_NOT_COMPLETED":
       return "本次结果未通过最终验收。";
     case "ASSESSMENT_ERROR":
@@ -1750,7 +1748,7 @@ function recoveredFailureMessage(run) {
     case "FORBIDDEN":
       return "当前内容需要更多权限才能继续处理。";
     default:
-      return "本次未能形成可提交的最终结果。";
+      return "本次处理未完成。";
   }
 }
 
@@ -2717,7 +2715,7 @@ function renderMessage(message) {
       : `<span class="thinking"><i></i><i></i><i></i></span>`)
     : `<span class="terminal-empty">${escapeHtml(artifactSummary || presentation.emptyText)}</span>`;
   const output = message.status === "failed"
-    ? `<div class="failure-title">${formatText(message.error || presentation.emptyText)}</div>${message.partialText ? `<div class="partial-result"><strong>执行总结</strong>${renderMarkdown(message.partialText)}</div>` : ""}${recovery}`
+    ? `${message.partialText?.trim() ? `<div class="partial-result">${renderMarkdown(message.partialText)}</div>` : `<div class="failure-title">${formatText(message.error || presentation.emptyText)}</div>`}${recovery}`
     : projectedOutput || emptyOutput;
   const stateLabel = message.humanLoop?.status === "open" ? "等待你的输入" : message.recovery?.status === "required" || message.recovery?.status === "advancing" ? "正在恢复" : presentation.label;
   const stateIcon = presentation.icon;

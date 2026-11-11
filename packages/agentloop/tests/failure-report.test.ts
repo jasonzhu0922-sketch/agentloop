@@ -68,7 +68,7 @@ test("recoverable leaf defers reporting until the Run owner actually chooses fai
   const [first, second] = await Promise.all([failure.report(), failure.report()]);
   assert.equal(calls, 2);
   assert.equal(first, second);
-  assert.match(first, /任务未完成/);
+  assert.equal(first, "已有部分成果，验证未完成。");
 });
 
 test("exhausted assessment adds exactly one tool-free report without reassessment or completion", async () => {
@@ -85,6 +85,8 @@ test("exhausted assessment adds exactly one tool-free report without reassessmen
         assert.deepEqual(request.tools, []);
         assert.match(request.runtimeContext?.content ?? "", /runtime_failure_report/);
         assert.match(request.runtimeContext?.content ?? "", /schema_summary/);
+        assert.match(request.runtimeContext?.content ?? "", /Lead with the useful result or the concrete obstacle/);
+        assert.match(request.runtimeContext?.content ?? "", /without repeating raw internal field names/);
         return { content: "取得部分价格记录；结构预检的证据尚未确认，不能作完整结论。", finishReason: "stop", toolCalls: [] };
       }
       return { content: "尚未通过验收的结论", finishReason: "stop", toolCalls: [] };
@@ -100,13 +102,14 @@ test("exhausted assessment adds exactly one tool-free report without reassessmen
     assert.ok(error instanceof AppError);
     assert.equal(error.code, "STEP_NOT_COMPLETED");
     assert.equal(error.details?.repairExhausted, true);
-    assert.match(String(error.details?.partialOutput), /任务未完成.*\n.*schema_summary/s);
-    assert.match(String(error.details?.partialOutput), /取得部分价格记录/);
+    assert.equal(error.details?.partialOutput, "取得部分价格记录；结构预检的证据尚未确认，不能作完整结论。");
     return true;
   });
   assert.equal(calls, 2);
   assert.equal(assessments, 1);
   assert.equal(events.filter((event) => event.type === "failure_report.generated").length, 1);
+  assert.deepEqual(events.find((event) => event.type === "failure_report.started")?.data.missingEvidenceKinds, ["schema_summary"]);
+  assert.equal(events.find((event) => event.type === "failure_report.generated")?.data.output, "取得部分价格记录；结构预检的证据尚未确认，不能作完整结论。");
   assert.equal(events.some((event) => event.type === "loop.completed" || event.type === "candidate.approved"), false);
 });
 
@@ -139,7 +142,7 @@ for (const mode of ["empty", "tool", "dsml_text", "length", "provider_error", "c
         assert.equal(error.details?.partialOutput, undefined);
       } else {
         assert.equal(error.code, "STEP_NOT_COMPLETED");
-        assert.match(String(error.details?.partialOutput), /最后一次结果整理未成功/);
+        assert.equal(error.details?.partialOutput, "本次处理未完成，暂时无法提供可靠结果。");
         assert.doesNotMatch(String(error.details?.partialOutput), /UNVERIFIED_DRAFT|UNSAFE_PARTIAL|PROVIDER_SECRET|DSML/);
       }
       return true;
@@ -165,16 +168,15 @@ test("failed Run persists its report in both snapshot and Outcome, never a deliv
       assessorFactory: () => ({ assess: async (input) => ({
         ...await approvingTestAssessor().assess(input), approved: false,
         criteria: input.step.successCriteria.map((criterion) => ({ criterionId: criterion.id, satisfied: false, rationale: "Not verified", evidenceRefs: [] })),
-        feedback: "Not verified", failedBoundary: { stepId: input.step.id, missingEvidenceKinds: ["schema_summary"], violatedSkillRequirements: [], reusableEvidenceRefs: [], suggestedRepairShape: "repair_leaf" },
+        // Exercise terminal failure directly; recovery planning is outside
+        // this test's report-persistence contract.
+        feedback: "Not verified", failedBoundary: { stepId: input.step.id, missingEvidenceKinds: ["schema_summary"], violatedSkillRequirements: [], reusableEvidenceRefs: [], suggestedRepairShape: "fail" },
       }) }),
     });
     const run = await runs.execute(owner.user.id, "请直接给出一段简短说明");
     assert.equal(run.status, "failed");
     assert.equal(reports, 1);
-    assert.match(run.output ?? "", /任务未完成/);
-    assert.match(run.output ?? "", /未发布正式交付结果/);
-    assert.match(run.output ?? "", /阶段性说明（未作为最终交付）/);
-    assert.match(run.output ?? "", /已取得部分资料/);
+    assert.equal(run.output, "已取得部分资料，但缺少验证，不能给出完整结论。");
     const refreshed = await runs.get(owner.user.id, run.id);
     assert.equal(refreshed.output, run.output);
     const outcome = await database.prepare("SELECT status, output, delivery_receipt_json, reason_code FROM run_outcomes WHERE run_id = ?").get(run.id) as Record<string, unknown>;

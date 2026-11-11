@@ -4,8 +4,9 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import test from "node:test";
 import { projectAssistantEvent, replayAssistantEvents } from "../web/client/projections/assistant-event-projection.js";
+import { assistantMessagePresentation } from "../web/client/presentation/assistant-message-presentation.js";
 
-const report = "任务未完成，以下仅为阶段性结果。\n\n已取得部分记录，但缺少结构预检证据。";
+const report = "已提取 12 条记录，但其中 3 条缺少日期，暂时无法计算月度趋势。";
 test("failed terminal event keeps its persisted final report separate from the failure status", () => {
   const event = { seq: 42, type: "run.failed", data: { code: "STEP_NOT_COMPLETED", message: "Evidence missing", output: report }, createdAt: 42 };
   const assistant: { status: string; text: string; error?: string; partialText?: string } = { status: "running", text: "rejected draft", error: undefined };
@@ -45,7 +46,35 @@ test("browser reload restores a failed Run's persisted final report", () => {
   assert.equal(assistant.text, "");
   assert.equal(assistant.partialText, report);
   assert.equal(assistant.completedAt, 42);
-  assert.match(source, /class="partial-result"[\s\S]*?执行总结[\s\S]*?renderMarkdown\(message\.partialText\)/);
+});
+
+test("failed message shows its report once with the failure status and no boilerplate wrappers", () => {
+  const source = readFileSync(new URL("../web/client/app.js", import.meta.url), "utf8");
+  const start = source.indexOf("function renderMessage(");
+  const end = source.indexOf("\nfunction renderRoundHistory", start);
+  assert.ok(start >= 0 && end > start);
+  const empty = () => "";
+  const render = runInNewContext(`(${source.slice(start, end).trim()})`, {
+    assistantMessagePresentation, selectedAssistantMessage: empty, activeConversation: empty,
+    projectPlanStatuses: () => [], renderExecutionProvenance: empty, renderHumanLoop: empty,
+    renderRecovery: () => '<button>查看恢复选项</button>', completedArtifactSummary: empty,
+    renderMarkdown: (value: string) => `<p>${value}</p>`, formatText: String, escapeHtml: String,
+    formatMessageTime: empty, formatConversationDuration: empty, renderLiveEventIndicator: empty,
+    renderMessageFooter: empty, renderRoundHistory: empty, renderExecutionTrace: empty,
+    renderInlineArtifacts: empty, renderSteerMessages: empty,
+  });
+  const message = { id: "failed-report", status: "failed", error: "通用错误说明", partialText: report };
+  const html = render(message);
+  assert.match(html, /assistant-state failed/);
+  assert.match(html, /AgentLoop · 未完成/);
+  assert.equal(html.split(report).length - 1, 1);
+  assert.match(html, /查看恢复选项/);
+  assert.doesNotMatch(html, /通用错误说明|failure-title|执行总结|阶段性说明|尚非成功交付/);
+  for (const partialText of [undefined, "   "]) {
+    const emptyHtml = render({ ...message, partialText });
+    assert.match(emptyHtml, /class="failure-title">通用错误说明/);
+    assert.doesNotMatch(emptyHtml, /class="partial-result"/);
+  }
 });
 
 
