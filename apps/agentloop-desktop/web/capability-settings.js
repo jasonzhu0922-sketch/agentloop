@@ -262,8 +262,11 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     const choices = []; const skillList = el('div', undefined, 'runtime-skill-options'); skills.append(skillList);
     if (!packages.length) skillList.append(el('p', '暂无可选的 Custom / 上传 Skill；此 Runtime 仍会使用内核 Skills。'));
     for (const pkg of packages) {
-      const checkbox = input('', 'checkbox'); checkbox.checked = snapshot.configuration.skills.some(skill => skill.packageId === pkg.packageId); checkbox.disabled = pkg.validationStatus !== 'valid';
+      const checkbox = input('', 'checkbox'); checkbox.checked = snapshot.configuration.skills.some(skill => skill.packageId === pkg.packageId);
+      const unavailable = pkg.validationStatus !== 'valid';
+      checkbox.disabled = unavailable && !checkbox.checked;
       const option = el('label', undefined, 'runtime-skill-option'); const copy = el('span'); copy.append(el('strong', pkg.displayName || pkg.skillName), el('small', pkg.description || '暂无描述。'));
+      if (unavailable) copy.append(el('small', `Skill 不可用：${pkg.validationDetail === 'skill_package_not_available' ? '包文件缺失、内容变更或校验失败' : pkg.validationDetail || '未通过校验'}。${checkbox.checked ? '当前绑定已隔离，可取消勾选解除；保留绑定不影响其他配置保存。' : '请先修复或重新上传，再选择。'}`, 'capability-status error'));
       option.append(checkbox, copy); skillList.append(option); choices.push([pkg, checkbox]);
     }
     renderSharedMcp(tabs.mcp);

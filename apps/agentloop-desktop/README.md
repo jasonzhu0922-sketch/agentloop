@@ -152,28 +152,34 @@ npm run test:local-runtime
 
 ### macOS 在线更新（需配置发布信任）
 
-macOS 托盘由安装包内固定的监督进程启动，启动后及每 6 小时检查一次，也可从菜单选择「检查更新」。客户端验证签名、渠道、架构、版本序号及模块清单后，复用本机内容，只下载缺少的文件；用户确认后请求本地服务正常关闭。活动 Run 或请求阻止关闭时，不会切换。新版在报告就绪之前失败时恢复旧版；就绪后确认切换，不自动回滚之后产生的用户数据。Windows 当前发行物是 ZIP，尚未接入在线更新。
+macOS 托盘由安装包内固定的监督进程启动，启动后及每 6 小时检查一次，也可从菜单选择「检查更新」。更新窗口展示目标版本与更新序号、真实下载字节数、文件准备和校验、安装及重启状态；可以取消下载、稍后安装和失败重试，关闭窗口不会中断下载或任务。
+
+发布使用 `agentloop.desktop.module-release/v2`：同一个 Ed25519 签名同时绑定模块清单、原生宿主标识及完整 PKG 的 HTTPS 地址、长度和 SHA-256。打包时记录托盘源码、固定监督进程及其依赖、原生资源、安装脚本、编译工具链和 Node 的构建标识，后端源码与更新序号不参与原生宿主标识。仅后端变化时复用本机内容，只下载缺少的文件；托盘、启动器或最低 Bootstrap 要求变化时，下载并校验完整 PKG，用户点击「打开安装器」后交给 macOS 系统安装器显示进度并引导管理员授权，不会只重启后端后宣称整包升级成功。
+
+增量更新在本地服务正常关闭后切换；活动 Run 或请求阻止关闭时暂停更新，新版就绪前失败会恢复旧版。原生更新由 PKG preinstall 执行同样的任务退出检查，系统安装器负责包安装事务，postinstall 自动重启安装后的 App。打开安装器不等于安装完成：只有新安装包的宿主标识、序号匹配且后端报告就绪后才显示成功。取消或未完成安装时保留当前应用和经过校验的安装包，下次启动可重新打开安装器；安装器启动失败不会关闭当前服务。Windows 当前发行物是 ZIP，尚未接入在线更新。
 
 更新包必须在打包时配置固定的 HTTPS feed、公钥及当前安装包的单调递增序号；三项缺一即报错。未配置时安装包不会检查更新。公钥只能来自可信的发行配置；私钥不得放进仓库、安装包、服务端下载目录或日志。首次部署需要生成受控的 Ed25519 密钥并安全分发公钥，例如：
 
 ```sh
-export AGENTLOOP_DESKTOP_UPDATE_URL=https://updates.example.com/desktop-updates/production-arm64.json
+export AGENTLOOP_DESKTOP_UPDATE_URL=https://updates.example.com/desktop-updates/v2/production-arm64.json
 export AGENTLOOP_DESKTOP_UPDATE_PUBLIC_KEY_FILE=/secure/path/desktop-update-public.pem
 export AGENTLOOP_DESKTOP_UPDATE_SEQUENCE=1
 npm run package:desktop:mac -- --account-service https://accounts.example.com
 ```
 
-每个渠道、架构使用独立 feed 与递增序号；同一个序号不得重复用于不同版本。以最终构建的 Resources 为发布输入，生成内容对象及签名模块清单。发布人必须审查数据库迁移是否允许旧版读取；`backward-compatible` 是发行声明，不自动证明迁移安全。
+每个渠道、架构使用独立 feed 与递增序号；同一个序号不得重复用于不同版本。产品版本使用 `CFBundleShortVersionString`，配置了更新的包以更新序号作为 `CFBundleVersion` 和 PKG receipt 版本，确保产品版本相同时 macOS 仍能识别新的原生安装。以最终构建的 Resources 和 PKG 为发布输入，生成内容对象及签名模块清单。发布人必须审查数据库迁移是否允许旧版读取；`backward-compatible` 是发行声明，不自动证明迁移安全。
 
 ```sh
 node apps/agentloop-desktop/scripts/publish-desktop-modules.mjs \
   /secure/build/玄武.app/Contents/Resources /secure/build/objects
 node apps/agentloop-desktop/scripts/create-module-release.mjs \
   --resources /secure/build/玄武.app/Contents/Resources \
+  --installer /secure/build/AgentLoop-Desktop-0.1.8-production-mac-arm64.pkg \
+  --installer-url https://updates.example.com/downloads/desktop/production-arm64/desktop-1.pkg \
   --private-key /secure/path/desktop-update-private.pem \
   --public-key /secure/path/desktop-update-public.pem \
   --object-base-url https://updates.example.com/desktop-updates/objects/ \
-  --minimum-bootstrap 2 --data-compatibility backward-compatible \
+  --minimum-bootstrap 3 --data-compatibility backward-compatible \
   --expires-at 2027-02-01T00:00:00Z --output /secure/build/production-arm64.json
 ```
 
@@ -181,16 +187,19 @@ node apps/agentloop-desktop/scripts/create-module-release.mjs \
 
 ```sh
 docker run --rm --network none \
-  -v /opt/agentloop/desktop-update-tools/v1:/source:ro \
+  -v /opt/agentloop/desktop-update-tools/v2:/source:ro \
   -v /opt/agentloop/desktop-updates:/publish \
   -v /secure/staging:/staging:ro \
   <deployed-image> node /source/apps/agentloop-desktop/scripts/install-module-release.mjs \
   --root /publish --feed /staging/production-arm64.json \
-  --objects /staging/objects --bootstrap 2 \
+  --objects /staging/objects --bootstrap 3 \
+  --installer /staging/AgentLoop-Desktop-0.1.8-production-mac-arm64.pkg \
   --public-key /staging/desktop-update-public.pem --base-url https://updates.example.com
 ```
 
-该命令先验签并核对每个对象，禁止降低序号或覆盖同序号的不同内容，先发布不可变对象，再原子替换 feed。相同版本可重新签发 feed 以延长有效期；并发发布由目录锁拒绝。异常中断遗留 `.publish-lock` 时须核实没有其他发布进程再由运维清理。生产 Nginx 的独立只读路由由 `deploy/production/install-desktop-update-nginx.sh` 配置，发布后验证外网 HTTPS 和 Range。服务器不需要签名私钥。
+该命令先验签并核对每个对象和 PKG，禁止降低序号或覆盖同序号的不同内容，先发布不可变对象及 `installers/<channel>-<arch>/desktop-<sequence>.pkg`，再原子替换 `v2/<channel>-<arch>.json`。安装包地址必须与签名清单的渠道、架构和序号一致。相同版本可重新签发 feed 以延长有效期；并发发布由目录锁拒绝。异常中断遗留 `.publish-lock` 时须核实没有其他发布进程再由运维清理。生产 Nginx 的独立只读路由由 `deploy/production/install-desktop-update-nginx.sh` 配置，发布后验证外网 HTTPS 和 Range。服务器不需要签名私钥。
+
+Bootstrap 3 使用独立的 `/desktop-updates/v2/` feed，不读取旧版 v1 清单。已有旧托盘不能通过只更新后端来获得新的原生安装能力，必须先安装一次 Bootstrap 3 的完整 PKG；该包的更新序号须高于此前已发布及客户端已见过的序号。此后托盘和启动器变化会自动走完整安装流程。部署时更新只读发布工具至 v2 并安装新增 Nginx 路由，旧 feed 保留给旧客户端，不覆盖其协议。
 
 客户端持久化见过的最高序号以拒绝回放；每次启动已下载版本前重新验签并逐文件校验。就绪只证明本机宿主启动，不证明账号登录或真实模型任务。安装包本身仍需独立完成 Apple 开发者签名、公证和原生升级验收，feed 签名不替代平台签名。
 
@@ -219,7 +228,7 @@ npm run package:desktop:win -- --account-service https://accounts.example.com
 - 默认 channel 为 `production`，必须指定 HTTPS 账号地址；local / production 使用不同的应用标识及数据目录。开发预览仍使用原来的 Development 目录和端口 8796，托盘包分配空闲 loopback 端口，避免与其冲突。
 - macOS 数据位于 `~/Library/Application Support/AgentLoop Desktop Local/runtime-data`；Windows 位于 `%LOCALAPPDATA%\AgentLoop Desktop Local\runtime-data`。正式包去掉 ` Local`。运行摘要和错误写入同级 `logs/backend.log`，也可通过托盘菜单“查看日志”打开目录；日志不写入应用安装目录。日志在启动时超过 5 MiB 会轮转保留上一份。
 - 构建输出位于 `release/<channel>-<mac|win>-<arch>/`，macOS 可显式选择 `--target dmg`、`--target zip` 或 `--target dir`；Windows 默认仍为 ZIP。PKG 升级先请求目标安装路径下的后端正常退出，再停止托盘；若任务仍在运行且后端拒绝退出，会中止安装，不强杀任务。只管理同一 channel 的安装路径，不操作 Local Agent、源码预览或其他 channel，也不修改用户数据。安装后以当前登录用户启动托盘；没有登录用户或安装到其他卷时不自动启动。后置脚本只确认托盘与后端进程已启动，不代表真实登录或模型 Run 验收。通过 DMG/ZIP 或构建产物目录启动的其他副本须先手动退出，以免占用同一 channel 的单实例锁。
-- macOS 与 Windows 默认强制包含官方 Node 26.0.0、可重定位 Python 3.12、生产 Node 依赖、内置 Skill、三个 Connector 和预构建界面。Python 复用 Local Agent 的 `preparePackagedPythonRuntime` 和 `requirements.local-agent.txt`，包含 markitdown 0.1.7、pandas、openpyxl、pypdf、reportlab、Pillow 等同一套依赖基线；构建时没有 Python 输入即失败，不会生成缺 Python 的精简包。包内不含模型密钥、账号数据、自定义 Skill 或开发配置。LibreOffice、Poppler、Tesseract 可执行程序、FFmpeg 等外部工具与 Local Agent 一样不属于此默认依赖包。
+- macOS 与 Windows 默认强制包含官方 Node 26.0.0、可重定位 Python 3.12、生产 Node 依赖、内置 Skill、三个 Connector 和预构建界面。Python 复用 Local Agent 的 `preparePackagedPythonRuntime` 和 `requirements.local-agent.txt`，包含 markitdown 0.1.7、pandas、openpyxl、pypdf、reportlab、Pillow，以及数据查询使用的 `psycopg[binary,pool]`、`sqlglot` 等同一套依赖基线；构建时没有 Python 输入即失败，不会生成缺 Python 的精简包。包内不含模型密钥、账号数据、自定义 Skill 或开发配置。LibreOffice、Poppler、Tesseract 可执行程序、FFmpeg 等外部工具与 Local Agent 一样不属于此默认依赖包。
 - `desktop-config.json` 记录账号地址、源码提交、工作区是否含未提交改动、Node 校验和、Python 版本与依赖基线校验和及构建时间；`runtime-python/packages.json` 记录实际 Python 包版本。工具执行使用宿主传入的包内 PATH / NODE_PATH / Python 配置，已禁用用户 site-packages，并隔离继承的 PYTHONHOME、PYTHONPATH。打包使用当前工作区，包含尚未提交的源代码修改。
 
 验证示例（不注册测试账号、不配置真实模型）：
@@ -229,4 +238,6 @@ npm run test:packaging --workspace agentloop-desktop
 node apps/agentloop-desktop/scripts/smoke-package.mjs "apps/agentloop-desktop/release/local-mac-arm64/玄武（本地）.app/Contents/Resources" --probe-account-service
 ```
 
-烟测将整个 Resources 复制到仓库外的临时目录，移除宿主 Node/Python 搜索路径，并注入错误的宿主 Python 配置。它通过真实 ComputerExecutor 调用随包 python / python3 / node，执行 Python 模块导入、XLSX/PDF/DOCX/PPTX 生成和 markitdown 转换，然后使用独立临时数据启动后端，检查预构建静态资源、账号服务配置、未登录隔离、真实账号服务对无效凭据的拒绝、退出和重启。它不等价于真实账号登录或真实模型 Run 验收。
+构建在裁剪完成后使用隔离解释器检查统一模块清单，并按 requirements 验证实际安装版本、所选 extras 及传递依赖全部位于包内。`pip` 只用于构建，成品主动移除；默认依赖应在发布前备齐。后来安装的自定义 Skill 如需基线以外的依赖，须另行解决依赖交付，不能认为安装包支持任意 Python 包。
+
+烟测将整个 Resources 复制到仓库外的临时目录，移除宿主 Node/Python 搜索路径，并注入错误的宿主 Python 配置。它通过真实 ComputerExecutor 调用随包 python / python3 / node，执行 Python 模块导入、PostgreSQL 二进制驱动加载、SQL 解析、XLSX/PDF/DOCX/PPTX 生成和 markitdown 转换，然后使用独立临时数据启动后端，检查预构建静态资源、账号服务配置、未登录隔离、真实账号服务对无效凭据的拒绝、退出和重启。它不等价于真实账号登录、数据库连接或真实模型 Run 验收。

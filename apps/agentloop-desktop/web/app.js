@@ -192,9 +192,18 @@ async function deleteConversation(item) {
   catch (error) { status(`会话已删除，但列表刷新失败：${error.message}`, true); }
   finally { busy(false); }
 }
-async function transcript(token = generation) {
+async function transcript(token = generation, unconfirmedConversation = false) {
   if (!conversationId) return;
-  const { runs } = await api(`/api/conversations/${encodeURIComponent(conversationId)}`);
+  let history;
+  try { history = await api(`/api/conversations/${encodeURIComponent(conversationId)}`); }
+  catch (error) {
+    // A saved send is written before admission. A rejected/unreceived request
+    // may never have created its conversation; keep its exact request for retry.
+    // Only the conversation lookup may be absent, not any persisted Run data.
+    if (unconfirmedConversation && error.status === 404 && error.message === 'NOT_FOUND') return;
+    throw error;
+  }
+  const { runs } = history;
   if (token !== generation) return;
   // Hydrate every turn from durable events, not only the newest Run. The same
   // projector handles reconnect, history, and incremental running updates.
@@ -412,8 +421,10 @@ async function refreshModels() {
 }
 installCapabilitySettings({ api, element, refreshModels, status, currentRuntime: () => runtimeId, refreshCapabilities: async () => { await loadRuntimes(); await loadConnectors(); } });
 busy(true);
+let initializationPhase = '账号确认';
 try {
   const session = await api('/api/session'); csrf = session.csrfToken;
+  initializationPhase = '本地初始化';
   PENDING_KEY = `agentloop-desktop-pending:${session.accountId}`;
   ACTIVE_KEY = `agentloop-desktop-active:${session.accountId}`;
   steerAccount = session.accountId;
@@ -423,17 +434,18 @@ try {
   await loadRuntimes(); await loadConnectors();
   const models = await refreshModels();
   await conversations(); status(models.length ? (element('model').value ? '请选择任务并发送。' : '请选择本机模型后发送。') : '尚未配置本机模型。请在本机能力设置中添加 Provider 和模型。');
+  initializationPhase = '会话恢复';
   const saved = sessionStorage.getItem(PENDING_KEY);
   if (saved) {
     const restored = JSON.parse(saved);
     if (typeof restored.requestId !== 'string' || typeof restored.payload?.input !== 'string' || !Array.isArray(restored.payload?.uploadedSourceIds)) throw new Error('待确认发送记录无效，请检查当前标签页的本机存储。');
     if (restored.runtimeId !== undefined && typeof restored.runtimeId !== 'string') throw new Error('待确认发送记录无效，请检查当前标签页的本机存储。');
     if (restored.runtimeId && restored.runtimeId !== runtimeId) { runtimeId = restored.runtimeId; await loadRuntimes(); await refreshModels(); await loadConnectors(); }
-    pending = restored; conversationId = pending.payload.conversationId || crypto.randomUUID(); conversationRuntimeLocked = true; conversationPersisted = true; selectedSources = pending.payload.uploadedSourceIds;
+    pending = restored; conversationId = pending.payload.conversationId || crypto.randomUUID(); conversationRuntimeLocked = true; conversationPersisted = false; selectedSources = pending.payload.uploadedSourceIds;
     element('message').value = pending.payload.input; element('model').value = pending.payload.modelKey;
     const pendingConnectors = new Set(pending.payload.connectorConnectionIds || []);
     for (const checkbox of element('run-connectors').querySelectorAll('input')) checkbox.checked = pendingConnectors.has(checkbox.value);
-    if (conversationId) await transcript();
+    if (conversationId) conversationPersisted = (await transcript(generation, true)) !== undefined;
     autoResizeComposerInput(element('message')); view.submitting(pending.payload.input, true); element('empty-state').hidden = true;
     status('已恢复一条未确认的发送。保持消息和模型不变，点击发送将复用原请求 ID。');
   }
@@ -444,6 +456,6 @@ try {
   }
 } catch (error) {
   busy(true);
-  element('account-identity').textContent = '云端账号确认失败';
-  status(`账号或本地初始化失败：${error.message}。可退出后重新登录。`, true);
+  if (initializationPhase === '账号确认') element('account-identity').textContent = '云端账号确认失败';
+  status(`${initializationPhase}失败：${error.message}。${initializationPhase === '账号确认' ? '可退出后重新登录。' : '请检查本机配置或刷新页面重试。'}`, true);
 }

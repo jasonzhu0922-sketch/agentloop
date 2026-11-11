@@ -7,7 +7,7 @@ description: 先由用户明确指定或通过结构化 HIL 选择数据场景�
 
 完整问数链路属于本 Skill，由当前 Agent 使用当前会话模型完成业务判断。包内包含目录读取、SQL 校验、场景隔离、只读执行、审计、结果保存和可选 HTTP 接口的全部实现；不依赖另一个项目的代码或服务，不启动另一套模型流程。不调用自然语言整链路 `/api/runs`、`/api/runs/stream` 或 MCP `query`。规划、SQL、修正、工具结果和结论保留在当前 Runtime Run 中。
 
-本机的数据源定义与凭据已放在 Skill 根目录 `connections.json`，Python 配置位于 `config/deployment.json`。直接执行本包 `scripts/data_client.py`；入口自动选择已配置的解释器。无需用户提供项目路径或设置 `NL2SQL_PROJECT_ROOT`。配置仅由脚本读取，不回显凭据，不要求用户粘贴连接密码。通常无需启动 HTTP 服务。
+数据源定义与凭据由宿主在 Skill 根目录 `connections.json` 配置。使用 Runtime 提供的 `python3` 直接执行本包 `scripts/data_client.py`；脚本沿用启动它的解释器，依赖见 `requirements.txt`。无需用户提供项目路径或设置 `NL2SQL_PROJECT_ROOT`。配置仅由脚本读取，不回显凭据，不要求用户粘贴连接密码。通常无需启动 HTTP 服务。
 
 ## 工作流
 

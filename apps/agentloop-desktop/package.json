@@ -14,7 +14,7 @@
     "test": "node --test --test-isolation=process tests/*.test.ts tests/*.test.mjs",
     "package:mac": "node scripts/package-desktop.mjs --platform mac",
     "package:win": "node scripts/package-desktop.mjs --platform win",
-    "test:packaging": "node --test tests/packaging.test.mjs tests/packaged-tools.test.mjs tests/macos-installer.test.mjs"
+    "test:packaging": "node --test tests/packaging.test.mjs tests/packaged-tools.test.mjs tests/python-requirements.test.mjs tests/macos-installer.test.mjs"
   },
   "dependencies": {
     "@zhujun/agentloop": "*",

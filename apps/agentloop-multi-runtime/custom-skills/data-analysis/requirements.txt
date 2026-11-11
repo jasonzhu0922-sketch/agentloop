@@ -1,0 +1,4 @@
+fastapi>=0.115,<1
+psycopg[binary,pool]>=3.2,<4
+sqlglot>=30,<31
+uvicorn>=0.32,<1

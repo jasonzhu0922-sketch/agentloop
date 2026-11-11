@@ -5,9 +5,6 @@ from __future__ import annotations
 import argparse
 import sys
 sys.dont_write_bytecode = True
-from runtime_config import use_configured_python
-if __name__ == "__main__":
-    use_configured_python()
 from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Query

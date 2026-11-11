@@ -4,6 +4,7 @@ root=/opt/agentloop
 conf=/etc/nginx/conf.d/agentloop-tls.conf
 snippet=/etc/nginx/snippets/agentloop-desktop-updates.conf
 source_snippet=${1:?usage: install-desktop-update-nginx.sh /path/to/desktop-update-nginx.conf}
+expected_previous_sha256=${2:-}
 test -f "$source_snippet"
 test -f "$conf"
 exec 9>"$root/.production-release.lock"
@@ -13,7 +14,11 @@ install -d -m 700 "$root/backups"
 backup=$(mktemp -d "$root/backups/desktop-update-nginx.XXXXXXXX")
 cp -p "$conf" "$backup/agentloop-tls.conf"
 if [ -e "$snippet" ]; then
-  cmp -s "$snippet" "$source_snippet" || { echo 'Existing Desktop update snippet differs; refusing replacement.' >&2; exit 1; }
+  if ! cmp -s "$snippet" "$source_snippet"; then
+    [[ "$expected_previous_sha256" =~ ^[a-f0-9]{64}$ ]] || { echo 'Updating an existing Desktop snippet requires its reviewed SHA-256.' >&2; exit 1; }
+    actual_previous_sha256=$(sha256sum "$snippet" | cut -d ' ' -f 1)
+    [ "$actual_previous_sha256" = "$expected_previous_sha256" ] || { echo 'Desktop snippet changed since review; refusing replacement.' >&2; exit 1; }
+  fi
   cp -p "$snippet" "$backup/previous-snippet.conf"
 fi
 rollback() {

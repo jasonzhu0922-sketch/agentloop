@@ -1047,7 +1047,14 @@ export class LocalRuntimeConfigurationStore {
     const mcpServers = validateMcpServers(input.mcpServers ?? [], allowMissingCredentials);
     const mcpServerIds = unique(input.mcpServerIds ?? mcpServers.map(server => server.id!).filter((id): id is string => id !== undefined));
     if (input.mcpServerIds !== undefined) await this.assertDeviceMcpServers(mcpServerIds);
-    await this.assertValidPackages(skillPackageIds);
+    const existingBindings = await this.database.prepare(
+      "SELECT package_id FROM local_runtime_skill_bindings WHERE runtime_id = ?",
+    ).all(runtimeId) as Array<{ package_id: string }>;
+    const existingPackageIds = new Set(existingBindings.map(row => row.package_id));
+    // Quarantine preserves the user's existing bindings for repair. Keeping or
+    // removing one must not block unrelated edits; only new bindings enable a
+    // package and therefore require it to be available and valid.
+    await this.assertValidPackages(skillPackageIds.filter(id => !existingPackageIds.has(id)));
     const existing = await this.database.prepare("SELECT icon_key FROM local_runtime_configurations WHERE runtime_id = ?").get(runtimeId) as { icon_key?: string } | undefined;
     const iconKey = runtimeIconKey(input.iconKey ?? existing?.icon_key ?? DEFAULT_RUNTIME_ICON);
     const now = Date.now();

@@ -5,6 +5,8 @@ from copy import deepcopy
 import io
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,6 +19,55 @@ import runtime_config
 from data_api import create_app
 from scenario_selection import selection_requirement
 import httpx
+
+
+class InstalledEntrypointTest(unittest.TestCase):
+    @contextmanager
+    def installed_skill(self, stale_deployment=False):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)/"installed-skill"
+            shutil.copytree(Path(__file__).resolve().parent.parent, root,
+                            ignore=shutil.ignore_patterns("connections.json", "__pycache__", "*.pyc"))
+            if stale_deployment:
+                config = root/"config"/"deployment.json"
+                config.parent.mkdir(exist_ok=True)
+                config.write_text(json.dumps({"python_executable": "/unavailable/developer/.pyenv/bin/python3"}))
+            paths = list(root.rglob("*"))
+            for path in paths:
+                path.chmod(0o555 if path.is_dir() else 0o444)
+            root.chmod(0o555)
+            try:
+                yield root
+            finally:
+                root.chmod(0o755)
+                for path in paths:
+                    path.chmod(0o755 if path.is_dir() else 0o644)
+
+    def test_readonly_installed_entrypoints_keep_the_host_interpreter(self):
+        for stale_deployment in (False, True):
+            with self.installed_skill(stale_deployment) as root:
+                for script in ("data_client.py", "data_api.py"):
+                    with self.subTest(script=script, stale_deployment=stale_deployment):
+                        result = subprocess.run([sys.executable, "-B", str(root/"scripts"/script), "--help"],
+                                                cwd=root, text=True, capture_output=True, timeout=15)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertIn("usage:", result.stdout)
+                        self.assertFalse((root/"connections.json").exists())
+                        self.assertEqual((root/"scripts"/script).stat().st_mode & 0o777, 0o444)
+
+    def test_missing_host_dependencies_report_failure_without_switching_python(self):
+        with self.installed_skill(stale_deployment=True) as root:
+            # -S removes site-packages from this real process, simulating a
+            # host Python without gateway dependencies. No database is used.
+            result = subprocess.run([sys.executable, "-B", "-S", str(root/"scripts/data_client.py"), "scenarios"],
+                                    cwd=root, text=True, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            saved = json.loads(result.stdout)
+            self.assertEqual(saved["status"], "gateway_error")
+            self.assertEqual(saved["diagnostic"]["code"], "dependency_unavailable")
+            self.assertEqual(saved["diagnostic"]["module"], "psycopg")
+            self.assertEqual(saved["execution_state"], "not_applicable")
+            self.assertEqual(result.stderr, "")
 
 
 class PolicyError(ValueError):

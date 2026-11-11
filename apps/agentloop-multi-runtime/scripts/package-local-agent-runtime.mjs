@@ -3,6 +3,8 @@ import { existsSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
+import { requiredLocalRuntimePythonModules } from "./local-runtime-tools.mjs";
+import { verifyPackagedPythonRequirements } from "./packaged-python-requirements.mjs";
 
 export const PACKAGED_NODE_MAJOR = 26;
 export const PACKAGED_PYTHON_MAJOR_MINOR = "3.12";
@@ -59,16 +61,16 @@ export async function preparePackagedPythonRuntime({ sourceRoot, destinationRoot
     ? join(destination, "python.exe")
     : join(destination, "bin", "python3.12");
   await cp(source, destination, { recursive: true, dereference: true });
-  const version = runCapture(python, ["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"]);
+  const version = runCapture(python, ["-I", "-B", "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"]);
   if (version !== PACKAGED_PYTHON_MAJOR_MINOR) throw new Error(`Packaged Python must be ${PACKAGED_PYTHON_MAJOR_MINOR}; got ${version}`);
-  const pipArgs = ["-m", "pip", "install", "--prefix", destination, "--no-cache-dir"];
+  const pipArgs = ["-I", "-B", "-m", "pip", "install", "--prefix", destination, "--no-cache-dir"];
   if (pipIndexUrl !== undefined && pipIndexUrl.trim() !== "") pipArgs.push("--index-url", pipIndexUrl);
   pipArgs.push("-r", resolve(requirementsPath));
   run(python, pipArgs, { action: "install packaged Runtime Python requirements" });
   const probe = "import importlib, sys; [importlib.import_module(name) for name in sys.argv[1:]]";
   await removeBundledFfmpeg(destination);
   await prunePackagedPythonRuntime(destination);
-  run(python, ["-c", probe, "anthropic", "defusedxml", "imageio", "lxml", "mcp", "numpy", "openpyxl", "pandas", "pdf2image", "pdfplumber", "PIL", "pymysql", "pypdf", "pytesseract", "reportlab"], { action: "verify packaged Runtime Python modules after pruning" });
+  run(python, ["-I", "-B", "-c", probe, ...requiredLocalRuntimePythonModules({}), "markitdown"], { action: "verify packaged Runtime Python modules after pruning" });
   await ensurePythonCommandAliases(destination, python);
   if (process.platform !== "win32") {
     const markitdown = join(destination, "bin", "markitdown");
@@ -93,6 +95,7 @@ export async function preparePackagedPythonRuntime({ sourceRoot, destinationRoot
   run(markitdown, ["--version"], { action: "verify packaged markitdown" });
   // Import and CLI probes can recreate bytecode after the first pruning pass.
   await prunePackagedPythonRuntime(destination);
+  verifyPackagedPythonRequirements(python, resolve(requirementsPath), destination);
   const marker = {
     schema: "agentloop.packagedRuntimePython/v1",
     pythonVersion: PACKAGED_PYTHON_MAJOR_MINOR,

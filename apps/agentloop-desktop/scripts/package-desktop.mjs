@@ -10,6 +10,7 @@ import { writeMacInstallerFiles } from './package-macos-installer.mjs';
 import { requiredPythonRoot, packagePython } from './package-python.mjs';
 import { packagedToolEnvironment, verifyPackagedPython } from '../distribution/packaged-tools.mjs';
 import { inventoryDesktopModules } from './desktop-modules.mjs';
+import { nativeHostIdentity } from './native-host-identity.mjs';
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repositoryRoot = resolve(appRoot, '../..');
@@ -20,6 +21,8 @@ const nodeVersion = '26.0.0';
 const pythonSourceRoot = await requiredPythonRoot();
 const searchDefaults = await packagedSearchDefaults(join(appRoot, '.env'));
 const update = await packagedUpdateConfig();
+// macOS must distinguish two native installs with the same product version.
+const buildVersion = String(update?.sequence ?? manifest.version);
 const pythonRequirements = join(repositoryRoot, 'apps/agentloop-multi-runtime/requirements.local-agent.txt');
 const customOutput = process.env.AGENTLOOP_DESKTOP_PACKAGE_OUTPUT;
 if (customOutput && (!isAbsolute(customOutput) || existsSync(customOutput))) throw new Error('Desktop custom output must be a new absolute directory');
@@ -82,6 +85,7 @@ try {
   await cp(join(appRoot, 'distribution/module-update-client.mjs'), join(backend, 'module-update-client.mjs'));
   await cp(join(appRoot, 'distribution/module-state.mjs'), join(backend, 'module-state.mjs'));
   await cp(join(appRoot, 'distribution/module-supervisor.mjs'), join(backend, 'module-supervisor.mjs'));
+  await cp(join(appRoot, 'distribution/native-update.mjs'), join(backend, 'native-update.mjs'));
   await writeFile(join(backend, 'package.json'), '{"private":true,"type":"module"}\n');
   await cp(join(appRoot, 'dist'), join(backend, 'dist'), { recursive: true });
   await cp(join(appRoot, 'web'), join(backend, 'web'), { recursive: true });
@@ -96,6 +100,13 @@ try {
   const status = spawnSync('git', ['status', '--porcelain'], { cwd: repositoryRoot, encoding: 'utf8' });
   const turnDefaults = await packagedTurnDefaults(join(appRoot, '.env'));
   const config = { schema: 'agentloop.desktop.package/v1', version: manifest.version, ...options, node, python, turnDefaults, searchDefaults, ...(update ? { update: { ...update, platform: options.platform, arch: options.arch, channel: options.channel } } : {}), sourceCommit: git.status === 0 ? git.stdout.trim() : null, sourceDirty: status.status === 0 ? Boolean(status.stdout.trim()) : null, builtAt: new Date().toISOString() };
+  if (options.platform === 'mac') {
+    const swift = spawnSync('/usr/bin/swiftc', ['--version'], { encoding: 'utf8' });
+    const sdk = spawnSync('/usr/bin/xcrun', ['--show-sdk-version'], { encoding: 'utf8' });
+    if (swift.status !== 0 || sdk.status !== 0) throw new Error('Unable to identify native build toolchain');
+    config.nativeToolchain = { swift: swift.stdout.trim(), sdk: sdk.stdout.trim() };
+  }
+  if (config.update) config.update.nativeHostSha256 = await nativeHostIdentity(appRoot, config);
   await writeFile(join(backend, 'desktop-config.json'), `${JSON.stringify(config, null, 2)}\n`);
   await verifyPackagedPython(backend, config, await packagedToolEnvironment(backend, config));
   const artifactName = `AgentLoop-Desktop-${manifest.version}-${options.channel}-${options.platform}-${options.arch}`;
@@ -120,7 +131,7 @@ try {
 <key>CFBundleIdentifier</key><string>${options.appId}</string>
 <key>CFBundleName</key><string>${options.displayName}</string>
 <key>CFBundleDisplayName</key><string>${options.displayName}</string>
-<key>CFBundleVersion</key><string>${manifest.version}</string>
+<key>CFBundleVersion</key><string>${buildVersion}</string>
 <key>CFBundleShortVersionString</key><string>${manifest.version}</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>icon.icns</string>
@@ -142,7 +153,7 @@ try {
       await mkdir(join(payload, 'Applications'), { recursive: true });
       await cp(application, join(payload, 'Applications', `${options.productName}.app`), { recursive: true });
       const installer = await writeMacInstallerFiles(join(staging, 'installer'), options);
-      run('/usr/bin/pkgbuild', ['--root', payload, '--scripts', installer.scripts, '--component-plist', installer.components, '--identifier', `${options.appId}.installer`, '--version', manifest.version, '--ownership', 'recommended', '--install-location', '/', join(output, `${artifactName}.pkg`)]);
+      run('/usr/bin/pkgbuild', ['--root', payload, '--scripts', installer.scripts, '--component-plist', installer.components, '--identifier', `${options.appId}.installer`, '--version', buildVersion, '--ownership', 'recommended', '--install-location', '/', join(output, `${artifactName}.pkg`)]);
     } else if (options.target === 'dmg') {
       const imageRoot = join(staging, 'image'); await mkdir(imageRoot);
       await cp(application, join(imageRoot, `${options.productName}.app`), { recursive: true });

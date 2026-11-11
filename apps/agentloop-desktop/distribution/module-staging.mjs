@@ -71,29 +71,41 @@ export async function verifyDesktopModuleTree(root, manifest) {
 }
 
 /** Assemble in a new directory. Activation is a separate, trusted operation. */
-export async function stageDesktopModules({ currentRoot, currentManifest, nextManifest, stagingRoot, objectBaseUrl, fetchObject = fetch }) {
+export async function stageDesktopModules({ currentRoot, currentManifest, nextManifest, stagingRoot, objectBaseUrl, fetchObject = fetch, signal, onProgress = () => {} }) {
   const current = validateModuleManifest(currentManifest), next = validateModuleManifest(nextManifest);
   const url = new URL(objectBaseUrl);
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || !url.pathname.endsWith('/')) throw new Error('desktop_module_url_invalid');
   const available = new Map();
   for (const [path, file] of current) if (file.type === 'file' && !available.has(file.sha256)) available.set(file.sha256, { root: currentRoot, path });
-  await mkdir(stagingRoot); let downloadedBytes = 0;
+  const required = new Map();
+  for (const file of next.values()) if (file.type === 'file' && !available.has(file.sha256)) required.set(file.sha256, file.size);
+  const totalBytes = [...required.values()].reduce((sum, size) => sum + size, 0);
+  await mkdir(stagingRoot); let downloadedBytes = 0, completedFiles = 0;
+  const totalFiles = [...next.values()].filter(file => file.type === 'file').length;
+  onProgress({ downloadedBytes, totalBytes, completedFiles, totalFiles });
   for (const [path, file] of [...next].filter(([, f]) => f.type === 'directory').sort(([a], [b]) => a.split('/').length - b.split('/').length)) await mkdir(join(stagingRoot, ...path.split('/')));
   for (const [path, file] of next) {
+    signal?.throwIfAborted();
     if (file.type !== 'file') continue;
     const target = join(stagingRoot, ...path.split('/')), local = available.get(file.sha256);
     if (local) await copyFile(join(local.root, ...local.path.split('/')), target);
     else {
-      const response = await fetchObject(new URL(file.sha256, url), { redirect: 'error', signal: AbortSignal.timeout(120000) });
+      const response = await fetchObject(new URL(file.sha256, url), { redirect: 'error', signal: AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(120000)]) });
       if (!response.ok || !response.body) throw new Error('desktop_module_download_failed');
       let size = 0;
-      const limit = new Transform({ transform(chunk, _encoding, done) { size += chunk.length; done(size > file.size ? new Error('desktop_module_object_invalid') : null, chunk); } });
-      await pipeline(Readable.fromWeb(response.body), limit, createWriteStream(target, { flags: 'wx', mode: 0o600 }));
+      const limit = new Transform({ transform(chunk, _encoding, done) {
+        size += chunk.length;
+        onProgress({ downloadedBytes: downloadedBytes + size, totalBytes, completedFiles, totalFiles });
+        done(size > file.size ? new Error('desktop_module_object_invalid') : null, chunk);
+      } });
+      await pipeline(Readable.fromWeb(response.body), limit, createWriteStream(target, { flags: 'wx', mode: 0o600 }), ...(signal ? [{ signal }] : []));
       downloadedBytes += size;
     }
     await verifyFile(target, file);
     await chmod(target, file.executable ? 0o755 : 0o644);
     available.set(file.sha256, { root: stagingRoot, path });
+    completedFiles++;
+    onProgress({ downloadedBytes, totalBytes, completedFiles, totalFiles });
   }
   for (const [path, file] of next) if (file.type === 'symlink') await symlink(file.target, join(stagingRoot, ...path.split('/')));
   return { downloadedBytes };

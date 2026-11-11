@@ -1,11 +1,8 @@
-"""Skill-owned runtime and root-level data-source configuration."""
+"""Skill-owned root-level data-source configuration."""
 import json
-import os
 from pathlib import Path
-import sys
 
 
-DEPLOYMENT_FILE = Path(__file__).resolve().parent.parent / "config" / "deployment.json"
 CONNECTIONS_FILE = Path(__file__).resolve().parent.parent / "connections.json"
 
 
@@ -13,16 +10,6 @@ class ConnectionConfigurationError(ValueError):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
-
-
-def deployment():
-    value = json.loads(DEPLOYMENT_FILE.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or set(value) != {"python_executable"}:
-        raise ValueError("Invalid Skill deployment settings")
-    for path in value.values():
-        if not isinstance(path, str) or not Path(path).is_absolute():
-            raise ValueError("Skill deployment paths must be absolute")
-    return value
 
 
 def connections():
@@ -51,9 +38,3 @@ def connections():
                 or any(not isinstance(v, str) for v in binding["allowed_relations"])):
             raise ConnectionConfigurationError("scenario_binding_invalid", "Invalid scenario database binding")
     return value
-
-
-def use_configured_python():
-    executable = Path(deployment()["python_executable"]).resolve(strict=True)
-    if executable != Path(sys.executable).resolve():
-        os.execv(str(executable), [str(executable), "-B", str(Path(sys.argv[0]).resolve()), *sys.argv[1:]])

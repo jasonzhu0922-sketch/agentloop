@@ -515,13 +515,13 @@ test("local launcher provisions a fixed MarkItDown contract and exposes it to Ru
   assert.deepEqual(localRuntimeHostEnvironment({ PATH: "/usr/bin" }, toolsBin), {
     PATH: `${toolsBin}:/application/data/dev-tools:/usr/bin`,
     RUNTIME_REQUIRED_COMMANDS: "markitdown,pandoc,pdftoppm,pdftotext,pdfinfo,qpdf,gs,tesseract,ffmpeg,unzip,zip",
-    RUNTIME_REQUIRED_PYTHON_MODULES: "anthropic,defusedxml,imageio,lxml,mcp,numpy,openpyxl,pandas,pdf2image,pdfplumber,PIL,pymysql,pypdf,pytesseract,reportlab",
+    RUNTIME_REQUIRED_PYTHON_MODULES: "anthropic,defusedxml,fastapi,imageio,lxml,mcp,numpy,openpyxl,pandas,pdf2image,pdfplumber,PIL,pymysql,psycopg,psycopg_pool,sqlglot,pypdf,pytesseract,reportlab,uvicorn",
     RUNTIME_REQUIRED_NODE_MODULES: "docx,pptxgenjs,react,react-dom,react-icons,sharp,@zhujun/agentloop-plan-template",
   });
   assert.equal(localRuntimeHostEnvironment({ PATH: "/usr/bin", RUNTIME_REQUIRED_COMMANDS: "markitdown,soffice" }, toolsBin).RUNTIME_REQUIRED_COMMANDS, "markitdown,soffice");
   assert.deepEqual(requiredLocalRuntimePythonModules(), [
-    "anthropic", "defusedxml", "imageio", "lxml", "mcp", "numpy", "openpyxl", "pandas",
-    "pdf2image", "pdfplumber", "PIL", "pymysql", "pypdf", "pytesseract", "reportlab",
+    "anthropic", "defusedxml", "fastapi", "imageio", "lxml", "mcp", "numpy", "openpyxl", "pandas",
+    "pdf2image", "pdfplumber", "PIL", "pymysql", "psycopg", "psycopg_pool", "sqlglot", "pypdf", "pytesseract", "reportlab", "uvicorn",
   ]);
   assert.deepEqual(requiredLocalRuntimePythonModules({ RUNTIME_REQUIRED_PYTHON_MODULES: "anthropic, anthropic ,pymysql" }), ["anthropic", "pymysql"]);
 });
@@ -535,6 +535,21 @@ test("Local Agent packaging uses a media-light Python baseline", async () => {
   const windowsScript = await readFile(join(appRoot, "scripts/package-local-agent-windows.mjs"), "utf8");
   assert.match(macosScript, /requirements\.local-agent\.txt/);
   assert.match(windowsScript, /requirements\.local-agent\.txt/);
+});
+
+test("development Hosts and packaged Local Agents include PostgreSQL and SQL dependencies", async () => {
+  const appRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+  for (const filename of ["requirements.txt", "requirements.local-agent.txt"]) {
+    const requirements = await readFile(join(appRoot, filename), "utf8");
+    assert.match(requirements, /^psycopg\[binary,pool\]>=3\.2,<4$/m, filename);
+    assert.match(requirements, /^sqlglot>=30,<31$/m, filename);
+    assert.match(requirements, /^fastapi>=0\.115,<1$/m, filename);
+    assert.match(requirements, /^uvicorn>=0\.32,<1$/m, filename);
+  }
+  // The same inventory drives launcher provisioning and package verification;
+  // checking the actual modules includes the binary PostgreSQL driver's load.
+  const required = requiredLocalRuntimePythonModules({});
+  for (const module of ["psycopg", "psycopg_pool", "sqlglot", "fastapi", "uvicorn"]) assert.ok(required.includes(module));
 });
 
 test("packaged Python pruning removes build artifacts without removing runtime modules", async () => {

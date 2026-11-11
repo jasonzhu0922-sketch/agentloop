@@ -95,3 +95,38 @@ test("invalid custom sources remain visible for repair and do not erase Runtime 
   assert.equal((await manager.skillPackages())[0]?.validationStatus, "invalid");
   assert.deepEqual((await manager.configuration("default")).skills.map(s => s.packageId), bindings);
 });
+
+test("an unavailable bound Skill does not block other edits or unbinding, and cannot be newly bound", async t => {
+  const { root, bundled } = await fixture(t);
+  const options = { dataDirectory: root, defaultRuntimeId: "default", models: modelPort(), bundledSkillDirectories: [bundled] };
+  let manager = await createLocalRuntimeManager(options);
+  t.after(() => manager.close());
+  const upload = async (name: string) => (await manager.importSkills({ files: [{ path: "SKILL.md",
+    content: Buffer.from(`---\nname: ${name}\ndescription: Test ${name}\n---\n\nInstructions.\n`) }] }))[0]!;
+  const broken = await upload("unavailable"), healthy = await upload("healthy");
+  await manager.stopRuntime("default");
+  await manager.configureRuntime("default", { skillPackageIds: [broken.packageId, healthy.packageId], mcpServerIds: [] });
+  await manager.close();
+  const directory = (await readdir(join(root, "skill-library"))).find(name => name.startsWith(`uploaded-${broken.packageId.slice("local_skill_".length)}`))!;
+  const path = join(root, "skill-library", directory, "SKILL.md");
+  const original = await readFile(path, "utf8");
+  await chmod(path, 0o600); await writeFile(path, `${original}\nChanged after import.\n`);
+  manager = await createLocalRuntimeManager(options);
+  assert.equal((await manager.runtimes())[0]?.status, "stopped");
+  assert.equal((await manager.skillPackages()).find(pkg => pkg.packageId === broken.packageId)?.validationStatus, "invalid");
+  // Removing a healthy Skill and changing the icon preserves the quarantined
+  // binding instead of letting it veto the entire configuration save.
+  await manager.configureRuntime("default", { skillPackageIds: [broken.packageId], mcpServerIds: [], iconKey: "qinglong" });
+  assert.deepEqual((await manager.configuration("default")).skills.map(s => s.packageId), [broken.packageId]);
+  assert.equal((await manager.configuration("default")).iconKey, "qinglong");
+  await manager.startRuntime("default");
+  assert.equal((await manager.runtimes())[0]?.status, "ready");
+  assert.equal((await manager.runtimes())[0]?.skillDiagnostics?.[0]?.skillName, "unavailable");
+  const db = new DatabaseSync(join(root, "runtime.db"), { readOnly: true });
+  try { assert.deepEqual(db.prepare("SELECT name FROM discovered_skills").all(), []); } finally { db.close(); }
+  await manager.stopRuntime("default");
+  await manager.configureRuntime("default", { skillPackageIds: [], mcpServerIds: [] });
+  assert.deepEqual((await manager.configuration("default")).skills, []);
+  await assert.rejects(manager.configureRuntime("default", { skillPackageIds: [broken.packageId], mcpServerIds: [] }), /skill_package_invalid/);
+  assert.deepEqual((await manager.configuration("default")).skills, []);
+});

@@ -7,6 +7,12 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
   private var stateItem: NSMenuItem!
   private var versionItem: NSMenuItem!
   private var sequenceItem: NSMenuItem!
+  private var updateMenuItem: NSMenuItem!
+  private var updateWindow: DesktopUpdateWindowController!
+  private var updateStage = "idle"
+  private var updateVersion = ""
+  private var updateSequence = 0
+  private var updateMode = "module"
   private var process: Process?
   private var input: Pipe?
   private var output: Pipe?
@@ -47,10 +53,12 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
     menu.addItem(action("启动本地服务", #selector(startBackend)))
     menu.addItem(action("在 Chrome 中打开", #selector(openChrome)))
     menu.addItem(action("查看日志", #selector(openLogs)))
-    menu.addItem(action("检查更新", #selector(checkUpdate)))
+    updateMenuItem = action("检查更新", #selector(showUpdates)); menu.addItem(updateMenuItem)
     menu.addItem(.separator())
     menu.addItem(action("退出 Desktop", #selector(quit)))
     item.menu = menu
+    updateWindow = DesktopUpdateWindowController()
+    updateWindow.onCommand = { [weak self] command in self?.sendUpdateCommand(command) }
     startBackend()
   }
   private func action(_ title: String, _ selector: Selector) -> NSMenuItem {
@@ -128,20 +136,42 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
         alert("仍有运行中的任务或请求，请等待完成或取消任务后退出。")
       case "startup-error": alert("本地服务启动失败，请查看日志或检查已有实例。")
       case "update-available":
-        let version = message["version"] as? String ?? "新版本"
-        let dialog = NSAlert(); dialog.messageText = "发现玄武 \(version)"; dialog.informativeText = "下载完成后可选择重启应用。运行中的任务会阻止切换。"; dialog.addButton(withTitle: "下载更新"); dialog.addButton(withTitle: "稍后")
-        if dialog.runModal() == .alertFirstButtonReturn { input?.fileHandleForWriting.write(Data("download-update\n".utf8)) }
-      case "update-current": alert("当前已是最新版本。")
-      case "update-unavailable": alert("此安装包尚未配置更新服务。")
-      case "update-downloading": stateItem.title = "Desktop · 正在下载更新"
-      case "update-error": stateItem.title = "Desktop · 更新失败"; alert("更新检查或下载失败，请稍后重试并检查更新服务配置。")
-      case "update-staged":
-        stateItem.title = "Desktop · 更新已下载"
-        let dialog = NSAlert(); dialog.messageText = "更新已准备好"; dialog.informativeText = "现在重启玄武以应用更新。运行中的任务会阻止重启。"; dialog.addButton(withTitle: "重启并更新"); dialog.addButton(withTitle: "稍后")
-        if dialog.runModal() == .alertFirstButtonReturn { input?.fileHandleForWriting.write(Data("apply-update\n".utf8)) }
-      case "update-busy": stateItem.title = "Desktop · 运行中"; alert("仍有运行中的任务或请求，请完成或取消后重新检查更新。")
-      case "update-installed": alert("玄武已更新至 \(message["version"] as? String ?? "新版本")。")
-      case "update-rolled-back": alert("新版本启动失败，正在恢复之前的版本。")
+        updateReleaseDetails(message)
+        item.button?.title = " ↑"
+        updateUI("available", "发现可用更新", "玄武 \(updateVersion) · 更新序号 \(updateSequence)\n下载期间可以继续使用，安装时间由你决定。", action: "下载更新", command: "download-update")
+      case "update-checking": updateUI("checking", "正在检查更新", "正在连接更新服务…")
+      case "update-current":
+        item.button?.title = ""; updateStage = "idle"
+        updateUI("idle", "已是最新版本", "当前版本和更新序号已是最新。", progress: 1, action: "重新检查", command: "check-update")
+      case "update-unavailable": updateUI("idle", "更新服务尚未配置", "请使用配置了更新服务的正式安装包。", progress: 0)
+      case "update-downloading":
+        updateReleaseDetails(message)
+        updateUI("downloading", "正在下载更新", "玄武 \(updateVersion) · 更新序号 \(updateSequence)\n下载期间可以继续使用。", progress: 0, cancellable: true)
+      case "update-progress":
+        let downloaded = (message["downloadedBytes"] as? Double) ?? 0, total = (message["totalBytes"] as? Double) ?? 0
+        let completed = (message["completedFiles"] as? Double) ?? 0, files = (message["totalFiles"] as? Double) ?? 0
+        let fraction = total > 0 ? downloaded / total : (files > 0 ? completed / files : 0)
+        let detail = total > 0 ? "\(Int(min(1, max(0, fraction)) * 100))% · \(ByteCountFormatter.string(fromByteCount: Int64(downloaded), countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file))" : "正在准备更新文件…"
+        updateWindow.setProgress(fraction, detail: detail)
+        updateMenuItem.title = "正在下载更新 · \(Int(min(1, max(0, fraction)) * 100))%"
+      case "update-verifying": updateUI("verifying", "正在校验更新", "下载已完成，正在核对文件完整性…")
+      case "update-staged", "update-install-pending":
+        updateReleaseDetails(message)
+        let native = updateMode == "installer"
+        let detail = native ? "此次更新包含菜单栏应用。系统安装器将引导安装及授权，完成后自动重启。" : "重启后应用更新。仍有任务运行时会暂停更新，请先完成或取消任务。"
+        updateUI("staged", native ? "应用更新已准备好" : "更新已准备好", "玄武 \(updateVersion) · 更新序号 \(updateSequence)\n\(detail)", progress: 1, action: native ? "打开安装器" : "重启并更新", command: "apply-update", reveal: true)
+      case "update-restarting": updateUI("restarting", "正在重启玄武", "正在安全关闭本地服务，稍后将自动打开…", reveal: true)
+      case "update-installing": updateUI("installing", "请在系统安装器中完成更新", "玄武 \(updateVersion) · 更新序号 \(updateSequence)\n安装器将显示进度并引导授权。请先完成或取消运行中的任务；安装后玄武会自动重新启动。", action: "重新打开安装器", command: "apply-update", reveal: true)
+      case "update-cancelled": updateUI("cancelled", "下载已取消", "当前版本继续运行，可以随时重新下载。", progress: 0, action: "重新下载", command: "download-update")
+      case "update-busy": updateUI("staged", "任务仍在运行，更新已暂停", "请先等待任务完成或取消任务，再重试更新。", progress: 1, action: "重试更新", command: "apply-update", reveal: true)
+      case "update-error":
+        let phase = message["phase"] as? String ?? "download"
+        let command = phase == "download" ? "download-update" : "check-update"
+        updateUI("error", "更新未完成", phase == "install" ? "安装器未能打开或安装文件校验失败。当前版本仍可使用，请重新检查更新后再试。" : "连接或文件校验失败，当前版本继续运行。请检查网络后重试。", progress: 0, action: "重试", command: command, reveal: true)
+      case "update-installed":
+        updateReleaseDetails(message); item.button?.title = ""
+        updateUI("idle", "更新完成", "玄武 \(updateVersion) · 更新序号 \(updateSequence)\n新版本已启动，可以继续使用。", progress: 1, action: "检查更新", command: "check-update", reveal: true)
+      case "update-rolled-back": updateUI("error", "新版本启动失败，正在恢复", "正在重新启动之前的版本，下载的更新仍会保留。", action: "重试更新", command: "apply-update", reveal: true)
       default: break
       }
     }
@@ -156,9 +186,25 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
   }
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { openChrome(); return false }
   @objc private func openLogs() { NSWorkspace.shared.open(dataRoot.appendingPathComponent("logs")) }
-  @objc private func checkUpdate() {
+  private func updateReleaseDetails(_ message: [String: Any]) {
+    if let version = message["version"] as? String { updateVersion = version }
+    if let sequence = message["sequence"] as? Int { updateSequence = sequence }
+    if let mode = message["mode"] as? String { updateMode = mode }
+  }
+  private func updateUI(_ stage: String, _ title: String, _ detail: String, progress: Double? = nil, action: String? = nil, command: String? = nil, cancellable: Bool = false, reveal: Bool = false) {
+    updateStage = stage
+    updateMenuItem.title = stage == "idle" ? "检查更新" : title
+    item.button?.toolTip = "玄武 · \(title)"
+    updateWindow.render(title: title, detail: detail, progress: progress, action: action, command: command, cancellable: cancellable)
+    if reveal { updateWindow.present(activate: false) }
+  }
+  @objc private func showUpdates() {
+    updateWindow.present(activate: true)
+    if updateStage == "idle" { sendUpdateCommand("check-update") }
+  }
+  private func sendUpdateCommand(_ command: String) {
     guard process?.isRunning == true else { alert("请先启动本地服务。"); return }
-    input?.fileHandleForWriting.write(Data("check-update\n".utf8))
+    input?.fileHandleForWriting.write(Data("\(command)\n".utf8))
   }
   @objc private func quit() { NSApplication.shared.terminate(nil) }
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -167,4 +213,67 @@ final class DesktopTray: NSObject, NSApplicationDelegate {
     return .terminateLater
   }
   private func alert(_ message: String) { let alert = NSAlert(); alert.messageText = config["displayName"] as? String ?? "玄武"; alert.informativeText = message; alert.runModal() }
+}
+
+/// A persistent modeless window: closing it never stops a download or a running task.
+final class DesktopUpdateWindowController: NSWindowController {
+  var onCommand: ((String) -> Void)?
+  private let heading = NSTextField(labelWithString: "玄武更新")
+  private let explanation = NSTextField(wrappingLabelWithString: "正在准备检查更新…")
+  private let progress = NSProgressIndicator()
+  private let detail = NSTextField(labelWithString: "")
+  private let primary = NSButton(title: "检查更新", target: nil, action: nil)
+  private let secondary = NSButton(title: "稍后", target: nil, action: nil)
+  private var command: String? = "check-update"
+  private var cancellable = false
+
+  init() {
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 260), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+    window.title = "玄武更新"; window.isReleasedWhenClosed = false
+    super.init(window: window)
+    heading.font = .systemFont(ofSize: 21, weight: .semibold)
+    explanation.font = .systemFont(ofSize: 13); explanation.textColor = .secondaryLabelColor
+    explanation.preferredMaxLayoutWidth = 424
+    progress.style = .bar; progress.minValue = 0; progress.maxValue = 1
+    progress.identifier = NSUserInterfaceItemIdentifier("desktop-update-progress")
+    detail.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular); detail.textColor = .secondaryLabelColor
+    primary.target = self; primary.action = #selector(performPrimary); primary.bezelStyle = .rounded; primary.keyEquivalent = "\r"
+    secondary.target = self; secondary.action = #selector(performSecondary); secondary.bezelStyle = .rounded
+    let buttons = NSStackView(views: [secondary, primary]); buttons.orientation = .horizontal; buttons.spacing = 10
+    let content = NSStackView(views: [heading, explanation, progress, detail, buttons])
+    content.orientation = .vertical; content.alignment = .leading; content.spacing = 15
+    content.translatesAutoresizingMaskIntoConstraints = false
+    window.contentView!.addSubview(content)
+    NSLayoutConstraint.activate([
+      content.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 28),
+      content.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -28),
+      content.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 24),
+      content.bottomAnchor.constraint(lessThanOrEqualTo: window.contentView!.bottomAnchor, constant: -20),
+      progress.widthAnchor.constraint(equalTo: content.widthAnchor),
+    ])
+    window.center()
+  }
+  required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+  func present(activate: Bool) {
+    showWindow(nil)
+    if activate { NSApp.activate(ignoringOtherApps: true); window?.makeKeyAndOrderFront(nil) }
+    else { window?.orderFront(nil) }
+  }
+  func render(title: String, detail: String, progress value: Double?, action: String?, command: String?, cancellable: Bool) {
+    heading.stringValue = title; explanation.stringValue = detail
+    self.command = command; self.cancellable = cancellable
+    primary.title = action ?? ""; primary.isHidden = action == nil; primary.isEnabled = true
+    secondary.title = cancellable ? "取消下载" : "稍后"; secondary.isEnabled = true
+    progress.isIndeterminate = value == nil
+    if let value { progress.stopAnimation(nil); progress.doubleValue = min(1, max(0, value)); self.detail.stringValue = "" }
+    else { progress.startAnimation(nil); self.detail.stringValue = "请稍候…" }
+  }
+  func setProgress(_ value: Double, detail: String) {
+    progress.isIndeterminate = false; progress.stopAnimation(nil); progress.doubleValue = min(1, max(0, value)); self.detail.stringValue = detail
+  }
+  @objc private func performPrimary() { guard let command else { return }; onCommand?(command) }
+  @objc private func performSecondary() {
+    if cancellable { secondary.isEnabled = false; onCommand?("cancel-update-download") }
+    else { window?.orderOut(nil) }
+  }
 }

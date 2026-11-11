@@ -8,7 +8,7 @@
 
 目录数据库提供已配置的场景业务元数据（`nl2sql_app.scenarios`），审计写入 `nl2sql_app.query_audit`。元数据读取使用只读事务，不读取模型配置、不初始化默认配置。场景绑定来自本包根目录配置；缺少绑定则拒绝，不默认访问其他场景。所有业务连接均检查只读角色及授权范围，不能使用高权限账号。连接配置不通过 CLI 参数传递，不输出原始驱动异常。
 
-Python 位置由 `config/deployment.json` 配置，入口按需切换到该解释器。依赖为 `psycopg`、`psycopg_pool` 和 `sqlglot`；HTTP 还用 `fastapi`、`uvicorn`，包内测试用 `httpx`。依赖缺失时明确报告，不自动安装。
+使用 Runtime 提供的 Python 3.10 或更新版本，脚本沿用启动它的解释器。CLI 依赖由根目录 `requirements.txt` 声明（`psycopg`、`psycopg_pool` 和 `sqlglot`）；可选 HTTP 接口还需 `fastapi`、`uvicorn`，包内测试还需 `httpx`。依赖由宿主在对应 Python 环境中安装；缺失时报告 `dependency_unavailable`，不自动安装、搜索开发机解释器或改写只读 Skill 包。
 
 ## CLI
 

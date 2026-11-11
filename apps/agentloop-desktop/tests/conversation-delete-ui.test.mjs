@@ -5,10 +5,11 @@ import { runInNewContext } from 'node:vm';
 import { randomUUID } from 'node:crypto';
 import { createSteerDrafts } from '../web/reference/ui/steer-queue.js';
 import { createComposerPreferences } from '../web/composer-preferences.js';
+import { artifactsVisible } from '../web/turn-projection.js';
 
 // Run the actual app controller with a small DOM/transport fixture. Rendering
 // dependencies are replaced; the sidebar, click handlers and state are real.
-async function fixture(preferencesStorage = new Map(), running = false, runtimeCount = 2) {
+async function fixture(preferencesStorage = new Map(), running = false, runtimeCount = 2, recovery = {}) {
   const source = await readFile(new URL('../web/app.js', import.meta.url), 'utf8');
   class Element {
     children = []; value = ''; hidden = false; disabled = false; textContent = ''; attributes = {};
@@ -25,7 +26,7 @@ async function fixture(preferencesStorage = new Map(), running = false, runtimeC
   let records = [{ id: 'first', title: '第一条会话' }, { id: 'second', title: '第二条会话' }];
   const runtimeRows = Array.from({ length: runtimeCount }, (_, index) => ({ id: `runtime-${String.fromCharCode(97 + index)}`, displayName: `Runtime ${String.fromCharCode(65 + index)}`, status: 'ready' }));
   let confirmed = true; let failure; let clearCount = 0;
-  const requests = []; const storage = new Map();
+  const requests = []; const storage = new Map(recovery.storage);
   const noop = () => {};
   const sandbox = {
     document: { getElementById: element, createElement(tag) { const node = new Element(); node.tag = tag; return node; }, querySelectorAll: () => [], addEventListener: noop, documentElement: { dataset: {} } },
@@ -35,12 +36,14 @@ async function fixture(preferencesStorage = new Map(), running = false, runtimeC
     localStorage: { getItem: key => preferencesStorage.get(key), setItem: (key, value) => preferencesStorage.set(key, value) }, createComposerPreferences,
     createArtifactWorkspace: () => ({ render: noop, collapse: noop, activate: noop }),
     createConversationView: () => ({ clear() { clearCount++; }, render: noop, submitting: noop, submitted: noop }),
-    createTurn: run => ({ ...run, events: [], lastSeq: 0 }),
+    artifactsVisible, createTurn: run => ({ ...run, events: [], lastSeq: 0 }),
     updateTurn: (turn, run) => Object.assign(turn, run),
     readRunUpdate: () => new Promise(() => {}),
-    installCapabilitySettings: noop, resetComposerInput: noop,
+    installCapabilitySettings: noop, resetComposerInput: noop, autoResizeComposerInput: noop,
     async fetch(path, options) {
       requests.push({ path, ...options }); const url = new URL(path, 'http://fixture'); let data;
+      const rejected = recovery.failures?.get(url.pathname);
+      if (rejected) return { ok: false, status: rejected.status, json: async () => ({ error: rejected.error }) };
       if (url.pathname === '/api/session') data = { csrfToken: 'fixture-csrf', accountId: 'fixture', user: { email: 'test@example.test' } };
       else if (url.pathname === '/api/runtimes') data = { runtimes: runtimeRows };
       else if (url.pathname === '/api/connectors') data = { connections: [{ id: 'mail', displayName: 'Mail', enabled: true, moduleAvailable: true }] };
@@ -66,6 +69,73 @@ async function fixture(preferencesStorage = new Map(), running = false, runtimeC
   await runInNewContext(`(async () => { ${source.replace(/^import .*;\n/gm, '')} })()`, sandbox);
   return { element, requests, storage, rows: () => element('conversations').children,
     confirm: value => { confirmed = value; }, fail: value => { failure = value; }, clears: () => clearCount };
+}
+
+const pendingKey = 'agentloop-desktop-pending:fixture';
+function pendingRecovery(failures = new Map()) {
+  const pending = { requestId: 'unconfirmed-request', runtimeId: 'runtime-b', payload: {
+    input: '保留这条未确认消息', modelKey: 'model-a', conversationId: 'not-yet-created', uploadedSourceIds: [], connectorConnectionIds: ['mail'],
+  } };
+  return { pending, storage: [[pendingKey, JSON.stringify(pending)]], failures };
+}
+
+test('login restores an unaccepted send whose conversation does not exist and retries the same request', async () => {
+  const recovery = pendingRecovery(new Map([['/api/conversations/not-yet-created', { status: 404, error: 'NOT_FOUND' }]]));
+  const ui = await fixture(new Map(), true, 2, recovery);
+  assert.equal(ui.element('message').disabled, false);
+  assert.equal(ui.element('account-identity').textContent, 'test@example.test');
+  assert.equal(ui.element('message').value, recovery.pending.payload.input);
+  assert.equal(ui.element('runtime-select').value, 'runtime-b');
+  assert.equal(ui.element('run-connectors').querySelectorAll('input')[0].checked, true);
+  assert.deepEqual(JSON.parse(ui.storage.get(pendingKey)), recovery.pending);
+  assert.match(ui.element('status').textContent, /未确认的发送/);
+  assert.equal(ui.requests.some(request => request.method === 'POST'), false);
+  void ui.element('composer').onsubmit({ preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  const request = ui.requests.find(request => request.method === 'POST' && request.path.startsWith('/api/runs?'));
+  assert.equal(request.path, '/api/runs?runtimeId=runtime-b');
+  assert.deepEqual(JSON.parse(request.body), { requestId: recovery.pending.requestId, ...recovery.pending.payload });
+});
+
+test('pending restoration still reads an existing conversation', async () => {
+  const recovery = pendingRecovery();
+  recovery.pending.payload.conversationId = 'first';
+  recovery.storage = [[pendingKey, JSON.stringify(recovery.pending)]];
+  const ui = await fixture(new Map(), true, 2, recovery);
+  assert.equal(ui.element('message').disabled, false);
+  assert.equal(ui.requests.some(request => request.path === '/api/runs/run-first/events?runtimeId=runtime-b'), true);
+  assert.deepEqual(JSON.parse(ui.storage.get(pendingKey)), recovery.pending);
+});
+
+test('an uncreated pending conversation can be left without attempting to delete it', async () => {
+  const recovery = pendingRecovery(new Map([['/api/conversations/not-yet-created', { status: 404, error: 'NOT_FOUND' }]]));
+  const ui = await fixture(new Map(), false, 2, recovery);
+  ui.element('runtime-robots').querySelectorAll('button')[0].onclick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ui.element('runtime-select').value, 'runtime-a');
+  assert.equal(ui.element('send').disabled, false);
+  assert.equal(ui.requests.some(request => request.path.includes('/remove')), false);
+});
+
+test('a missing Run inside an existing pending conversation is still a history failure', async () => {
+  const recovery = pendingRecovery(new Map([['/api/runs/run-first/events', { status: 404, error: 'NOT_FOUND' }]]));
+  recovery.pending.payload.conversationId = 'first';
+  recovery.storage = [[pendingKey, JSON.stringify(recovery.pending)]];
+  const ui = await fixture(new Map(), true, 2, recovery);
+  assert.equal(ui.element('send').disabled, true);
+  assert.equal(ui.element('account-identity').textContent, 'test@example.test');
+  assert.match(ui.element('status').textContent, /会话恢复失败：NOT_FOUND/);
+  assert.deepEqual(JSON.parse(ui.storage.get(pendingKey)), recovery.pending);
+});
+
+for (const rejected of [{ status: 500, error: 'desktop_operation_failed' }, { status: 404, error: 'route_not_found' }]) {
+  test(`pending restoration preserves a real history failure (${rejected.error})`, async () => {
+    const recovery = pendingRecovery(new Map([['/api/conversations/not-yet-created', rejected]]));
+    const ui = await fixture(new Map(), false, 2, recovery);
+    assert.equal(ui.element('send').disabled, true);
+    assert.match(ui.element('status').textContent, new RegExp(rejected.error));
+    assert.deepEqual(JSON.parse(ui.storage.get(pendingKey)), recovery.pending);
+  });
 }
 
 test('sidebar conversations use a dot and highlight the selected conversation', async () => {

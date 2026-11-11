@@ -25,6 +25,14 @@ for (const alias of ['python', 'python3']) {
   assert.equal(await realpath(python.prefix), await realpath(join(root, 'runtime-python')));
   assert.equal(await realpath(dirname(python.executable)), await realpath(join(root, process.platform === 'win32' ? 'runtime-python' : 'runtime-python/bin')));
   assert.equal(python.version, config.python.version);
+  // Exercise the data-query baseline through the same sandbox and PATH used
+  // by Skills. Loading libpq must use the shipped binary, not a host install.
+  await command(alias, ['-c', `import psycopg, psycopg_pool, sqlglot
+from psycopg import pq
+assert pq.__impl__ == 'binary', pq.__impl__
+assert pq.version() > 0
+assert sqlglot.parse_one('SELECT 1 AS value', dialect='postgres').sql(dialect='postgres') == 'SELECT 1 AS value'
+`]);
 }
 await command('python', ['-c', `from openpyxl import Workbook,load_workbook
 from reportlab.pdfgen import canvas

@@ -12,7 +12,7 @@ import sys
 import tempfile
 sys.dont_write_bytecode = True
 from data_access import load_gateway
-from runtime_config import use_configured_python, ConnectionConfigurationError
+from runtime_config import ConnectionConfigurationError
 from scenario_selection import selection_requirement
 
 
@@ -120,6 +120,9 @@ def main(argv=None):
             message = str(exc)  # Only fixed, credential-free configuration messages.
         elif isinstance(exc, ImportError):
             diagnostic["code"] = "dependency_unavailable"
+            if exc.name in ("psycopg", "psycopg_pool", "sqlglot"):
+                diagnostic["module"] = exc.name
+            message = "Required Python dependency is unavailable in the Runtime; provision the Skill requirements.txt in the host Python environment"
         elif type(exc).__module__.split(".")[0] == "psycopg":
             diagnostic["code"] = "database_operation_failed"
             sqlstate = getattr(exc, "sqlstate", None)
@@ -156,5 +159,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    use_configured_python()
     sys.exit(main())
