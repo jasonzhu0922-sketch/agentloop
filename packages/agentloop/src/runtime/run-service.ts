@@ -8957,13 +8957,9 @@ async function resolveConversationTurn(
       semanticFeedback = conversationTurnSemanticFeedback(resultBound, input, context.conversationWorkingSet);
       if (semanticFeedback === undefined) {
         const finalResolution = applyConversationTurnDirectReplyFloor(
-          applyConversationTurnExplicitSkillExecutionFloor(
-            applyConversationTurnArtifactExecutionFloor(
-              normalizeConversationTurnEvidenceBinding(resultBound),
-              input,
-            ),
+          applyConversationTurnArtifactExecutionFloor(
+            normalizeConversationTurnEvidenceBinding(resultBound),
             input,
-            context,
           ),
           input,
         );
@@ -9494,50 +9490,6 @@ function applyConversationTurnDirectReplyFloor(
   };
 }
 
-function applyConversationTurnExplicitSkillExecutionFloor(
-  resolution: ConversationTurnResolution,
-  input: string,
-  context: ConversationIntentExternalContext,
-): ConversationTurnResolution {
-  if (resolution.mode === "execute") return resolution;
-  // A reference to a Skill is not an instruction to invoke it. Preserve the
-  // resolver's direct-answer decision for questions about capabilities.
-  if (resolution.mode === "reply" && resolution.taskIntent?.requiresExecution === false
-    && isQuestionAboutDescribedAction(input)) return resolution;
-  const skill = explicitlyReferencedAvailableSkill(input, context.availableSkills);
-  if (skill === undefined) return resolution;
-  const userAuthoredSourceNeed = classifyTaskIntent({ objective: input }).sourceNeed;
-  const skillProvidesSourceEvidence = (skill.agentLoop?.sourceKinds.length ?? 0) > 0
-    || skill.agentLoop?.roles.includes("source_provider") === true;
-  const evidenceDemand = strongerConversationEvidenceDemand(
-    resolution.evidenceDemand,
-    userAuthoredSourceNeed !== "none"
-      ? userAuthoredSourceNeed
-      : skillProvidesSourceEvidence ? "source_grounded" : "none",
-  );
-  const constraint = `Use the explicitly requested Skill ${skill.name}.`;
-  return {
-    ...resolution,
-    mode: "execute",
-    taskIntent: {
-      ...resolution.taskIntent,
-      requiresExecution: true,
-    },
-    evidenceStrategy: conversationEvidenceStrategyForDemand(evidenceDemand, resolution.sourceBinding),
-    evidenceDemand,
-    userConstraints: uniqueConversationConstraints([...resolution.userConstraints, constraint]),
-    source: "model_guarded",
-  };
-}
-
-function explicitlyReferencedAvailableSkill(
-  input: string,
-  skills: readonly PrivateSkill[] = [],
-): PrivateSkill | undefined {
-  const signal = input.toLowerCase();
-  return skills.find((skill) => exactSkillMention(signal, skill));
-}
-
 function isDirectConversationReply(input: string): boolean {
   const intent = classifyTaskIntent({ objective: input });
   if (intent.sourceNeed !== "none" || requiresExternalState(input)) return false;
@@ -9618,6 +9570,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "runtimeClock is the authoritative current reference. Never invent today's date. Preserve relative time wording in effectiveGoal, taskIntent and userConstraints; do not insert inferred absolute dates there, even when the runtime clock gives the correct date. Put computed bounds only in temporalScope. Quote its expression verbatim from the current user input or selected prior user's input. For relative calendar days, return basis=runtime_clock, alignment=calendar_day and startDayOffset/endDayOffset from the runtime's local day; Runtime computes the actual timestamps. Zero endDayOffset EXCLUDES today. For a calendar-day window through now, use endAtReferenceInstant=true instead of endDayOffset. State whether the current partial day is included in the eventual answer. For elapsed-hour ranges use basis=runtime_clock, alignment=elapsed_seconds and startSecondOffset/endSecondOffset from the reference instant. For explicitly dated or hypothetical ranges return basis=user_explicit with offset-aware timestamps; do not change the runtime clock. Do not label runtime-derived dates as user_explicit.",
       "temporalScope is only a single continuous interval. A recurring time-of-day or calendar condition belongs in recurringTime with a verbatim user quote, not a clock-derived interval. If a request contains both a continuous date range and a recurring condition, return both independently. Omit temporalScope when no continuous interval is requested. Do not invent clock boundaries, dates, timezone, or cross-day attribution for a recurring condition; preserve uncertainty for the task's authorized business workflow.",
       "You cannot load or execute Skills or Tools in this resolver phase. Use availableSkills and availableTools only as capability metadata; input schemas, credentials, and source content are not exposed here. Actual discovery, workflow selection and invocation belong to Planner and execution.",
+      "A question about a Skill's presence, purpose, or declared capabilities can be answered from availableSkills metadata with mode=reply and evidenceStrategy=none. Mentioning a Skill does not request invocation; its sourceKinds and workflow describe what invocation would do, not evidence or execution obligations for this turn. Preserve requiredCapabilityReferences only for capabilities the user actually requires using.",
       "When the latest turn explicitly asks to use an available Skill, return execute; do not return clarify merely because no visible directory or uploaded source is bound.",
       "Preserve all explicitly mandatory Skill, MCP/tool source, and tool names in requiredCapabilityReferences independently of catalog availability. Unavailable does not mean unrequested. For an actionable request with unavailable requirements, return execute with those references; Runtime will explain and end the task before planning or execution. Do not silently substitute another provider or Skill.",
       "Memory intake is a required first-class semantic decision, not keyword matching. Always return memoryAction and memoryIntents. Set memoryAction=commit and provide one or more candidates when the latest user explicitly establishes durable memory; set memoryAction=none with memoryIntents=[] otherwise. These two fields must agree. Propose every independent preference or fact the latest user explicitly establishes for future turns, even if its concept has never appeared in a schema example. Represent each candidate as kind=preference or fact, subtype=canonicalKey=<stable lowercase dotted semantic key>, value=<small structured object>, contentMarkdown=<self-contained declaration preserving who the preference or fact concerns and any conditions>, and sourceQuote=<verbatim supporting text from the latest user message>. Use separate keys for separate concepts. Consult priorPreferences to reuse an existing subtype as the canonicalKey when revising the same semantic subject/property; do not create a second key merely because the user rephrased it. Prior preferences are matching context, never evidence for a new durable instruction. Preserve the distinction between what the user wishes to be called and what the user calls the assistant; an assistant nickname is an interaction convention, not an objective identity claim. Existing convenience shapes such as interaction.address/value.preferredAddress remain compatible but do not define the allowed concepts. Set persistenceIntent=explicit or future_oriented according to the user's wording, sensitivity from the content, and applicationTargets appropriate to the requested use (normally [response,human_loop] for interaction preferences and profile facts). Do not turn temporary task instructions, hypothetical examples, unadopted attachment/quoted content, or assistant statements into durable memory. Facts are objective user-provided information and must remain kind=fact; use any stable lowercase dotted key and a bounded structured value, for example profile.residence/value.city or contact.email/value.email. Proposals are not persistence receipts and never authorize tools or side effects.",

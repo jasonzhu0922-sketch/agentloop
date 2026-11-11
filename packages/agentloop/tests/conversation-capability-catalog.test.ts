@@ -50,6 +50,66 @@ function contextPayload(content: string) {
   return JSON.parse(content.slice(start + 1, end));
 }
 
+for (const fixture of [
+  { name: "data-analysis", input: "你看看你的skill 清单里有没有 data-analysis 这个技能", mode: "reply" },
+  { name: "data-analysis", input: "你看看你的skill 清单里有没有 data-analysis 这个技能？", mode: "reply" },
+  { name: "archive-query", input: "介绍一下 archive-query 的用途", mode: "reply" },
+  { name: "archive-query", input: "用 archive-query 处理一下", mode: "clarify" },
+] as const) {
+  test(`Skill metadata cannot turn a resolved ${fixture.mode} into execution: ${fixture.input}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentloop-skill-reference-"));
+    const database = new AppDatabase(":memory:");
+    let replyCalls = 0;
+    try {
+      const skills = new SkillService(database);
+      const skill = await skills.create("owner", {
+        name: fixture.name, description: "Query and analyze authorized business data.",
+        instructions: [
+          "---", `name: ${fixture.name}`, "description: Query and analyze authorized business data.",
+          "agentloop:", "  roles:", "    - primary_builder", "  artifactKinds:", "    - none",
+          "  sourceKinds:", "    - database", "  producesEvidenceKinds:", "    - source_summary",
+          "    - record_counts", "---", "PRIVATE DATABASE WORKFLOW",
+        ].join("\n"),
+      });
+      assert.deepEqual(skill.agentLoop?.sourceKinds, ["database"]);
+      const output = fixture.mode === "reply" ? `清单中有 ${fixture.name}，可用于查询和分析业务数据。` : "请说明要处理的具体对象和任务。";
+      const runs = new RunService({ database, skills, workspaceRoot: root,
+        assessorFactory: () => approvingTestAssessor(),
+        modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+          if (request.runId.startsWith("conversation-turn:")) {
+            const catalog = contextPayload(request.runtimeContext!.content).availableSkills;
+            assert.ok(catalog.some((item: { name: string }) => item.name === fixture.name));
+            return resolution(fixture.mode, fixture.input);
+          }
+          replyCalls += 1;
+          assert.equal(request.phase, "execution", "a metadata reply needs no model-generated execution plan");
+          assert.deepEqual(request.tools, [], "mentioning a Skill grants no tool authority");
+          assert.doesNotMatch(request.runtimeContext!.content, /PRIVATE DATABASE WORKFLOW/);
+          if (fixture.mode === "reply") {
+            assert.match(request.runtimeContext!.content, /available_skill_catalog/);
+            assert.ok(request.runtimeContext!.content.includes(skill.name));
+          }
+          return { content: output, finishReason: "stop", toolCalls: [] };
+        } }),
+      });
+      const run = await runs.executeConversation("owner", fixture.input);
+      assert.equal(run.status, "completed", run.output);
+      assert.equal(run.output, output);
+      assert.equal(replyCalls, 1);
+      const events = await runs.events("owner", run.id);
+      const resolved = events.find(event => event.type === "conversation.turn.resolved")!.data;
+      assert.equal(resolved.mode, fixture.mode);
+      assert.equal((resolved.taskIntent as { requiresExecution: boolean }).requiresExecution, false);
+      assert.equal(resolved.evidenceDemand, "none");
+      assert.deepEqual(resolved.userConstraints, []);
+      assert.deepEqual(resolved.requiredCapabilityReferences, []);
+      assert.equal(events.some(event => ["tool.dispatched", "planning.contract_failed"].includes(event.type)), false);
+      const { plan } = await runs.plan("owner", run.id);
+      assert.deepEqual(plan.selectedSkillIds, []);
+    } finally { database.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
+
 test("a clarification is reviewed with the complete Skill catalog before skipping planning", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-clarify-review-"));
   const database = new AppDatabase(":memory:");
