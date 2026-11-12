@@ -843,19 +843,17 @@ test("ContextAssembler projects generic written artifact receipts before raw ins
     { role: "assistant", content: "", toolCalls: [{ id: "write", name: "computer_write_file", arguments: { path: "dcmm4-training.html" } }] },
     { role: "tool", toolCallId: "write", name: "computer_write_file", content: toolResult, isError: false },
   ], []);
-  const projected = assembly.runtimeContext.content;
-  const serializedRecord = projected.match(/<runtime_evidence_record[^>]*>\n([\s\S]+)\n<\/runtime_evidence_record>/)?.[1];
-  assert.ok(serializedRecord);
-  const projection = JSON.parse(serializedRecord) as {
+  const projected = assembly.messages.find(message => message.role === "tool")?.content ?? "";
+  const projection = JSON.parse(projected.split("\n\n")[0]) as {
     schema: string;
-    toolName: string;
-    artifact: { path: string; sha256: string };
+    artifactReceipt: { sourceTool: string; artifact: { path: string; sha256: string } };
   };
 
-  assert.equal(projection.schema, "agentloop.committedToolHistory/v1");
-  assert.equal(projection.toolName, "computer_write_file");
-  assert.equal(projection.artifact.path, "dcmm4-training.html");
-  assert.equal(projection.artifact.sha256, "artifact-hash");
+  assert.equal(projection.schema, "agentloop.contextArtifactProjection/v1");
+  assert.equal(projection.artifactReceipt.sourceTool, "computer_write_file");
+  assert.equal(projection.artifactReceipt.artifact.path, "dcmm4-training.html");
+  assert.equal(projection.artifactReceipt.artifact.sha256, "artifact-hash");
+  assert.equal(assembly.messages[0]?.role, "assistant");
   assert.doesNotMatch(projected, /raw generated html sample/);
   assert.equal(events.some((event) => event.type === "context.tool_outputs_projected" && event.data.reason === "structured_tool_result"), true);
 });
@@ -915,28 +913,24 @@ test("ContextAssembler projects generic written artifact receipts before file sa
     { role: "assistant", content: "", toolCalls: [{ id: "write", name: "computer_write_file", arguments: { path: "deliverables/report.md" } }] },
     { role: "tool", toolCallId: "write", name: "computer_write_file", content: toolResult, isError: false },
   ], []);
-  const projected = assembly.runtimeContext.content;
-  const serializedRecord = projected.match(/<runtime_evidence_record[^>]*>\n([\s\S]+)\n<\/runtime_evidence_record>/)?.[1];
-  assert.ok(serializedRecord);
-  const projection = JSON.parse(serializedRecord) as {
+  const projected = assembly.messages.find(message => message.role === "tool")?.content ?? "";
+  const projection = JSON.parse(projected.split("\n\n")[0]) as {
     schema: string;
-    toolName: string;
-    state: string;
-    artifact: { path: string; sha256: string };
-    instruction: string;
+    artifactReceipt: { sourceTool: string; artifact: { path: string; sha256: string } };
+    actionContinuity: { state: string; contentState: string };
   };
 
-  assert.equal(projection.schema, "agentloop.committedToolHistory/v1");
-  assert.equal(projection.toolName, "computer_write_file");
-  assert.equal(projection.state, "completed");
-  assert.equal(projection.artifact.path, "deliverables/report.md");
-  assert.equal(projection.artifact.sha256, "written-artifact-hash");
-  assert.match(projection.instruction, /not an executable tool call/);
-  assert.equal(assembly.messages.some((message) => message.role === "tool" && message.toolCallId === "write"), false);
+  assert.equal(projection.schema, "agentloop.contextArtifactProjection/v1");
+  assert.equal(projection.artifactReceipt.sourceTool, "computer_write_file");
+  assert.equal(projection.actionContinuity.state, "committed");
+  assert.equal(projection.actionContinuity.contentState, "retained_in_matching_tool_call");
+  assert.equal(projection.artifactReceipt.artifact.path, "deliverables/report.md");
+  assert.equal(projection.artifactReceipt.artifact.sha256, "written-artifact-hash");
+  assert.equal(assembly.messages.some((message) => message.role === "tool" && message.toolCallId === "write"), true);
   assert.doesNotMatch(projected, /raw written file sample/);
 });
 
-test("ContextAssembler preserves current-Run write ownership without projecting an executable write payload", async () => {
+test("ContextAssembler preserves the exact completed write and its native result for the next action", async () => {
   const generatedMarkdown = "# Report\n\n" + "analysis paragraph ".repeat(2_500);
   const toolResult = JSON.stringify({
     path: "deliverables/report.md",
@@ -991,20 +985,19 @@ test("ContextAssembler preserves current-Run write ownership without projecting 
   ];
 
   const assembly = await assembler.assemble(canonical, []);
-  assert.equal(assembly.messages.some(message => message.role === "assistant"), false);
-  const serverEvidence = assembly.runtimeContext.content;
-  assert.match(serverEvidence, /runtime_evidence_record source="server" kind="committed_tool_history"/);
-  assert.match(serverEvidence, /agentloop\.committedToolHistory\/v1/);
-  assert.match(serverEvidence, /deliverables\/report\.md/);
-  assert.match(serverEvidence, /completed historical tool result/);
-  assert.match(serverEvidence, /never use an omission marker as file content/);
-  assert.equal(assembly.messages.some((message) => message.role === "tool" && message.toolCallId === "write"), false);
-  assert.doesNotMatch(JSON.stringify(assembly.messages), /analysis paragraph analysis paragraph analysis paragraph/);
-  assert.doesNotMatch(serverEvidence, /# Report/);
+  assert.deepEqual(assembly.messages[0], canonical[0]);
+  const receipt = assembly.messages[1];
+  assert.equal(receipt?.role, "tool");
+  if (receipt?.role !== "tool") throw new Error("Missing native write result");
+  assert.equal(receipt.toolCallId, "write");
+  assert.equal(receipt.name, "computer_write_file");
+  assert.match(receipt.content, /written-artifact-hash/);
+  assert.match(receipt.content, /"state":"committed"/);
+  assert.doesNotMatch(assembly.runtimeContext.content, /committed_tool_history|# Report/);
   assert.equal((canonical[0] as unknown as { toolCalls: [{ arguments: { content: string } }] }).toolCalls[0].arguments.content, generatedMarkdown);
 });
 
-test("server write receipts compact with their exchanges instead of becoming permanent fixed context", async () => {
+test("native write exchanges compact as complete exchanges and preserve the latest write", async () => {
   let summaries = 0;
   const canonical: ModelMessage[] = [{ role: "user", content: "Write the staged results, then continue the task." }];
   for (let index = 0; index < 24; index += 1) {
@@ -1029,6 +1022,9 @@ test("server write receipts compact with their exchanges instead of becoming per
   assert.ok(assembly.estimatedInputTokens <= assembly.usableInputTokens);
   assert.ok(assembler.contextSummary);
   assert.equal(assembly.messages.some(message => message.role === "assistant" && message.content.includes("runtime_evidence_record")), false);
+  const lastWrite = assembly.messages.find(message => message.role === "assistant" && message.toolCalls?.some(call => call.id === "write-23"));
+  assert.deepEqual(lastWrite, canonical.at(-2));
+  assert.equal(assembly.messages.at(-1)?.role, "tool");
   assert.equal(JSON.stringify(canonical), before);
 });
 

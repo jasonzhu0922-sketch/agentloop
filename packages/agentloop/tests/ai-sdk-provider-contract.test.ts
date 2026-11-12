@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { AppError } from "../src/shared/errors.ts";
 import { InMemoryResponsesReasoningContinuationStore, OpenAICompatibleModel, ResponsesModel } from "../src/runtime/models.ts";
+import { ContextAssembler } from "../src/runtime/context-assembler.ts";
 import type { ModelInvocation, ModelStreamEvent } from "../src/runtime/contracts.ts";
 
 const settings = { baseUrl: "https://provider.example.test/v1", apiKey: "private-provider-key", model: "custom-proxy-model", contextWindowTokens: 128_000, maxOutputTokens: 4096, retryDelayMs: 0 };
@@ -14,6 +15,45 @@ const invocation: ModelInvocation = {
 const sse = (...events: unknown[]) => events.map(event => `data: ${typeof event === "string" ? event : JSON.stringify(event)}\n\n`).join("");
 const chunk = (delta: unknown, finish_reason: string | null = null) => ({ choices: [{ index: 0, delta, finish_reason }] });
 const response = (body: string) => new Response(body, { headers: { "content-type": "text/event-stream", "x-request-id": "sdk-contract-request" } });
+
+test("a committed script write reaches the next provider request as the original call and matching success result", async () => {
+  const previous = globalThis.fetch;
+  const content = '# -*- coding: utf-8 -*-\n' + '# 游戏介绍演示文稿\n'.repeat(2_000) + 'print("ready")\n';
+  const originalCall = { id: "call-write-script", name: "computer_write_file", arguments: { path: "make_spec.py", content, mode: "create" } };
+  let sent: any;
+  globalThis.fetch = async (_url, init) => {
+    sent = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { role: "assistant", content: "observed" } }] }),
+      { headers: { "content-type": "application/json" } });
+  };
+  try {
+    const model = new OpenAICompatibleModel({ ...settings, contextWindowTokens: 64_000 });
+    const assembler = new ContextAssembler({ runId: "write-then-execute", systemPrompt: "Create and execute the requested script.",
+      runtimeContext: { phase: "execution", content: "Task in progress" }, model });
+    const toolResult = JSON.stringify({ path: "make_spec.py", sha256: "script-hash", bytes: Buffer.byteLength(content),
+      resultRef: { schema: "agentloop.resultRef/v1", resultId: "rr_11111111-1111-4111-8111-111111111111" },
+      artifactReceipt: { schema: "agentloop.artifactReceipt/v1", receiptId: "artifact:script", sourceTool: "computer_write_file",
+        artifact: { path: "make_spec.py", sha256: "script-hash", bytes: Buffer.byteLength(content) },
+        evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty", "artifact_integrity"], caveated: [], failed: [] } } });
+    const canonical: ModelInvocation["messages"] = [
+      { role: "user", content: "Create the presentation, then build it." },
+      { role: "assistant", content: "", toolCalls: [originalCall] },
+      { role: "tool", name: "computer_write_file", toolCallId: originalCall.id, content: toolResult, isError: false },
+    ];
+    const assembly = await assembler.assemble(canonical, []);
+    await model.complete({ ...invocation, messages: assembly.messages, runtimeContext: assembly.runtimeContext });
+    const write = sent.messages.find((message: any) => message.role === "assistant" && message.tool_calls?.some((call: any) => call.id === originalCall.id));
+    assert.ok(write, "the provider must see its own completed write in the chronological transcript");
+    assert.deepEqual(JSON.parse(write.tool_calls[0].function.arguments), originalCall.arguments);
+    const receipt = sent.messages[sent.messages.indexOf(write) + 1];
+    assert.equal(receipt.role, "tool");
+    assert.equal(receipt.tool_call_id, originalCall.id);
+    assert.match(receipt.content, /script-hash/);
+    assert.match(receipt.content, /"state":"committed"/);
+    assert.match(receipt.content, /rr_11111111-1111-4111-8111-111111111111/);
+    assert.deepEqual(canonical[1], { role: "assistant", content: "", toolCalls: [originalCall] });
+  } finally { globalThis.fetch = previous; }
+});
 
 test("well-formed streams with visible protocol residue retain exact raw evidence without executing or stripping it", async () => {
   const previous = globalThis.fetch;

@@ -9,7 +9,6 @@ import type {
   ModelInvocation,
   ModelMessage,
   ModelResponse,
-  ModelToolCall,
   ModelToolDefinition,
   RuntimeContextSnapshot,
   RuntimeEvent,
@@ -181,7 +180,6 @@ export class ContextAssembler {
   private previousSnapshotId?: string;
   private summary?: string;
   private resultContextEntries: readonly RuntimeResultContextEntry[] = [];
-  private committedWriteHistory: readonly { messageIndex: number; content: string }[] = [];
   private contentReferenceCoverage: readonly ContentReferenceCoverage[] = [];
   private retainedContentReferenceWindowToolCallIds = new Set<string>();
   private lastLargeToolResultProjectionThreshold?: number;
@@ -300,15 +298,6 @@ export class ContextAssembler {
       - this.policy.safetyMarginTokens;
     let runtimeContext = this.currentRuntimeContext();
     let fixedTokens = this.estimateInvocationTokens(tools, runtimeContext, []);
-    if (fixedTokens >= usableInputTokens && this.committedWriteHistory.length > 0) {
-      // Receipt observations moved out of assistant prose must remain
-      // compactable with their original exchanges, not become fixed overhead.
-      const before = this.estimateInvocationTokens(tools, runtimeContext, this.buildProjection(canonicalMessages));
-      if (await this.compact(canonicalMessages, tools, runtimeContext, before, signal)) {
-        runtimeContext = this.currentRuntimeContext();
-        fixedTokens = this.estimateInvocationTokens(tools, runtimeContext, []);
-      }
-    }
     if (fixedTokens >= usableInputTokens) {
       throw contextBudgetError("System prompt and Tool schemas leave no message budget", {
         fixedTokens,
@@ -557,13 +546,6 @@ export class ContextAssembler {
   }
 
   private refreshToolResultCatalog(canonicalMessages: readonly ModelMessage[]): void {
-    const writes = committedWriteToolCallProjections(canonicalMessages, this.firstKeptMessageIndex);
-    const writeHistory = canonicalMessages.slice(this.firstKeptMessageIndex).flatMap((message, index) =>
-      message.role !== "assistant" ? [] : (message.toolCalls ?? []).flatMap(call => {
-        const projection = writes.get(call.id);
-        return projection === undefined ? [] : [{ messageIndex: this.firstKeptMessageIndex + index,
-          content: committedWriteTranscript(call.name, projection, call.arguments) }];
-      }));
     const entries = new Map<string, RuntimeResultContextEntry>();
     for (const message of canonicalMessages) {
       if (message.role !== "tool" || message.isError) continue;
@@ -587,12 +569,10 @@ export class ContextAssembler {
     const nextRetainedIds = referenceWorkingSet.retainedToolCallIds;
     if (
       JSON.stringify(next) === JSON.stringify(this.resultContextEntries)
-      && JSON.stringify(writeHistory) === JSON.stringify(this.committedWriteHistory)
       && JSON.stringify(nextCoverage) === JSON.stringify(this.contentReferenceCoverage)
       && sameStringSet(nextRetainedIds, this.retainedContentReferenceWindowToolCallIds)
     ) return;
     this.resultContextEntries = next;
-    this.committedWriteHistory = writeHistory;
     this.contentReferenceCoverage = nextCoverage;
     this.retainedContentReferenceWindowToolCallIds = nextRetainedIds;
     this.contextRevision += 1;
@@ -606,18 +586,12 @@ export class ContextAssembler {
   }
 
   private buildProjectionFrom(canonicalMessages: readonly ModelMessage[], startIndex: number): ModelMessage[] {
-    const committedWriteProjections = committedWriteToolCallProjections(canonicalMessages, startIndex);
     const tail: ModelMessage[] = [];
     for (const message of canonicalMessages.slice(startIndex)) {
-      if (message.role === "assistant") {
-        const projected = projectAssistantToolCallArguments(message, committedWriteProjections);
-        if (projected.content.length > 0 || projected.toolCalls?.length) tail.push(projected);
-        continue;
-      }
-      // A successfully completed write is represented in Runtime context as server
-      // evidence record. Keeping its paired tool result would violate the native
-      // function-call protocol after removing the executable historical call.
-      if (message.role === "tool" && committedWriteProjections.has(message.toolCallId)) continue;
+      // Keep the native call/result exchange in chronological order. Removing a
+      // completed write here makes the next model turn lose its immediate action
+      // history even if a receipt survives elsewhere in Runtime context. Large
+      // write bodies age out only through whole-exchange compaction.
       if (message.role !== "tool") {
         tail.push(message);
         continue;
@@ -859,7 +833,7 @@ export class ContextAssembler {
     // The accepted summary is an input to the summarizer, but the resulting
     // summary replaces it in the next invocation. Count the summary envelope
     // here, not both the old and replacement summary bodies.
-    const replacementContext = this.currentRuntimeContext({ summary: "", epoch: this.contextEpoch + 1, firstKeptMessageIndex: tailStart });
+    const replacementContext = this.currentRuntimeContext({ summary: "", epoch: this.contextEpoch + 1 });
     const retainedTokens = this.estimateInvocationTokens(tools, replacementContext, retainedProjection);
     const maxTokens = Math.floor(Math.min(
       this.policy.summaryMaxOutputTokens,
@@ -893,7 +867,7 @@ export class ContextAssembler {
       } });
       throw error;
     });
-    const nextRuntimeContext = this.currentRuntimeContext({ summary: summaryResult.summary, epoch: this.contextEpoch + 1, firstKeptMessageIndex: tailStart });
+    const nextRuntimeContext = this.currentRuntimeContext({ summary: summaryResult.summary, epoch: this.contextEpoch + 1 });
     const estimatedTokensAfter = this.estimateInvocationTokens(tools, nextRuntimeContext, retainedProjection);
     if (estimatedTokensAfter > usableInputTokens || estimatedTokensAfter >= estimatedTokensBefore) {
       const details = { estimatedTokensBefore, estimatedTokensAfter, usableInputTokens };
@@ -1194,14 +1168,12 @@ export class ContextAssembler {
       + estimateMessages(messages);
   }
 
-  private currentRuntimeContext(proposal?: { summary: string; epoch: number; firstKeptMessageIndex?: number }): RuntimeContextSnapshot {
+  private currentRuntimeContext(proposal?: { summary: string; epoch: number }): RuntimeContextSnapshot {
     if (proposal === undefined && this.snapshot !== undefined) return this.snapshot;
     const summary = proposal?.summary ?? this.summary;
     const id = `${this.runId}:${this.runtimeContextBase.phase}:context:${proposal?.epoch ?? this.contextEpoch}:${this.contextRevision}`;
     const content = [
       this.runtimeContextBase.content,
-      ...this.committedWriteHistory.filter(record => record.messageIndex >= (proposal?.firstKeptMessageIndex ?? this.firstKeptMessageIndex))
-        .map(record => record.content),
       ...(summary === undefined ? [] : [
         "<structured_summary>",
         summary,
@@ -1833,94 +1805,6 @@ function structuredToolResultProjection(toolName: string, content: string): stri
   return undefined;
 }
 
-function committedWriteToolCallProjections(
-  canonicalMessages: readonly ModelMessage[],
-  startIndex: number,
-): ReadonlyMap<string, Record<string, unknown>> {
-  const projections = new Map<string, Record<string, unknown>>();
-  for (let index = startIndex; index < canonicalMessages.length; index += 1) {
-    const message = canonicalMessages[index];
-    if (message.role !== "tool" || message.isError) continue;
-    const projection = committedWriteToolCallProjection(message.name, message.content);
-    if (projection !== undefined) projections.set(message.toolCallId, projection);
-  }
-  return projections;
-}
-
-function projectAssistantToolCallArguments(
-  message: Extract<ModelMessage, { role: "assistant" }>,
-  projections: ReadonlyMap<string, Record<string, unknown>>,
-): Extract<ModelMessage, { role: "assistant" }> {
-  if (message.toolCalls === undefined || message.toolCalls.length === 0) return message;
-  const retainedToolCalls: ModelToolCall[] = [];
-  let hasCommittedWrite = false;
-  for (const call of message.toolCalls) {
-    const projection = projections.get(call.id);
-    if (projection === undefined) {
-      retainedToolCalls.push(call);
-      continue;
-    }
-    hasCommittedWrite = true;
-  }
-  if (!hasCommittedWrite) return message;
-  return {
-    role: "assistant",
-    // Server observations must never masquerade as assistant-authored output.
-    // Their receipts live in Runtime context; retain only real assistant prose.
-    content: message.content,
-    ...(retainedToolCalls.length === 0 ? {} : { toolCalls: retainedToolCalls }),
-    ...(message.reasoningContent === undefined ? {} : { reasoningContent: message.reasoningContent }),
-  };
-}
-
-function committedWriteToolCallProjection(toolName: string, content: string): Record<string, unknown> | undefined {
-  if (toolName !== "computer_write_file") return undefined;
-  const value = parseJsonRecord(content);
-  if (value === undefined) return undefined;
-  const receipt = recordValue(value.artifactReceipt);
-  if (receipt === undefined || stringValue(receipt.schema) !== ARTIFACT_RECEIPT_SCHEMA) return undefined;
-  const artifact = recordValue(receipt.artifact);
-  if (artifact === undefined) return undefined;
-  const inspection = recordValue(receipt.inspection);
-  const projection = omitUndefinedDeep({
-    schema: "agentloop.contextArtifactToolCallArguments/v1",
-    sourceSchema: stringValue(value.schema),
-    successfulArtifactWrite: true,
-    receiptId: stringValue(receipt.receiptId),
-    sourceTool: stringValue(receipt.sourceTool) ?? toolName,
-    artifact: compactArtifactReceiptArtifact(artifact),
-    inspection: inspection === undefined ? undefined : compactArtifactReceiptInspection(inspection),
-    evidenceKinds: recordValue(receipt.evidenceKinds),
-    instruction: "Original artifact content arguments are omitted from this model-context projection after a successful write. Use artifact receipt fields; if artifact acceptance is still missing, verify the artifact instead of rereading the same path.",
-  });
-  return recordValue(projection);
-}
-
-function committedWriteTranscript(
-  toolName: string,
-  projection: Record<string, unknown>,
-  originalArguments: unknown,
-): string {
-  const originalRecord = recordValue(originalArguments);
-  const artifact = recordValue(projection.artifact);
-  const content = JSON.stringify(omitUndefinedDeep({
-    schema: "agentloop.committedToolHistory/v1",
-    toolName,
-    state: "completed",
-    artifact: compactArtifactReceiptArtifact(artifact ?? {}),
-    originalArguments: {
-      sha256: digest(JSON.stringify(originalArguments ?? null)),
-      characters: JSON.stringify(originalArguments ?? null).length,
-      contentCharacters: stringValue(originalRecord?.content)?.length,
-      contentSha256: typeof originalRecord?.content === "string" ? digest(originalRecord.content) : undefined,
-      omittedFields: typeof originalRecord?.content === "string" ? ["content"] : undefined,
-      canonicalArgumentsPersisted: true,
-    },
-    instruction: "This is a completed historical tool result supplied by the server, not an executable tool call. Original write content is omitted only from model context. Continue from the committed artifact receipt; never use an omission marker as file content.",
-  })).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e").replaceAll("&", "\\u0026");
-  return `<runtime_evidence_record source="server" kind="committed_tool_history" encoding="json">\n${content}\n</runtime_evidence_record>`;
-}
-
 function hasArtifactEvidenceBoundary(
   canonicalMessages: readonly ModelMessage[],
   firstKeptMessageIndex: number,
@@ -2020,7 +1904,7 @@ function compactArtifactReceiptInspection(inspection: Record<string, unknown>): 
   });
 }
 
-const committedWriteInstruction = "This receipt is the committed result of the matching computer_write_file call in the current Run. The file was created or updated by that call; it is not a replay or an unknown pre-existing file. Original content is omitted only to control model-context size. Continue from this committed write and execute or verify it as appropriate; do not recreate, rename, reread, or probe the path solely because content is omitted.";
+const committedWriteInstruction = "This receipt is the committed result of the matching computer_write_file call in the current Run. The file was created or updated by that call; it is not a replay or an unknown pre-existing file. Inspection samples may be omitted to control model-context size; the matching historical call retains its original arguments. Continue from this committed write and execute or verify it as appropriate; do not recreate, rename, reread, or probe the path solely because content is omitted.";
 
 function committedWriteContinuity(sourceTool: string, artifactPath: string): Record<string, unknown> {
   return {
@@ -2029,7 +1913,7 @@ function committedWriteContinuity(sourceTool: string, artifactPath: string): Rec
     relationship: "result_of_matching_tool_call",
     sourceTool,
     artifactPath,
-    contentState: "omitted_from_model_context",
+    contentState: "retained_in_matching_tool_call",
   };
 }
 
