@@ -288,42 +288,18 @@ test("Memory settlement uses the committed Runtime result reference", () => {
   }), "run-2:200");
 });
 
-for (const explicitlyNamed of [false, true]) {
-  test(`intent resolution does not inherit source scope while Planner retains the catalog (explicit=${explicitlyNamed})`, async () => {
-    const database = new AppDatabase(":memory:");
-    let planned = false;
-    try {
-      const skills = new SkillService(database);
-      const source = await skills.create("owner", { name: "records-source", description: "REGISTRY-SCOPE-ONLY",
-        instructions: "SOURCE-WORKFLOW-TEMPLATE" });
-      const goal = `${explicitlyNamed ? "使用 records-source 作为来源之一，" : ""}查询示例公司的董事长和总裁是谁。`;
-      const runs = new RunService({ database, skills,
-        modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
-          assert.ok(request.runId.startsWith("conversation-turn:"));
-          const context = request.runtimeContext?.content ?? "";
-          const data = JSON.parse(context.split("\n")[1]);
-          assert.deepEqual(data.availableSkills, explicitlyNamed ? [{ id: source.id, name: source.name }] : []);
-          assert.doesNotMatch(context, /REGISTRY-SCOPE-ONLY|SOURCE-WORKFLOW-TEMPLATE/);
-          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "intent", name: "resolve_conversation_turn", arguments: {
-            mode: "execute", relation: "new_goal", inputMode: "none", effectiveGoal: goal,
-            taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "lookup", requiresExecution: true,
-              deliverables: [{ targetId: "answer", purpose: goal, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
-            evidenceStrategy: "source_grounded", sourceBinding: { mode: "none", visibleDirectoryIds: [] }, userConstraints: [],
-            memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
-          } }] };
-        } }),
-        plannerFactory: () => ({ plan: async (task) => {
-          assert.equal(task.canonicalState.intent.userInput, goal);
-          assert.ok(task.capabilityRecovery?.availableSkills.some((skill) => skill.id === source.id && skill.description === "REGISTRY-SCOPE-ONLY"));
-          planned = true;
-          throw new Error("planner-boundary-observed");
-        } }),
-      });
-      await assert.rejects(runs.executeConversation("owner", goal));
-      assert.equal(planned, true);
-    } finally { database.close(); }
-  });
-}
+test("explicit Skill selection survives support, QA, source and absent role metadata", () => {
+  for (const role of ["support", "qa", "source_provider", "primary_builder", undefined] as const) {
+    const skill = { id: "discovered:requested-analysis", name: "requested-analysis", description: "Execute the requested package workflow.",
+      ...(role ? { agentLoop: { roles: [role], artifactKinds: ["none"], sourceKinds: [], qaKinds: [] } } : {}),
+    } as PrivateSkill;
+    const understanding = understandTask({ objective: "请使用 requested-analysis 完成本次查询并报告结果。", evidenceDemand: "source_grounded" });
+    const selected = selectPlanningSkillRoles([skill], understanding, []);
+    assert.equal(selected.length, 1, `explicit selection lost for ${role}`);
+    assert.equal(selected[0]!.skill.id, skill.id);
+    assert.equal(selected[0]!.selection.role, role ?? "support");
+  }
+});
 
 test("source-grounded lookup does not nominate every no-artifact primary builder", () => {
   const registry = {

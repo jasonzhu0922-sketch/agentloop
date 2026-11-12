@@ -16,6 +16,52 @@ import {
 
 export const SKILL_DECLARATION_SCHEMA = "agentloop.skillDeclaration/v1" as const;
 
+export interface SkillRequirements {
+  readonly python?: {
+    readonly version?: string;
+    readonly packages: readonly string[];
+    readonly files: readonly string[];
+  };
+  readonly commands: readonly string[];
+  readonly environment: readonly string[];
+  readonly mcpServers: readonly string[];
+}
+
+/** Public form contract. Enum choices and limits are shared with the parser. */
+export const SKILL_DECLARATION_EDITOR_SCHEMA = {
+  schema: SKILL_DECLARATION_SCHEMA,
+  groups: [
+    { id: "identity", fields: [
+      { path: "identity.name", type: "text", readOnly: true, maxLength: 80 },
+      { path: "identity.description", type: "textarea", readOnly: true, maxLength: 2000 },
+    ] },
+    { id: "activation", fields: [
+      { path: "activation.semanticTags", type: "list", maxItems: 32, maxLength: 64, pattern: "^[a-z0-9][a-z0-9._-]{0,63}$" },
+      { path: "activation.intentExamples", type: "list", maxItems: 16, maxLength: 500 },
+    ] },
+    { id: "workflow", fields: [
+      { path: "workflow.roles", type: "choices", values: SKILL_AGENT_LOOP_ROLE_VALUES, minItems: 1 },
+      { path: "workflow.artifactKinds", type: "choices", values: SKILL_AGENT_LOOP_ARTIFACT_KIND_VALUES, minItems: 1 },
+      { path: "workflow.sourceKinds", type: "choices", values: SKILL_AGENT_LOOP_SOURCE_KIND_VALUES },
+      { path: "workflow.qaKinds", type: "choices", values: SKILL_AGENT_LOOP_QA_KIND_VALUES },
+      { path: "workflow.requiredSkills", type: "skills", maxItems: 32, maxLength: 80, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    ] },
+    { id: "requirements", fields: [
+      { path: "requirements.python.version", type: "text", maxLength: 120, pattern: "^[0-9.*<>=!~, \\t]+$", optional: true },
+      { path: "requirements.python.packages", type: "list", maxItems: 128, maxLength: 500 },
+      { path: "requirements.python.files", type: "list", maxItems: 16, maxLength: 240 },
+      { path: "requirements.commands", type: "list", maxItems: 32, maxLength: 80, pattern: "^[a-zA-Z0-9][a-zA-Z0-9._+-]*$" },
+      { path: "requirements.environment", type: "list", maxItems: 32, maxLength: 80, pattern: "^[A-Z_][A-Z0-9_]*$" },
+      { path: "requirements.mcpServers", type: "list", maxItems: 32, maxLength: 80, pattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]*$" },
+    ] },
+    { id: "execution", fields: [
+      { path: "execution.manifest", type: "text", readOnly: true },
+      { path: "compatibility.executionProfiles", type: "choices", values: SKILL_AGENT_LOOP_EXECUTION_PROFILE_VALUES, readOnly: true },
+      { path: "compatibility.producesEvidenceKinds", type: "choices", values: SKILL_AGENT_LOOP_PRODUCED_EVIDENCE_KIND_VALUES, readOnly: true },
+    ] },
+  ],
+} as const;
+
 export interface SkillDeclaration {
   readonly schema: typeof SKILL_DECLARATION_SCHEMA;
   readonly identity: {
@@ -36,6 +82,7 @@ export interface SkillDeclaration {
   readonly execution?: {
     readonly manifest: "agentloop.executors.json";
   };
+  readonly requirements?: SkillRequirements;
   /** Temporary migration projection for consumers not yet on ResolvedSkillContract. */
   readonly compatibility?: {
     readonly executionProfiles?: readonly (typeof SKILL_AGENT_LOOP_EXECUTION_PROFILE_VALUES[number])[];
@@ -76,11 +123,13 @@ export function parseSkillDeclaration(value: unknown): SkillDeclaration {
   const compatibility = root.compatibility === undefined ? undefined : record(root.compatibility, "Skill declaration compatibility");
   const executionProfiles = compatibility?.executionProfiles === undefined ? [] : enumList(compatibility.executionProfiles, "skill_declaration_execution_profiles", EXECUTION_PROFILE_VALUES) as typeof SKILL_AGENT_LOOP_EXECUTION_PROFILE_VALUES[number][];
   const producesEvidenceKinds = compatibility?.producesEvidenceKinds === undefined ? [] : enumList(compatibility.producesEvidenceKinds, "skill_declaration_evidence_kinds", EVIDENCE_VALUES) as typeof SKILL_AGENT_LOOP_PRODUCED_EVIDENCE_KIND_VALUES[number][];
+  const requirements = root.requirements === undefined ? undefined : parseSkillRequirements(root.requirements);
   return {
     schema: SKILL_DECLARATION_SCHEMA,
     identity: { name, description },
     activation: { semanticTags, intentExamples },
     workflow: { roles, artifactKinds, sourceKinds, qaKinds, requiredSkills },
+    ...(requirements === undefined ? {} : { requirements }),
     ...(execution === undefined ? {} : { execution: { manifest: "agentloop.executors.json" as const } }),
     ...(compatibility === undefined || (executionProfiles.length === 0 && producesEvidenceKinds.length === 0) ? {} : {
       compatibility: {
@@ -88,6 +137,28 @@ export function parseSkillDeclaration(value: unknown): SkillDeclaration {
         ...(producesEvidenceKinds.length === 0 ? {} : { producesEvidenceKinds }),
       },
     }),
+  };
+}
+
+export function parseSkillRequirements(value: unknown): SkillRequirements {
+  const root = record(value, "skill_requirements_invalid");
+  if (Object.keys(root).some(key => !["python", "commands", "environment", "mcpServers"].includes(key))) throw invalid("skill_requirements_field_invalid");
+  let python: SkillRequirements["python"];
+  if (root.python !== undefined) {
+    const entry = record(root.python, "skill_requirements_python_invalid");
+    if (Object.keys(entry).some(key => !["version", "packages", "files"].includes(key))) throw invalid("skill_requirements_python_field_invalid");
+    const version = entry.version === undefined ? undefined : string(entry.version, "skill_requirements_python_version_invalid");
+    if (version !== undefined && (version.length > 120 || !/^[0-9.*<>=!~, \t]+$/u.test(version))) throw invalid("skill_requirements_python_version_invalid");
+    const packages = stringList(entry.packages ?? [], "skill_requirements_python_packages_invalid", /^[A-Za-z0-9][^\r\n\0]*$/u, 128, 500);
+    const files = stringList(entry.files ?? [], "skill_requirements_python_files_invalid", undefined, 16, 240);
+    if (files.some(path => path.includes("\\") || path.startsWith("/") || path.includes(":") || path.split("/").some(part => !part || part === "." || part === ".."))) throw invalid("skill_requirements_python_files_invalid");
+    python = { ...(version === undefined ? {} : { version }), packages, files };
+  }
+  return {
+    ...(python === undefined ? {} : { python }),
+    commands: stringList(root.commands ?? [], "skill_requirements_commands_invalid", /^[a-zA-Z0-9][a-zA-Z0-9._+-]*$/u, 32, 80),
+    environment: stringList(root.environment ?? [], "skill_requirements_environment_invalid", /^[A-Z_][A-Z0-9_]*$/u, 32, 80),
+    mcpServers: stringList(root.mcpServers ?? [], "skill_requirements_mcp_invalid", /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u, 32, 80),
   };
 }
 
@@ -140,21 +211,10 @@ export function detectSkillDeclaration(
   files: readonly string[],
   hasExecutorManifest = false,
 ): SkillDeclaration {
-  const text = `${name} ${description} ${instructions}`.toLowerCase();
-  const artifactKinds: SkillAgentLoopArtifactKind[] = [];
-  const artifactHints: Array<[string, SkillAgentLoopArtifactKind]> = [
-    ["pptx|presentation|slide|deck", "presentation"],
-    ["docx|word|document|report", "document"],
-    ["xlsx|spreadsheet|excel|csv", "spreadsheet"],
-    ["png|jpg|image|visual", "image"],
-    ["audio|sound|mp3|wav", "audio"],
-    ["html|web|dashboard", "html"],
-    ["code|script|repository|repo", "code"],
-  ];
-  for (const [pattern, kind] of artifactHints) if (new RegExp(pattern, "u").test(text) || files.some((file) => new RegExp(pattern, "iu").test(file))) artifactKinds.push(kind);
-  // Detection is a review proposal, not an authorization source. Keep the
-  // role and source capability conservative until the user explicitly edits
-  // and activates the declaration.
+  // Package assets and frontmatter field names do not establish a delivery
+  // contract ("description" itself contains "script"). Semantic recognition
+  // or an explicit package declaration owns roles, inputs and output kinds.
+  // The basic declaration stays usable without making users confirm it.
   const roles: SkillAgentLoopRole[] = ["support"];
   const sourceKinds: SkillAgentLoopSourceKind[] = [];
   const tags = [...new Set(name.split("-").filter((tag) => TAG_PATTERN.test(tag)))];
@@ -164,7 +224,7 @@ export function detectSkillDeclaration(
     activation: { semanticTags: tags, intentExamples: description.length > 0 ? [description] : [] },
     workflow: {
       roles,
-      artifactKinds: artifactKinds.length === 0 ? ["none"] : [...new Set(artifactKinds)],
+      artifactKinds: ["none"],
       sourceKinds: [...new Set(sourceKinds)],
       qaKinds: [],
       requiredSkills: [],

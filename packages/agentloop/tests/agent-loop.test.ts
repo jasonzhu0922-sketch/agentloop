@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ModelPlanner } from "../src/planning/planner.ts";
-import { deliveryClaimsForCurrentTargetBindings, runAgentLoop } from "../src/runtime/agent-loop.ts";
-import { buildRuntimeDeliveryCandidate } from "../src/runtime/delivery-candidate.ts";
+import { runAgentLoop } from "../src/runtime/agent-loop.ts";
+import { buildRuntimeDeliveryCandidate, deliveryClaimsForCurrentTargetBindings } from "../src/runtime/delivery-candidate.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
 import { formatPracticePromptAugmentation } from "../src/runtime/dynamic-prompt.ts";
@@ -28,6 +28,201 @@ import { AppError } from "../src/shared/errors.ts";
 import { ToolRegistry } from "../src/tools/tool-registry.ts";
 import type { RuntimeTool } from "../src/tools/tool-registry.ts";
 import { TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
+
+test("authored auxiliary source stays pending before its first execution and survives unrelated successes", () => {
+  const policy = runtimeStepToolProgressPolicy(["source_summary"]);
+  const source = { toolCallId: "write-source", toolName: "computer_write_file", isError: false,
+    result: JSON.stringify({ path: "compute.py", bytes: 100, sha256: "a".repeat(64) }) };
+  const unrelated = { toolCallId: "unrelated", toolName: "computer_run_command", isError: false,
+    result: JSON.stringify({ exitCode: 0, stdout: "ready" }) };
+  const evidence = [source, unrelated];
+  const pending = deriveRuntimeStepEvidenceState({ policy, evidence });
+  assert.deepEqual(pending?.pendingComputation, { toolCallId: "write-source", sourceMutationCount: 1, sourcePath: "compute.py" });
+  assert.equal(pending?.nextAction, "execute_authored_computation");
+  assert.match(pending!.instruction, /compute.py/);
+  assert.match(pending!.instruction, /inputRefs/);
+  assert.equal(pending?.workProduct.status, "none", "Auxiliary code is not a deliverable");
+  const completed = deriveRuntimeStepEvidenceState({ policy, evidence: [...evidence, {
+    toolCallId: "execute", toolName: "computer_run_command", isError: false,
+    result: JSON.stringify({ exitCode: 0, computationReceipt: { schema: "agentloop.commandComputationReceipt/v1", facts: { total: 140 } } }),
+  }] });
+  assert.equal(completed?.pendingComputation, undefined);
+  assert.equal(deriveRuntimeStepEvidenceState({ policy: artifactStepToolProgressPolicy(["artifact_path"], { expectedArtifactKind: "code" }), evidence: [source] })?.pendingComputation, undefined);
+  assert.equal(deriveRuntimeStepEvidenceState({ policy: artifactStepToolProgressPolicy(["artifact_path"], { expectedArtifactKind: "pdf" }), evidence: [source] })?.pendingComputation, undefined);
+});
+
+test("source-only computation executes after its first write with canonical decision instructions", async () => {
+  let turns = 0;
+  let executions = 0;
+  const tools: RuntimeTool<unknown>[] = [
+    { name: "computer_write_file", description: "Author auxiliary source", inputSchema: { type: "object" }, parse: value => value,
+      execute: async () => ({ path: "compute.py", bytes: 100, sha256: "a".repeat(64) }) },
+    { name: "computer_run_command", description: "Compute", inputSchema: { type: "object" }, parse: value => value,
+      execute: async () => { executions += 1; return { exitCode: 0, computationReceipt: { schema: "agentloop.commandComputationReceipt/v1", facts: { total: 140 } },
+        evidenceReceipt: { evidenceKinds: { satisfied: ["source_summary"] } } }; } },
+  ];
+  const grant = makeGrant(tools.map(tool => tool.name));
+  const result = await runAgentLoop({ runId: grant.runId, systemPrompt: "Compute from the acquired source.", input: "Compute the total.",
+    tools: new ToolRegistry(tools), grant, maxSteps: 5,
+    progressPolicy: { ...runtimeStepToolProgressPolicy(["source_summary"]), autoCompleteFromEvidence: false },
+    requireStructuredCandidateSynthesis: true,
+    model: { limits: TEST_MODEL_LIMITS, complete: async request => {
+      turns += 1;
+      if (turns === 1) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "author", name: "computer_write_file", arguments: { path: "compute.py", content: "compute source" } }] };
+      if (turns === 2) {
+        assert.match(request.runtimeContext!.content, /execute_authored_computation/);
+        assert.match(request.runtimeContext!.content, /The authored auxiliary source is compute.py/);
+        assert.equal(request.tools.length, tools.length);
+        return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "compute", name: "computer_run_command", arguments: { command: "python3", args: ["compute.py"], computationInputs: [{ path: "records.json" }] } }] };
+      }
+      return { content: "The total is 140.", finishReason: "stop", toolCalls: [] };
+    } },
+  });
+  assert.equal(result.output, "The total is 140.");
+  assert.equal(executions, 1);
+  assert.equal(turns, 3);
+});
+
+test("identical source rewrites before any execution enter computation recovery", async () => {
+  let turns = 0;
+  const events: RuntimeEvent[] = [];
+  const tools: RuntimeTool<unknown>[] = [
+    { name: "computer_write_file", description: "Author source", inputSchema: { type: "object" }, parse: value => value,
+      execute: async () => ({ path: "compute.py", bytes: 100, sha256: "a".repeat(64) }) },
+    { name: "computer_run_command", description: "Compute", inputSchema: { type: "object" }, parse: value => value,
+      execute: async () => { assert.fail("The stuck model never requests execution"); } },
+  ];
+  const grant = makeGrant(tools.map(tool => tool.name));
+  await assert.rejects(() => runAgentLoop({ runId: grant.runId, systemPrompt: "Compute the total.", input: "Compute the total.",
+    grant, tools: new ToolRegistry(tools), maxSteps: 64, progressPolicy: runtimeStepToolProgressPolicy(["source_summary"]),
+    emit: event => { events.push(event); },
+    model: { limits: TEST_MODEL_LIMITS, complete: async request => {
+      if (request.tools.length === 0) return { content: "The computation has not executed.", finishReason: "stop", toolCalls: [] };
+      turns += 1;
+      return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `write-${turns}`, name: "computer_write_file",
+        arguments: { path: "compute.py", mode: "overwrite", content: "same source" } }] };
+    } },
+  }), error => error instanceof AppError && error.code === "STEP_NOT_COMPLETED" && error.details?.reason === "pending_computation_execution");
+  assert.equal(turns, 4);
+  const stopped = events.filter(event => event.type === "loop.no_progress");
+  assert.deepEqual(stopped.map(event => event.data.stalled), [false, true]);
+  assert.equal(stopped.at(-1)?.data.sourcePath, "compute.py");
+  assert.equal(events.some(event => event.type === "loop.limit_exceeded"), false);
+});
+
+test("a failed computation is executed after its repair instead of converging on the write receipt", async () => {
+  let executions = 0;
+  let writes = 0;
+  let turns = 0;
+  const events: RuntimeEvent[] = [];
+  const tools: RuntimeTool<unknown>[] = [
+    { name: "computer_run_command", description: "Compute from the existing records", inputSchema: { type: "object" },
+      parse: value => value, execute: async () => {
+        executions += 1;
+        return executions === 1
+          ? { exitCode: 1, stdout: "", stderr: "Traceback at line 17: KeyError: 0", computationEvidenceError: "Command did not succeed, so computation provenance cannot be verified." }
+          : { exitCode: 0, stdout: "{\"total\":140}", stderr: "",
+            computationReceipt: { schema: "agentloop.commandComputationReceipt/v1", facts: { total: 140 } } };
+      } },
+    { name: "computer_write_file", description: "Repair the computation", inputSchema: { type: "object" },
+      parse: value => value, execute: async () => { writes += 1; return { path: "compute.py" }; } },
+  ];
+  const grant = makeGrant(tools.map(tool => tool.name));
+  const result = await runAgentLoop({ runId: grant.runId, systemPrompt: "Compute and explain the total.", input: "Compute the recorded total.",
+    grant, tools: new ToolRegistry(tools), maxSteps: 5, progressPolicy: runtimeStepToolProgressPolicy(["delivery_receipt"]),
+    emit: event => { events.push(event); },
+    model: { limits: TEST_MODEL_LIMITS, complete: async request => {
+      turns += 1;
+      if (turns === 3) {
+        const frame = runtimeStepSemanticState(request.runtimeContext!.content);
+        assert.equal(frame.nextAction, "execute_repaired_computation");
+        assert.deepEqual(frame.pendingComputation, { toolCallId: "compute-1", sourceMutationCount: 1 });
+        assert.ok(request.tools.some(tool => tool.name === "computer_run_command"));
+        assert.ok(request.tools.some(tool => tool.name === "computer_write_file"), "The complete grant stays available");
+      }
+      if (turns === 1 || turns === 3) return { content: "", finishReason: "tool_calls", toolCalls: [{
+        id: `compute-${turns}`, name: "computer_run_command", arguments: { command: "python3", args: ["compute.py"], computationInputs: [{ path: "records.json" }] },
+      }] };
+      if (turns === 2) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "repair", name: "computer_write_file",
+        arguments: { path: "compute.py", mode: "overwrite", content: "corrected computation" } }] };
+      return { content: "The recorded total is 140.", finishReason: "stop", toolCalls: [] };
+    } },
+  });
+  assert.equal(result.output, "The recorded total is 140.");
+  assert.equal(executions, 2);
+  assert.equal(writes, 1);
+  assert.equal(events.some(event => event.type === "loop.no_progress"), false);
+});
+
+test("chunked repair authoring retains the pending computation without spending the rewrite budget", async () => {
+  let turns = 0;
+  const events: RuntimeEvent[] = [];
+  const tools: RuntimeTool<unknown>[] = [
+    { name: "computer_run_command", description: "Compute", inputSchema: { type: "object" }, parse: value => value,
+      execute: async () => turns === 1
+        ? { exitCode: 1, computationEvidenceError: "Command did not succeed." }
+        : { exitCode: 0, computationReceipt: { schema: "agentloop.commandComputationReceipt/v1", facts: { total: 140 } } } },
+    { name: "computer_write_file", description: "Append repair", inputSchema: { type: "object" }, parse: value => value,
+      execute: async () => ({ path: "compute.py" }) },
+  ];
+  const grant = makeGrant(tools.map(tool => tool.name));
+  const result = await runAgentLoop({ runId: grant.runId, systemPrompt: "Compute the total.", input: "Compute the total.",
+    grant, tools: new ToolRegistry(tools), maxSteps: 8, progressPolicy: runtimeStepToolProgressPolicy(["delivery_receipt"]),
+    emit: event => { events.push(event); },
+    model: { limits: TEST_MODEL_LIMITS, complete: async request => {
+      turns += 1;
+      if (turns >= 3 && turns <= 6) {
+        assert.equal(runtimeStepSemanticState(request.runtimeContext!.content).nextAction, "execute_repaired_computation");
+        assert.equal(request.tools.length, tools.length);
+      }
+      if (turns === 1 || turns === 6) return { content: "", finishReason: "tool_calls", toolCalls: [{
+        id: `compute-${turns}`, name: "computer_run_command", arguments: { command: "python3", args: ["compute.py"] },
+      }] };
+      if (turns < 6) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `chunk-${turns}`,
+        name: "computer_write_file", arguments: { path: "compute.py", mode: "append", content: `chunk-${turns}` } }] };
+      return { content: "The total is 140.", finishReason: "stop", toolCalls: [] };
+    } },
+  });
+  assert.equal(result.output, "The total is 140.");
+  assert.equal(turns, 7);
+  assert.equal(events.some(event => event.type === "loop.no_progress" && event.data.reason === "pending_computation_execution"), false);
+});
+
+test("repeated computation rewrites stop without consuming the entire execution budget", async () => {
+  let writes = 0;
+  let turns = 0;
+  const events: RuntimeEvent[] = [];
+  const tools: RuntimeTool<unknown>[] = [
+    { name: "computer_run_command", description: "Run computation", inputSchema: { type: "object" }, parse: value => value,
+      execute: async () => ({ exitCode: 1, stdout: "", stderr: "KeyError: 0", computationEvidenceError: "Command did not succeed." }) },
+    { name: "computer_write_file", description: "Write source", inputSchema: { type: "object" }, parse: value => value,
+      execute: async () => { writes += 1; return { path: `variant-${writes}.py` }; } },
+  ];
+  const grant = makeGrant(tools.map(tool => tool.name));
+  await assert.rejects(() => runAgentLoop({ runId: grant.runId, systemPrompt: "Compute the total.", input: "Compute the total.",
+    grant, tools: new ToolRegistry(tools), maxSteps: 64, progressPolicy: runtimeStepToolProgressPolicy(["delivery_receipt"]),
+    emit: event => { events.push(event); },
+    model: { limits: TEST_MODEL_LIMITS, complete: async request => {
+      if (request.tools.length === 0) return { content: "The computation did not complete.", finishReason: "stop", toolCalls: [] };
+      turns += 1;
+      return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `action-${turns}`,
+        name: turns === 1 ? "computer_run_command" : "computer_write_file",
+        arguments: turns === 1 ? { command: "python3", args: ["compute.py"] }
+          : { path: `variant-${turns}.py`, mode: "create", content: `rewritten-${turns}` },
+      }] };
+    } },
+  }), error => {
+    assert.ok(error instanceof AppError);
+    assert.equal(error.code, "STEP_NOT_COMPLETED");
+    assert.equal(error.details?.reason, "pending_computation_execution");
+    return true;
+  });
+  assert.equal(turns, 4);
+  assert.equal(writes, 3);
+  const stopped = events.filter(event => event.type === "loop.no_progress");
+  assert.deepEqual(stopped.map(event => event.data.stalled), [false, true]);
+  assert.equal(stopped.at(-1)?.data.failedToolCallId, "action-1");
+});
 
 test("plural delivery claim requires every bound instance to have matching acceptance", () => {
   const targets = [1, 2, 3].map((n) => ({ targetId: `pdf.${n}`, deliveryTargetId: "pdf" }));

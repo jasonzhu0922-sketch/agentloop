@@ -5,7 +5,7 @@ import { createConcurrencyLimiter, mapWithConcurrencyLimit } from "../shared/con
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import { ContextAssembler, type ContextPolicy } from "./context-assembler.ts";
 import { isCommandResult } from "./command-result-projection.ts";
-import { appendDeliveryCandidateCaveats, buildRuntimeDeliveryCandidate, normalizeDeliveryCandidate } from "./delivery-candidate.ts";
+import { acceptedArtifactVersions, appendDeliveryCandidateCaveats, buildRuntimeDeliveryCandidate, normalizeDeliveryCandidate } from "./delivery-candidate.ts";
 import type {
   AgentLoopResult,
   AgentLoopToolEvidence,
@@ -30,7 +30,6 @@ import { ToolRegistry } from "../tools/tool-registry.ts";
 import { HUMAN_LOOP_TOOL_NAME } from "../tools/human-loop-tool.ts";
 import { completeWithStreaming } from "./model-streaming.ts";
 import { isTextToolInvocation } from "./text-tool-invocation.ts";
-import { canonicalArtifactAcceptanceVerdict, runtimeEvidenceRecordsFromToolResult } from "./tool-result-evidence.ts";
 import {
   classifyToolOperationOutcome,
   type ToolInvocationStatus,
@@ -128,6 +127,8 @@ export interface AgentLoopOptions {
     context: ToolStepConvergenceContext,
   ) => boolean | Promise<boolean>;
   readonly progressPolicy?: RuntimeToolProgressPolicy;
+  /** Complete canonical target scope, independent of file observation tracking. */
+  readonly deliveryTargets?: readonly import("./canonical-run-state.ts").CanonicalDeliveryTarget[];
   readonly stepExecutionStrategy?: StepExecutionStrategy;
   /**
    * A modify-artifact leaf may replace only a path it has already read
@@ -138,7 +139,7 @@ export interface AgentLoopOptions {
   /** Stage 3: current-leaf visibility only; no assessment/recovery policy change. */
   readonly workProductContext?: WorkProductContextOptions;
   /** Persist Runtime-validated current target/version bindings through the canonical writer. */
-  readonly onWorkProductDeliveryTargets?: (bindings: NonNullable<CurrentDecisionWorkProductFacts["semantics"]["deliveryTargets"]>) => Promise<void> | void;
+  readonly onWorkProductDeliveryTargets?: (bindings: NonNullable<CurrentDecisionWorkProductFacts["semantics"]["deliveryTargets"]>, observations: CurrentDecisionWorkProductFacts["observations"]) => Promise<void> | void;
   /** Read the latest committed Run at every model and assessment boundary. */
   readonly currentDecisionContext?: () => CurrentDecisionContext;
   readonly signal?: AbortSignal;
@@ -261,26 +262,23 @@ function automaticArtifactAcceptanceCall(input: {
   readonly convergenceOnly: boolean;
   readonly availableToolNames: readonly string[];
   readonly attemptedArtifactKeys: ReadonlySet<string>;
+  readonly evidence: readonly AgentLoopToolEvidence[];
   readonly currentTargetBindings?: readonly { readonly targetId: string; readonly path: string; readonly versionId: string; readonly sha256: string }[];
 }): AutomaticArtifactAcceptanceCall | undefined {
   const state = input.stepEvidenceState;
-  if (
-    input.convergenceOnly
-    ||
-    state?.nextAction !== "verify_existing_artifact"
-    || state.workProduct.status !== "deliverable_available"
-    || !input.availableToolNames.includes("verify_artifact_acceptance")
-  ) return undefined;
-  const artifact = state.workProduct.deliverableArtifacts.findLast((candidate) => {
-    if (!artifactMatchesExpectedTarget(
-      candidate,
-      state.workProduct.expectedArtifactKind,
-      state.workProduct.expectedArtifactFormat,
-    )) return false;
-    if (input.currentTargetBindings !== undefined && !input.currentTargetBindings.some((binding) =>
-      binding.path === candidate.path && binding.sha256 === candidate.sha256)) return false;
-    return !input.attemptedArtifactKeys.has([candidate.path, candidate.sha256 ?? candidate.toolCallId].join("#"));
-  });
+  if (!input.availableToolNames.includes("verify_artifact_acceptance")) return undefined;
+  // A canonical file target is verified by its current realization, never by
+  // progress inferred from an older same-kind receipt in recovery history.
+  const acceptances = acceptedArtifactVersions(input.evidence);
+  const artifact: { readonly path: string; readonly sha256?: string; readonly toolCallId?: string; readonly acceptanceProfile?: string } | undefined =
+    input.currentTargetBindings !== undefined
+      ? input.currentTargetBindings.findLast((binding) => !acceptances.has(`${binding.path}\u0000${binding.sha256.toLowerCase()}`)
+        && !input.attemptedArtifactKeys.has(`${binding.path}#${binding.sha256}`))
+      : input.convergenceOnly || state?.nextAction !== "verify_existing_artifact" || state.workProduct.status !== "deliverable_available"
+        ? undefined
+        : state.workProduct.deliverableArtifacts.findLast((candidate) => artifactMatchesExpectedTarget(candidate,
+          state.workProduct.expectedArtifactKind, state.workProduct.expectedArtifactFormat)
+          && !input.attemptedArtifactKeys.has([candidate.path, candidate.sha256 ?? candidate.toolCallId].join("#")));
   if (artifact === undefined) return undefined;
   const artifactKey = [artifact.path, artifact.sha256 ?? artifact.toolCallId].join("#");
   // `artifactKind` is a Runtime/Planner semantic label (for example
@@ -535,7 +533,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const observed = workProducts?.capture(event) ?? event;
     await options.emit?.(observed);
     if (workProducts !== undefined && options.onWorkProductDeliveryTargets !== undefined) {
-      await options.onWorkProductDeliveryTargets(workProducts.derive().semantics.deliveryTargets ?? []);
+      const facts = workProducts.derive();
+      await options.onWorkProductDeliveryTargets(facts.semantics.deliveryTargets ?? [], facts.observations);
     }
   };
   const maxToolResultCharacters = options.maxToolResultCharacters ?? 50_000;
@@ -572,13 +571,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       : options.initialMessages),
   ];
   const toolEvidence: AgentLoopToolEvidence[] = [...(options.initialToolEvidence ?? [])];
-  const semanticDeliveryTargetsEnabled = (options.workProductContext?.deliveryTargets?.length ?? 0) > 0;
+  const artifactDeliveryTargetsEnabled = (options.workProductContext?.deliveryTargets?.length ?? 0) > 0;
   const buildDeliveryCandidate = (
-    input: Omit<Parameters<typeof buildRuntimeDeliveryCandidate>[0], "expectedArtifactKind" | "expectedArtifactFormat">,
+    input: Omit<Parameters<typeof buildRuntimeDeliveryCandidate>[0], "expectedArtifactKind" | "expectedArtifactFormat" | "deliveryTargets" | "artifactBindings" | "artifactTargets">,
   ): RuntimeDeliveryCandidate => buildRuntimeDeliveryCandidate({
     ...input,
-    ...(!semanticDeliveryTargetsEnabled ? {} : { deliveryClaims: deliveryClaimsForCurrentTargetBindings(workProducts!.derive().semantics.deliveryTargets ?? [], toolEvidence, options.workProductContext!.deliveryTargets!) }),
-    ...(options.progressPolicy?.targetIds === undefined ? {} : { targetIds: options.progressPolicy.targetIds }),
+    deliveryTargets: options.deliveryTargets ?? [],
+    artifactBindings: workProducts?.derive().semantics.deliveryTargets ?? [],
+    artifactTargets: options.workProductContext?.deliveryTargets ?? [],
     ...(options.progressPolicy?.expectedArtifactKind === undefined
       ? {}
       : { expectedArtifactKind: options.progressPolicy.expectedArtifactKind }),
@@ -648,6 +648,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let invalidHumanLoopAttempts = 0;
   let humanLoopRepairPending = false;
   let toolProgressState = initialRuntimeToolProgressState();
+  let computationRewriteTurns = 0;
   let stalled = false;
   let requestedConvergenceReason: string | undefined;
   const currentLimit = (): number =>
@@ -985,6 +986,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     });
     const missingToolEvidenceKinds = stepEvidenceState?.missingToolEvidenceKinds ?? [];
     const canConvergeFromCurrentEvidence = missingToolEvidenceKinds.length === 0
+      && stepEvidenceState?.pendingComputation === undefined
       && currentDecisionView.currentGap.assessmentGaps.every((gap) =>
         currentDecisionView.currentGap.repairInProgressGapIds.includes(gap.id)
         || gap.suggestedAction === "repair_leaf" && gap.missingEvidenceKinds.length === 0);
@@ -1054,7 +1056,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       assertArtifactAcceptanceCallMatchesTarget(
         call,
         options.progressPolicy,
-        semanticDeliveryTargetsEnabled ? workProducts!.derive().semantics.deliveryTargets : undefined,
+        artifactDeliveryTargetsEnabled ? workProducts!.derive().semantics.deliveryTargets : undefined,
       );
       return grantedMaterialized.prepare(call);
     };
@@ -1147,7 +1149,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       convergenceOnly,
       availableToolNames: grantedMaterialized.definitions.map((tool) => tool.name),
       attemptedArtifactKeys: automaticArtifactAcceptanceAttempts,
-      ...(!semanticDeliveryTargetsEnabled ? {} : { currentTargetBindings: workProducts!.derive().semantics.deliveryTargets }),
+      evidence: toolEvidence,
+      ...(!artifactDeliveryTargetsEnabled ? {} : { currentTargetBindings: workProducts!.derive().semantics.deliveryTargets }),
     });
     if (automaticAcceptance !== undefined) {
       automaticArtifactAcceptanceAttempts.add(automaticAcceptance.artifactKey);
@@ -2067,6 +2070,33 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       policy: options.progressPolicy,
       evidence: toolEvidence,
     });
+    const pendingComputation = evidenceStateBeforeCandidate?.pendingComputation;
+    if (pendingComputation === undefined || pendingComputation.toolCallId !== stepEvidenceState?.pendingComputation?.toolCallId) {
+      computationRewriteTurns = 0;
+    } else if (outcomes.some((outcome) => !outcome.isError && outcome.call.name === "computer_write_file"
+      && (outcome.call.arguments as { mode?: string } | null)?.mode !== "append")) {
+      // Complete rewrites/new variants cannot indefinitely substitute for
+      // executing an authored or failed computation. Appends and targeted patches may be
+      // legitimate bounded authoring, so they do not spend this retry budget.
+      computationRewriteTurns += 1;
+      if (computationRewriteTurns >= 2) {
+        const feedback = "The pending computation was repeatedly rewritten without executing a verified result. Run the committed source with its declared inputs, or use a different evidence-producing strategy; another script variant is not a computation result.";
+        await emit({ type: "loop.no_progress", data: {
+          step, phase: "execution", reason: "pending_computation_execution",
+          failedToolCallId: pendingComputation.toolCallId,
+          ...(pendingComputation.sourcePath === undefined ? {} : { sourcePath: pendingComputation.sourcePath }),
+          sourceMutationCount: pendingComputation.sourceMutationCount,
+          computationRewriteTurns, stalled: computationRewriteTurns >= 3,
+        } });
+        if (computationRewriteTurns >= 3) {
+          throw await completionFailure(new AppError("STEP_NOT_COMPLETED", feedback, 422, {
+            feedback, reason: "pending_computation_execution", failedToolCallId: pendingComputation.toolCallId,
+            repairExhausted: true,
+          }), step, response.content, { approved: false, feedback, requiresEvidenceProgress: true,
+            ...(evidenceProgressBoundary === undefined ? {} : { failedBoundary: evidenceProgressBoundary }) });
+        }
+      }
+    }
     const stepProgressSignatureAfter = currentStepProgressSignature(evidenceStateBeforeCandidate, options.progressPolicy);
     const successfulNonExploratoryAction = outcomes.some((outcome) =>
       !outcome.isError
@@ -2111,7 +2141,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       convergenceOnly: false,
       availableToolNames: grantedMaterialized.definitions.map((tool) => tool.name),
       attemptedArtifactKeys: automaticArtifactAcceptanceAttempts,
-      ...(!semanticDeliveryTargetsEnabled ? {} : { currentTargetBindings: workProducts!.derive().semantics.deliveryTargets }),
+      evidence: toolEvidence,
+      ...(!artifactDeliveryTargetsEnabled ? {} : { currentTargetBindings: workProducts!.derive().semantics.deliveryTargets }),
     }) !== undefined) {
       step -= 1;
       continue;
@@ -2961,65 +2992,6 @@ function parseJsonRecord(value: string): Record<string, unknown> | undefined {
   }
 }
 
-/**
- * A target claim is only created when the exact model-selected current version
- * has a successful acceptance receipt for that same path and SHA-256. This is
- * deliberately narrower than the older kind/format matching: two Markdown
- * files are not interchangeable user deliveries.
- */
-export function deliveryClaimsForCurrentTargetBindings(
-  bindings: readonly {
-    readonly targetId: string;
-    readonly deliveryTargetId: string;
-    readonly path: string;
-    readonly versionId: string;
-    readonly bytes: number;
-    readonly sha256: string;
-    readonly observedByToolCallId: string;
-  }[],
-  evidence: readonly AgentLoopToolEvidence[],
-  targets: readonly { readonly targetId: string; readonly deliveryTargetId?: string }[],
-): NonNullable<RuntimeDeliveryCandidate["deliveryClaims"]> {
-  const acceptances = new Map<string, string>();
-  for (const item of evidence) {
-    if (item.isError || item.toolName !== "verify_artifact_acceptance") continue;
-    for (const result of runtimeEvidenceRecordsFromToolResult(item.result)) {
-      if (result.schema !== "agentloop.artifactAcceptance/v1") continue;
-      const artifact = isPlainRecord(result.artifact) ? result.artifact : undefined;
-      const path = typeof artifact?.path === "string" ? artifact.path : undefined;
-      const sha256 = typeof artifact?.sha256 === "string" ? artifact.sha256.toLowerCase() : undefined;
-      if (path === undefined || sha256 === undefined || !["accepted", "caveated"].includes(canonicalArtifactAcceptanceVerdict(result) ?? "")) continue;
-      acceptances.set(`${path}\u0000${sha256}`, item.toolCallId);
-    }
-  }
-  const accepted = bindings.flatMap((binding) => {
-    const acceptanceToolCallId = acceptances.get(`${binding.path}\u0000${binding.sha256.toLowerCase()}`);
-    if (acceptanceToolCallId === undefined) return [];
-    return [{
-      targetId: binding.deliveryTargetId,
-      instanceId: binding.targetId,
-      evidenceRefs: [binding.observedByToolCallId, acceptanceToolCallId],
-      artifact: {
-        path: binding.path,
-        versionId: binding.versionId,
-        sha256: binding.sha256,
-        bytes: binding.bytes,
-        observedByToolCallId: binding.observedByToolCallId,
-        acceptanceToolCallId,
-      },
-    }];
-  });
-  const byTarget = new Map<string, typeof accepted>();
-  for (const claim of accepted) byTarget.set(claim.targetId, [...(byTarget.get(claim.targetId) ?? []), claim]);
-  return [...byTarget.entries()].filter(([targetId, claims]) => {
-    const expected = targets.filter((target) => (target.deliveryTargetId ?? target.targetId) === targetId);
-    return expected.length > 0 && expected.every((target) => claims.some((claim) => claim.instanceId === target.targetId));
-  }).map(([targetId, claims]) => ({
-    targetId,
-    evidenceRefs: claims.flatMap((claim) => claim.evidenceRefs),
-    ...(claims.length === 1 ? { artifact: claims[0]!.artifact } : { artifacts: claims.map((claim) => claim.artifact!) }),
-  }));
-}
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);

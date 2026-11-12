@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import type { ConversationTurnResolution, ExecutionPlan, FailedBoundary, SkillComplianceAssessment, StepEvidence } from "../planning/contracts.ts";
 import type { StructuredTaskUnderstanding } from "./task-intent.ts";
+import type { WorkProductObservationState } from "./work-product-observations.ts";
 import type { WorkProductSemantics } from "./work-product-semantics.ts";
 import type { RuntimeDeliveryClaim } from "./contracts.ts";
 import type { RuntimeClock } from "./runtime-clock.ts";
@@ -83,6 +84,8 @@ export interface CanonicalDeliveryTarget {
   readonly claims: readonly {
     readonly stepId: string;
     readonly assessmentId: string;
+    /** Accepted conversation material survives retirement of its producing Step. */
+    readonly output?: string;
     readonly evidenceRefs: readonly string[];
     readonly artifact?: RuntimeDeliveryClaim["artifact"];
     readonly artifacts?: RuntimeDeliveryClaim["artifacts"];
@@ -428,6 +431,7 @@ export function recordCanonicalAssessment(
       claims: Object.freeze([...target.claims, {
         stepId: assessment.stepId,
         assessmentId: assessment.id,
+        ...(target.surface === "conversation" ? { output: evidence.deliveryCandidate!.output } : {}),
         evidenceRefs,
         ...(claim?.artifact === undefined ? {} : { artifact: claim.artifact }),
         ...(claim?.artifacts === undefined ? {} : { artifacts: claim.artifacts }),
@@ -508,6 +512,7 @@ export function reconcileCanonicalDeliveryTargetBindings(
   input: {
     readonly stepId: string;
     readonly bindings: NonNullable<WorkProductSemantics["deliveryTargets"]>;
+    readonly observations?: WorkProductObservationState;
     readonly now?: number;
   },
 ): CanonicalRunState {
@@ -520,12 +525,30 @@ export function reconcileCanonicalDeliveryTargetBindings(
   }
   let changed = false;
   const targets = Object.fromEntries(Object.entries(state.targets).map(([targetId, target]) => {
-    if (!target.ownerStepIds.includes(input.stepId)) return [targetId, target];
-    const bindings = byTarget.get(targetId) ?? [];
-    if (bindings.length === 0) {
-      if (target.artifactBinding?.stepId !== input.stepId) return [targetId, target];
+    // Physical identity belongs to the Run, including deliveries whose producer
+    // was retired. Any later committed observation can invalidate that identity.
+    const currentBindings = target.artifactBindings ?? (target.artifactBinding === undefined ? [] : [target.artifactBinding]);
+    const invalidated = currentBindings.some((binding) => {
+      const object = input.observations?.objects.find((item) => item.path === binding.path);
+      if (object === undefined) return false;
+      const version = object.versions.find((item) => item.id === object.currentVersionId);
+      // A later write is a new incarnation even with identical bytes or no
+      // digest. An ordinary read of the same bytes does not revoke acceptance.
+      const rewritten = input.observations!.observations.some((observation) => version?.observationIds.includes(observation.id)
+        && (observation.kind === "created" || observation.kind === "modified")
+        && observation.source.toolCallId !== binding.observedByToolCallId);
+      return object.presence !== "present" || rewritten
+        || version?.sha256 !== undefined && version.sha256 !== binding.sha256
+        || version?.bytes !== undefined && version.bytes !== binding.bytes;
+    });
+    const clearBinding = () => {
       changed = true;
       return [targetId, Object.freeze({ ...target, status: "open" as const, artifactBinding: undefined, artifactBindings: undefined })];
+    };
+    if (!target.ownerStepIds.includes(input.stepId)) return invalidated ? clearBinding() : [targetId, target];
+    const bindings = byTarget.get(targetId) ?? [];
+    if (bindings.length === 0) {
+      return invalidated || target.artifactBinding?.stepId === input.stepId ? clearBinding() : [targetId, target];
     }
     const nextBindings = bindings.map((binding) => ({
       stepId: input.stepId,
@@ -540,13 +563,17 @@ export function reconcileCanonicalDeliveryTargetBindings(
     const identity = (binding: NonNullable<CanonicalDeliveryTarget["artifactBinding"]>) =>
       JSON.stringify([binding.stepId, binding.declarationId, binding.path, binding.versionId, binding.sha256, binding.bytes, binding.observedByToolCallId]);
     const current = target.artifactBindings ?? (target.artifactBinding === undefined ? [] : [target.artifactBinding]);
-    if (current.length === nextBindings.length
+    if (!invalidated && current.length === nextBindings.length
       && current.map(identity).sort().every((value, index) => value === nextBindings.map(identity).sort()[index])) return [targetId, target];
     changed = true;
     return [targetId, Object.freeze({ ...target, status: "open" as const, artifactBinding: Object.freeze(nextBindings[0]!), artifactBindings: Object.freeze(nextBindings.map((binding) => Object.freeze(binding))) })];
   }));
   if (!changed) return state;
-  return next(state, { targets: Object.freeze(targets) }, now);
+  return next(state, {
+    targets: Object.freeze(targets),
+    gaps: Object.freeze(state.gaps.map((gap) => gap.targetId !== undefined && gap.status === "resolved" && targets[gap.targetId]?.status === "open"
+      ? Object.freeze({ ...gap, status: "open" as const, resolvedAt: undefined }) : gap)),
+  }, now);
 }
 
 export function recordCanonicalStepResult(
@@ -596,26 +623,57 @@ function bindTargetOwners(
       owners.set(targetId, [...(owners.get(targetId) ?? []), step.id]);
     }
   }
-  return Object.freeze(Object.fromEntries(Object.entries(targets).map(([targetId, target]) => [targetId, Object.freeze({
-    ...target,
-    ownerStepIds: Object.freeze(owners.get(targetId) ?? []),
-  })])));
+  return Object.freeze(Object.fromEntries(Object.entries(targets).map(([targetId, target]) => {
+    const plannedOwners = owners.get(targetId) ?? [];
+    if (acceptedCanonicalDelivery(target) !== undefined) {
+      if (plannedOwners.some((id) => !target.ownerStepIds.includes(id))) throw conflict(`Plan cannot reassign accepted delivery target ${targetId}`);
+      return [targetId, target];
+    }
+    return [targetId, Object.freeze({ ...target, ownerStepIds: Object.freeze(plannedOwners) })];
+  })));
+}
+
+/** One delivery ledger, independent of the lifetime of its producing Step. */
+export function acceptedCanonicalDelivery(target: CanonicalDeliveryTarget): CanonicalDeliveryTarget["claims"][number] | undefined {
+  if (target.status !== "accepted") return undefined;
+  return [...target.claims].reverse().find((claim) => claim.assessmentId.length > 0
+    && (target.surface !== "conversation" || (claim.output?.trim().length ?? 0) > 0)
+    && deliveryClaimMatchesCurrentTargetBinding(target, { ...claim, targetId: target.targetId }));
+}
+
+/** Planning schedules unresolved obligations; accepted realizations remain Run-owned. */
+export function canonicalDeliveryPlanScope(state: CanonicalRunState, targetIds = Object.keys(state.targets)): {
+  readonly acceptedTargets: readonly CanonicalDeliveryTarget[];
+  readonly outstandingTargets: readonly CanonicalDeliveryTarget[];
+} {
+  const targets = targetIds.map((id) => {
+    const target = state.targets[id];
+    if (target === undefined) throw conflict(`Unknown canonical delivery target ${id}`);
+    if (target.status === "accepted" && acceptedCanonicalDelivery(target) === undefined) {
+      throw conflict(`Accepted delivery target ${id} has no current assessed realization`);
+    }
+    return target;
+  });
+  return {
+    acceptedTargets: targets.filter((target) => acceptedCanonicalDelivery(target) !== undefined),
+    outstandingTargets: targets.filter((target) => acceptedCanonicalDelivery(target) === undefined),
+  };
 }
 
 function deliveryClaimMatchesCurrentTargetBinding(
   target: CanonicalDeliveryTarget | undefined,
   claim: RuntimeDeliveryClaim | undefined,
 ): boolean {
-  if (target === undefined || claim === undefined) return false;
+  if (target === undefined || claim === undefined || claim.targetId !== target.targetId) return false;
   const bindings = target.artifactBindings ?? (target.artifactBinding === undefined ? [] : [target.artifactBinding]);
   if (bindings.length === 0) return target.surface !== "workspace_artifact";
   const artifacts = claim.artifacts ?? (claim.artifact === undefined ? [] : [claim.artifact]);
-  if (bindings.length < target.expectedCount || artifacts.length !== bindings.length) return false;
+  if (bindings.length !== target.expectedCount || artifacts.length !== bindings.length) return false;
   return bindings.every((binding) => artifacts.some((artifact) => artifact.path === binding.path
     && artifact.versionId === binding.versionId
     && artifact.sha256 === binding.sha256
     && artifact.bytes === binding.bytes
-    && artifact.observedByToolCallId === binding.observedByToolCallId));
+    && artifact.observedByToolCallId === binding.observedByToolCallId && artifact.acceptanceToolCallId.length > 0));
 }
 
 export function commitCanonicalTerminal(

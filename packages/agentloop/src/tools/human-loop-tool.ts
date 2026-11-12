@@ -7,6 +7,7 @@ export const HUMAN_LOOP_TOOL_NAME = "request_human_loop";
 export function createHumanLoopTool(): RuntimeTool<HumanLoopRequirement> {
   return {
     name: HUMAN_LOOP_TOOL_NAME,
+    effect: "write",
     description: "Request structured user input, selection, confirmation, or approval when the current step cannot safely continue. This pauses the Run; do not use prose instead. responseSchema is the Human-in-the-Loop response schema below, not a JSON Schema: choose exactly one of select, form, or confirm. resume must contain mode (normally continue_step); never substitute nextAction or an instruction string.",
     executionMode: "exclusive",
     replaySafe: true,

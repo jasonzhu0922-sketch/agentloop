@@ -18,7 +18,7 @@ import type {
   PlanningCapability,
   PlanningToolSummary,
 } from "../planning/contracts.ts";
-import type { CanonicalGoalGap, CanonicalRunState } from "./canonical-run-state.ts";
+import { canonicalDeliveryPlanScope, type CanonicalGoalGap, type CanonicalRunState } from "./canonical-run-state.ts";
 import type { ModelAdapter, ModelInvocation, ModelToolCall, RuntimeContextSnapshot } from "./contracts.ts";
 import type { RuntimeActionRecord } from "./runtime-action-repository.ts";
 import { buildUserAuthorityContext, USER_AUTHORITY_INSTRUCTION, type RuntimeUserAuthorityContext } from "./user-authority.ts";
@@ -102,7 +102,7 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
       "Existing Step definitions are immutable. When replacing the failed boundary, never reuse its Step id with a changed objective, dependencies, bindings, criteria or ownership: create a new repair leaf id (for example <failedStepId>.repair.<version>), omit the old failed Step so Runtime retires it, and rewire dependents to the new id. Unchanged Steps may keep their ids.",
       "A Plan revision retires a Step from future scheduling only. It never erases, authorizes, compensates for, or replays an Action already recorded for that Step. If a retired Action has an unknown external effect, preserve that fact and choose a continuation that neither relies on nor repeats that effect, or fail when no such continuation exists.",
       "If the failed boundary shows the current Plan's evidence contract is wrong for the evidence that actually exists, prefer revise_plan and repair the Plan boundary rather than resubmitting the same step.",
-      "Preserve unchanged Steps only by listing their ids in retainedStepIds; Runtime loads their exact persisted definitions, criteria, provenance and bindings. Never copy or rewrite an existing Step into steps. All completed active Steps must be retained. To change an unfinished Step or its dependencies, omit its id from retainedStepIds and create a new Step id. Every new step must explicitly declare targetIds, dependencies, skillIds, requiredCapabilities and successCriteria. Current bindings are in currentPlan.steps[].executionBinding.targetIds. Preserve every canonical delivery target exactly once on its producing or adopting leaf; use targetIds: [] for a prerequisite that owns no user-visible target. Do not infer ownership from criteria or requiredFacts[].basis.targetIds. Runtime regenerates delivery_target criteria for new Steps; omit those derived criteria from new definitions.",
+      "Preserve unchanged Steps only by listing their ids in retainedStepIds; Runtime loads their exact persisted definitions, criteria, provenance and bindings. Never copy or rewrite an existing Step into steps. All completed active Steps must be retained. To change an unfinished Step or its dependencies, omit its id from retainedStepIds and create a new Step id. Every new step must explicitly declare targetIds, dependencies, skillIds, requiredCapabilities and successCriteria. Current bindings are in currentPlan.steps[].executionBinding.targetIds. Schedule every outstanding canonical delivery target exactly once on its producing or adopting leaf. deliveryPlanScope.acceptedTargets already have assessed Run-owned realizations; preserve them without assigning them to a new Step or reproducing their artifacts, even when their original mixed-delivery Step is retired; use targetIds: [] for a prerequisite that owns no user-visible target. Do not infer ownership from criteria or requiredFacts[].basis.targetIds. Runtime regenerates delivery_target criteria for new Steps; omit those derived criteria from new definitions.",
       "Execution-method criteria must never be blocking. Reuse collected evidence; do not add an extra search or verification step unless it can resolve a material gap or contradiction, or is needed for an explicit user constraint.",
       "Submit basis metadata (kind, targetIds, rationale) only. Omit basis.intentId and basis.requirement, including when copying currentPlan criteria or facts: Runtime binds both from canonicalState.intent. A rationale must justify the condition; binding provenance does not prove that a derived condition is necessary.",
       "Within every revised Step, each success criterion id must appear exactly once. Copy each existing criterion at most once; do not duplicate a criterion while adding or preserving a delivery condition. Runtime derives delivery_target:<targetId> criteria from targetIds, so never submit those criteria in successCriteria.",
@@ -160,7 +160,7 @@ export class ModelPlanRevisionAssessor implements PlanRevisionAssessor {
         "Approve only when the revised Plan covers the current canonical intent and the user's still-applicable requirements. Retiring a Step does not discard its recorded Actions: an unknown external effect remains a durable caveat and the revised Plan must neither claim it succeeded nor replay or depend on it without a new justified execution path.",
         "Read the original request, accepted user amendments and HIL answers in userAuthority in order. An explicit later amendment can replace or relax an earlier requirement; do not reject a plan for omitting a requirement the user has superseded. Preserve all requirements and source constraints that remain applicable, and never infer a waiver from silence. The canonical intent and accepted user answers are the authority for this assessment, not the old Plan's criteria.",
         "Check criterion basis against that current intent: a plan may replace execution methods and repair unjustified derived conditions, but cannot remove or weaken a still-applicable requested result, source constraint or explicit user requirement. A quote and rationale are provenance, not proof that a derived condition is necessary.",
-        "Do not infer completion from an artifact, model prose, or an event alone.",
+        "The revised Plan covers the goal jointly with deliveryPlanScope.acceptedTargets, whose exact assessed realizations and bindings are retained by Runtime even if their producing Step is retired. New Steps must own outstanding targets, never reproduce or reassign accepted ones. Do not infer new acceptance from an artifact, model prose, or an event alone.",
         "Assess the revised Plan against open canonical evidence concerns. Do not treat an assessor hypothesis as a proven cause or reuse affected results as proof of a disputed premise without resolving the concern. Repeated results based on the same premise are not independent proof of that premise.",
         "Return exactly one submit_plan_revision_assessment tool call.",
       ].join("\n"),
@@ -252,6 +252,7 @@ function recoveryRuntimeContext(input: RecoveryPlannerInput): RuntimeContextSnap
       failedBoundary: input.failedBoundary,
       canonicalGap: input.canonicalGap,
       canonicalState: input.canonicalState,
+      deliveryPlanScope: canonicalDeliveryPlanScope(input.canonicalState),
       userAuthority: input.userAuthority ?? buildUserAuthorityContext({ userInput: input.userInput, intent: input.canonicalState.intent }),
       availableTools: input.availableTools,
       availableSkills: input.availableSkills,
@@ -296,6 +297,7 @@ function planRevisionRuntimeContext(input: PlanRevisionAssessmentInput): Runtime
     content: JSON.stringify({
       currentPlan: input.currentPlan,
       canonicalState: input.canonicalState,
+      ...(input.canonicalState === undefined ? {} : { deliveryPlanScope: canonicalDeliveryPlanScope(input.canonicalState) }),
       userAuthority: input.userAuthority ?? buildUserAuthorityContext({ userInput: input.userInput, intent: input.canonicalState?.intent }),
       proposedPlan: input.proposal,
       retiredStepIds: input.retiredStepIds,

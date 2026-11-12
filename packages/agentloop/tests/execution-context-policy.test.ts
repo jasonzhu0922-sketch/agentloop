@@ -1,10 +1,83 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { ComputerExecutor } from "../src/computer/computer-executor.ts";
 import type { ArtifactTarget, ConversationWorkingSet, ExecutionPlan, PlanStep } from "../src/planning/contracts.ts";
 import { createStepExecutionBinding, planningCapabilitiesFromToolNames } from "../src/planning/step-execution-binding.ts";
 import { buildTaskProfile } from "../src/runtime/dynamic-prompt.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "../src/runtime/execution-context-policy.ts";
 import { deriveRuntimeStepEvidenceState } from "../src/runtime/tool-progress-policy.ts";
+import { runtimeStepToolProgressPolicy } from "../src/runtime/tool-progress-policy.ts";
+import type { AgentLoopToolEvidence } from "../src/runtime/contracts.ts";
+
+test("real object-row computation stays pending until the repaired process returns a bound receipt", async t => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-computation-repair-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const executor = new ComputerExecutor(root, { executableAliases: { "trusted-node": process.execPath } });
+  await executor.writeFile("records.json", JSON.stringify({ rows: [{ value: 3_520 }, { value: 3_590 }] }), "create");
+  const script = (expression: string) => `const fs = require('node:fs');
+const rows = JSON.parse(fs.readFileSync('records.json', 'utf8')).rows;
+const total = ${expression};
+console.log(JSON.stringify({schema:'agentloop.commandComputation/v1',inputRefs:[{path:'records.json'}],facts:{total}}));`;
+  await executor.writeFile("compute.cjs", script("rows[0][0].value + rows[1][0].value"), "create");
+  const command = { command: "trusted-node", args: ["compute.cjs"], cwd: ".", timeoutMs: 2_000,
+    computationInputs: [{ path: "records.json" }] };
+  const failed = await executor.runCommand(command);
+  assert.notEqual(failed.exitCode, 0);
+  assert.match(failed.stderr, /TypeError/);
+  assert.ok(failed.computationEvidenceError);
+  const evidence: AgentLoopToolEvidence[] = [{ toolCallId: "failed", toolName: "computer_run_command",
+    isError: true, result: JSON.stringify(failed) }];
+  const write = await executor.writeFile("compute.cjs", script("rows[0].value + rows[1].value"), "overwrite");
+  evidence.push({ toolCallId: "repair", toolName: "computer_write_file", isError: false, result: JSON.stringify(write) });
+  const policy = runtimeStepToolProgressPolicy(["delivery_receipt"]);
+  assert.equal(deriveRuntimeStepEvidenceState({ policy, evidence })?.nextAction, "execute_repaired_computation");
+  const succeeded = await executor.runCommand(command);
+  assert.equal(succeeded.exitCode, 0, succeeded.stderr);
+  assert.deepEqual(succeeded.computationReceipt?.facts, { total: 7_110 });
+  evidence.push({ toolCallId: "verified", toolName: "computer_run_command", isError: false, result: JSON.stringify(succeeded) });
+  assert.equal(deriveRuntimeStepEvidenceState({ policy, evidence })?.pendingComputation, undefined);
+});
+
+test("failed computation remains pending across rewrites, rereads and unrelated successful commands", () => {
+  const policy = runtimeStepToolProgressPolicy(["source_summary"]);
+  const source: AgentLoopToolEvidence = { toolCallId: "source", toolName: "computer_run_command", isError: false,
+    result: JSON.stringify({ exitCode: 0, stdout: "12 records", stderr: "", evidenceReceipt: {
+      evidenceKinds: { satisfied: ["source_summary"], caveated: [], failed: [] },
+    } }) };
+  const failed: AgentLoopToolEvidence = { toolCallId: "compute-failed", toolName: "computer_run_command", isError: true,
+    result: JSON.stringify({ exitCode: 1, stdout: "", stderr: "Traceback at line 17: KeyError: 0",
+      computationEvidenceError: "Command did not succeed, so computation provenance cannot be verified." }) };
+  const write: AgentLoopToolEvidence = { toolCallId: "write-fixed", toolName: "computer_write_file", isError: false,
+    result: JSON.stringify({ path: "fixed.py" }) };
+  const read: AgentLoopToolEvidence = { toolCallId: "read", toolName: "computer_read_json", isError: false, result: "{}" };
+  const unrelated: AgentLoopToolEvidence = { toolCallId: "inspect", toolName: "computer_run_command", isError: false,
+    result: JSON.stringify({ exitCode: 0, stdout: "environment OK", stderr: "" }) };
+  assert.equal(deriveRuntimeStepEvidenceState({ policy, evidence: [source, failed] })?.nextAction, "repair_artifact_source");
+  const evidence = [source, failed, write, read, unrelated, { ...write, toolCallId: "write-another-variant" }];
+  const pending = deriveRuntimeStepEvidenceState({ policy, evidence })!;
+  assert.equal(pending.nextAction, "execute_repaired_computation");
+  assert.deepEqual(pending.pendingComputation, { toolCallId: "compute-failed", sourceMutationCount: 2 });
+  assert.deepEqual(pending.evidenceProducingToolNames, ["computer_run_command"]);
+  assert.deepEqual(pending.missingToolEvidenceKinds, [], "Acquisition receipts remain distinct from computation readiness");
+  assert.match(pending.instruction, /writing or renaming another script does not execute/i);
+  const succeeded: AgentLoopToolEvidence = { toolCallId: "compute-ok", toolName: "computer_run_command", isError: false,
+    result: JSON.stringify({ exitCode: 0, stdout: "computed", stderr: "",
+      computationReceipt: { schema: "agentloop.commandComputationReceipt/v1", facts: { total: 140 } } }) };
+  const completed = deriveRuntimeStepEvidenceState({ policy, evidence: [...evidence, succeeded] })!;
+  assert.equal(completed.pendingComputation, undefined);
+  assert.equal(completed.nextAction, "submit_completion_candidate");
+});
+
+test("writing a helper without a prior failed computation creates no execution obligation", () => {
+  const state = deriveRuntimeStepEvidenceState({ policy: runtimeStepToolProgressPolicy(["delivery_receipt"]), evidence: [{
+    toolCallId: "helper", toolName: "computer_write_file", isError: false, result: JSON.stringify({ path: "helper.py" }),
+  }] });
+  assert.equal(state?.pendingComputation, undefined);
+  assert.equal(state?.nextAction, "submit_completion_candidate");
+});
 
 test("fact-acquisition progress policy keeps observable source evidence obligations", () => {
   const step = planStep({

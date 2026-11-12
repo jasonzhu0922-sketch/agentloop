@@ -15,6 +15,47 @@ const sse = (...events: unknown[]) => events.map(event => `data: ${typeof event 
 const chunk = (delta: unknown, finish_reason: string | null = null) => ({ choices: [{ index: 0, delta, finish_reason }] });
 const response = (body: string) => new Response(body, { headers: { "content-type": "text/event-stream", "x-request-id": "sdk-contract-request" } });
 
+test("well-formed streams with visible protocol residue retain exact raw evidence without executing or stripping it", async () => {
+  const previous = globalThis.fetch;
+  try {
+    for (const content of [
+      '｜DSML｜ invoke name="computer_run_command"',
+      '<｜begin▁of▁sentence｜># Validation protect',
+      '<ds_safety>[分类]其他</ds_safety>',
+    ]) {
+      const raw = sse(chunk({ role: "assistant", content }, "stop"), "[DONE]");
+      let captured: any;
+      globalThis.fetch = async () => response(raw);
+      const result = await new OpenAICompatibleModel({ ...settings, streamRawCaptureWriter: async input => {
+        captured = input;
+        return { schema: "agentloop.modelStreamRawCaptureRef/v1", ref: "private-anomalous-content",
+          capturedBytes: input.rawSse.byteLength, rawBytes: input.rawBytes, rawSha256: input.rawSha256, truncated: input.truncated };
+      } }).streamComplete(invocation, () => undefined);
+      assert.equal(result.content, content);
+      assert.deepEqual(result.toolCalls, []);
+      assert.equal(result.finishReason, "stop");
+      assert.deepEqual(result.streamReceipt?.anomalyReasons, ["provider_protocol_text_in_content"]);
+      assert.equal(result.streamReceipt?.rawCapture?.ref, "private-anomalous-content");
+      assert.equal(Buffer.from(captured.rawSse).toString(), raw);
+      assert.equal(result.streamReceipt?.rawSha256, createHash("sha256").update(raw).digest("hex"));
+    }
+  } finally { globalThis.fetch = previous; }
+});
+
+test("ordinary content mentioning protocol names does not cause raw capture", async () => {
+  const previous = globalThis.fetch;
+  let captures = 0;
+  globalThis.fetch = async () => response(sse(chunk({ content: "DSML and safety classification are protocol concepts. The total is 140." }, "stop"), "[DONE]"));
+  try {
+    const result = await new OpenAICompatibleModel({ ...settings, streamRawCaptureWriter: async () => {
+      captures += 1;
+      throw new Error("must not capture ordinary content");
+    } }).streamComplete(invocation, () => undefined);
+    assert.deepEqual(result.streamReceipt?.anomalyReasons, []);
+    assert.equal(captures, 0);
+  } finally { globalThis.fetch = previous; }
+});
+
 test("SDK migration preserves opaque Responses schemas including constraints OpenAI would remove", async () => {
   const previous = globalThis.fetch;
   const schema = { type: "object", propertyNames: true, properties: { q: { type: "string", pattern: "^(?!bad).*$" } }, required: ["q"], additionalProperties: false };

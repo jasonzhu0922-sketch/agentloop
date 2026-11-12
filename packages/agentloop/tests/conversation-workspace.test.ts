@@ -18,7 +18,7 @@ test("uploaded-source wording is not mistaken for a prior reusable Result", () =
   assert.equal(referencesPriorConversationResult("把上一轮的分析结果生成一份 PPTX"), true);
 });
 
-test("stable general knowledge can be delivered as a tool-free conversation reply", async () => {
+test("stable general knowledge can be answered without invoking available readers", async () => {
   const database = new AppDatabase(":memory:");
   const question = "浙江省会是哪里？";
   const planner = new RecordingVisibleDirectoryPlanner();
@@ -37,7 +37,8 @@ test("stable general knowledge can be delivered as a tool-free conversation repl
             memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
           } }] };
         }
-        assert.equal(request.tools.length, 0);
+        assert.ok(request.tools.some(tool => tool.name === "read_result"));
+        assert.equal(request.tools.some(tool => tool.name === "computer_write_file"), false);
         return { content: "浙江省的省会是杭州。", finishReason: "stop", toolCalls: [] };
       } }),
     });
@@ -276,11 +277,12 @@ test("Conversation entry classifies with Runtime-owned external context handles"
     assert.equal(model.intentCalls, 2);
     assert.match(model.intentContexts[0] ?? "", /agentloop\.conversationTurnContext\/v1/);
     assert.match(model.intentContexts[0] ?? "", /"visibleDirectories":\[/);
-    assert.deepEqual(planner.visibleDirectoryCounts, [1, 0]);
+    assert.deepEqual(planner.visibleDirectoryCounts, [1, 1]);
     assert.deepEqual(planner.responseOnlyFlags, [false, true]);
     assert.equal(planner.availableToolNameSnapshots[0]?.includes("visible_find_files"), true);
     assert.equal(planner.availableToolNameSnapshots[0]?.includes("visible_read_files"), true);
-    assert.deepEqual(planner.availableToolNameSnapshots[1], []);
+    assert.ok(planner.availableToolNameSnapshots[1]?.includes("visible_read_files"));
+    assert.equal(planner.availableToolNameSnapshots[1]?.includes("computer_write_file"), false);
     assert.deepEqual((await runs.events(owner.user.id, executionRun.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
     assert.deepEqual((await runs.events(owner.user.id, replyRun.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "reply" });
   } finally {
@@ -717,7 +719,7 @@ for (const fixture of [
   { name: "uploaded source used as a directory", root: { sourceBinding: { mode: "primary_data", visibleDirectoryIds: ["src_uploaded"] } }, feedback: /sourceBinding must contain mode/ },
   { name: "missing prior Result selector", root: { inputMode: "prior_result" }, feedback: /inputMode=prior_result requires resultCandidateId/ },
   { name: "missing prior artifact selector", root: { inputMode: "prior_artifact" }, feedback: /inputMode=prior_artifact requires targetArtifact.path/ },
-  { name: "reply that requests new evidence", root: { mode: "reply", evidenceStrategy: "lookup_lite" }, noExecution: true, feedback: /mode=reply or clarify requires evidenceStrategy=none/ },
+  { name: "clarification that requests new evidence", root: { mode: "clarify", evidenceStrategy: "lookup_lite" }, noExecution: true, feedback: /mode=clarify requires evidenceStrategy=none/ },
 ]) {
   test(`conversation resolver repairs ${fixture.name} using its parser rejection`, async () => {
     const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-resolver-repair-"));

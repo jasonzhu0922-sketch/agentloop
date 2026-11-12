@@ -1,4 +1,5 @@
 import type { PrivateSkill } from "../skills/skill-service.ts";
+import { hasSkillSourceContract } from "../skills/agentloop-metadata.ts";
 import type { CapabilityRecoveryCatalog, EvidenceKind, PlanProposal, PlanningCapability, SourceConstraint } from "./contracts.ts";
 import { skillSourceProviderCapabilityId } from "./step-execution-binding.ts";
 
@@ -191,7 +192,7 @@ function boundSourceProviderKinds(
   for (const skill of skills) {
     if (!selectedSkillIds.has(skill.id)) continue;
     const metadata = skill.agentLoop;
-    if (!metadata?.roles.includes("source_provider")) continue;
+    if (!hasSkillSourceContract(metadata)) continue;
     for (const kind of metadata.sourceKinds) kinds.add(kind);
   }
   // Recovery callers may not carry a resolved Skill object, but the bound
@@ -214,6 +215,6 @@ function sourceProviderSkillsByCapability(skills: readonly PrivateSkill[]): Read
 
 function sourceProviderCapabilityIds(skill: PrivateSkill): readonly string[] {
   const metadata = skill.agentLoop;
-  if (!metadata?.roles.includes("source_provider") || (metadata.producesEvidenceKinds?.length ?? 0) === 0) return [];
+  if (!hasSkillSourceContract(metadata)) return [];
   return metadata.sourceKinds.map((sourceKind) => skillSourceProviderCapabilityId(skill.id, sourceKind));
 }

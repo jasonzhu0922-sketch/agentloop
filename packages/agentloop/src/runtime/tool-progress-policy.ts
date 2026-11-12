@@ -99,6 +99,8 @@ export type RuntimeStepNextAction =
   | "verify_existing_artifact"
   | "repair_artifact_source"
   | "repair_computation_binding"
+  | "execute_repaired_computation"
+  | "execute_authored_computation"
   | "submit_completion_candidate"
   | "produce_required_evidence";
 
@@ -146,6 +148,8 @@ export interface RuntimeStepEvidenceState {
   readonly recentActionableDiagnostic: boolean;
   readonly recentComputationBindingMismatch: boolean;
   readonly recentPatchPreconditionFailure: boolean;
+  /** Authored source and failed computations both require an executed result. */
+  readonly pendingComputation?: { readonly toolCallId: string; readonly sourceMutationCount: number; readonly sourcePath?: string };
   readonly nextAction: RuntimeStepNextAction;
   readonly requiredWorkflowAction?: RuntimeWorkflowEvidenceAction;
   readonly evidenceProducingToolNames: readonly string[];
@@ -263,6 +267,7 @@ export function deriveRuntimeStepEvidenceState(input: {
   const workProduct = classifyWorkProduct(input.evidence, policy, evidenceKinds);
   const recentActionableDiagnostic = hasRecentActionableDiagnostic(input.evidence);
   const recentComputationBindingMismatch = hasRecentComputationBindingMismatch(input.evidence);
+  const pendingComputation = pendingComputationExecution(input.evidence, policy);
   const recentPatchPreconditionFailure = hasRecentPatchPreconditionFailure(input.evidence);
   const nextAction = nextActionForEvidenceGap({
     missingRequiredEvidenceKinds,
@@ -270,6 +275,7 @@ export function deriveRuntimeStepEvidenceState(input: {
     failedEvidenceKinds: [...evidenceKinds.failed],
     recentActionableDiagnostic,
     recentComputationBindingMismatch,
+    pendingComputation,
     workProduct,
     policy,
   });
@@ -290,17 +296,20 @@ export function deriveRuntimeStepEvidenceState(input: {
     recentActionableDiagnostic,
     recentComputationBindingMismatch,
     recentPatchPreconditionFailure,
+    ...(pendingComputation === undefined ? {} : { pendingComputation }),
     nextAction,
     ...(requiredWorkflowAction === undefined ? {} : { requiredWorkflowAction }),
     evidenceProducingToolNames,
     exploratoryToolNames: recentPatchPreconditionFailure
       ? policy.exploratoryToolNames.filter((name) => PATCH_REBASE_READ_TOOL_NAMES.has(name))
-      : recentActionableDiagnostic || nextAction === "verify_existing_artifact" || nextAction === "repair_computation_binding" ? [] : policy.exploratoryToolNames,
+      : recentActionableDiagnostic || nextAction === "verify_existing_artifact" || nextAction === "repair_computation_binding"
+        || nextAction === "execute_repaired_computation" || nextAction === "execute_authored_computation" ? [] : policy.exploratoryToolNames,
     instruction: instructionForStepState({
       workProduct,
       nextAction,
       recentActionableDiagnostic,
       recentComputationBindingMismatch,
+      pendingComputation,
       recentPatchPreconditionFailure,
       evidenceProducingToolNames,
       ...(requiredWorkflowAction === undefined ? {} : { requiredWorkflowAction }),
@@ -1072,6 +1081,7 @@ function nextActionForEvidenceGap(input: {
   readonly failedEvidenceKinds: readonly string[];
   readonly recentActionableDiagnostic?: boolean;
   readonly recentComputationBindingMismatch?: boolean;
+  readonly pendingComputation?: RuntimeStepEvidenceState["pendingComputation"];
   readonly workProduct: RuntimeStepWorkProductState;
   readonly policy: RuntimeToolProgressPolicy;
 }): RuntimeStepNextAction {
@@ -1081,6 +1091,9 @@ function nextActionForEvidenceGap(input: {
   if (prerequisiteAction !== undefined) return "produce_required_evidence";
   if (input.recentComputationBindingMismatch === true && hasAnyTool(input.policy, ["computer_run_command"])) {
     return "repair_computation_binding";
+  }
+  if ((input.pendingComputation?.sourceMutationCount ?? 0) > 0 && hasAnyTool(input.policy, ["computer_run_command"])) {
+    return input.pendingComputation?.sourcePath === undefined ? "execute_repaired_computation" : "execute_authored_computation";
   }
   if (input.recentActionableDiagnostic === true && hasAnyTool(input.policy, ["computer_patch_file", "computer_write_file"])) {
     return "repair_artifact_source";
@@ -1177,6 +1190,8 @@ function evidenceProducingToolsForAction(
         || name === "verify_artifact_acceptance"
       );
     case "repair_computation_binding":
+    case "execute_repaired_computation":
+    case "execute_authored_computation":
       return tools.filter((name) => name === "computer_run_command");
     case "submit_completion_candidate":
       return [];
@@ -1221,6 +1236,7 @@ function instructionForStepState(input: {
   readonly nextAction: RuntimeStepNextAction;
   readonly recentActionableDiagnostic: boolean;
   readonly recentComputationBindingMismatch: boolean;
+  readonly pendingComputation?: RuntimeStepEvidenceState["pendingComputation"];
   readonly recentPatchPreconditionFailure: boolean;
   readonly evidenceProducingToolNames: readonly string[];
   readonly requiredWorkflowAction?: RuntimeWorkflowEvidenceAction;
@@ -1248,6 +1264,12 @@ function instructionForStepState(input: {
   if (input.recentComputationBindingMismatch) {
     lines.push("A computation result was produced, but its source binding did not match the declared computationInputs.");
     lines.push("Do not reread the source or rewrite the parser. Rerun the same command with computationInputs set to the exact paths listed in the command's inputRefs, and emit those same paths in inputRefs.");
+    return lines.join(" ");
+  }
+  if (input.nextAction === "execute_repaired_computation" || input.nextAction === "execute_authored_computation") {
+    lines.push(`Computation ${input.pendingComputation!.toolCallId} has no verified successful result after ${input.pendingComputation!.sourceMutationCount} source edit(s).`);
+    if (input.pendingComputation!.sourcePath !== undefined) lines.push(`The authored auxiliary source is ${input.pendingComputation!.sourcePath}. It has not produced a verified computation result.`);
+    lines.push("The committed source is available; writing or renaming another script does not execute it. Run the computation with its declared computationInputs and emit agentloop.commandComputation/v1 with matching inputRefs and non-empty facts, inspect the returned output, then publish the derived facts. An unrelated successful command does not verify this computation.");
     return lines.join(" ");
   }
   if (input.recentActionableDiagnostic) {
@@ -1319,6 +1341,7 @@ export function evaluateRuntimeToolProgress(input: {
     workProduct,
     policy,
     recentComputationBindingMismatch,
+    pendingComputation: pendingComputationExecution(priorEvidence, policy),
   });
   const recentActionableDiagnostic = hasRecentActionableDiagnostic(priorEvidence);
   const recentPatchPreconditionFailure = hasRecentPatchPreconditionFailure(priorEvidence);
@@ -1612,6 +1635,41 @@ function hasRecentActionableDiagnostic(evidence: readonly AgentLoopToolEvidence[
     return isActionableDiagnostic(item);
   }
   return false;
+}
+
+/** A source file authored inside a fact-only Step is auxiliary work, not a
+ * computed fact. Retain this obligation from its first write, even before any
+ * command fails. Requested file/code delivery continues to use its own
+ * artifact contract. Only verified computation results discharge this state. */
+function pendingComputationExecution(evidence: readonly AgentLoopToolEvidence[], policy: RuntimeToolProgressPolicy): RuntimeStepEvidenceState["pendingComputation"] {
+  let pending: RuntimeStepEvidenceState["pendingComputation"];
+  const tracksAuxiliarySource = policy.requiredEvidenceKinds.includes("source_summary")
+    && policy.artifactDeliveryRequired !== true
+    && policy.expectedArtifactKind === undefined && policy.expectedArtifactFormat === undefined
+    && (policy.artifactTargets?.length ?? 0) === 0
+    && !policy.requiredEvidenceKinds.some(kind => ARTIFACT_WORK_PRODUCT_EVIDENCE_KINDS.has(kind));
+  for (const item of evidence) {
+    if (item.toolName === "computer_run_command") {
+      const record = parseToolEvidenceRecord(item);
+      if (record === undefined) continue;
+      if (stringField(record, "computationEvidenceError") !== undefined) {
+        pending = { toolCallId: item.toolCallId, sourceMutationCount: 0 };
+      } else if (!item.isError && record.exitCode === 0
+        && asRecord(record.computationReceipt)?.schema === "agentloop.commandComputationReceipt/v1") {
+        pending = undefined;
+      }
+    } else if (!item.isError && (item.toolName === "computer_write_file" || item.toolName === "computer_patch_file")) {
+      if (pending !== undefined) {
+        pending = { ...pending, sourceMutationCount: pending.sourceMutationCount + 1 };
+      } else if (tracksAuxiliarySource) {
+        const path = stringField(parseToolEvidenceRecord(item), "path");
+        if (path !== undefined && isSourceArtifactPath(path)) {
+          pending = { toolCallId: item.toolCallId, sourceMutationCount: 1, sourcePath: path };
+        }
+      }
+    }
+  }
+  return pending;
 }
 
 function hasRecentComputationBindingMismatch(evidence: readonly AgentLoopToolEvidence[]): boolean {

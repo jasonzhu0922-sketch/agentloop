@@ -7,6 +7,8 @@ import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
 import { ModelRecoveryPlanner, parseRecoveryDecision } from "../src/runtime/recovery-planning.ts";
 import { RunService } from "../src/runtime/run-service.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
+import { createRuntimeResult, type RuntimeResultBinding } from "../src/runtime/runtime-result.ts";
+import { RuntimeResultRepository } from "../src/runtime/runtime-result-repository.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
@@ -44,6 +46,66 @@ function call(planRevision: unknown) {
   return { id: "decision", name: "submit_recovery_decision", arguments: { actionId: "review", expectedActionRevision: 1,
     decision: "revise_plan", rationale: "Preserve facts and repair only the answer.", evidenceRefs: [], planRevision } };
 }
+
+test("recovery preserves authorized prior-round Result reads through two persisted revisions", async () => {
+  const { state, plan } = fixture();
+  const database = new AppDatabase(":memory:");
+  try {
+    await database.prepare("INSERT INTO runs(id, owner_user_id, depth, allow_dangerous_tools, status, input, created_at) VALUES (?, 'owner', 0, 0, 'running', ?, 1)")
+      .run(state.runId, state.intent.userInput);
+    const repository = new PlanRepository(database);
+    const previous = { ...plan, id: "prior-round", steps: [plan.steps[0]!] };
+    await repository.create(previous);
+    const result = createRuntimeResult({ kind: "step", producer: { runId: state.runId, planId: previous.id, stepId: "facts" },
+      value: { totals: [80, 60] }, inputs: [], publication: { status: "published", assessmentRef: "prior-assessment", decision: "approved" } });
+    await database.prepare("UPDATE plan_steps SET evidence_json = ? WHERE plan_id = ? AND step_id = 'facts'")
+      .run(JSON.stringify({ publishedResult: result }), previous.id);
+    const binding: RuntimeResultBinding = { schema: "agentloop.resultBinding/v1", result: result.ref, relation: "continue_prior" };
+    await repository.create({ ...plan, resultBindings: [binding] });
+    for (const [number, planId, status] of [[1, previous.id, "completed"], [2, plan.id, "executing"]] as const) {
+      await database.prepare("INSERT INTO run_rounds(run_id, round_number, status, plan_id, revision, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1, 1)")
+        .run(state.runId, number, status, planId);
+    }
+    await database.prepare("INSERT INTO run_round_results(run_id, round_number, plan_id, canonical_revision, result_json, created_at) VALUES (?, 1, ?, 1, ?, 1)")
+      .run(state.runId, previous.id, JSON.stringify({ schema: "agentloop.roundResult/v1", runId: state.runId, planId: previous.id,
+        steps: [{ stepId: "facts", result: result.ref, assessmentId: "prior-assessment" }] }));
+    const results = new RuntimeResultRepository(database);
+    let replacedId = "answer";
+    for (const version of [2, 3]) {
+      const current = await repository.get(plan.id);
+      const proposal = revision(plan.goal);
+      proposal.steps[0]!.id = `answer.repair.${version}`;
+      const decision = parseRecoveryDecision(call(proposal), state, current);
+      const admitted = admitPlan({ runId: state.runId, canonicalState: state, currentPlan: current, proposal: decision.planRevision!,
+        availableSkills: [], availableToolNames: new Set(), resultBindings: [binding] });
+      assert.deepEqual(admitted.resultBindings, [binding], "Inherited and explicitly supplied server bindings are deduplicated");
+      // The real Recovery path supplies no new binding. It must inherit the
+      // persisted input without asking the model to grant it again.
+      const recovery = admitPlan({ runId: state.runId, canonicalState: state, currentPlan: current, proposal: decision.planRevision!,
+        availableSkills: [], availableToolNames: new Set() });
+      const action = await new RuntimeActionRepository(database).dispatch({ runId: state.runId, planId: plan.id, stepId: replacedId,
+        kind: "planning", replayPolicy: "safe", deadlineMs: 1000 });
+      const revised = await repository.revise({ planId: plan.id, proposal: recovery, retiredStepIds: [replacedId], reason: "repair", actionId: action.id });
+      assert.deepEqual(revised.resultBindings, [binding]);
+      assert.deepEqual(await results.readAuthorized({ resultId: result.ref.resultId, runId: state.runId, planId: plan.id,
+        stepId: proposal.steps[0]!.id, actorUserId: "owner" }), result);
+      assert.equal(await results.readAuthorized({ resultId: result.ref.resultId, runId: state.runId, planId: plan.id,
+        stepId: proposal.steps[0]!.id, actorUserId: "foreign-owner" }), undefined);
+      replacedId = proposal.steps[0]!.id;
+    }
+  } finally { database.close(); }
+});
+
+test("Recovery cannot inherit a different Run's Plan or accept model-authored Result bindings", () => {
+  const { state, plan } = fixture();
+  const binding: RuntimeResultBinding = { schema: "agentloop.resultBinding/v1", relation: "continue_prior",
+    result: { schema: "agentloop.resultRef/v1", resultId: "rr_00000000-0000-0000-0000-000000000001" } };
+  const proposal = { ...revision(plan.goal), resultBindings: [binding] };
+  assert.equal(admitPlan({ runId: state.runId, canonicalState: state, currentPlan: plan, proposal,
+    availableSkills: [], availableToolNames: new Set() }).resultBindings, undefined);
+  assert.throws(() => admitPlan({ runId: state.runId, canonicalState: state, currentPlan: { ...plan, runId: "foreign-run", resultBindings: [binding] },
+    proposal, availableSkills: [], availableToolNames: new Set() }), /Current Plan belongs to another Run/);
+});
 
 test("recovery retains the exact persisted definition, criteria, provenance and completed evidence", async () => {
   const { state, plan } = fixture();

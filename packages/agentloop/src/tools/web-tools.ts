@@ -131,6 +131,7 @@ function createFetchTool(
 ): RuntimeTool<{ url: string; format: "markdown" | "text"; render?: "browser" }> {
   return {
     name: "webfetch",
+    effect: "read",
     description: [
       "Fetch a web page by URL and return readable content plus a canonical evidenceReceipt.",
       "Follows redirects including JavaScript and meta-refresh redirects; returns { schema, url, title, content, bytes, truncated, evidenceReceipt }.",
@@ -192,6 +193,7 @@ function createSearchTool(
 ): RuntimeTool<{ query: string; numResults: number }> {
   return {
     name: "websearch",
+    effect: "read",
     description: [
       "Search the web and return structured results plus a canonical evidenceReceipt.",
       "Returns { schema, query, returned, results: [{ title, url, snippet }], evidenceReceipt }.",

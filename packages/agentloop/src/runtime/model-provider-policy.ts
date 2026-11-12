@@ -484,6 +484,14 @@ export function streamAnomalyReasons(
   const hasProviderOutput = response.content.length > 0
     || (response.reasoningContent?.length ?? 0) > 0
     || response.toolCalls.length > 0;
+  // Reserved wire/control markers in visible content are useful forensic
+  // evidence even when SSE and its terminal event are well formed. Preserve
+  // the exact response and capture the wire bytes; never decode these strings
+  // into executable calls or silently remove them from the model transcript.
+  const normalizedContent = response.content.replaceAll("｜", "|");
+  if (/<\|begin▁of▁sentence\|>|(?:<)?\|+DSML\|+\s*(?:calls|invoke|parameter)\b|<\/?ds_safety\b/iu.test(normalizedContent)) {
+    reasons.push("provider_protocol_text_in_content");
+  }
   if (response.finishReason === "stop" && response.content.trim().length === 0 && response.toolCalls.length === 0) {
     reasons.push("empty_stop_completion");
   }

@@ -20,6 +20,7 @@ interface ReadResultInput {
 export function createResultTool(repository: RuntimeResultRepository): RuntimeTool<ReadResultInput> {
   return {
     name: RESULT_READER_NAME,
+    effect: "read",
     description: [
       "Read exact values from a committed Tool result, an assessed dependency Step result, an explicitly bound earlier Round result, or an explicitly bound completed Run result through one opaque Runtime result ref.",
       "Pass resultId from agentloop.resultRef/v1; never supply a filesystem path or digest.",

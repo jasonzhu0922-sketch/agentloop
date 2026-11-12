@@ -14,6 +14,7 @@ import type {
 } from "./contracts.ts";
 import type { UploadedSourceSummary } from "../runtime/contracts.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
+import { hasSkillSourceContract } from "../skills/agentloop-metadata.ts";
 import { resolveCapabilityRequirements } from "./capability-requirements.ts";
 
 const ARTIFACT_EVIDENCE_KINDS = new Set<EvidenceKind>([
@@ -61,7 +62,7 @@ export function createStepExecutionBinding(input: {
     if (capability?.produces.includes(evidenceKind) !== true) return [];
     const scriptProvider = (input.availableSkills ?? []).find((skill) =>
       input.step.skillIds.includes(skill.id)
-      && skill.agentLoop?.roles.includes("source_provider")
+      && hasSkillSourceContract(skill.agentLoop)
       && skill.agentLoop.executionProfiles?.includes("local_script")
       && skill.agentLoop.sourceKinds.some((kind) => skillSourceProviderCapabilityId(skill.id, kind) === capabilityId)
     );
@@ -169,6 +170,14 @@ export function planningCapabilitiesFromTools(
   sources?: readonly UploadedSourceSummary[],
 ): PlanningCapability[] {
   const staticCapabilities = planningCapabilitiesFromToolNames(tools.map((tool) => tool.name), sources);
+  const readers = tools.filter(tool => tool.effect === "read");
+  if (readers.length > 0) staticCapabilities.push({
+    id: "read_only_observation", category: "information_retrieval", label: "Observe authorized resources",
+    description: "Inspect information using host-declared read-effect Tools without selecting a source or mutating its state.",
+    produces: ["source_summary", "explicit_caveats"], sourceKinds: [],
+    sourceIds: [...new Set(readers.flatMap(tool => tool.source === undefined ? [] : [tool.source.id]))],
+    sideEffect: "external_read", risk: "medium",
+  });
   const dynamic = new Map<string, PlanningCapability>();
   for (const tool of tools) {
     const source = tool.source;
@@ -228,7 +237,7 @@ export function planningCapabilitiesFromSkills(skills: readonly PrivateSkill[]):
   return skills.flatMap((skill) => {
     const metadata = skill.agentLoop;
     const produces = metadata?.producesEvidenceKinds ?? [];
-    if (!metadata?.roles.includes("source_provider") || produces.length === 0) return [];
+    if (!hasSkillSourceContract(metadata)) return [];
     return metadata.sourceKinds.map((sourceKind) => ({
       id: skillSourceProviderCapabilityId(skill.id, sourceKind),
       category: "skill_source_provider",
@@ -383,6 +392,7 @@ export function unresolvedToolSourceIds(
 }
 
 export function capabilityRequiresTool(capability: string): boolean {
+  if (capability === "read_only_observation") return true;
   if (capability === "external_api_call") return true;
   if (capability === "custom_tool_call") return true;
   const binding = CAPABILITY_TOOL_BINDINGS[capability];
@@ -422,6 +432,12 @@ export function resolveToolNamesForCapabilities(
 ): string[] {
   const resolved = new Set<string>();
   for (const capability of capabilities) {
+    if (capability === "read_only_observation") {
+      for (const tool of availableTools) {
+        if (tool.effect === "read" && availableToolNames.has(tool.name)) resolved.add(tool.name);
+      }
+      continue;
+    }
     if (capability === "external_api_call") {
       for (const toolName of availableToolNames) {
         if (isExternalApiToolName(toolName)) resolved.add(toolName);
@@ -512,10 +528,11 @@ function inferSideEffect(capabilities: readonly string[]): CapabilitySideEffect 
     || capabilities.includes("uploaded_source_materialization")
     || capabilities.includes("artifact_acceptance")
   ) return "workspace_write";
+  if (capabilities.includes("custom_tool_call")) return "workspace_write";
+  if (capabilities.includes("read_only_observation")) return "external_read";
   if (capabilities.includes("web_research")) return "external_read";
   if (capabilities.includes("external_api_call")) return "external_read";
   if (capabilities.includes("skill_local_script_execution")) return "external_read";
-  if (capabilities.includes("custom_tool_call")) return "workspace_write";
   if (
     capabilities.includes("uploaded_source_read")
     || capabilities.includes("uploaded_table_extraction")
@@ -586,6 +603,7 @@ function isTabularUpload(extension: string): boolean {
 }
 
 const CAPABILITY_TOOL_BINDINGS: Record<string, readonly string[]> = {
+  read_only_observation: [],
   uploaded_source_read: ["read_source"],
   uploaded_source_materialization: ["materialize_source_file"],
   uploaded_table_extraction: ["extract_source_tables"],

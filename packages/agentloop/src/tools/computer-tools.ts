@@ -50,6 +50,7 @@ export function createComputerTools(
   const tools: RuntimeTool<unknown>[] = [
     {
       name: "computer_list_directory",
+      effect: "read",
       description: "List entries under the configured workspace root or an authorized read-only @skills/<skill-name> root. path must be relative to an authorized root; absolute paths are rejected.",
       inputSchema: objectSchema(["path"], { path: { type: "string" } }),
       executionMode: "parallel",
@@ -59,6 +60,7 @@ export function createComputerTools(
     },
     {
       name: "computer_read_file",
+      effect: "read",
       // A verified 12000-character window can expand sixfold in JSON escaping.
       // Keep serialization from corrupting a window already bounded by the reader.
       maxResultCharacters: CONTENT_REFERENCE_WINDOW_CHARACTERS * 6 + 32_000,
@@ -131,6 +133,7 @@ export function createComputerTools(
     },
     {
       name: "computer_find_files",
+      effect: "read",
       description: [
         "Find files under the configured workspace root or an authorized read-only @skills/<skill-name> root using a glob pattern; respects root containment and skips .git and node_modules.",
         "Use this for low-noise discovery before reading files or running commands.",
@@ -158,6 +161,7 @@ export function createComputerTools(
     },
     {
       name: "verify_artifact_acceptance",
+      effect: "read",
       description: [
         "Produce one aggregate artifact acceptance evidence object for a file under the workspace root.",
         "Use this after creating or locating a deliverable to record artifact_path, artifact_non_empty, artifact_openable, format_matches_request, explicit caveats, and artifact_acceptance evidence.",
@@ -198,6 +202,7 @@ export function createComputerTools(
     },
     {
       name: "computer_search_text",
+      effect: "read",
       description: [
         "Search literal text recursively under the configured workspace root or an authorized read-only @skills/<skill-name> root.",
         "path must be relative to an authorized root; absolute paths are rejected.",
@@ -235,6 +240,7 @@ export function createComputerTools(
     },
     {
       name: "computer_read_json",
+      effect: "read",
       description: [
         "Read structured data from a JSON file under the configured workspace root or an authorized read-only @skills/<skill-name> root.",
         "Use this for durable JSON artifacts such as .agentloop/table-extractions/*.json before falling back to computer_search_text or line-window computer_read_file.",
@@ -302,6 +308,7 @@ export function createComputerTools(
     },
     {
       name: "computer_summarize_table_artifact",
+      effect: "read",
       description: [
         "Summarize a durable agentloop.visibleTableExtraction/v1 JSON artifact under the workspace root.",
         "Use this before manual computer_read_json windows when a downstream analysis must cover many extracted tables/files.",
@@ -348,6 +355,7 @@ export function createComputerTools(
     },
     {
       name: "computer_aggregate_table_artifact",
+      effect: "write",
       description: [
         "Derive deterministic count, group-count, sum, average, minimum, or maximum statistics from a durable agentloop.visibleTableExtraction/v1 JSON artifact.",
         "Use this for a downstream count, grouping, distribution, ranking, or numeric aggregate question after structured extraction; it reads every selected record and returns coverage, source ranges, filters, values/groups, and computation provenance.",
@@ -453,6 +461,7 @@ export function createComputerTools(
     },
     {
       name: "computer_write_file",
+      effect: "write",
       description: [
         "Create, overwrite, or append to a UTF-8 file under the workspace root; requires dangerous-tool consent.",
         "path must be relative to the workspace root; absolute paths are rejected.",
@@ -516,6 +525,7 @@ export function createComputerTools(
     },
     {
       name: "computer_patch_file",
+      effect: "write",
       description: [
         "Patch an existing UTF-8 text file under the workspace root as one validated transaction of exact, revision-bound line hunks; requires dangerous-tool consent.",
         "Use this for local repairs to an existing artifact or generated source file instead of rewriting the whole file with computer_write_file.",
@@ -595,6 +605,7 @@ export function createComputerTools(
     },
     {
       name: "computer_run_command",
+      effect: "write",
       description: [
         "Spawn an executable with an argument array and no shell; requires dangerous-tool consent.",
         "command is the executable name and args is a separate array containing only its arguments; never put command inside args. Example: {command:'python3',args:['scripts/task.py','query','--request-json','{...}'],cwd:'@skills/hr-report-data'}.",
@@ -1603,12 +1614,16 @@ function requireBoundedInteger(value: unknown, field: string, min: number, max: 
 function createDriverTools(driver: ComputerDriver): RuntimeTool<unknown>[] {
   return [
     {
-      name: "computer_snapshot", description: "Capture the current computer screen", inputSchema: objectSchema([], {}),
+      name: "computer_snapshot",
+      effect: "read",
+      description: "Capture the current computer screen", inputSchema: objectSchema([], {}),
       executionMode: "exclusive", replaySafe: true, parse: (value) => requireRecord(value),
       execute: async (context) => driver.snapshot(context.signal),
     },
     {
-      name: "computer_click", description: "Click screen coordinates", inputSchema: objectSchema(["x", "y"], { x: { type: "number" }, y: { type: "number" } }),
+      name: "computer_click",
+      effect: "write",
+      description: "Click screen coordinates", inputSchema: objectSchema(["x", "y"], { x: { type: "number" }, y: { type: "number" } }),
       executionMode: "exclusive", replaySafe: false,
       parse: (value) => {
         const record = requireRecord(value);
@@ -1634,7 +1649,7 @@ function driverTextTool(
   execute: (value: string, signal?: AbortSignal) => Promise<void>,
 ): RuntimeTool<unknown> {
   return {
-    name, description, inputSchema: objectSchema([field], { [field]: { type: "string" } }),
+    name, effect: "write", description, inputSchema: objectSchema([field], { [field]: { type: "string" } }),
     executionMode: "exclusive", replaySafe: false,
     parse: (value) => ({ [field]: fieldString(value, field, 20_000) }),
     execute: async (context, value) => execute((value as Record<string, string>)[field], context.signal),

@@ -10,6 +10,7 @@ import { taskEvidencePolicyForTaskUnderstanding, uploadedSourcePlanningContext, 
 import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext, type PlanTopologyRequirement, type TaskProfile } from "../runtime/dynamic-prompt.ts";
 import { formatAvailableSkills } from "../skills/skill-context.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
+import { hasSkillSourceContract } from "../skills/agentloop-metadata.ts";
 import type {
   CaveatPolicy,
   ConversationTurnResolution,
@@ -285,7 +286,7 @@ export class ModelPlanner implements Planner {
         maxPlanningTurns: this.maxPlanningTurns,
       },
     });
-    if (task.responseOnly && taskProfile.planShape === "single_leaf") {
+    if (task.responseOnly) {
       await emit?.({
         type: "planning.turn.started",
         data: {
@@ -293,7 +294,7 @@ export class ModelPlanner implements Planner {
           loadedSkillCount: 0,
           pendingSkillCount: 0,
           hasRuntimeDirective: false,
-          toolCount: 0,
+          toolCount: task.availableToolNames.length,
           messageCount: 1,
           deterministic: true,
         },
@@ -594,6 +595,7 @@ function withoutReasoningContent(response: import("../runtime/contracts.ts").Mod
 function responseOnlyPlan(task: TaskSpec): PlanProposal {
   const input = planningIntentObjective(task);
   const targetIds = Object.keys(task.canonicalState.targets);
+  const canRead = task.availableToolNames.length > 0;
   return {
     goal: input.trim().slice(0, 20_000) || "Answer the latest user message",
     schema: "agentloop.outcomePlan/v2",
@@ -602,20 +604,28 @@ function responseOnlyPlan(task: TaskSpec): PlanProposal {
     selectedSkillIds: [],
     steps: [{
       id: "response",
-      objective: "Answer the latest user message directly without using Skills or Tools.",
+      objective: canRead
+        ? "Answer the latest user message. Use authorized read-only Tools as needed to inspect relevant information, preserving input identities and caveats. A Result reference or truncated summary is not its full content. Do not execute Skills, write files, or change external state."
+        : "Answer the latest user message directly from the supplied context.",
       dependencies: [],
       role: "deliver",
       skillIds: [],
-      requiredCapabilities: ["conversation_delivery"],
+      requiredCapabilities: canRead ? ["conversation_delivery", "read_only_observation"] : ["conversation_delivery"],
       targetIds,
-      // A response-only turn has no unresolved execution or source contract.
-      // Its only completion condition is that Runtime received user-visible
-      // text, so Assessment must not ask a second model to reinterpret it.
+      // Resource access remains the Run grant; do not turn every offered
+      // directory or upload into a mandatory primary input.
+      ...(task.canonicalState.intent.requiredToolSourceIds.length > 0 ? {
+        sourceConstraint: { requiredToolSourceIds: task.canonicalState.intent.requiredToolSourceIds },
+      } : {}),
+      ...(canonicalTurnResolution(task)?.evidenceDemand !== "none" && canRead ? {
+        evidenceContract: { requiredKinds: ["source_summary" as const], caveatPolicy: "mark_unverified_facts" as const },
+      } : {}),
       successCriteria: [{
         id: "answered",
-        description: "A non-empty direct answer is returned.",
+        description: canRead ? "The answer addresses the latest user request using the supplied context and any needed read observations, preserving material uncertainty."
+          : "A non-empty direct answer is returned.",
         source: "planner",
-        verification: "deterministic",
+        verification: canRead ? "model_judged" : "deterministic",
       }],
     }],
   };
@@ -833,7 +843,7 @@ function boundSourceProviderContractViolations(
     if (requiredKinds.length === 0) return [];
     const providerKindSets = step.skillIds.flatMap((skillId) => {
       const metadata = skillById.get(skillId)?.agentLoop;
-      return metadata?.roles.includes("source_provider")
+      return hasSkillSourceContract(metadata)
         ? [new Set<EvidenceKind>(metadata.producesEvidenceKinds ?? [])]
         : [];
     });
@@ -844,7 +854,7 @@ function boundSourceProviderContractViolations(
     const invalidKinds = requiredKinds.filter((kind) => runtimeProducedEvidenceKind(kind) && !providerKinds.has(kind));
     return invalidKinds.length === 0 ? [] : [{
       stepId: step.id,
-      skillIds: step.skillIds.filter((skillId) => skillById.get(skillId)?.agentLoop?.roles.includes("source_provider") === true),
+      skillIds: step.skillIds.filter((skillId) => hasSkillSourceContract(skillById.get(skillId)?.agentLoop)),
       allowedKinds: [...providerKinds].sort() as EvidenceKind[],
       invalidKinds,
     }];
@@ -1659,10 +1669,9 @@ function capabilitiesForSelectedSourceProviders(
   selectedSkillRoles: readonly SelectedSkillRole[],
 ): readonly PlanningCapability[] {
   const selectedSourceSkillIds = new Set(selectedSkillRoles
-    .filter((role) => role.role === "source_provider")
     .map((role) => role.skillId));
   const selectedSourceCapabilities = task.availableSkills
-    .filter((skill) => selectedSourceSkillIds.has(skill.id) && skill.agentLoop?.roles.includes("source_provider"))
+    .filter((skill) => selectedSourceSkillIds.has(skill.id) && hasSkillSourceContract(skill.agentLoop))
     .flatMap((skill) => skill.agentLoop!.sourceKinds.map((sourceKind) => skillSourceProviderCapabilityId(skill.id, sourceKind)));
   if (selectedSourceCapabilities.length > 0) {
     const selectedIds = new Set(selectedSourceCapabilities);
@@ -2370,7 +2379,7 @@ function normalizeProgressiveSourceContract(
   const contract = step.evidenceContract;
   if (contract === undefined || taskProfile.sourceNeed === "strict_user_source") return step;
   const providerEvidence: ReadonlySet<EvidenceKind> = new Set<EvidenceKind>(task.availableSkills
-    .filter((skill) => step.skillIds.includes(skill.id) && skill.agentLoop?.roles.includes("source_provider"))
+    .filter((skill) => step.skillIds.includes(skill.id) && hasSkillSourceContract(skill.agentLoop))
     .flatMap((skill) => skill.agentLoop?.producesEvidenceKinds ?? []));
   const discoveryCanSupportBoundedDelivery = taskProfile.sourceNeed === "lookup_lite"
     && taskProfile.deliverySurface === "conversation"

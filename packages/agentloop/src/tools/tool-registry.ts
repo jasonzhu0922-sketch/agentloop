@@ -52,6 +52,12 @@ export interface ToolSourceDescriptor {
 export interface RuntimeTool<TInput = unknown> {
   readonly name: string;
   readonly description: string;
+  /**
+   * Host-owned effect on the observed resource, independent of replay safety.
+   * Read tools may persist Runtime audit/results, but cannot mutate user or
+   * external state. Missing declarations do not authorize reply-time access.
+   */
+  readonly effect?: "read" | "write";
   readonly source?: ToolSourceDescriptor;
   readonly inputSchema: JsonSchema;
   readonly executionMode: "parallel" | "exclusive";
@@ -140,7 +146,8 @@ export class ToolRegistry {
     grant: CapabilityGrant,
     options: { readonly decisionLedger?: readonly RuntimeDecisionCommit[] } = {},
   ): MaterializedTools {
-    const visible = [...this.tools.values()].filter((tool) => grant.allowedToolNames.has(tool.name));
+    const visible = [...this.tools.values()].filter((tool) => grant.allowedToolNames.has(tool.name)
+      && (grant.toolEffectScope !== "read" || tool.effect === "read"));
     const byName = new Map(visible.map((tool) => [tool.name, tool]));
     return {
       definitions: visible.map((tool) => ({

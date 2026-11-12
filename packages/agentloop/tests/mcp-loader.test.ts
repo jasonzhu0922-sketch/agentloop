@@ -152,3 +152,26 @@ test("MCP startup handshake and discovery honor the configured request timeout",
     globalThis.fetch = originalFetch;
   }
 });
+
+
+test("reply read effects require trusted MCP read-only annotations independently of replay safety", async () => {
+  const config = parseMcpServersConfig({ servers: [
+    { key: "trusted", transport: "http", url: "https://mcp.example.test", trust: "trusted" },
+    { key: "untrusted", transport: "http", url: "https://mcp.example.test", trust: "untrusted" },
+  ] });
+  const integration = await loadMcpToolsFromConfigWithFactory(config, {
+    create: async () => ({
+      request: async method => method === "tools/list" ? { tools: [
+        { name: "observe", annotations: { readOnlyHint: true }, inputSchema: { type: "object" } },
+        { name: "conflict", annotations: { readOnlyHint: true, destructiveHint: true }, inputSchema: { type: "object" } },
+        { name: "unknown", inputSchema: { type: "object" } },
+      ] } : { content: [] },
+      close: async () => undefined,
+    }),
+  });
+  assert.equal(integration.tools.length, 6);
+  for (const tool of integration.tools) {
+    assert.equal(tool.effect, tool.name === "mcp_trusted_observe" ? "read" : undefined);
+    assert.equal(tool.replaySafe, false);
+  }
+});

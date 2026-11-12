@@ -83,6 +83,29 @@ does not authorize arbitrary prior results or suppress unrelated schema errors.
 History and Plan projections disclose their bounded coverage. This mechanism
 does not imply that every historical Run is present in the current context.
 
+## Read tools in conversational replies
+
+A `reply` delivers a conversational answer and may inspect information through
+already authorized tools declared `effect: "read"`. The model chooses whether
+and what to read: workspace files, visible directories, uploaded sources,
+published Results, and read-only services all use the same policy. Supplying a
+resource grants access to inspect it; it does not implicitly select primary data
+or require reading every resource. A `clarify` turn remains tool-free.
+
+Tool registrations own the effect declaration. A read tool cannot mutate user or
+external state; Runtime audit and Result persistence are allowed. Missing effects
+never imply read authority, and tool names or `replaySafe` do not establish it.
+MCP tools qualify only when the host trusts the server and the tool declares
+`readOnlyHint: true` without `destructiveHint: true`. Commands, artifact creation,
+and Skill execution workflows require `execute`.
+
+The read restriction is enforced again when materializing tools, including after
+recovery. Existing resource, account, and Result grants still apply. Explicit
+prior-Result inputs must be consumed through `read_result`; their identities are
+retained in the published answer's provenance. History summaries are not full
+Result content. Replies with read access use semantic assessment against the
+latest request and evidence rather than accepting any non-empty answer.
+
 ## Build & test
 
 ```sh

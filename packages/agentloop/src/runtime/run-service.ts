@@ -71,6 +71,7 @@ import {
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import { readSkillExecutionManifest } from "../skills/skill-execution-manifest.ts";
 import type { PrivateSkill, SkillService } from "../skills/skill-service.ts";
+import { hasSkillSourceContract } from "../skills/agentloop-metadata.ts";
 import type { SqlConnection } from "../storage/connection.ts";
 import { RunRepository, type RunRow } from "../storage/repositories/run-repository.ts";
 import { SourceRepository, sourceSummary } from "../storage/repositories/source-repository.ts";
@@ -131,6 +132,7 @@ import { RunOutcomeRepository } from "../storage/repositories/outcome-repository
 import { CompletionFailure, partialOutputForFailure } from "./completion-failure.ts";
 import { RuntimeActionRepository, type RuntimeActionRecord } from "./runtime-action-repository.ts";
 import { RuntimeResultRepository } from "./runtime-result-repository.ts";
+import { toolNamesForConversationMode } from "./conversation-tool-policy.ts";
 import { createRuntimeResult, type RuntimeResultRef } from "./runtime-result.ts";
 import { RunCheckpointRepository, type RunCheckpointRecord } from "./run-checkpoint-repository.ts";
 import { RunRoundRepository } from "./run-round-repository.ts";
@@ -184,6 +186,7 @@ import {
   bindCanonicalPlan,
   beginCanonicalRound,
   canonicalRunStateRef,
+  acceptedCanonicalDelivery,
   createCanonicalRunState,
   reconcileCanonicalDeliveryTargetBindings,
   recordCanonicalAssessment,
@@ -1472,10 +1475,12 @@ export class RunService {
       }),
     });
     assertNoDuplicateTools(allTools);
-    const allowedToolNames = new Set(allTools
+    const canonicalState = await this.canonicalStates.get(runId);
+    const allowedToolNames = toolNamesForConversationMode(canonicalState.intent.turnResolution?.mode, allTools, allTools
       .map((tool) => tool.name)
       .filter((name) => run.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)));
     const rootGrant = createCapabilityGrant({
+      ...(canonicalState.intent.turnResolution?.mode === "reply" ? { toolEffectScope: "read" as const } : {}),
       actorUserId,
       runId,
       ...(run.conversationId === undefined ? {} : { conversationId: run.conversationId }),
@@ -1497,7 +1502,6 @@ export class RunService {
       (await this.canonicalStates.getOptional(runId))?.intent.turnResolution?.recurringTime,
     );
     const assessor = this.assessorFactory(model);
-    const canonicalState = await this.canonicalStates.get(runId);
     const emit = async (event: RuntimeEvent): Promise<void> => this.appendRunEvent(runId, event);
     let resumeStarted = false;
     try {
@@ -2268,12 +2272,18 @@ export class RunService {
           (executeOptions.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name))
           && (resumePlanning?.context.allowedToolNames === undefined || resumePlanning.context.allowedToolNames.includes(name))
         );
-      const allowedToolNames = responseOnly ? [] : catalogToolNames;
+      const allowedToolNames = toolNamesForConversationMode(turnResolution?.mode, allTools, catalogToolNames);
+      // Persist the effective Run boundary, not the pre-resolution catalog.
+      // HIL, Steer and restarts must not restore writers to a reading reply.
+      planningRecoveryContext = { ...planningRecoveryContext, allowedToolNames };
+      await this.planningRecovery.updateContext(runId, planningRecoveryContext, this.clock());
       const effectiveGoal = turnResolution?.effectiveGoal ?? input;
       // Visible directories are capabilities offered to the resolver, never
       // implicit task input.  Only its atomic source binding is propagated to
       // planning, admission, and the prompt profile selection.
-      const planningVisibleDirectories = visibleDirectoriesForTurn(turnResolution, visibleDirectories);
+      const planningVisibleDirectories = turnResolution?.mode === "reply"
+        ? visibleDirectories
+        : visibleDirectoriesForTurn(turnResolution, visibleDirectories);
       const targetArtifact = turnResolution?.targetArtifact === undefined
         ? undefined
         : conversationWorkingSet?.reusableArtifacts.find((artifact) =>
@@ -2314,7 +2324,7 @@ export class RunService {
         });
       }
       const planningAllowedToolNames = responseOnly
-        ? []
+        ? allowedToolNames
         : turnResolution === undefined || planningVisibleDirectories.length > 0
         ? allowedToolNames
         : allowedToolNames.filter((name) => !isVisibleDirectoryToolName(name));
@@ -2343,13 +2353,13 @@ export class RunService {
         },
       });
       let explicitlyRequiredSkillIds: readonly string[] = [];
-      if (!responseOnly) {
+      if (turnResolution?.mode !== "clarify") {
         const reusesPriorSource = turnResolution?.inputMode === "prior_result"
           && turnResolution.targetResult !== undefined && turnResolution.evidenceDemand === "none";
         const availability = resolveCapabilityRequirements(
           (canonicalState.intent.turnResolution?.requiredCapabilityReferences ?? [])
             .filter((item) => !reusesPriorSource || item.kind === "skill"),
-          privateSkills,
+          responseOnly ? [] : privateSkills,
           allowedToolSummaries,
         );
         explicitlyRequiredSkillIds = availability.skillIds;
@@ -2371,6 +2381,7 @@ export class RunService {
         }
       }
       const rootGrant = createCapabilityGrant({
+        ...(turnResolution?.mode === "reply" ? { toolEffectScope: "read" as const } : {}),
         actorUserId,
         runId,
         ...(conversationId === undefined ? {} : { conversationId }),
@@ -2717,11 +2728,11 @@ export class RunService {
           },
         });
 
-        let output = finalPlanOutput(plan);
         await throwIfRunCancelled(this.runs, runId, runController.signal);
         const completion = await this.finishPlanAfterInputs(actorUserId, runId, plan, emit);
         if (completion.nextRound) return this.get(actorUserId, runId);
-        plan = completion.plan; output = completion.output;
+        plan = completion.plan;
+        const output = completion.output;
         const reasonCode = completion.reasonCode;
         await this.enqueueMemorySettlement(runId, emit);
         await this.notifyPlanningExtensionsAfterOutcome({
@@ -2873,7 +2884,7 @@ export class RunService {
     emit: (event: RuntimeEvent) => Promise<void>): Promise<{ plan: ExecutionPlan; output: string; reasonCode: string; nextRound: boolean }> {
     let plan = initialPlan;
     for (;;) {
-      const output = finalPlanOutput(plan);
+      const output = finalPlanOutput(plan, await this.canonicalStates.get(runId));
       try {
         await new RunInputRepository(this.database).checkpoint(runId);
         if (await this.advanceRoundIfNeeded(actorUserId, runId, plan, output, emit)) return { plan, output, reasonCode: "next_round", nextRound: true };
@@ -2893,7 +2904,7 @@ export class RunService {
           additionalTools: await this.connectorToolsForRun({ runId, actorUserId, conversationId: run.conversationId, connectionIds: context.connectorConnectionIds }) });
         const workspaceRoot = run.conversationId === undefined ? await this.workspace.ensureOwnerWorkspace(actorUserId)
           : await this.workspace.ensureConversationWorkspace(actorUserId, run.conversationId);
-        const rootGrant = createCapabilityGrant({ actorUserId, runId, ...(run.conversationId === undefined ? {} : { conversationId: run.conversationId }),
+        const rootGrant = createCapabilityGrant({ ...(state.intent.turnResolution?.mode === "reply" ? { toolEffectScope: "read" as const } : {}), actorUserId, runId, ...(run.conversationId === undefined ? {} : { conversationId: run.conversationId }),
           depth: run.depth, workspaceRoot, visibleDirectories, uploadedSources: sources, allowedToolNames: context.allowedToolNames ?? [], allowedSkillIds: privateSkills.map(skill => skill.id) });
         const scope: { planId?: string; stepId?: string } = { planId: plan.id };
         const model = new ActionTrackedModel(this.modelFactory(this.retryReporter(runId), run.modelKey), this.actions, runId, () => scope,
@@ -3104,7 +3115,7 @@ export class RunService {
     const context = contextRow === undefined ? undefined : JSON.parse(contextRow.context_json) as PlanningRecoveryContext;
     const workspaceRoot = run.conversationId === undefined ? await this.workspace.ensureOwnerWorkspace(actorUserId)
       : await this.workspace.ensureConversationWorkspace(actorUserId, run.conversationId);
-    const rootGrant = createCapabilityGrant({ actorUserId, runId, ...(run.conversationId === undefined ? {} : { conversationId: run.conversationId }),
+    const rootGrant = createCapabilityGrant({ ...(state.intent.turnResolution?.mode === "reply" ? { toolEffectScope: "read" as const } : {}), actorUserId, runId, ...(run.conversationId === undefined ? {} : { conversationId: run.conversationId }),
       depth: run.depth, workspaceRoot, visibleDirectories, uploadedSources: sources,
       allowedToolNames: context?.allowedToolNames ?? [], allowedSkillIds: context?.allowedSkillIds ?? [] });
     const model = new ActionTrackedModel(this.modelFactory(this.retryReporter(runId), run.modelKey), this.actions, runId, () => ({}),
@@ -3464,6 +3475,7 @@ export class RunService {
       );
       const stepSources = uploadedSourcesForStep(input.sources, activeStep.executionBinding.requiredUploadedSourceIds);
       const stepGrant = createCapabilityGrant({
+        ...(canonicalState.intent.turnResolution?.mode === "reply" ? { toolEffectScope: "read" as const } : {}),
         actorUserId: input.actorUserId,
         runId: input.runId,
         planId: plan.id,
@@ -3570,7 +3582,7 @@ export class RunService {
       const requiresSourceBackedConversationSynthesis = activeStep.requiredCapabilities.includes("conversation_delivery")
         && !fileOutputStep
         && (stepNeedsReusableSourceEvidence(activeStep)
-          || stepSkills.some((skill) => skill.agentLoop?.roles.includes("source_provider") === true));
+          || stepSkills.some((skill) => hasSkillSourceContract(skill.agentLoop)));
       // Runtime prerequisites and semantic assessments share one durable
       // rejection boundary. Recovery must never observe a rejection whose
       // canonical Gap (or assessment record) has not committed.
@@ -3593,7 +3605,8 @@ export class RunService {
         // File-producing leaves must keep the same delivery-target reducer after
         // a HIL/recovery pause. Otherwise the resumed step can produce and
         // verify artifacts while the canonical targets remain open.
-        ...(fileOutputStep ? {
+        deliveryTargets: activeStep.executionBinding.targetIds.map((id) => canonicalState.targets[id]!),
+        ...(fileOutputStep || Object.values(canonicalState.targets).some((target) => target.surface === "workspace_artifact") ? {
           workProductContext: {
             goalId: `${plan.id}:v${plan.version}:${activeStep.id}`,
             goal: activeStep.objective,
@@ -3609,7 +3622,7 @@ export class RunService {
             }),
             storeSnapshot: (content: string) => new ComputerExecutor(input.rootGrant.workspaceRoot ?? this.workspaceRoot).storeContentReference(content),
           },
-          onWorkProductDeliveryTargets: async (bindings) => {
+          onWorkProductDeliveryTargets: async (bindings, observations) => {
             const newlyObserved = bindings.filter((binding) => binding.bindingAuthority === "runtime"
               && !persistedDeliveryBindingKeys.has(`${binding.targetId}\u0000${binding.path}\u0000${binding.versionId}`));
             if (newlyObserved.length > 0) {
@@ -3639,6 +3652,7 @@ export class RunService {
             const reconciled = reconcileCanonicalDeliveryTargetBindings(canonicalState, {
               stepId: activeStep.id,
               bindings,
+              observations,
             });
             if (reconciled === canonicalState) return;
             canonicalState = await this.canonicalStates.commit({
@@ -3845,10 +3859,12 @@ export class RunService {
             toolCalls: mergeAssessmentToolEvidence(inheritedAssessmentToolEvidence, candidate.toolEvidence),
             modelSteps: candidate.modelSteps,
           };
-          const unreadDependencyResultIds = unreadDependencyResultIdsForCandidate(activeStep, plan, candidate.toolEvidence);
+          const turn = canonicalState.intent.turnResolution;
+          const unreadDependencyResultIds = unreadDependencyResultIdsForCandidate(activeStep, plan, candidate.toolEvidence,
+            turn?.mode === "reply" && turn.targetResult !== undefined ? [turn.targetResult] : []);
           if (unreadDependencyResultIds.length > 0) {
             const feedback = [
-              "This Step has completed dependency Results but did not consume them.",
+              "This Step has bound input Results that it did not consume.",
               `Call read_result with only resultId (no pointer, offset, or limit) for each bound dependency before writing the completion: ${unreadDependencyResultIds.join(", ")}.`,
               "Do not infer or restate dependency facts from metadata, a prior draft, or the original request.",
             ].join(" ");
@@ -4126,11 +4142,11 @@ export class RunService {
       }),
     });
     assertNoDuplicateTools(allTools);
-    const availableToolNames = new Set(allTools
-      .map((tool) => tool.name)
-      .filter((name) => input.run.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)));
-    const availableToolSummaries = toolSummaries(allTools, availableToolNames);
     const canonicalState = await this.canonicalStates.get(input.run.id);
+    const availableToolNames = new Set(toolNamesForConversationMode(canonicalState.intent.turnResolution?.mode, allTools, allTools
+      .map((tool) => tool.name)
+      .filter((name) => input.run.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name))));
+    const availableToolSummaries = toolSummaries(allTools, availableToolNames);
     const normalizedRevision = input.decision.planRevision;
     const planRevision = { ...normalizedRevision, ...(normalizedRevision.roundScope !== undefined ? {} : input.currentPlan.roundScope === undefined ? {} : { roundScope: input.currentPlan.roundScope }) };
     const gapId = stringField(input.action.metadata, "canonicalGapId");
@@ -4234,6 +4250,7 @@ export class RunService {
         retainedStepIds: planRevision.retainedStepIds ?? [],
         createdStepIds: planRevision.steps.map(step => step.id),
         retiredStepIds,
+        preservedTargetIds: Object.values(revisedCanonicalState.targets).filter((target) => acceptedCanonicalDelivery(target) !== undefined).map((target) => target.targetId),
       },
     });
     const repairLeaves = revised.steps.filter((step) => step.retiredAt === undefined && step.role === "repair"
@@ -4276,6 +4293,7 @@ export class RunService {
       ? await this.workspace.ensureOwnerWorkspace(input.run.ownerUserId)
       : await this.workspace.ensureConversationWorkspace(input.run.ownerUserId, input.run.conversationId);
     const rootGrant = createCapabilityGrant({
+      ...(revisedCanonicalState.intent.turnResolution?.mode === "reply" ? { toolEffectScope: "read" as const } : {}),
       actorUserId: input.actorUserId,
       runId: input.run.id,
       ...(input.run.conversationId === undefined ? {} : { conversationId: input.run.conversationId }),
@@ -6426,6 +6444,12 @@ function selectFirstRoundSkillRole(
   sourceWorkRequested: boolean,
 ): SelectedSkillRole | undefined {
   const metadata = skill.agentLoop;
+  if (explicitlyRequested) {
+    const role = metadata?.roles.includes("primary_builder") ? "primary_builder"
+      : metadata?.roles.includes("source_provider") ? "source_provider"
+      : metadata?.roles.includes("qa") ? "qa" : "support";
+    return { skillId: skill.id, role, reason: "The user explicitly selected this Skill; metadata roles are workflow hints, not an availability gate." };
+  }
   if (metadata === undefined) return undefined;
   const roles = new Set(metadata.roles);
   const artifactKinds = new Set(metadata.artifactKinds);
@@ -6469,14 +6493,14 @@ function selectFirstRoundSkillRole(
         : "Prior completed-plan binding keeps this source_provider available as a multi-turn continuation candidate; the Planner decides whether the latest turn continues it.",
     };
   }
-  if (roles.has("support") && explicitSupportSkillRequested(semanticSignal)) {
+  if (roles.has("support") && (explicitSupportSkillRequested(semanticSignal) || hasMeaningfulPlanningSkillAffinity(skill, semanticSignal))) {
     return {
       skillId: skill.id,
       role: "support",
       reason: "The user explicitly requested a support capability declared by Skill metadata.",
     };
   }
-  if (roles.has("qa") && explicitQaSkillRequested(semanticSignal)) {
+  if (roles.has("qa") && (explicitQaSkillRequested(semanticSignal) || hasMeaningfulPlanningSkillAffinity(skill, semanticSignal))) {
     return {
       skillId: skill.id,
       role: "qa",
@@ -7018,6 +7042,7 @@ function toolSummaries(
     .map((tool) => ({
       name: tool.name,
       description: tool.description,
+      ...(tool.effect === undefined ? {} : { effect: tool.effect }),
       dangerous: DANGEROUS_COMPUTER_TOOL_NAMES.has(tool.name),
       ...(tool.source === undefined ? {} : { source: tool.source }),
     }))
@@ -7768,11 +7793,12 @@ function unreadDependencyResultIdsForCandidate(
   step: ExecutionPlan["steps"][number],
   plan: ExecutionPlan,
   toolCalls: readonly ToolEvidence[],
+  boundInputs: readonly RuntimeResultRef[] = [],
 ): readonly string[] {
-  const required = new Set(step.dependencies.flatMap((dependencyId) => {
+  const required = new Set([...boundInputs.map(ref => ref.resultId), ...step.dependencies.flatMap((dependencyId) => {
     const result = plan.steps.find((candidate) => candidate.id === dependencyId)?.evidence?.publishedResult;
     return result === undefined ? [] : [result.ref.resultId];
-  }));
+  })]);
   if (required.size === 0) return [];
   const consumed = new Set(toolCalls.flatMap((toolCall) => {
     if (toolCall.isError || toolCall.toolName !== "read_result") return [];
@@ -8452,13 +8478,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function finalPlanOutput(plan: ExecutionPlan): string {
+function finalPlanOutput(plan: ExecutionPlan, state: CanonicalRunState): string {
   const effectiveSteps = activeLeafSteps(plan);
   const terminalSteps = effectiveSteps.filter((candidate) =>
     !effectiveSteps.some((other) => other.dependencies.includes(candidate.id))
   );
-  if (terminalSteps.length === 1) return terminalSteps[0].output ?? "";
-  return JSON.stringify(terminalSteps.map((step) => ({ stepId: step.id, output: step.output ?? "" })));
+  const output = terminalSteps.length === 1 ? terminalSteps[0].output ?? ""
+    : JSON.stringify(terminalSteps.map((step) => ({ stepId: step.id, output: step.output ?? "" })));
+  // Delivery belongs to the Run. Scheduling position and Step retirement must
+  // not decide whether an independently accepted result reaches the user.
+  const acceptedMaterial = Object.values(state.targets).flatMap((target) => {
+    const accepted = acceptedCanonicalDelivery(target);
+    if (accepted === undefined) return [];
+    if (target.surface === "conversation") return output.includes(accepted.output!) ? [] : [accepted.output!];
+    const artifacts = accepted.artifacts ?? (accepted.artifact === undefined ? [] : [accepted.artifact]);
+    return artifacts.filter((artifact) => !output.includes(artifact.path))
+      .map((artifact) => `[${target.purpose.replace(/[\[\]]/gu, "")}](${encodeURI(artifact.path).replace(/\(/gu, "%28").replace(/\)/gu, "%29")})`);
+  });
+  return [...new Set([output, ...acceptedMaterial])].filter(Boolean).join("\n\n");
 }
 
 function isEffectivelyComplete(plan: ExecutionPlan): boolean {
@@ -8683,7 +8720,7 @@ function conversationTurnTool(context: ConversationIntentExternalContext): Model
       type: "object",
       additionalProperties: false,
       required: ["path"],
-      description: "Select an existing reusable prior artifact to modify. This is never the output path for a newly created artifact.",
+      description: "Select an existing reusable prior artifact to read or modify. This is never the output path for a newly created artifact.",
       properties: {
         path: { type: "string", enum: artifactPaths },
       },
@@ -9175,7 +9212,8 @@ function inheritPriorWorkProductBinding(
   workset: ConversationWorkingSet | undefined,
 ): ConversationTurnResolution {
   if (
-    resolution.mode !== "execute"
+    resolution.mode === "clarify"
+    || (resolution.mode === "reply" && resolution.inputMode !== "prior_result")
     || resolution.relation === "new_goal"
     || resolution.targetRunId === undefined
     || resolution.targetArtifact !== undefined
@@ -9299,7 +9337,8 @@ function bindUnambiguousPriorResult(
   workset: ConversationWorkingSet | undefined,
 ): ConversationTurnResolution {
   if (
-    resolution.mode !== "execute"
+    resolution.mode === "clarify"
+    || (resolution.mode === "reply" && resolution.inputMode !== "prior_result" && resolution.targetResult === undefined)
     || resolution.inputMode === "refresh_sources"
     || resolution.targetArtifact !== undefined
   ) return resolution;
@@ -9354,7 +9393,7 @@ function conversationTurnSemanticFeedback(
 }
 
 /**
- * Reply and clarification turns are deliberately tool-free.  A model may
+ * Replies may read, but neither replies nor clarifications produce files. A model may
  * still describe the user's pending file request in its semantic frame, but
  * it must not make that file a terminal deliverable for the current Run.
  */
@@ -9452,7 +9491,7 @@ export function referencesPriorConversationResult(input: string): boolean {
 function normalizeConversationTurnEvidenceBinding(
   resolution: ConversationTurnResolution,
 ): ConversationTurnResolution {
-  if (resolution.mode === "clarify") return resolution;
+  if (resolution.mode !== "execute") return resolution;
   // The structured Resolver decision owns evidence demand. Comparisons,
   // calculations, generation and transformations may use already supplied
   // content; their action words cannot create a source-acquisition obligation.
@@ -9462,10 +9501,10 @@ function normalizeConversationTurnEvidenceBinding(
     && resolution.targetArtifact !== undefined && resolution.inputMode !== "refresh_sources";
   if (!consumesPriorResult && !transformsBoundArtifact) return resolution;
   const evidenceDemand = resolution.sourceBinding.mode === "primary_data" ? "source_grounded" : "none";
-  if (resolution.evidenceDemand === evidenceDemand && resolution.mode === "execute") return resolution;
+  if (resolution.evidenceDemand === evidenceDemand && !transformsBoundArtifact) return resolution;
   return {
     ...resolution,
-    mode: "execute",
+    ...(transformsBoundArtifact ? { mode: "execute" as const } : {}),
     evidenceStrategy: conversationEvidenceStrategyForDemand(evidenceDemand, resolution.sourceBinding),
     evidenceDemand,
     source: "model_guarded",
@@ -9582,27 +9621,27 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "Use evidenceStrategy=none when the requested work can use supplied values, transcript facts, stable general knowledge, or creative content without acquiring outside facts. Comparison, calculation, generation and result assessment do not by themselves require source research; describe the actual missing fact before selecting a source-acquisition strategy.",
       "Also return taskIntent as a semantic frame: operation, requiresExecution, and every terminal output family the user requested with stable targetId, user-visible purpose, exact expectedArtifactCount, action, semantic kind, optional concrete format, and delivery surface. targetId/purpose are the immutable identity and acceptance intent of each output family, never a filename. expectedArtifactCount is required, must be a positive integer, and must preserve an explicit requested cardinality; use 1 only when exactly one output is requested. Derive these fields from the full transcript and prior work context, not from isolated action words.",
       "taskIntent.deliverables is an acceptance contract, not an implementation plan. Never promote a helper script, temporary file, manifest, intermediate representation, source summary, or verification output into deliverables merely because execution may create or use it. Include code plus a rendered artifact only when the user explicitly requests both as terminal outputs.",
-      "taskIntent.requiresExecution must agree with mode=execute. Preserve every explicitly requested terminal output instead of choosing one because it appears first.",
-      "reply and clarify are tool-free conversation boundaries: every taskIntent deliverable in those modes must use surface=conversation, action=none, kind=none, and omit format. If the user is asking for a file but its requirements are unresolved, keep the pending artifact request in effectiveGoal or userConstraints and return a conversation-only clarification; never declare a workspace_artifact deliverable for that turn.",
+      "taskIntent.requiresExecution is true for mode=execute task workflows, false for reply or clarify. A reply may invoke authorized read-only Tools; reading alone does not require mode=execute. Preserve every explicitly requested terminal output instead of choosing one because it appears first.",
+      "reply and clarify have conversation-only delivery: every taskIntent deliverable in those modes must use surface=conversation, action=none, kind=none, and omit format. If the user is asking for a file but its requirements are unresolved, keep the pending artifact request in effectiveGoal or userConstraints and return a conversation-only clarification; never declare a workspace_artifact deliverable for that turn.",
       "visibleDirectories are merely Runtime-authorized candidates, not automatic input. Use sourceBinding.mode=none and visibleDirectoryIds=[] unless the user explicitly refers to a candidate or the requested object, period, and subject have a high-confidence match to one unique candidate.",
       "When a visible directory is the primary data input, set sourceBinding.mode=primary_data, select only its opaque IDs from visibleDirectories, and set evidenceStrategy=bound_visible_sources. A primary-data binding can never use evidenceStrategy=none.",
       "When multiple visible directories could plausibly satisfy the goal and the transcript does not distinguish one, return clarify rather than guessing. Do not bind a directory merely because it is available.",
       "For lookup, uploaded, or other non-directory evidence, keep sourceBinding.mode=none and choose the matching non-bound evidenceStrategy.",
-      "Return reply when the effective goal can be satisfied from the existing transcript, supplied metadata, or the model's reliable general knowledge without external state or tool use. Stable common-knowledge questions can be answered directly; do not require a source merely because the answer is a factual statement. If unsure, do not guess: choose an appropriate acquisition strategy or acknowledge uncertainty.",
+      "Return reply when the requested outcome is an answer, explanation, or clarification of facts that can be fulfilled with existing context or authorized read-only Tools. Reply may read prior Results, files, uploaded sources, directories, or read-only services as needed; preserve selected input references and the appropriate evidence strategy. Stable general knowledge can be answered directly. Do not require a read when supplied content is already sufficient. Reading does not authorize writes, commands, state changes, or Skill execution workflows.",
       "runtimeCapabilityInventories are frozen capability knowledge with explicit scopes. For a capability-inventory question, choose reply when the requested scope is supplied: run_authorized for current/selected/authorized services; runtime_configured for system-wide, configured, installed, connected, or MCP-service directory questions; platform_catalog only for product-supported/installable questions. Never use a run_authorized inventory to claim that a service is absent from the Runtime configuration. If the requested broader scope is not supplied, a reply may state only that this Runtime did not provide that catalog metadata; do not invent a directory Tool or assert absence.",
-      "Return execute when faithful completion requires external state acquisition or capability use, even when the user only rejects, questions, or refines a prior answer.",
+      "Return execute for artifact production/transformation, state-changing actions, command or Skill execution workflows, and multi-step task execution. Needing to read information for an answer alone does not require execute. Clarify remains tool-free when a material user decision is missing.",
       "Choose lookup_lite or source_grounded for facts that require fresh, private, task-specific, disputed, or otherwise verifiable external evidence to answer the user's actual request. Respect explicit requests for sources, verification, or current information; mere factuality does not require retrieval.",
       "When the user disputes an unsupported prior factual answer, bind to that prior Run, use correct_prior or challenge_prior, and require source_grounded evidence.",
       "Use strict_user_source only when the user explicitly requires official, authoritative, or exact-source verification.",
       "Use clarify when the semantic target or requested external side effect is materially ambiguous. This resolution never grants permission for destructive or external side effects.",
       "availableTools is the authorized capability catalog for this Run, including connected services. Its metadata is available for intent classification even though those tools cannot be invoked in this resolver phase. A tool-free resolver is not an unavailable service. Do not return clarify merely because no visible directory or uploaded source is bound when the request can acquire evidence through this catalog.",
-      "A user may describe the needed capability without naming a provider or tool. Preserve that functional need and return execute when it requires capability use; Planner selects the matching authorized capability. Catalog availability is not by itself a request to use a tool, and must not narrow or replace the user's semantic goal.",
+      "A user may describe the needed capability without naming a provider or tool. Preserve that functional need; replies may use matching authorized readers, while task workflows require execute. Catalog availability is not by itself a request to use a tool, and must not narrow or replace the user's semantic goal.",
       "Candidate selectors are closed-world Runtime handles, not values you may construct. Use only selector fields and enum values exposed by the current tool schema; never infer an ID from its pattern.",
       "For relation=new_goal, omit targetGoalCandidateId, targetArtifact, and resultCandidateId. targetArtifact always means an existing reusable prior artifact, never the output path of a new artifact.",
-      "For a prior relation, select targetGoalCandidateId from priorGoalCandidates. When inputMode=prior_result and resultCandidateId is selected, Runtime can derive the goal from that Result's producer if targetGoalCandidateId is omitted; include a separate targetGoalCandidateId when continuing a different failed goal. Never reconstruct or emit a Run ID.",
-      "When changing a prior delivered file, use the matching opaque goal candidate for lineage and select its concrete artifact path. Do not select an artifact for a request that only reuses prior facts or delivery text.",
+      "For a prior relation, select targetGoalCandidateId from priorGoalCandidates; retain it when repairing inputMode. reply can retain prior lineage with inputMode=none or select a prior Result/artifact for reading. When inputMode=prior_result and resultCandidateId is selected, Runtime can derive the goal from that Result's producer if targetGoalCandidateId is omitted; include a separate targetGoalCandidateId when continuing a different failed goal. Never reconstruct or emit a Run ID.",
+      "When inspecting or changing a prior delivered file, use the matching opaque goal candidate for lineage and select its concrete artifact path. Do not select an artifact for a request that only reuses prior facts or delivery text.",
       "Set inputMode=prior_result when a follow-up consumes prior accepted delivery text, and select only its opaque resultCandidateId from reusableResultCandidates. Never reconstruct or emit a Run ID, hash, or character count for a result.",
-      "Set inputMode=prior_artifact only when changing a concrete delivered file. Set inputMode=refresh_sources only when the latest user asks to refresh, reanalyze, or verify source facts. Otherwise use inputMode=none.",
+      "Set inputMode=prior_artifact when inspecting or changing a concrete delivered file. Set inputMode=refresh_sources only when the latest user asks to refresh, reanalyze, or verify source facts. Otherwise use inputMode=none.",
       "A request to remove external dependencies from an existing artifact (for example links, fonts, scripts, images, CDNs, or remote resources) is a prior_artifact transformation with evidenceStrategy=none. It is not source research unless the user separately asks to refresh, reanalyze, or verify the underlying facts.",
       "Goal lineage and input ownership are separate: targetGoalCandidateId may identify a failed goal being continued while targetArtifact selects an earlier reusable file or resultCandidateId identifies the published Runtime Result supplying its content. Preserve both identities; the input producer need not be the goal being continued.",
       "For requests such as 'turn this analysis into a PDF', bind the prior result and use evidenceStrategy=none. For 'reanalyze the source and make a PDF', use refresh_sources with source_grounded evidence.",
@@ -9654,6 +9693,9 @@ function parseConversationTurnResolution(
   if (requiredCapabilityReferences === undefined) {
     groundingFailures.push("requiredCapabilityReferences must be an array of at most 32 {kind, reference} entries. kind must be skill, tool_source, or tool; reference must be a non-empty string of at most 200 characters copied exactly from the latest user request. Do not infer mandatory capabilities from output formats or the available catalog; use [] when none were explicitly named.");
   }
+  if (mode === "reply" && requiredCapabilityReferences?.some(item => item.kind === "skill")) {
+    groundingFailures.push("mode=reply cannot invoke a Skill workflow. You declared a mandatory Skill invocation in requiredCapabilityReferences: choose mode=execute with taskIntent.requiresExecution=true, including for instruction-only Skills and conversational output. If the user only asks about Skill metadata, keep reply and remove the invocation requirement.");
+  }
   const effectiveGoal = typeof argumentsRecord.effectiveGoal === "string"
     ? argumentsRecord.effectiveGoal.trim()
     : "";
@@ -9681,13 +9723,13 @@ function parseConversationTurnResolution(
   const targetResult = resultCandidateId === undefined
     ? undefined
     : conversationResultForCandidateId(workset, resultCandidateId);
-  const resultProducer = mode === "execute" && inputMode === "prior_result" && targetResult !== undefined
+  const resultProducer = mode !== "clarify" && inputMode === "prior_result" && targetResult !== undefined
     ? workset?.resultCards?.find((card) => card.result.resultId === targetResult.resultId)?.producer.runId
     : undefined;
   // A selected published Result already identifies its producer. Do not ask
   // the model to duplicate that identity, but preserve a separately selected
   // failed goal when its input belongs to an earlier Run.
-  const targetRunId = candidateTargetRunId ?? (guardedPriorArtifact ? targetArtifact.runId : resultProducer);
+  const targetRunId = candidateTargetRunId ?? (targetArtifact !== undefined && mode === "reply" ? targetArtifact.runId : guardedPriorArtifact ? targetArtifact.runId : resultProducer);
   const normalizedInputMode = guardedPriorArtifact ? "prior_artifact" : inputMode;
   const normalizedRelation = (guardedPriorArtifact || resultProducer !== undefined) && relation === "new_goal" ? "refine_prior" : relation;
   const userConstraints = Array.isArray(argumentsRecord.userConstraints)
@@ -9729,9 +9771,9 @@ function parseConversationTurnResolution(
   if (taskIntent.requiresExecution !== (mode === "execute")) return reject("taskIntent.requiresExecution must be true exactly when mode=execute.");
   if (
     taskIntent !== undefined
-    && !taskIntent.requiresExecution
+    && mode === "clarify"
     && (normalizedInputMode !== "none" || targetArtifact !== undefined || targetResult !== undefined)
-  ) return reject("A reply or clarification must use inputMode=none and omit targetArtifact and resultCandidateId; consuming prior artifacts or results requires mode=execute.");
+  ) return reject("A clarification must use inputMode=none and omit targetArtifact and resultCandidateId; use reply for read-only consumption or execute for task execution.");
   if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000) return reject("effectiveGoal must be a non-empty string no longer than 2000 characters.");
   if (userConstraints === undefined) return reject("userConstraints must be an array of at most 8 non-empty strings, each no longer than 240 characters; use [] when no additional constraint applies.");
   if (memoryAction !== "none" && memoryAction !== "commit") return reject("memoryAction must be none or commit and is required for every turn.");
@@ -9779,7 +9821,7 @@ function parseConversationTurnResolution(
     }
     return reject("evidenceStrategy and sourceBinding must agree: bound_visible_sources requires sourceBinding.mode=primary_data with at least one Runtime-issued visibleDirectoryId. All other evidence strategies require mode=none and visibleDirectoryIds=[]. For uploaded or non-directory evidence, choose a non-bound evidenceStrategy.");
   }
-  if (mode !== "execute" && (evidenceDemand !== "none" || sourceBinding.mode !== "none")) return reject("mode=reply or clarify requires evidenceStrategy=none and sourceBinding.mode=none. Acquiring evidence requires mode=execute.");
+  if (mode === "clarify" && (evidenceDemand !== "none" || sourceBinding.mode !== "none")) return reject("mode=clarify requires evidenceStrategy=none and sourceBinding.mode=none.");
 
   if (targetArtifact !== undefined) {
     if (normalizedRelation === "new_goal") return reject("relation=new_goal cannot select targetArtifact; a prior artifact transformation requires prior goal lineage.");
@@ -9979,7 +10021,7 @@ function conversationTurnResolutionFromEvents(
     if (taskIntent === undefined || taskIntent.requiresExecution !== (mode === "execute")) return undefined;
     if (
       taskIntent !== undefined
-      && !taskIntent.requiresExecution
+      && mode === "clarify"
       && (inputMode !== "none" || targetArtifact !== undefined || targetResult !== undefined)
     ) return undefined;
     if (
@@ -9993,7 +10035,7 @@ function conversationTurnResolutionFromEvents(
     if (memoryAction === "commit" && memoryIntents.length === 0) return undefined;
     if (!isConversationSourceBindingConsistent(evidenceStrategy, sourceBinding)) return undefined;
     if (conversationEvidenceDemandForStrategy(evidenceStrategy) !== evidenceDemand) return undefined;
-    if (mode !== "execute" && (evidenceDemand !== "none" || sourceBinding.mode !== "none")) return undefined;
+    if (mode === "clarify" && (evidenceDemand !== "none" || sourceBinding.mode !== "none")) return undefined;
     if (relation !== "new_goal" && (targetRunId === undefined || targetRunId.length === 0)) return undefined;
     if (targetArtifact !== undefined && relation === "new_goal") return undefined;
     if (data.targetResult !== undefined && targetResult === undefined) return undefined;
@@ -10191,9 +10233,9 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
     externalContextPolicy: {
       purpose: "intent_classification_only",
       contentAccess: "metadata_only",
-      replyBoundary: "Reply may use transcript and this metadata only; execute is required to inspect resources, verify external facts, or perform capability work.",
+      replyBoundary: "Reply may use transcript, supplied metadata and authorized Tools declared effect=read. Preserve relevant Result/artifact bindings and evidence strategy. State-changing work, command/Skill workflows and artifact production require execute.",
       sideEffectBoundary: "This resolution expresses semantic need only and cannot authorize destructive or external side effects.",
-      capabilityBoundary: "Capability inventories describe only their explicit scope and source state. They are metadata, not user intent, source content, or execution permission. A reply or clarification still receives no executable tools.",
+      capabilityBoundary: "Capability inventories describe only their explicit scope and source state. They are metadata, not user intent, source content, or execution permission. Reply receives only the already authorized read-effect subset; clarify remains tool-free. Unspecified effects never imply read authority.",
     },
     visibleDirectories: context.visibleDirectories.map((directory) => ({
       id: directory.id,
@@ -10219,6 +10261,7 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
     availableTools: (context.availableTools ?? []).map((tool) => ({
       name: tool.name,
       description: tool.description,
+      ...(tool.effect === undefined ? {} : { effect: tool.effect }),
       ...(tool.dangerous === undefined ? {} : { dangerous: tool.dangerous }),
       ...(tool.source === undefined ? {} : { source: tool.source }),
     })),

@@ -1,7 +1,7 @@
 import { AppError } from "../shared/errors.ts";
 import type { ExecutionPlan, PlanStep, SkillComplianceAssessment, StepEvidence } from "../planning/contracts.ts";
 import type { PlanRepository } from "../planning/plan-repository.ts";
-import { createRuntimeResult, type RuntimeResultRecord, type RuntimeResultRef } from "./runtime-result.ts";
+import { createRuntimeResult, parseRuntimeResultRef, type RuntimeResultRecord, type RuntimeResultRef } from "./runtime-result.ts";
 
 /** The only boundary allowed to publish a formal Step result. */
 export class StepResultCommitter {
@@ -50,6 +50,13 @@ export class StepResultCommitter {
       inputs: uniqueResultRefs([
         ...dependencyResultRefs(persistedPlan, step),
         ...input.evidence.toolCalls.flatMap((toolCall) => toolCall.resultRef === undefined ? [] : [toolCall.resultRef]),
+        // A Result observation does not publish another Result, but its
+        // original identity remains an input of the answer it supports.
+        ...input.evidence.toolCalls.flatMap((toolCall) => {
+          if (toolCall.isError || toolCall.toolName !== "read_result") return [];
+          const ref = parseRuntimeResultRef(parseRecord(toolCall.result)?.sourceResultRef);
+          return ref === undefined ? [] : [ref];
+        }),
       ]),
       publication: {
         status: "published",

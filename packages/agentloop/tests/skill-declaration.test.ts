@@ -14,12 +14,19 @@ test("skill declaration sidecars round-trip without putting planning metadata in
   assert.deepEqual(parsed, declaration);
   assert.deepEqual(projectSkillAgentLoopMetadata(parsed), {
     roles: ["support"],
-    artifactKinds: ["document", "code"],
+    artifactKinds: ["none"],
     sourceKinds: [],
     qaKinds: [],
     semanticTags: ["contract", "review"],
     intentExamples: ["Review contract documents."],
   });
+});
+
+test("basic detection never treats frontmatter, references, scripts or input filenames as output contracts", () => {
+  const declaration = detectSkillDeclaration("instruction-only", "Follow the referenced procedure", "---\nname: instruction-only\ndescription: Follow procedure\n---\nRead references/workflow.md and run scripts/check.py on input.csv, then reply.", ["SKILL.md", "references/workflow.md", "scripts/check.py", "input.csv"]);
+  assert.deepEqual(declaration.workflow.artifactKinds, ["none"]);
+  assert.deepEqual(declaration.workflow.sourceKinds, []);
+  assert.deepEqual(declaration.workflow.roles, ["support"]);
 });
 
 test("legacy frontmatter is converted to a declaration with compatibility projection", () => {

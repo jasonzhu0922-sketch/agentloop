@@ -37,14 +37,15 @@ const tools: readonly PlanningToolSummary[] = [
   { name: "materialize_result_json", description: "Materialize an authorized JSON Runtime Result" },
 ];
 
-test("a local-script source provider executes in a conversation leaf without requiring artifact writing", () => {
+for (const declaredRole of ["source_provider", "primary_builder", "support", "qa"] as const) {
+test(`a local-script source contract executes independently of its ${declaredRole} workflow role`, () => {
   const runId = "run-local-script-source-answer";
   const skill = {
     id: "discovered:company-registry",
     name: "company-registry",
     description: "Read company registration facts from a bounded API script.",
     agentLoop: {
-      roles: ["source_provider"],
+      roles: [declaredRole],
       artifactKinds: ["none"],
       sourceKinds: ["api"],
       qaKinds: [],
@@ -114,6 +115,7 @@ test("a local-script source provider executes in a conversation leaf without req
     evidenceKind: "source_summary", capabilityId, resolvedToolNames: ["computer_run_command"], skillId: skill.id,
   }]);
 });
+}
 
 test("Admission rejects a Skill source capability whose declaring Skill is not bound to the leaf", () => {
   const selectedSource = {

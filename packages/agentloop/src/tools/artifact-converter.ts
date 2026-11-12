@@ -280,6 +280,7 @@ export interface ConvertArtifactInput {
 export function createArtifactConverterTools(executor: ComputerExecutor): RuntimeTool<unknown>[] {
   return [{
     name: "convert_artifact",
+    effect: "write",
     description: [
       "Convert an existing artifact under the workspace root to another document format; requires dangerous-tool consent.",
       "inputPath and outputPath must be relative to the workspace root; absolute paths and @skills/@visible aliases are rejected.",

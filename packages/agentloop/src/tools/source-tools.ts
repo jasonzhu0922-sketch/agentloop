@@ -15,6 +15,7 @@ const MAX_SOURCE_READ_CHUNKS = 10;
 export function createSourceTools(repository: SourceRepository): RuntimeTool<unknown>[] {
   return [{
     name: "read_source",
+    effect: "read",
     description: [
       "Read chunks from uploaded sources authorized for the current Run or conversation.",
       "Use sourceId from sources in runtime context.",
@@ -126,6 +127,7 @@ export function createSourceTools(repository: SourceRepository): RuntimeTool<unk
     },
   }, {
     name: "extract_source_tables",
+    effect: "write",
     description: [
       "Extract bounded, coordinate-preserving table records from one authorized uploaded CSV, XLSX, or XLSM source.",
       "Use sourceId from sources in runtime context. This reads the server-owned original through the source grant; it never exposes an upload storage path.",
@@ -185,6 +187,7 @@ export function createSourceTools(repository: SourceRepository): RuntimeTool<unk
     },
   }, {
     name: "materialize_source_file",
+    effect: "write",
     description: [
       "Materialize the immutable original bytes of one uploaded source into the current Runtime workspace.",
       "Use this when a file operation such as merge, split, rotate, convert, archive, or media processing needs the original binary rather than extracted read_source text.",

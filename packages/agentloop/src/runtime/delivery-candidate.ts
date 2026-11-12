@@ -1,4 +1,7 @@
 import type { AgentLoopToolEvidence, RuntimeDeliveryCandidate, RuntimeDeliveryCandidateEvidenceKinds, RuntimeDeliveryClaim, RuntimeDeliveryReceipt } from "./contracts.ts";
+import { runtimeEvidenceRecordsFromToolResult } from "./tool-result-evidence.ts";
+import type { CanonicalDeliveryTarget } from "./canonical-run-state.ts";
+import type { WorkProductDeliveryBinding, WorkProductDeliveryTarget } from "./work-product-semantics.ts";
 import { canonicalArtifactAcceptanceVerdict } from "./tool-result-evidence.ts";
 import type { StepSemanticFrame } from "./step-semantic-frame.ts";
 import { artifactMatchesExpectedTarget } from "./tool-progress-policy.ts";
@@ -68,9 +71,10 @@ export function buildRuntimeDeliveryCandidate(input: {
   readonly expectedArtifactFormat?: string;
   readonly caveats?: readonly string[];
   readonly sourceToolCallIds?: readonly string[];
-  readonly targetIds?: readonly string[];
-  /** Runtime-validated target/version bindings, never prose-derived target guesses. */
-  readonly deliveryClaims?: readonly RuntimeDeliveryClaim[];
+  /** Every owned canonical target, including conversation delivery. */
+  readonly deliveryTargets?: readonly Pick<CanonicalDeliveryTarget, "targetId" | "surface">[];
+  readonly artifactBindings?: readonly WorkProductDeliveryBinding[];
+  readonly artifactTargets?: readonly WorkProductDeliveryTarget[];
 }): RuntimeDeliveryCandidate {
   const evidenceKinds = collectEvidenceKinds(
     input.toolEvidence,
@@ -92,10 +96,17 @@ export function buildRuntimeDeliveryCandidate(input: {
     evidenceKinds,
     caveats,
     sourceToolCallIds: input.sourceToolCallIds ?? input.toolEvidence.map((item) => item.toolCallId),
-    deliveryClaims: input.deliveryClaims ?? (input.targetIds ?? []).map((targetId) => ({
-      targetId,
-      evidenceRefs: uniqueStrings(input.sourceToolCallIds ?? input.toolEvidence.map((item) => item.resultRef?.resultId ?? item.toolCallId)),
-    })),
+    // A claim names the presented result; it does not approve its meaning.
+    // Both surfaces enumerate the same canonical inventory. Only a file claim
+    // requires a current, accepted physical binding.
+    deliveryClaims: (input.deliveryTargets ?? []).flatMap((target) => {
+      if (target.surface === "conversation") return input.output.trim().length === 0 ? [] : [{
+        targetId: target.targetId,
+        evidenceRefs: uniqueStrings(input.sourceToolCallIds ?? input.toolEvidence.map((item) => item.resultRef?.resultId ?? item.toolCallId)),
+      }];
+      return deliveryClaimsForCurrentTargetBindings(input.artifactBindings ?? [], input.toolEvidence, input.artifactTargets ?? [])
+        .filter((claim) => claim.targetId === target.targetId);
+    }),
     ...(deliveryReceipt === undefined ? {} : { deliveryReceipt }),
   }));
 }
@@ -262,4 +273,69 @@ function parseJsonRecord(value: unknown): Record<string, unknown> | undefined {
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * A target claim is only created when the exact model-selected current version
+ * has a successful acceptance receipt for that same path and SHA-256. This is
+ * deliberately narrower than the older kind/format matching: two Markdown
+ * files are not interchangeable user deliveries.
+ */
+export function deliveryClaimsForCurrentTargetBindings(
+  bindings: readonly {
+    readonly targetId: string;
+    readonly deliveryTargetId: string;
+    readonly path: string;
+    readonly versionId: string;
+    readonly bytes: number;
+    readonly sha256: string;
+    readonly observedByToolCallId: string;
+  }[],
+  evidence: readonly AgentLoopToolEvidence[],
+  targets: readonly { readonly targetId: string; readonly deliveryTargetId?: string }[],
+): NonNullable<RuntimeDeliveryCandidate["deliveryClaims"]> {
+  const acceptances = acceptedArtifactVersions(evidence);
+  const accepted = bindings.flatMap((binding) => {
+    const acceptanceToolCallId = acceptances.get(`${binding.path}\u0000${binding.sha256.toLowerCase()}`);
+    if (acceptanceToolCallId === undefined) return [];
+    return [{
+      targetId: binding.deliveryTargetId,
+      instanceId: binding.targetId,
+      evidenceRefs: [binding.observedByToolCallId, acceptanceToolCallId],
+      artifact: {
+        path: binding.path,
+        versionId: binding.versionId,
+        sha256: binding.sha256,
+        bytes: binding.bytes,
+        observedByToolCallId: binding.observedByToolCallId,
+        acceptanceToolCallId,
+      },
+    }];
+  });
+  const byTarget = new Map<string, typeof accepted>();
+  for (const claim of accepted) byTarget.set(claim.targetId, [...(byTarget.get(claim.targetId) ?? []), claim]);
+  return [...byTarget.entries()].filter(([targetId, claims]) => {
+    const expected = targets.filter((target) => (target.deliveryTargetId ?? target.targetId) === targetId);
+    return expected.length > 0 && expected.every((target) => claims.some((claim) => claim.instanceId === target.targetId));
+  }).map(([targetId, claims]) => ({
+    targetId,
+    evidenceRefs: claims.flatMap((claim) => claim.evidenceRefs),
+    ...(claims.length === 1 ? { artifact: claims[0]!.artifact } : { artifacts: claims.map((claim) => claim.artifact!) }),
+  }));
+}
+/** Exact committed verifier identities shared by execution and delivery claims. */
+export function acceptedArtifactVersions(evidence: readonly AgentLoopToolEvidence[]): ReadonlyMap<string, string> {
+  const acceptances = new Map<string, string>();
+  for (const item of evidence) {
+    if (item.isError || item.toolName !== "verify_artifact_acceptance") continue;
+    for (const result of runtimeEvidenceRecordsFromToolResult(item.result)) {
+      if (result.schema !== "agentloop.artifactAcceptance/v1") continue;
+      const artifact = isPlainRecord(result.artifact) ? result.artifact : undefined;
+      const path = typeof artifact?.path === "string" ? artifact.path : undefined;
+      const sha256 = typeof artifact?.sha256 === "string" ? artifact.sha256.toLowerCase() : undefined;
+      if (path === undefined || sha256 === undefined || !["accepted", "caveated"].includes(canonicalArtifactAcceptanceVerdict(result) ?? "")) continue;
+      acceptances.set(`${path}\u0000${sha256}`, item.toolCallId);
+    }
+  }
+  return acceptances;
 }

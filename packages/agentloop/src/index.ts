@@ -5,7 +5,7 @@
 // reference implementation).
 export { BatchService } from "./batch/batch-service.ts";
 export type { BatchItemRecord, BatchRecord } from "./batch/batch-service.ts";
-export { ComputerExecutor } from "./computer/computer-executor.ts";
+export { ComputerExecutor, buildCommandEnvironment } from "./computer/computer-executor.ts";
 export type { ComputerDriver, ComputerSnapshot } from "./computer/computer-driver.ts";
 export { ArtifactAcceptanceService } from "./acceptance/artifact-acceptance.ts";
 export { assertPracticeProfileCatalog, practiceGuidanceForPrompt, practiceInputFamiliesForSourceKinds, resolvePracticeProfileResolution, resolvePracticeProfiles } from "./runtime/practice-profiles.ts";
@@ -290,16 +290,19 @@ export { discoverSkillDirectory, discoverSkillPackageRoot, scanSkillDirectory } 
 export type { SkillDirectoryEntry, SkillDirectoryScanResult, SkillLoadDiagnostic } from "./skills/skill-directory.ts";
 export { copySkillPackage, inspectSkillPackage, makeSkillPackageReadOnly, removeSkillPackage } from "./skills/skill-package.ts";
 export type { SkillPackageInspection } from "./skills/skill-package.ts";
+export { readSkillExecutionManifest } from "./skills/skill-execution-manifest.ts";
 export {
   SKILL_DECLARATION_SCHEMA,
+  SKILL_DECLARATION_EDITOR_SCHEMA,
   declarationFromLegacyMetadata,
   detectSkillDeclaration,
   parseSkillDeclaration,
   parseSkillDeclarationJson,
+  parseSkillRequirements,
   projectSkillAgentLoopMetadata,
   serializeSkillDeclaration,
 } from "./skills/skill-declaration.ts";
-export type { SkillDeclaration, SkillDeclarationSource } from "./skills/skill-declaration.ts";
+export type { SkillDeclaration, SkillDeclarationSource, SkillRequirements } from "./skills/skill-declaration.ts";
 export {
   SKILL_AGENT_LOOP_ARTIFACT_KIND_VALUES,
   SKILL_AGENT_LOOP_EXECUTION_PROFILE_VALUES,

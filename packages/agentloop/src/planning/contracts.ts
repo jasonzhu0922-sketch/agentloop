@@ -482,6 +482,7 @@ export interface PlanningVisibleDirectory {
 export interface PlanningToolSummary {
   readonly name: string;
   readonly description: string;
+  readonly effect?: "read" | "write";
   readonly dangerous?: boolean;
   readonly source?: ToolSourceDescriptor;
 }

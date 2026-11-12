@@ -127,6 +127,8 @@ export interface CurrentDecisionViewProjection {
     readonly workProduct: RuntimeStepEvidenceState["workProduct"];
     /** Receipt readiness is not a judgment that the requested facts are established. */
     readonly receiptNextAction: RuntimeStepEvidenceState["nextAction"];
+    readonly instruction: string;
+    readonly pendingComputation?: RuntimeStepEvidenceState["pendingComputation"];
     readonly evidenceProducingToolNames: readonly string[];
     readonly exploratoryToolNames: readonly string[];
     readonly requiredWorkflowAction?: RuntimeStepEvidenceState["requiredWorkflowAction"];
@@ -217,6 +219,8 @@ export function deriveCurrentDecisionView(input: {
   const nextAction = awaitingDecision.some((gap) => gap.suggestedAction === "fail") ? "stop"
     : awaitingDecision.some((gap) => gap.suggestedAction === "ask_user") ? "request_input"
     : awaitingDecision.some((gap) => gap.suggestedAction === "revise_plan") ? "revise_plan"
+    : evidence?.pendingComputation !== undefined && (evidence.nextAction === "execute_authored_computation"
+      || evidence.nextAction === "execute_repaired_computation" || evidence.nextAction === "repair_computation_binding") ? evidence.nextAction
     : awaitingDecision.some((gap) => gap.missingEvidenceKinds.length > 0) ? "resolve_evidence_gap"
     : awaitingDecision.length > 0 ? "revise_completion_candidate"
     : evidence?.nextAction ?? input.stepSemanticFrame?.phaseRole ?? "inspect_current_state";
@@ -269,6 +273,8 @@ export function projectCurrentDecisionView(view: CurrentDecisionView): CurrentDe
       missingToolEvidenceKinds: view.evidence.missingToolEvidenceKinds,
       workProduct: view.evidence.workProduct,
       receiptNextAction: view.evidence.nextAction,
+      instruction: view.evidence.instruction,
+      ...(view.evidence.pendingComputation === undefined ? {} : { pendingComputation: view.evidence.pendingComputation }),
       evidenceProducingToolNames: view.evidence.evidenceProducingToolNames,
       exploratoryToolNames: view.evidence.exploratoryToolNames,
       ...(view.evidence.requiredWorkflowAction === undefined ? {} : { requiredWorkflowAction: view.evidence.requiredWorkflowAction }),
@@ -338,6 +344,7 @@ function evidenceBasis(evidence: RuntimeStepEvidenceState | undefined): unknown 
     missing: evidence.missingRequiredEvidenceKinds,
     missingTool: evidence.missingToolEvidenceKinds,
     nextAction: evidence.nextAction,
+    pendingComputation: evidence.pendingComputation,
     workProduct: evidence.workProduct,
   };
 }

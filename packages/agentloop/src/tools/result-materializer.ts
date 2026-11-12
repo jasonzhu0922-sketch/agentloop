@@ -25,6 +25,7 @@ export function createResultJsonMaterializer(
 ): RuntimeTool<MaterializeResultJsonInput> {
   return {
     name: RESULT_JSON_MATERIALIZER_NAME,
+    effect: "write",
     description: [
       "Materialize authorized JSON Runtime Results as one valid, Runtime-written workspace JSON evidence bundle.",
       "Pass opaque resultIds and a new workspace-relative .json path. Runtime preserves every result identity, producer metadata, and payload hash; never recreate or aggregate tool output through computer_write_file.",

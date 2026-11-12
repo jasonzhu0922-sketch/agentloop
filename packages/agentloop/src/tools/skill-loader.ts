@@ -21,6 +21,7 @@ export function createSkillLoader(skills: readonly PrivateSkill[]): RuntimeTool<
   const byReference = buildSkillReferenceMap(skills);
   return {
     name: SKILL_LOADER_TOOL_NAME,
+    effect: "read",
     description: [
       "Load the exact authorized private Skill version bound to the current Plan step.",
       "Use this before applying a Skill; its output injects the authoritative instructions and package-relative path base into the conversation.",

@@ -63,6 +63,7 @@ export function createVisibleDirectoryTools(): RuntimeTool<unknown>[] {
   return [
     {
       name: "visible_list_directory",
+      effect: "read",
       description: [
         "List entries under a user-authorized local visible directory.",
         "Use rootId from visibleDirectories in runtime context.",
@@ -92,6 +93,7 @@ export function createVisibleDirectoryTools(): RuntimeTool<unknown>[] {
     },
     {
       name: "visible_find_files",
+      effect: "read",
       description: [
         "Find files by glob under a user-authorized local visible directory.",
         "Use this when the user names a file, partial filename, extension, or asks to find local material.",
@@ -129,6 +131,7 @@ export function createVisibleDirectoryTools(): RuntimeTool<unknown>[] {
     },
     {
       name: "visible_index_directory",
+      effect: "read",
       description: [
         "Build a bounded metadata index for a user-authorized local visible directory.",
         "Use this before summarizing, analyzing, or reporting over many files in a directory.",
@@ -186,6 +189,7 @@ export function createVisibleDirectoryTools(): RuntimeTool<unknown>[] {
     },
     {
       name: "visible_extract_tables",
+      effect: "write",
       description: [
         "Extract bounded generic table records from spreadsheet-like files in a user-authorized visible directory.",
         "Use this after visible_index_directory has identified spreadsheet paths or sourceRefs.",
@@ -247,6 +251,7 @@ export function createVisibleDirectoryTools(): RuntimeTool<unknown>[] {
     },
     {
       name: "visible_search_text",
+      effect: "read",
       description: [
         "Search literal text recursively under a user-authorized local visible directory.",
         "Use this when the user references local material by content rather than filename.",
@@ -313,6 +318,7 @@ export function createVisibleDirectoryTools(): RuntimeTool<unknown>[] {
     },
     {
       name: "visible_read_file",
+      effect: "read",
       description: [
         "Read a UTF-8 file under a user-authorized local visible directory.",
         "Use rootId from visibleDirectories in runtime context and a path returned by visible_find_files or visible_search_text, or pass a returned sourceRef object directly.",
@@ -386,6 +392,7 @@ export function createVisibleDirectoryTools(): RuntimeTool<unknown>[] {
     },
     {
       name: "visible_read_files",
+      effect: "read",
       description: [
         "Read bounded windows from multiple UTF-8 files under a user-authorized local visible directory.",
         "Use this after visible_index_directory, visible_find_files, or visible_search_text has identified real paths or sourceRefs.",

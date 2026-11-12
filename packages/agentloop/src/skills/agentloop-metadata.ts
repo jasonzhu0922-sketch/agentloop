@@ -60,6 +60,11 @@ export type SkillAgentLoopQaKind = typeof SKILL_AGENT_LOOP_QA_KIND_VALUES[number
 export type SkillAgentLoopExecutionProfile = typeof SKILL_AGENT_LOOP_EXECUTION_PROFILE_VALUES[number];
 export type SkillAgentLoopProducedEvidenceKind = typeof SKILL_AGENT_LOOP_PRODUCED_EVIDENCE_KIND_VALUES[number];
 
+/** Roles describe workflow participation; declared source/evidence is the interface. */
+export function hasSkillSourceContract(metadata: SkillAgentLoopMetadata | undefined): metadata is SkillAgentLoopMetadata & { readonly producesEvidenceKinds: readonly SkillAgentLoopProducedEvidenceKind[] } {
+  return metadata !== undefined && metadata.sourceKinds.length > 0 && (metadata.producesEvidenceKinds?.length ?? 0) > 0;
+}
+
 export interface SkillAgentLoopMetadata {
   readonly roles: readonly SkillAgentLoopRole[];
   readonly artifactKinds: readonly SkillAgentLoopArtifactKind[];

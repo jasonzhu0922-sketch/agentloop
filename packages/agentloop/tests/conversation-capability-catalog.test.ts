@@ -83,7 +83,7 @@ for (const fixture of [
           }
           replyCalls += 1;
           assert.equal(request.phase, "execution", "a metadata reply needs no model-generated execution plan");
-          assert.deepEqual(request.tools, [], "mentioning a Skill grants no tool authority");
+          assertReplyTools(request.tools, fixture.mode);
           assert.doesNotMatch(request.runtimeContext!.content, /PRIVATE DATABASE WORKFLOW/);
           if (fixture.mode === "reply") {
             assert.match(request.runtimeContext!.content, /available_skill_catalog/);
@@ -109,6 +109,35 @@ for (const fixture of [
     } finally { database.close(); await rm(root, { recursive: true, force: true }); }
   });
 }
+
+test("mandatory instruction Skill invocation cannot be misclassified as a reply and reported unavailable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-instruction-skill-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const skill = await skills.create("owner", { name: "instruction-workflow", description: "Follow the packaged workflow", instructions: "Use the three instruction steps." });
+    let calls = 0;
+    const input = "请使用 instruction-workflow 执行包内流程，并在对话中回复结果。";
+    const runs = new RunService({ database, skills, workspaceRoot: root,
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+        calls += 1;
+        if (calls > 1) assert.match(request.systemPrompt + JSON.stringify(request.messages), /mode=reply cannot invoke a Skill workflow/);
+        const response = resolution(calls === 1 ? "reply" : "execute", input);
+        Object.assign(response.toolCalls[0]!.arguments, { evidenceStrategy: "none", requiredCapabilityReferences: [{ kind: "skill", reference: skill.name }] });
+        return response;
+      } }),
+      plannerFactory: () => ({ plan: async task => {
+        assert.equal(task.responseOnly, undefined);
+        assert.equal(task.canonicalState.intent.turnResolution?.mode, "execute");
+        assert.ok(task.availableSkills.some(item => item.id === skill.id));
+        throw new AppError("PLANNING_ERROR", "mandatory_instruction_reached_planner", 422);
+      } }),
+    });
+    await assert.rejects(runs.executeConversation("owner", input), /mandatory_instruction_reached_planner/);
+    assert.equal(calls, 2);
+    assert.equal((await database.prepare("SELECT COUNT(*) AS n FROM run_events WHERE type='planning.capability.unavailable'").get() as { n: number }).n, 0);
+  } finally { database.close(); await rm(root, { recursive: true, force: true }); }
+});
 
 test("a clarification is reviewed with the complete Skill catalog before skipping planning", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-clarify-review-"));
@@ -154,7 +183,7 @@ test("a materially ambiguous request can remain a tool-free clarification after 
     const runs = new RunService({ database, skills, workspaceRoot: root, assessorFactory: () => approvingTestAssessor(),
       modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
         if (request.runId.startsWith("conversation-turn:")) { calls += 1; return resolution("clarify", "Which archive and topic?"); }
-        assert.deepEqual(request.tools, []);
+        assertReplyTools(request.tools, "clarify");
         return { content: "请说明要查询哪个目录和主题。", finishReason: "stop", toolCalls: [] };
       } }),
     });
@@ -232,7 +261,7 @@ for (const mode of ["reply", "clarify"] as const) {
             assert.ok(contextPayload(request.runtimeContext!.content).availableTools.some((item: { name: string }) => item.name === tool.name));
             return resolution(mode, goal);
           }
-          assert.deepEqual(request.tools, [], "reply/clarify must remain tool-free despite catalog discovery");
+          assertReplyTools(request.tools, mode);
           return { content: mode === "reply" ? "Hello." : "Which archive and topic do you want?", finishReason: "stop", toolCalls: [] };
         } }),
       });
@@ -272,7 +301,7 @@ test("intent catalog honors empty connection selection and dangerous-tool restri
   } finally { database.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("a current authorized-capability reply receives a frozen redacted inventory without gaining tool authority", async () => {
+test("a current authorized-capability reply receives a frozen redacted inventory without invoking services", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-capability-reply-"));
   const database = new AppDatabase(":memory:");
   const connector = fixtureTool("archive_find", "connector");
@@ -285,7 +314,7 @@ test("a current authorized-capability reply receives a frozen redacted inventory
       runToolProvider: { resolve: async () => [connector] },
       modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
         if (request.runId.startsWith("conversation-turn:")) return resolution("reply", goal);
-        assert.deepEqual(request.tools, [], "an informational capability reply remains tool-free");
+        assertReplyTools(request.tools);
         const content = request.runtimeContext!.content;
         assert.match(content, /agentloop\.runtimeCapabilitySnapshot\/v1/);
         assert.match(content, /connector archive service/);
@@ -310,7 +339,7 @@ test("a current authorized-capability reply receives a frozen redacted inventory
   } finally { database.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("an empty selected capability inventory is a truthful tool-free reply context", async () => {
+test("an empty selected capability inventory is a truthful reply context", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-empty-capability-reply-"));
   const database = new AppDatabase(":memory:");
   const goal = "What can my currently authorized services do?";
@@ -320,7 +349,7 @@ test("an empty selected capability inventory is a truthful tool-free reply conte
       assessorFactory: () => approvingTestAssessor(),
       modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
         if (request.runId.startsWith("conversation-turn:")) return resolution("reply", goal);
-        assert.deepEqual(request.tools, []);
+        assertReplyTools(request.tools);
         assert.match(request.runtimeContext!.content, /"sources":\[\]/);
         return { content: "No selected authorized service is available for this Run.", finishReason: "stop" as const, toolCalls: [] };
       } }),
@@ -363,7 +392,7 @@ test("assessment receives the same frozen capability inventory as a capability r
             },
           }] };
         }
-        assert.deepEqual(request.tools, []);
+        assertReplyTools(request.tools);
         return { content: "The authorized archive service can find archive items.", finishReason: "stop" as const, toolCalls: [] };
       } }),
     });
@@ -419,7 +448,7 @@ test("a system-wide MCP inventory uses configured scope, not the selected-Run in
             },
           }] };
         }
-        assert.deepEqual(request.tools, [], "configured metadata never grants reply-time tool authority");
+        assertReplyTools(request.tools);
         const content = request.runtimeContext!.content;
         assert.match(content, /Route guidance service/);
         assert.match(content, /runtime_configured/);
@@ -454,7 +483,7 @@ test("missing configured metadata cannot turn a selected-Run inventory into a sy
           assert.deepEqual(context.runtimeCapabilityInventories.map((item: { scope: string }) => item.scope), ["run_authorized"]);
           return resolution("reply", goal);
         }
-        assert.deepEqual(request.tools, []);
+        assertReplyTools(request.tools);
         assert.match(request.runtimeContext!.content, /"availability":"not_provided"/);
         return { content: "此运行时没有提供“已配置 MCP 目录”的元数据，因此不能据本次运行的授权清单判断系统是否配置了服务。", finishReason: "stop" as const, toolCalls: [] };
       } }),
@@ -491,7 +520,7 @@ for (const goal of ["你有什么能力？", "你能帮我做些什么？", "Tel
               skills: [], concernResolutions: [], feedback: "", failedBoundary: null,
             } }] };
           }
-          assert.deepEqual(request.tools, []);
+          assertReplyTools(request.tools);
           const prompt = `${request.systemPrompt}\n${request.runtimeContext!.content}`;
           const catalog = prompt.match(/<available_skill_catalog[^>]*>\n([^\n]+)\n/);
           assert.ok(catalog);
@@ -507,4 +536,14 @@ for (const goal of ["你有什么能力？", "你能帮我做些什么？", "Tel
       assert.equal((await runs.events("owner", run.id)).some(event => event.type === "tool.dispatched"), false);
     } finally { database.close(); }
   });
+}
+
+function assertReplyTools(tools: readonly { name: string }[], mode: "reply" | "clarify" = "reply") {
+  if (mode === "clarify") { assert.deepEqual(tools, []); return; }
+  const names = tools.map(tool => tool.name);
+  assert.ok(names.includes("read_result"));
+  assert.ok(names.includes("computer_read_file"));
+  for (const denied of ["load_skill", "computer_write_file", "computer_run_command", "materialize_result_json", "archive_find"]) {
+    assert.equal(names.includes(denied), false, `${denied} is not authorized by a reply or descriptive inventory`);
+  }
 }

@@ -3,6 +3,7 @@ import test from "node:test";
 import { deriveCurrentDecisionView, projectCurrentDecisionView } from "../src/runtime/current-decision-view.ts";
 import { createCanonicalRunState, type CanonicalGoalGap } from "../src/runtime/canonical-run-state.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
+import { deriveRuntimeStepEvidenceState, runtimeStepToolProgressPolicy } from "../src/runtime/tool-progress-policy.ts";
 
 function evidence(nextAction: string): any {
   return {
@@ -101,6 +102,26 @@ function gap(overrides: Partial<CanonicalGoalGap> = {}): CanonicalGoalGap {
     unmetCriteria: [{ criterionId: "requested_fact", status: "unverified", rationale: "The source does not establish the requested fact.", evidenceRefs: ["source"] }],
     ...overrides };
 }
+
+test("a pending first execution supplies the next action while the assessment gap stays open", () => {
+  const data = input();
+  data.context.canonicalState.gaps = [gap()];
+  data.evidence = deriveRuntimeStepEvidenceState({ policy: runtimeStepToolProgressPolicy(["source_summary"]), evidence: [{
+    toolCallId: "author", toolName: "computer_write_file", isError: false,
+    result: JSON.stringify({ path: "compute.py", bytes: 100, sha256: "a".repeat(64) }),
+  }] });
+  const view = deriveCurrentDecisionView(data);
+  const projection = projectCurrentDecisionView(view);
+  assert.equal(view.nextAction, "execute_authored_computation");
+  assert.equal(view.currentGap.assessmentGaps[0].status, "open");
+  assert.deepEqual(view.currentGap.assessmentGaps[0].missingEvidenceKinds, ["source_summary"]);
+  assert.equal(projection.evidence?.pendingComputation?.sourcePath, "compute.py");
+  assert.match(projection.evidence!.instruction, /compute.py/);
+  for (const [suggestedAction, expected] of [["fail", "stop"], ["ask_user", "request_input"], ["revise_plan", "revise_plan"]] as const) {
+    data.context.canonicalState.gaps = [gap({ suggestedAction })];
+    assert.equal(deriveCurrentDecisionView(data).nextAction, expected);
+  }
+});
 
 test("canonical assessment gaps remain visible after receipt prerequisites are satisfied and after new observations", () => {
   const data = input();

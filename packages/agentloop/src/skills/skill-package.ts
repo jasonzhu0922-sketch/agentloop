@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { AppError, badRequest } from "../shared/errors.ts";
+import { readSkillExecutionManifest, SKILL_EXECUTION_MANIFEST_FILE } from "./skill-execution-manifest.ts";
 import {
   SKILL_AGENT_LOOP_ARTIFACT_KIND_VALUES,
   SKILL_AGENT_LOOP_EXECUTION_PROFILE_VALUES,
@@ -126,6 +127,15 @@ export async function inspectSkillPackage(directory: string): Promise<SkillPacka
   await visit(root);
   files.sort((left, right) => left.localeCompare(right, "en"));
   if (!files.includes("SKILL.md")) throw invalidPackage("Skill package root must contain SKILL.md");
+  if (files.includes(SKILL_EXECUTION_MANIFEST_FILE)) {
+    try {
+      for (const executor of await readSkillExecutionManifest(root)) {
+        if (!files.includes(executor.script)) throw new Error(`Missing executor script: ${executor.script}`);
+      }
+    } catch (error) {
+      throw invalidPackage(`Invalid ${SKILL_EXECUTION_MANIFEST_FILE}: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }
 
   const hash = createHash("sha256");
   hash.update("agentloop.skillPackage/v1\0");

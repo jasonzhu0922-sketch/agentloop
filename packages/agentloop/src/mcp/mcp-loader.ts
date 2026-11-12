@@ -230,6 +230,7 @@ interface McpToolDefinition {
   readonly title?: string;
   readonly description?: string;
   readonly inputSchema?: unknown;
+  readonly annotations?: { readonly readOnlyHint?: boolean; readonly destructiveHint?: boolean };
 }
 
 interface JsonRpcResponse {
@@ -247,6 +248,10 @@ function createRuntimeTool(
   const toolName = `mcp_${normalizeNamePart(server.key)}_${normalizeNamePart(tool.name)}`;
   return {
     name: toolName,
+    // Only host-trusted source metadata can establish read-only authority.
+    // Replay safety remains independent: MCP calls are not replayed blindly.
+    ...(trust === "trusted" && tool.annotations?.readOnlyHint === true && tool.annotations.destructiveHint !== true
+      ? { effect: "read" as const } : {}),
     description: [tool.title, tool.description, `source=${server.key}`, `trust=${trust}`].filter(Boolean).join(" "),
     source: {
       id: server.key,
@@ -491,6 +496,10 @@ async function listAllTools(session: McpSession): Promise<readonly McpToolDefini
       ...(typeof tool.title === "string" ? { title: tool.title } : {}),
       ...(typeof tool.description === "string" ? { description: tool.description } : {}),
       ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema }),
+      ...(isRecord(tool.annotations) ? { annotations: {
+        ...(typeof tool.annotations.readOnlyHint === "boolean" ? { readOnlyHint: tool.annotations.readOnlyHint } : {}),
+        ...(typeof tool.annotations.destructiveHint === "boolean" ? { destructiveHint: tool.annotations.destructiveHint } : {}),
+      } } : {}),
     }];
   });
 }

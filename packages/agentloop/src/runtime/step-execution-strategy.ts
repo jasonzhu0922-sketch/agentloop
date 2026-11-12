@@ -98,6 +98,7 @@ export interface LoopStepFrame {
 
 export interface CompactLoopEvidenceState {
   readonly nextAction: RuntimeStepEvidenceState["nextAction"];
+  readonly pendingComputation?: RuntimeStepEvidenceState["pendingComputation"];
   readonly requiredWorkflowAction?: RuntimeStepEvidenceState["requiredWorkflowAction"];
   readonly missingRequiredEvidenceKinds: readonly string[];
   readonly pendingCandidateEvidenceKinds: readonly string[];
@@ -448,6 +449,8 @@ function activeToolNamesForEvidenceState(
         ? uniqueStrings([...setupToolNames, ...state.exploratoryToolNames, ...state.evidenceProducingToolNames])
         : uniqueStrings([...setupToolNames, ...state.evidenceProducingToolNames]);
     case "repair_computation_binding":
+    case "execute_repaired_computation":
+    case "execute_authored_computation":
       // The progress policy has already narrowed this state to the exact
       // command rerun needed to rebind declared computation inputs. Keep that
       // command preferred without inventing a second, looser recovery path.
@@ -516,6 +519,9 @@ function unlockWhenForEvidenceState(state: RuntimeStepEvidenceState): string {
       return "the artifact source has been repaired, rerun, or the evidence state names a different next action";
     case "repair_computation_binding":
       return "the command is rerun with declared computationInputs bound to its exact inputRefs, or the evidence state names a different next action";
+    case "execute_repaired_computation":
+    case "execute_authored_computation":
+      return "the committed computation is executed and its result is verified, or a new execution diagnostic requires repair";
     case "verify_existing_artifact":
       return "artifact acceptance is recorded or verification produces a diagnostic requiring repair";
     case "submit_completion_candidate":
@@ -604,6 +610,7 @@ const EVIDENCE_PRODUCING_TOOL_NAMES = new Set([
 function compactLoopEvidenceState(state: RuntimeStepEvidenceState): CompactLoopEvidenceState {
   return {
     nextAction: state.nextAction,
+    ...(state.pendingComputation === undefined ? {} : { pendingComputation: state.pendingComputation }),
     ...(state.requiredWorkflowAction === undefined ? {} : { requiredWorkflowAction: state.requiredWorkflowAction }),
     missingRequiredEvidenceKinds: state.missingRequiredEvidenceKinds,
     pendingCandidateEvidenceKinds: state.pendingCandidateEvidenceKinds,

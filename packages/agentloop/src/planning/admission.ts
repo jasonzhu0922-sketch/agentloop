@@ -2,15 +2,17 @@ import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
+import { hasSkillSourceContract } from "../skills/agentloop-metadata.ts";
 import { taskEvidencePolicyForTaskUnderstanding, type StructuredTaskUnderstanding } from "../runtime/task-intent.ts";
 import {
   assertCanonicalDeliveryTargetInventory,
   canonicalRunStateRef,
+  canonicalDeliveryPlanScope,
   type CanonicalDeliveryTarget,
   type CanonicalRunState,
 } from "../runtime/canonical-run-state.ts";
 import type { ArtifactTarget, ConversationTurnResolution, ConversationWorkingSet, EvidenceContract, EvidenceKind, ExecutionPlan, PlanProposal, PlanStep, PlanningCapability, PlanningToolSummary, RefinementState, RequiredFact, StepExecutionBinding, SuccessCriterion } from "./contracts.ts";
-import { parseRuntimeResultBinding, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
+import { mergeRuntimeResultBindings, parseRuntimeResultBinding, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
 import { admitCriterionBasis, assertCriterionBasis } from "./criterion-basis.ts";
 import { validateRoundScope } from "./round-scope.ts";
 import {
@@ -102,6 +104,7 @@ export function admitPlan(input: {
   now?: number;
 }): ExecutionPlan {
   if (input.canonicalState.runId !== input.runId) reject("Canonical Run State belongs to another Run");
+  if (input.currentPlan !== undefined && input.currentPlan.runId !== input.runId) reject("Current Plan belongs to another Run");
   assertCanonicalDeliveryTargetInventory(input.canonicalState);
   const taskSemantics = input.canonicalState.intent.understanding;
   const allCanonicalTargets = Object.values(input.canonicalState.targets);
@@ -115,6 +118,8 @@ export function admitPlan(input: {
     reject("Plan target scope contains unknown canonical delivery target(s)");
   }
   const canonicalTargets = targetScope;
+  const deliveryScope = canonicalDeliveryPlanScope(input.canonicalState, targetScope.map((target) => target.targetId));
+  const acceptedTargetIds = new Set(deliveryScope.acceptedTargets.map((target) => target.targetId));
   const taskIntent = taskSemantics.intent;
   const canonicalRequiredToolSourceIds = input.canonicalState.intent.requiredToolSourceIds;
   const retainedIds = input.proposal.retainedStepIds ?? [];
@@ -145,7 +150,11 @@ export function admitPlan(input: {
   const proposal = bindRequiredSkillCompanions({
     ...input.proposal, steps: [...retainedProposals, ...input.proposal.steps],
   }, input.availableSkills);
-  assertRuntimeResultBindings(input.resultBindings ?? []);
+  // Recovery changes the schedule, not the authority of its accepted inputs.
+  // These bindings come from persisted/server-validated state, never from the
+  // model's replacement Plan (whose schema intentionally cannot grant inputs).
+  const resultBindings = mergeRuntimeResultBindings(input.currentPlan?.resultBindings ?? [], input.resultBindings ?? []);
+  assertRuntimeResultBindings(resultBindings);
   if (proposal.steps.length === 0 || proposal.steps.length > 100) {
     reject("Plan must contain between 1 and 100 steps");
   }
@@ -431,10 +440,9 @@ export function admitPlan(input: {
   });
 
   const admittedSteps = normalizeDependencyEvidenceReuse(steps, new Set(retainedIds));
-  assertDeliveryTargetCoverage(admittedSteps, canonicalTargets);
-  assertArtifactTargetCoverage(admittedSteps, taskSemantics, ownedTargetIds);
+  assertDeliveryTargetCoverage(admittedSteps, canonicalTargets, acceptedTargetIds, new Set(retainedIds));
+  assertArtifactTargetCoverage(admittedSteps, taskSemantics, ownedTargetIds, acceptedTargetIds);
   assertStructuredCapabilitiesMatchTaskSemantics(admittedSteps, taskSemantics);
-  if (roundScope?.kind !== "prerequisite" && canonicalTargets.some(target => target.surface === "workspace_artifact")) assertTerminalArtifactDelivery(admittedSteps, taskIntent);
   assertRequiredSourceGrounding(
     admittedSteps,
     { evidenceDemand: taskIntent.sourceNeed },
@@ -494,7 +502,7 @@ export function admitPlan(input: {
     selectedSkillIds,
     ...(roundScope === undefined ? {} : { roundScope }),
     canonicalStateRef: canonicalRunStateRef(input.canonicalState),
-    ...(input.resultBindings === undefined || input.resultBindings.length === 0 ? {} : { resultBindings: input.resultBindings }),
+    ...(resultBindings.length === 0 ? {} : { resultBindings }),
     status: "admitted",
     steps: admittedSteps,
     createdAt: now,
@@ -615,24 +623,6 @@ function assertRuntimeResultBindings(bindings: readonly RuntimeResultBinding[]):
   }
 }
 
-function assertTerminalArtifactDelivery(
-  steps: readonly PlanStep[],
-  taskIntent: {
-    readonly deliverySurface?: "conversation" | "workspace_artifact";
-    readonly artifactKind?: string;
-  } | undefined,
-): void {
-  if (taskIntent?.deliverySurface !== "workspace_artifact" || taskIntent.artifactKind === undefined || taskIntent.artifactKind === "none") return;
-  const dependedOn = new Set(steps.flatMap((step) => step.dependencies));
-  const terminalLeaves = steps.filter((step) => step.kind === "leaf" && !dependedOn.has(step.id));
-  const hasArtifactProducer = terminalLeaves.some((step) =>
-    step.evidenceContract === undefined
-      || step.evidenceContract.requiredKinds.some((kind) => ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(kind)),
-  );
-  if (!hasArtifactProducer) {
-    reject("Requested workspace artifact has no terminal producer with observable artifact evidence; a Human-in-the-Loop-only or text-only terminal step must be repaired before execution");
-  }
-}
 
 function assertRequiredSourceGrounding(
   steps: readonly PlanStep[],
@@ -1131,7 +1121,7 @@ function capabilitiesRequiredBySkill(skill: PrivateSkill): string[] {
   // separate lets a source provider execute a bounded query for a
   // conversation-only delivery without manufacturing artifact semantics.
   if (profiles.includes("local_script")) capabilities.add("skill_local_script_execution");
-  if (skill.agentLoop?.roles.includes("source_provider") && (skill.agentLoop.producesEvidenceKinds?.length ?? 0) > 0) {
+  if (hasSkillSourceContract(skill.agentLoop)) {
     for (const sourceKind of skill.agentLoop.sourceKinds) {
       capabilities.add(skillSourceProviderCapabilityId(skill.id, sourceKind));
     }
@@ -1267,15 +1257,22 @@ function deliveryTargetSuccessCriteria(
 function assertDeliveryTargetCoverage(
   steps: readonly PlanStep[],
   canonicalTargets: readonly CanonicalDeliveryTarget[],
+  acceptedTargetIds: ReadonlySet<string>,
+  retainedStepIds: ReadonlySet<string>,
 ): void {
   if (canonicalTargets.length === 0) return;
   const owners = new Map<string, string[]>();
   for (const step of steps) {
     for (const targetId of step.executionBinding.targetIds) {
+      if (acceptedTargetIds.has(targetId) && !retainedStepIds.has(step.id)) {
+        reject(`Accepted delivery target ${targetId} already has an assessed realization; a new Step cannot reassign or reproduce it. Preserve its canonical acceptance and current binding.`);
+      }
       owners.set(targetId, [...(owners.get(targetId) ?? []), step.id]);
     }
   }
-  const missing = canonicalTargets.filter((target) => (owners.get(target.targetId)?.length ?? 0) === 0);
+  // Coverage is a sum of durable accepted deliveries and scheduled producers,
+  // not a demand to produce every target again in each Plan revision.
+  const missing = canonicalTargets.filter((target) => !acceptedTargetIds.has(target.targetId) && (owners.get(target.targetId)?.length ?? 0) === 0);
   const duplicate = [...owners].filter(([, stepIds]) => stepIds.length > 1);
   if (missing.length > 0 || duplicate.length > 0) {
     const details = [
@@ -1290,6 +1287,7 @@ function assertArtifactTargetCoverage(
   steps: readonly PlanStep[],
   taskSemantics?: StructuredTaskUnderstanding,
   targetScopeIds?: readonly string[],
+  acceptedTargetIds: ReadonlySet<string> = new Set(),
 ): void {
   const requested = taskSemantics?.artifactTargets ?? [];
   const scopedRequested = targetScopeIds === undefined ? requested : requested.filter((target) => targetScopeIds.includes(target.id));
@@ -1305,7 +1303,8 @@ function assertArtifactTargetCoverage(
     item.surface === "workspace_artifact" && item.kind !== "none"
   ).every((item) => item.targetId !== undefined && item.purpose !== undefined) === true;
   if (requestedHasExplicitIdentity) {
-    const terminalIds = new Set(terminal.map((target) => target.id));
+    const terminalIds = new Set([...terminal.map((target) => target.id), ...scopedRequested
+      .filter((target) => acceptedTargetIds.has(target.deliveryTargetId ?? target.id)).map((target) => target.id)]);
     const missing = scopedRequested.filter((target) => !terminalIds.has(target.id));
     const unexpected = terminal.filter((target) => !scopedRequested.some((requestedTarget) => requestedTarget.id === target.id));
     if (missing.length > 0 || unexpected.length > 0) {
@@ -1318,7 +1317,7 @@ function assertArtifactTargetCoverage(
     return;
   }
   const targetCounts = countArtifactTargetShapes(terminal);
-  const requestedCounts = countArtifactTargetShapes(scopedRequested);
+  const requestedCounts = countArtifactTargetShapes(scopedRequested.filter((target) => !acceptedTargetIds.has(target.deliveryTargetId ?? target.id)));
   for (const [shape, count] of requestedCounts) {
     if ((targetCounts.get(shape) ?? 0) < count) {
       reject(`Plan has no terminal artifactTargets covering requested ${shape} deliverable(s)`);
