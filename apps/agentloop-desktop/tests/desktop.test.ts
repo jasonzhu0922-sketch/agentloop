@@ -271,7 +271,7 @@ test("Desktop serves its own Multi Runtime presentation without importing the cl
   assert.match(settingsScript, /MCP Servers/);
   assert.match(settingsScript, /runtime-skill-option/);
   assert.match(settingsScript, /runtime-config-actions/);
-  assert.match(settingsScript, /专属扩展 Skills/);
+  assert.match(settingsScript, /选择扩展 Skills/);
   assert.match(settingsScript, /function runtimeActionMenu/);
   assert.match(page, /data-settings-tab="mcp"/);
   assert.match(settingsScript, /renderDeviceMcp/);

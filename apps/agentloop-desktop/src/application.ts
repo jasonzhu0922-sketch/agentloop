@@ -46,6 +46,7 @@ async function assets(webDirectory?: string): Promise<ReadonlyMap<string, Static
     ["/composer-preferences.js", "composer-preferences.js", "text/javascript; charset=utf-8"],
     ["/model-settings.js", "model-settings.js", "text/javascript; charset=utf-8"],
     ["/capability-settings.js", "capability-settings.js", "text/javascript; charset=utf-8"],
+    ["/skill-settings.js", "skill-settings.js", "text/javascript; charset=utf-8"],
     ["/artifact-workspace.js", "artifact-workspace.js", "text/javascript; charset=utf-8"],
     ["/conversation.js", "conversation.js", "text/javascript; charset=utf-8"],
     ["/human-loop.js", "human-loop.js", "text/javascript; charset=utf-8"],

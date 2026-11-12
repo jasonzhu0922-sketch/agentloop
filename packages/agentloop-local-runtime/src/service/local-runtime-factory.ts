@@ -89,6 +89,9 @@ function localSettlementModel(
   }
   return {
     modelKey,
+    get completeTimeoutMs() {
+      return resolveProvider()?.create(modelKey.slice("local:".length)).completeTimeoutMs;
+    },
     complete: async ({ runId, systemPrompt, input, signal }) => {
       const provider = resolveProvider();
       if (provider === undefined) throw new LocalRuntimeSupervisorError(409, "memory_settlement_model_unavailable");
@@ -126,6 +129,7 @@ export class LocalRuntimeFactory {
     sharedStorageRoot: string,
     uploadStorageRoot: string,
     webToolsOptions: WebToolsOptions | undefined = this.input.webToolsOptions,
+    commandConfiguration?: { readonly environment: Readonly<Record<string, string>>; readonly readOnlyRoots: readonly string[] },
   ): Promise<LocalRuntimeControl> {
     const environment = this.input.environment ?? process.env;
     const integrationEnvironment = {
@@ -299,8 +303,10 @@ export class LocalRuntimeFactory {
           ...(activeWebSearch === undefined ? [] : createWebTools(activeWebSearch)),
           ...mcpIntegration.tools,
         ],
-        computerCommandEnvironment: this.input.computerCommandEnvironment,
-        computerCommandSandbox: this.input.computerCommandSandbox,
+        computerCommandEnvironment: commandConfiguration?.environment ?? this.input.computerCommandEnvironment,
+        computerCommandSandbox: commandConfiguration && this.input.computerCommandSandbox ? {
+          ...this.input.computerCommandSandbox, readOnlyRoots: [...(this.input.computerCommandSandbox.readOnlyRoots ?? []), ...commandConfiguration.readOnlyRoots],
+        } : this.input.computerCommandSandbox,
         ...(this.input.runEventLogSink === undefined ? {} : { runEventLogSink: (line) => this.input.runEventLogSink!(definition, line) }),
       });
       const secretValues = Object.values(configuration.integrationEnvironment).filter((value): value is string => typeof value === "string" && value.length > 0);

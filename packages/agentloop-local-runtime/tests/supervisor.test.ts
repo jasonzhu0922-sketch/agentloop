@@ -95,6 +95,16 @@ test("stop waits for an asynchronous business lease without counting reads as ac
   assert.equal((await supervisor.list())[0]?.status, "stopped");
 });
 
+test("a shared dependency environment reload replaces every running Runtime and preserves stopped instances", async t => {
+  const { supervisor } = await fixture(t);
+  const other = await supervisor.create("Other"); const stopped = await supervisor.create("Stopped"); await supervisor.stop(stopped.id);
+  const before = supervisor.runtime("stable-default"), otherBefore = supervisor.runtime(other.id);
+  await supervisor.withDeviceReconfiguration(() => supervisor.reloadRunningInstances());
+  assert.notEqual(supervisor.runtime("stable-default"), before);
+  assert.notEqual(supervisor.runtime(other.id), otherBefore);
+  assert.equal((await supervisor.list()).find(runtime => runtime.id === stopped.id)?.status, "stopped");
+});
+
 test("device reload owns admission, create, rename and external reload until all instances are replaced", async (t) => {
   const entered = deferred<void>(); const release = deferred<void>();
   let first = true;

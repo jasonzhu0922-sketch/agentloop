@@ -93,7 +93,7 @@ export async function importSkillFiles(library: string, files: readonly SkillImp
         const current = await inspectSkillPackage(target);
         if (current.packageHash !== inspection.packageHash) throw new LocalManagementError(409, "skill_package_changed");
       } else await rename(inspection.root, target);
-      installed.push({ storageKey, root: target, inspection });
+      installed.push({ storageKey, root: target, inspection: { ...inspection, root: target } });
     }
     return installed;
   } catch (error) { if (error instanceof LocalManagementError) throw error; return fail(); }

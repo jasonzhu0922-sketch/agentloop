@@ -14,6 +14,17 @@ import { RuntimeFacade, type LocalRuntime } from "./local-runtime.ts";
 import { LocalRuntimeSupervisor, type LocalRuntimeSummary } from "./runtime-supervisor.ts";
 import { LocalModelConfigurationStore, type LocalModelConfigurationInput, type LocalModelConfigurationSnapshot } from "../configuration/local-model-configuration-store.ts";
 import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local-runtime-secret-store.ts";
+import { SkillRequirementsService, type SkillRequirementsDiagnosis } from "./skill-requirements.ts";
+import { generateSkillMetadata, type SkillMetadataModelInvoker } from "./skill-metadata-generator.ts";
+import type { LocalSkillMetadata } from "../configuration/local-runtime-configuration-store.ts";
+
+export interface SkillDeviceSetup {
+  readonly metadata: LocalSkillMetadata;
+  readonly scope: "device";
+  readonly selectedBy: readonly Pick<LocalRuntimeSummary, "id" | "displayName">[];
+  readonly modelsConfigured: boolean;
+  readonly requirements: SkillRequirementsDiagnosis;
+}
 
 export interface LocalModelSettings {
   readonly configuration: LocalModelConfigurationInput;
@@ -85,7 +96,12 @@ export interface LocalRuntimeManager {
   importSkills(input: { files: readonly SkillImportFile[] } | { zip: Buffer }): ReturnType<LocalRuntimeConfigurationStore["listSkillPackages"]>;
   removeSkill(id: string): Promise<void>;
   skillMetadata(id: string): ReturnType<LocalRuntimeConfigurationStore["skillMetadata"]>;
-  updateSkillMetadata(id: string, declaration: unknown): ReturnType<LocalRuntimeConfigurationStore["updateSkillMetadata"]>;
+  skillSetup(id: string): Promise<SkillDeviceSetup>;
+  updateSkillMetadata(id: string, declaration: unknown, expectedRevision?: number): ReturnType<LocalRuntimeConfigurationStore["updateSkillMetadata"]>;
+  skillRequirements(id: string): Promise<SkillRequirementsDiagnosis>;
+  skillInstallationPlan(id: string): ReturnType<SkillRequirementsService["installationPlan"]>;
+  installSkillRequirements(id: string, fingerprint: string): Promise<Awaited<ReturnType<SkillRequirementsService["installation"]>>>;
+  skillInstallation(id: string): ReturnType<SkillRequirementsService["installation"]>;
   deviceMcpServers(): ReturnType<LocalRuntimeConfigurationStore["deviceMcpServers"]>;
   configureDeviceMcpServer(server: LocalRuntimeMcpServerInput): ReturnType<LocalRuntimeConfigurationStore["saveDeviceMcpServer"]>;
   removeDeviceMcpServer(id: string): ReturnType<LocalRuntimeConfigurationStore["removeDeviceMcpServer"]>;
@@ -121,6 +137,7 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
   // unavailable model is rejected before the Memory flag becomes durable.
   const webSearchSecrets = options.webSearchSecrets ?? new EncryptedLocalRuntimeSecretStore(join(options.dataDirectory, "private", "web-search-secrets"));
   const configurations = new LocalRuntimeConfigurationStore(database, options.secrets, options.customSkillDirectories ?? [], library, modelConfigurations, options.additionalSecretReferences, options.sharedMcpCatalog, webSearchSecrets);
+  const requirements = new SkillRequirementsService(join(options.dataDirectory, "skill-environments"), configurations, options.computerCommandEnvironment);
   const storage = { value: { workspaceRoot: options.workspaceRoot ?? join(options.dataDirectory, "workspace"), uploadStorageRoot: options.uploadStorageRoot ?? join(options.dataDirectory, "uploads") } };
   const connectors = options.connectorModules === undefined ? undefined : new ConnectorSettings(database,
     options.connectorSecrets ?? new (await import("../persistence/encrypted-local-runtime-secret-store.ts")).EncryptedLocalRuntimeSecretStore(join(options.dataDirectory, "private", "connector-secrets")), options.connectorModules);
@@ -133,9 +150,12 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
     planningMaxTurns: options.planningMaxTurns, stepMaxTurns: options.stepMaxTurns,
     environment: options.bundledSkillDirectories === undefined ? {} : { AGENTLOOP_BUNDLED_SKILL_DIRECTORIES: options.bundledSkillDirectories.join(",") },
   }, modelConfigurations, connectors ?? options.connectors);
-  const supervisor = new LocalRuntimeSupervisor(database, (definition, configuration) => factory.create(definition, {
-    ...configuration, integrationEnvironment: { ...configuration.integrationEnvironment, WEB_SEARCH_DISABLED: configuration.webSearch === undefined ? "1" : "0" },
-  }, storage.value.workspaceRoot, storage.value.uploadStorageRoot), async definition => {
+  const supervisor = new LocalRuntimeSupervisor(database, async (definition, configuration) => {
+    const command = await requirements.commandConfiguration();
+    return factory.create(definition, {
+      ...configuration, integrationEnvironment: { ...configuration.integrationEnvironment, WEB_SEARCH_DISABLED: configuration.webSearch === undefined ? "1" : "0" },
+    }, storage.value.workspaceRoot, storage.value.uploadStorageRoot, undefined, command);
+  }, async definition => {
     const runtimeRoot = factory.runtimeRootFor(definition);
     if (runtimeRoot !== undefined) await rm(runtimeRoot, { recursive: true, force: true });
     await rm(factory.runtimeUploadRootFor(definition, storage.value.uploadStorageRoot), { recursive: true, force: true });
@@ -152,7 +172,17 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
       await configurations.applyDeviceMemory(options.memory);
     }
     await supervisor.ready(options.defaultRuntimeId);
-    return new RuntimeManager(supervisor, configurations, modelConfigurations, options.models === undefined, library, connectors, storage, options.authorizeStorage);
+    const metadataModels: SkillMetadataModelInvoker = options.models !== undefined ? {
+      orderedModelKeys: async () => options.models!.modelKeys().map(key => `local:${key}`),
+      createModel: key => options.models!.create(key.slice("local:".length)),
+    } : {
+      orderedModelKeys: async () => modelConfigurations?.orderedModelKeys() ?? [],
+      createModel: key => {
+        if (!modelConfigurations) throw new Error("local_model_unavailable");
+        return modelConfigurations.createModelAdapter(key);
+      },
+    };
+    return new RuntimeManager(supervisor, configurations, modelConfigurations, options.models === undefined, library, connectors, storage, options.authorizeStorage, requirements, metadataModels);
   } catch (error) { await supervisor.close(); throw error; }
 }
 
@@ -169,7 +199,7 @@ class RuntimeManager implements LocalRuntimeManager {
   readonly #configurations: LocalRuntimeConfigurationStore;
   constructor(supervisor: LocalRuntimeSupervisor, configurations: LocalRuntimeConfigurationStore, models?: LocalModelConfigurationStore, modelsEditable = false,
     private library = "", private connectorSettings?: ConnectorSettings, private storage?: { value: ResolvedLocalRuntimeDeviceStorage },
-    private authorizeStorage?: LocalRuntimeManagerOptions["authorizeStorage"]) {
+    private authorizeStorage?: LocalRuntimeManagerOptions["authorizeStorage"], private requirements?: SkillRequirementsService, private metadataModels?: SkillMetadataModelInvoker) {
     this.#supervisor = supervisor; this.#configurations = configurations;
     this.#models = models; this.#modelsEditable = modelsEditable && models !== undefined;
   }
@@ -282,16 +312,49 @@ class RuntimeManager implements LocalRuntimeManager {
   configureRuntime(id: string, input: LocalRuntimeConfigurationInput, expectedRevision?: string) { return this.guard(() => this.#supervisor.updateConfiguration(id, input, undefined, expectedRevision)); }
   runtimeSettings(id: string) { return this.guard(async () => { const configuration = await this.#supervisor.configuration(id);
     return { configuration, revision: createHash("sha256").update(JSON.stringify(configuration)).digest("hex") }; }); }
-  skillPackages() { return this.guard(() => this.#configurations.listSkillPackages()); }
+  skillPackages() { return this.guard(async () => (await this.#configurations.listSkillPackages()).map(pkg => {
+    const diagnosis = this.requirements?.cached(pkg.packageId);
+    return { ...pkg, ...(diagnosis && diagnosis.checkedAt >= pkg.updatedAt && diagnosis.metadataRevision === pkg.metadataRevision ? { requirementsDiagnosis: diagnosis } : {}) };
+  })); }
   importSkills(input: { files: readonly SkillImportFile[] } | { zip: Buffer }) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
     const installed = await importSkillFiles(this.library, "zip" in input ? readSkillZip(input.zip) : input.files);
     const packages = [];
-    for (const pkg of installed) packages.push(await this.#configurations.registerUploadedPackage({ ...pkg, inspection: { ...pkg.inspection, metadataSource: pkg.inspection.declarationSource } }));
+    for (const pkg of installed) {
+      const metadata = await generateSkillMetadata(pkg.inspection, this.metadataModels);
+      const registered = await this.#configurations.registerUploadedPackage({ ...pkg, inspection: { ...pkg.inspection, metadataSource: pkg.inspection.declarationSource },
+        metadataDeclaration: metadata.declaration, metadataGeneration: metadata });
+      const requirementsDiagnosis = await this.requirements!.diagnose(registered.packageId);
+      packages.push({ ...registered, requirementsDiagnosis });
+    }
     return packages;
   })); }
   removeSkill(id: string) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(() => this.#configurations.removeUploadedPackage(id))); }
   skillMetadata(id: string) { return this.guard(() => this.#configurations.skillMetadata(id)); }
-  updateSkillMetadata(id: string, value: unknown) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(() => this.#configurations.updateSkillMetadata(id, value))); }
+  skillSetup(id: string): Promise<SkillDeviceSetup> { return this.guard(async () => {
+    const [metadata, runtimes, requirements, models] = await Promise.all([
+      this.#configurations.skillMetadata(id), this.#supervisor.list(),
+      this.requirements!.diagnose(id), this.metadataModels?.orderedModelKeys() ?? Promise.resolve([]),
+    ]);
+    const selected = await Promise.all(runtimes.map(async runtime => ({ runtime, configuration: await this.#supervisor.configuration(runtime.id) })));
+    return { metadata, scope: "device", selectedBy: selected.filter(item => item.configuration.skills.some(skill => skill.packageId === id))
+      .map(({ runtime }) => ({ id: runtime.id, displayName: runtime.displayName })), modelsConfigured: models.length > 0, requirements };
+  }); }
+  updateSkillMetadata(id: string, value: unknown, expectedRevision?: number) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(() => this.#configurations.updateSkillMetadata(id, value, expectedRevision))); }
+  skillRequirements(id: string) { return this.guard(() => this.requirements!.diagnose(id)); }
+  skillInstallationPlan(id: string) { return this.guard(() => this.requirements!.installationPlan(id)); }
+  installSkillRequirements(id: string, fingerprint: string) { return this.guard(async () => {
+    await this.#configurations.inspectSkill(id);
+    const installation = this.requirements!.beginInstall(id, fingerprint, install => this.#supervisor.withDeviceReconfiguration(async () => {
+      await install();
+      try { await this.#supervisor.reloadRunningInstances(); }
+      catch { throw new Error("skill_requirements_runtime_reload_failed"); }
+      await this.requirements!.prune();
+    }));
+    this.#pending++;
+    void installation.completed.catch(() => {}).finally(() => { this.#pending--; });
+    return installation.job;
+  }); }
+  skillInstallation(id: string) { return this.guard(() => this.requirements!.installation(id)); }
   deviceMcpServers() { return this.guard(() => this.#configurations.deviceMcpServers()); }
   configureDeviceMcpServer(server: LocalRuntimeMcpServerInput) { return this.guard(() => this.#supervisor.withDeviceReconfiguration(async () => {
     const result = await this.#configurations.saveDeviceMcpServer(server);

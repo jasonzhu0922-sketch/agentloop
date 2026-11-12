@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
 
-async function fixture() {
+async function fixture(tabName = 'runtimes', skillPackages) {
   const source = await readFile(new URL('../web/capability-settings.js', import.meta.url), 'utf8');
   const flatten = node => [node, ...node.children.flatMap(flatten)];
   class Element {
@@ -25,9 +25,9 @@ async function fixture() {
   const elements = new Map();
   const element = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
   const body = element('capability-body');
-  const tab = new Element(); tab.dataset.settingsTab = 'runtimes';
+  const tab = new Element(); tab.dataset.settingsTab = tabName;
   const runtime = { id: 'desktop-default', displayName: '本机 Runtime', status: 'stopped', isDefault: true, iconKey: 'xuanwu' };
-  const packages = [
+  const packages = skillPackages ?? [
     { packageId: 'healthy', skillName: 'data-analysis', validationStatus: 'valid' },
     { packageId: 'broken', skillName: 'data-platform-query', validationStatus: 'invalid', validationDetail: 'skill_package_not_available' },
     { packageId: 'unbound', skillName: 'unbound-invalid', validationStatus: 'invalid', validationDetail: '<script>text only</script>' },
@@ -43,7 +43,7 @@ async function fixture() {
     }
     throw Error(path);
   };
-  const install = runInNewContext(source.replace(/^import .*;\n/, '').replace('export function', 'function') + '\ninstallCapabilitySettings', {
+  const install = runInNewContext(source.replace(/^import .*;\n/gm, '').replace('export function', 'function') + '\ninstallCapabilitySettings', {
     document: { createElement: tag => Object.assign(new Element(), { tag }), querySelectorAll: () => [tab] }, Node: Element,
     installModelSettings: () => ({ canLeave: () => true }), confirm: () => true,
   });
@@ -52,7 +52,7 @@ async function fixture() {
   const button = title => flatten(body).find(node => node.tag === 'button' && node.textContent === title);
   const options = () => body.querySelectorAll('.runtime-skill-option');
   const configure = async () => { await click(button('•••')); await click(button('配置')); };
-  await click(tab); await configure();
+  await click(tab); if (tabName === 'runtimes') await configure();
   return { body, options, button, click, configure, writes };
 }
 
@@ -81,4 +81,16 @@ test('unchecking a healthy Skill saves the exact selection even with an unavaila
   await ui.configure();
   assert.equal(ui.options()[0].children[0].checked, false);
   assert.equal(ui.options()[1].children[0].checked, true);
+});
+
+test('Skill cards distinguish model recognition, failed recognition, missing models and package declarations', async () => {
+  const ui = await fixture('skills', [
+    { packageId: 'identified', skillName: 'identified', validationStatus: 'valid', metadataSource: 'detected', metadataGenerationMethod: 'deterministic+model', metadataGenerationStatus: 'completed', metadataNeedsReview: true },
+    { packageId: 'failed', skillName: 'failed', validationStatus: 'valid', metadataSource: 'detected', metadataGenerationMethod: 'deterministic', metadataGenerationStatus: 'failed', metadataNeedsReview: true },
+    { packageId: 'basic', skillName: 'basic', validationStatus: 'valid', metadataSource: 'detected', metadataGenerationMethod: 'deterministic', metadataGenerationStatus: 'fallback', metadataNeedsReview: true },
+    { packageId: 'package', skillName: 'package', validationStatus: 'valid', metadataSource: 'package', metadataGenerationMethod: 'none', metadataGenerationStatus: 'not-needed', metadataNeedsReview: false },
+  ]);
+  assert.deepEqual(ui.body.querySelectorAll('.skill-package-state').map(node => node.textContent), [
+    '已通过模型识别，可选维护', '模型识别未完成，已保留基础识别结果', '未配置可用模型，已完成基础识别', '使用包内声明',
+  ]);
 });

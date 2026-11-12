@@ -282,6 +282,22 @@ export class DesktopApi {
     }
     if (get && path === "/api/skills") { json(response, 200, { skills: await manager.skillPackages() }); return true; }
     if (post && path === "/api/skills/import") { json(response, 200, { skills: await manager.importSkills(skillImportInput(await readJson(request, 46 * 1024 * 1024))) }); return true; }
+    const skillSetup = /^\/api\/skills\/([a-zA-Z0-9_-]{1,200})\/setup$/.exec(path);
+    if (skillSetup && post) {
+      const b = await readJson(request); fields(b, []);
+      json(response, 200, await manager.skillSetup(skillSetup[1]!));
+      return true;
+    }
+    const requirements = /^\/api\/skills\/([a-zA-Z0-9_-]{1,200})\/requirements\/(diagnose|plan|install)$/.exec(path);
+    if (requirements && post) {
+      const b = await readJson(request); fields(b, requirements[2] === "install" ? ["fingerprint"] : []);
+      if (requirements[2] === "diagnose") json(response, 200, await manager.skillRequirements(requirements[1]!));
+      else if (requirements[2] === "plan") json(response, 200, await manager.skillInstallationPlan(requirements[1]!));
+      else json(response, 202, await manager.installSkillRequirements(requirements[1]!, text(b, "fingerprint", 64)));
+      return true;
+    }
+    const installation = /^\/api\/skill-installations\/([a-f0-9-]{36})$/.exec(path);
+    if (installation && get) { json(response, 200, await manager.skillInstallation(installation[1]!)); return true; }
     if (path === "/api/mcp") {
       if (get) { json(response, 200, { servers: await manager.deviceMcpServers() }); return true; }
       if (post) { const b = await readJson(request); fields(b, ["server"]); json(response, 200, { server: await manager.configureDeviceMcpServer(mcpInput(b.server)) }); return true; }
@@ -299,7 +315,7 @@ export class DesktopApi {
     const skill = /^\/api\/skills\/([a-zA-Z0-9_-]{1,200})\/metadata$/.exec(path);
     if (skill) {
       if (get) { json(response, 200, await manager.skillMetadata(skill[1]!)); return true; }
-      if (post) { const b = await readJson(request); fields(b, ["declaration"]); json(response, 200, await manager.updateSkillMetadata(skill[1]!, b.declaration)); return true; }
+      if (post) { const b = await readJson(request); fields(b, ["declaration", "revision"]); if (b.revision !== undefined && (!Number.isSafeInteger(b.revision) || Number(b.revision) < 1)) throw new HttpError(400, "skill_metadata_revision_invalid"); json(response, 200, await manager.updateSkillMetadata(skill[1]!, b.declaration, b.revision as number | undefined)); return true; }
     }
     if (get && path === "/api/connectors/catalog") { json(response, 200, { connectors: await manager.connectorCatalog() }); return true; }
     if (path === "/api/connectors") {

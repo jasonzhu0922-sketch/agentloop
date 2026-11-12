@@ -55,7 +55,7 @@ test("Runtime settings show quarantined Skill details while retaining the ready 
     if (path.endsWith("/configuration")) return { configuration: { skills: [{ packageId: "broken-id" }], mcpServers: [] } };
     throw Error(path);
   };
-  const install = runInNewContext(source.replace(/^import .*;\n/, "").replace("export function", "function") + "\ninstallCapabilitySettings", {
+  const install = runInNewContext(source.replace(/^import .*;\n/gm, "").replace("export function", "function") + "\ninstallCapabilitySettings", {
     document: { createElement: () => new Element(), querySelectorAll: () => [tab] }, Node: Element,
     installModelSettings: () => ({ canLeave: () => true }), confirm: () => true,
   });

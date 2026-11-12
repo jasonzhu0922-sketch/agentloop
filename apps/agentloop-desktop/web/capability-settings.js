@@ -1,4 +1,5 @@
 import { installModelSettings } from './model-settings.js';
+import { createSkillMetadataForm, renderSkillRequirements, renderSkillSetup } from './skill-settings.js';
 const RUNTIME_ICONS = [
   ['xuanwu', '玄武', '沉稳守护'], ['qinglong', '青龙', '生发探索'], ['baihu', '白虎', '迅捷执行'], ['zhuque', '朱雀', '创意表达'],
   ['qilin', '麒麟', '温和协作'], ['taotie', '饕餮', '深度吞吐'], ['yinglong', '应龙', '破局开拓'], ['pixiu', '貔貅', '聚势守财'],
@@ -11,6 +12,8 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
   const models = installModelSettings({ api, element, refreshModels, status, managed: true });
   const dialog = element('model-settings'), body = element('capability-body');
   let tab = 'general', target, runtimeDetail, runtimeDetailMode = 'view', dirty = false, working = false, snapshot, runtimeList = [], packages = [], mcpCatalog = [];
+  const setupSkillIds = new Set();
+  let metadataDrawer;
   const labels = { general: ['常规', '管理当前账号的本机存储与 Memory 配置。'], 'web-search': ['联网搜索', '配置 websearch 工具使用的端点和凭据；配置按当前账号加密保存在本机。'], skills: ['Skill 管理', '上传和维护本机 Skill 包；安装后可在各个 Runtime 配置中分别选择。'], mcp: ['MCP 配置', '配置当前账号的 MCP Server，供所有本机 Runtime 使用。'], runtimes: ['子 Runtime 管理', '新增、停止、重启、删除和查看各个本机 Runtime；每个 Runtime 独立选择扩展 Skill，共享当前账号的 MCP。'], connectors: ['Connector 配置', '个人 Connector 只保存在 Desktop；配置凭据不会上传到云端。'] };
   const errors = { account_storage_outside_scope: '此目录不适用于当前账号，请选择其他目录。', runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_json_invalid: 'JSON 格式无效，请检查引号、括号和逗号。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', mcp_server_key_duplicate: '当前账号的 MCP key 不能重复。', mcp_server_referenced_by_runtime: '该 MCP 已被一个或多个 Runtime 选择，不能删除。请先在对应 Runtime 中解除勾选。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', skill_runtime_active: '请先停止使用同名 Skill 的 Runtime，再重新上传。', skill_package_referenced: '该 Skill 已被 Runtime 选择，请先在对应 Runtime 配置中取消选择。', skill_metadata_runtime_active: '请先停止使用此 Skill 的 Runtime。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。', web_search_api_key_required: 'Bocha 搜索需要 API Key。', web_search_endpoint_required: 'Bocha 搜索需要搜索端点。', web_search_endpoint_invalid: '搜索端点必须为 HTTP 或 HTTPS，且不能包含凭据、查询参数或片段。', web_search_provider_invalid: '搜索服务类型无效。', web_search_credentials_missing: '搜索凭据缺失，请重新填写 API Key。' };
   const connectorBindings = {
@@ -23,7 +26,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
       ],
     },
   };
-  const message = (text, error = false) => { const e = element('capability-status'); e.textContent = text; e.classList.toggle('error', error); };
+  const message = (text, error = false) => { const e = (metadataDrawer?.open && metadataDrawer.querySelector('.skill-metadata-status')) || element('capability-status'); e.textContent = text; e.classList.toggle('error', error); };
   function el(tag, text, className) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (className) e.className = className; return e; }
   function button(text, fn, danger = false) { const e = el('button', text, danger ? 'danger' : ''); e.type = 'button'; e.onclick = () => void perform(fn); return e; }
   function input(value = '', type = 'text') { const e = el('input'); e.type = type; e.value = value; e.autocomplete = 'off'; e.spellcheck = false; return e; }
@@ -35,15 +38,18 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
   async function perform(fn) {
     if (working) return; working = true;
     // Never echo submitted JSON, credentials, paths, or upstream exception text.
-    const controls = [...body.querySelectorAll('button,input,textarea,select')].filter(e => !e.disabled); controls.forEach(e => e.disabled = true);
+    const controls = [...body.querySelectorAll('button,input,textarea,select'), ...(metadataDrawer?.querySelectorAll('button,input,textarea,select') ?? [])].filter(e => !e.disabled); controls.forEach(e => e.disabled = true);
     try { await fn(); }
-    catch (error) { message(errors[error.message] ?? `操作未完成（${/^[a-z][a-z0-9_]{1,100}$/.test(error.message) ? error.message : '输入格式或服务错误'}）。请重新读取核对，不要重复提交。`, true); }
+    catch (error) {
+      const metadataErrors = { skill_metadata_revision_stale: '声明已被其他页面修改，或 Skill 包已更新。请重新读取后再编辑。', skill_identity_immutable: '名称和描述属于原始 Skill 包，请通过更新 Skill 包修改。', skill_metadata_not_editable: '此 Skill 的声明只供查看。' };
+      message(metadataErrors[error.message] ?? errors[error.message] ?? `操作未完成（${/^[a-z][a-z0-9_]{1,100}$/.test(error.message) ? error.message : '输入格式或服务错误'}）。请重新读取核对，不要重复提交。`, true);
+    }
     finally { working = false; controls.forEach(e => { if (e.isConnected) e.disabled = false; }); }
   }
   function markDirty() { dirty = true; }
   body.addEventListener('input', markDirty);
   body.addEventListener('change', e => { if (!e.target.dataset.runtimePicker) markDirty(); });
-  function reset() { dirty = false; body.querySelector('.runtime-detail-modal')?.remove(); body.replaceChildren(); snapshot = undefined; }
+  function reset() { dirty = false; metadataDrawer?.close(); body.querySelector('.runtime-detail-modal')?.remove(); body.replaceChildren(); snapshot = undefined; }
   async function changed() { await refreshCapabilities(); }
   async function load() {
     reset(); message('正在读取本机配置…');
@@ -158,7 +164,9 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
       if (!files.length) throw new Error('请选择文件');
       if (files.length > 1000 || files.reduce((sum, f) => sum + f.size, 0) > (isZip ? 16 : 32) * 1024 * 1024 || (!isZip && files.some(f => f.size > 8 * 1024 * 1024))) throw new Error('文件超过大小限制');
       const payload = isZip ? { zipBase64: await encode(files[0]) } : { files: await Promise.all(files.map(async f => ({ path: f.webkitRelativePath || f.name, contentBase64: await encode(f) }))) };
-      await api('/api/skills/import', payload); zip.value = ''; directory.value = ''; dirty = false; await load(); message('Skill 已导入当前账号的本机库。请在 Runtime 页勾选并保存后启动。');
+      message('正在导入并识别 Skill，随后检查运行依赖…');
+      const imported = await api('/api/skills/import', payload); imported.skills.forEach(pkg => setupSkillIds.add(pkg.packageId));
+      zip.value = ''; directory.value = ''; dirty = false; await load(); message('Skill 已加入本机共享库，可查看运行条件；各 Runtime 在自身配置中选择使用。');
     }
     zip.onchange = () => void perform(() => importFiles([...zip.files], true));
     directory.onchange = () => void perform(() => importFiles([...directory.files], false));
@@ -168,31 +176,82 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     const pickerButton = (title, picker) => { const control = el('button', title); control.type = 'button'; control.onclick = () => picker.click(); return control; };
     const actions = el('div', undefined, 'capability-actions'); actions.append(pickerButton('上传 ZIP', zip), pickerButton('上传目录', directory)); heading.append(copy, actions);
     const pickers = el('div', undefined, 'skill-upload-inputs'); pickers.append(zip, directory); body.append(heading, pickers);
-    if (!packages.length) card('暂无本机 Skill 包', '可以上传 ZIP 或目录；导入后不会自动启用、不会上传到账号服务。请在 Runtime 管理中选择并绑定。');
+    if (!packages.length) card('暂无本机 Skill 包', '可以上传 ZIP 或目录；导入后不会自动启用、不会上传到账号服务。各 Runtime 可在自身配置中选择。');
     for (const p of packages) {
       const c = card(p.displayName || p.skillName, p.description || '暂无描述。'); c.classList.add('skill-package-card');
-      const state = el('small', `${p.validationStatus === 'valid' ? (p.metadataNeedsReview ? '待维护元数据' : '元数据已确认') : 'Skill 包校验未通过'}`, `skill-package-state${p.validationStatus === 'valid' && !p.metadataNeedsReview ? ' confirmed' : ''}`);
-      const actions = el('div', undefined, 'capability-actions skill-package-actions'); actions.append(button('维护元数据', async () => {
-        if (dirty) throw new Error('请先保存或放弃更改');
-        const meta = await api(`/api/skills/${p.packageId}/metadata`); const editor = jsonEditor(meta.declaration, 16);
+      if (setupSkillIds.has(p.packageId)) {
         c.classList.replace('skill-package-card', 'skill-metadata-card');
-        const heading = el('div', undefined, 'skill-metadata-heading');
-        heading.append(el('strong', p.displayName || p.skillName), el('span', meta.editable ? '维护元数据' : '只读', 'skill-metadata-badge'));
-        editor.setAttribute('aria-label', `${p.displayName || p.skillName} 声明 JSON`);
-        editor.disabled = !meta.editable;
+        await renderSkillSetup({ container: c, pkg: p, api, changed,
+          close: async () => { setupSkillIds.delete(p.packageId); await load(); }, navigate: show });
+        continue;
+      }
+      const metadataState = p.metadataGenerationMethod === 'user' ? '声明已维护'
+        : ['package', 'legacy-frontmatter'].includes(p.metadataSource) ? '使用包内声明'
+        : p.metadataGenerationStatus === 'failed' ? '模型识别未完成，已保留基础识别结果'
+        : ['model', 'deterministic+model'].includes(p.metadataGenerationMethod) ? '已通过模型识别，可选维护'
+        : p.metadataGenerationStatus === 'fallback' ? '未配置可用模型，已完成基础识别'
+        : p.metadataNeedsReview ? '已自动识别，可选维护' : '声明可用';
+      const state = el('small', p.validationStatus === 'valid' ? metadataState : 'Skill 包校验未通过', `skill-package-state${p.validationStatus === 'valid' && !p.metadataNeedsReview ? ' confirmed' : ''}`);
+      const actions = el('div', undefined, 'capability-actions skill-package-actions');
+      if (p.validationStatus === 'valid') actions.append(button('运行条件', async () => { if (dirty) throw new Error('请先保存或放弃更改'); setupSkillIds.add(p.packageId); await load(); }));
+      const metadataButton = button('维护元数据', async () => {
+        if (dirty) throw new Error('请先保存或放弃更改');
+        const meta = await api(`/api/skills/${p.packageId}/metadata`); const form = createSkillMetadataForm(meta, packages);
+        const drawer = el('dialog', undefined, 'desktop-settings-content agent-settings-content skill-metadata-drawer');
+        drawer.setAttribute('aria-labelledby', 'skill-metadata-drawer-title');
+        const heading = el('header', undefined, 'skill-metadata-drawer-heading');
+        const title = el('div');
+        const label = el('strong', meta.editable ? '维护元数据' : '查看元数据'); label.id = 'skill-metadata-drawer-title';
+        title.append(label, el('p', p.displayName || p.skillName));
+        const dismiss = () => { if (!working) { dirty = false; drawer.close(); } };
+        const closeButton = el('button', '×', 'skill-metadata-close'); closeButton.type = 'button'; closeButton.setAttribute('aria-label', '关闭元数据配置'); closeButton.onclick = dismiss;
+        heading.append(title, closeButton);
+        const content = el('div', undefined, 'skill-metadata-drawer-content');
+        content.append(el('p', '已沿用包内声明或自动识别结果，无需逐项填写。', 'skill-field-help'), form.element);
+        const notice = el('p', '', 'capability-status skill-metadata-status'); notice.setAttribute('role', 'status'); notice.setAttribute('aria-live', 'polite');
         const actions = el('div', undefined, 'capability-actions skill-metadata-actions');
-        const saveButton = button('保存声明', async () => { await api(`/api/skills/${p.packageId}/metadata`, { declaration: JSON.parse(editor.value) }); dirty = false; await load(); message('声明已保存，请重启使用此 Skill 的 Runtime。'); });
+        const saveButton = button('保存声明', async () => {
+          const result = form.read(); if (!result.valid) { message('请修正表单中标记的字段。', true); return; }
+          await api(`/api/skills/${p.packageId}/metadata`, { declaration: result.declaration, revision: meta.revision }); dirty = false; await load(); message('声明已保存，请重启使用此 Skill 的 Runtime；依赖配置可通过“依赖诊断”检查。');
+          [...body.querySelectorAll('button')].find(control => control.dataset.metadataPackageId === p.packageId)?.focus();
+        });
         saveButton.classList.add('primary'); saveButton.disabled = !meta.editable;
-        actions.append(button('取消编辑', async () => { dirty = false; await load(); }), saveButton);
-        const footer = el('div', undefined, 'skill-metadata-footer');
-        footer.append(el('p', meta.editable ? '保存后需重启使用此 Skill 的 Runtime。' : '此 Skill 的声明仅供查看。'), actions);
-        c.replaceChildren(heading, el('p', '编辑当前账号本机库中的声明元数据，不改写原始 Skill 内容。'), field('声明 JSON', editor), footer);
-      })); if (p.sourceKind === 'uploaded') { const remove = button('移除', async () => { if (dirty) throw new Error('请先保存或放弃更改'); if (!confirm(`移除“${p.displayName || p.skillName}”及其本机文件？`)) return; await api(`/api/skills/${p.packageId}/remove`, {}); dirty = false; await load(); await changed(); message('Skill 已移除。'); }, true); remove.setAttribute('aria-label', `移除 ${p.displayName || p.skillName}`); actions.append(remove); } c.append(state, actions);
+        const cancelButton = el('button', '取消编辑'); cancelButton.type = 'button'; cancelButton.onclick = dismiss;
+        actions.append(cancelButton, saveButton);
+        const footer = el('footer', undefined, 'skill-metadata-footer');
+        footer.append(notice, el('p', meta.editable ? '保存后需重启使用此 Skill 的 Runtime。' : '此 Skill 的声明仅供查看。'), actions);
+        drawer.append(heading, content, footer);
+        drawer.addEventListener('input', markDirty); drawer.addEventListener('change', markDirty);
+        drawer.addEventListener('cancel', event => {
+          event.preventDefault(); event.stopPropagation();
+          if (working || dirty) { message(working ? '正在保存，请稍候。' : '有未保存更改，请保存或点击“取消编辑”。', true); return; }
+          drawer.close();
+        });
+        // A native modal keeps keyboard focus inside the drawer. Match its
+        // bounds to the settings dialog even when the window is resized.
+        const position = () => {
+          const bounds = dialog.getBoundingClientRect(), width = Math.min(640, bounds.width - 2);
+          Object.assign(drawer.style, { left: `${bounds.right - width - 1}px`, top: `${bounds.top + 1}px`, width: `${width}px`, height: `${bounds.height - 2}px` });
+        };
+        const observer = new ResizeObserver(position);
+        drawer.addEventListener('close', () => { observer.disconnect(); drawer.remove(); if (metadataDrawer === drawer) metadataDrawer = undefined; if (metadataButton.isConnected) metadataButton.focus(); }, { once: true });
+        metadataDrawer = drawer; dialog.append(drawer); position(); drawer.showModal(); observer.observe(dialog);
+      });
+      metadataButton.dataset.metadataPackageId = p.packageId; metadataButton.setAttribute('aria-haspopup', 'dialog'); actions.append(metadataButton);
+      if (p.validationStatus === 'valid') actions.append(button('依赖诊断', async () => {
+        if (dirty) throw new Error('请先保存或放弃更改');
+        c.classList.replace('skill-package-card', 'skill-metadata-card');
+        await renderSkillRequirements({ container: c, pkg: p, api, changed });
+      }));
+      if (p.sourceKind === 'uploaded') { const remove = button('移除', async () => { if (dirty) throw new Error('请先保存或放弃更改'); if (!confirm(`移除“${p.displayName || p.skillName}”及其本机文件？`)) return; await api(`/api/skills/${p.packageId}/remove`, {}); dirty = false; await load(); await changed(); message('Skill 已移除。'); }, true); remove.setAttribute('aria-label', `移除 ${p.displayName || p.skillName}`); actions.append(remove); }
+      c.append(state);
+      if (p.requirementsDiagnosis) c.append(el('small', p.requirementsDiagnosis.status === 'satisfied' ? '已声明及已发现的依赖检查通过' : '依赖检查发现缺口，请查看依赖诊断。', 'skill-package-state'));
+      c.append(actions);
     }
   }
   function renderRuntimes() {
     const heading = el('section', undefined, 'runtime-manager-heading');
-    const copy = el('div'); copy.append(el('strong', '子 Runtime 管理'), el('p', '每个 Runtime 具有独立会话和扩展 Skill，共享当前账号的 MCP 配置。'));
+    const copy = el('div'); copy.append(el('strong', '子 Runtime 管理'), el('p', '每个 Runtime 具有独立会话，分别选择 Skill；Skill 库、依赖环境和 MCP 等运行资源在本机共享。'));
     const add = button('＋ 新增', () => createPanel(false)); add.classList.add('runtime-create'); heading.append(copy, add); body.append(heading);
     const list = el('div', undefined, 'runtime-manager-list'); body.append(list);
     for (const runtime of runtimeList) {
@@ -211,7 +270,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     function createPanel(open) {
       const existing = body.querySelector('.runtime-create-panel'); if (existing) { existing.hidden = !open; return; }
       const panel = el('section', undefined, 'capability-card runtime-create-panel'); const name = input(''); name.maxLength = 100;
-      panel.append(el('strong', '新建 Runtime'), el('p', '新 Runtime 共享模型、Skill 库、MCP 和 Connector，但拥有独立会话及 Skill 绑定。'), field('名称', name));
+      panel.append(el('strong', '新建 Runtime'), el('p', '新 Runtime 共享模型、Skill 库、MCP 和 Connector，但拥有独立会话及 Skill 选择。'), field('名称', name));
       const actions = el('div', undefined, 'capability-actions'); actions.append(button('取消', () => panel.remove()), button('创建', async () => {
         const result = await api('/api/runtimes', { displayName: name.value }); runtimeDetail = result.runtime.id; target = result.runtime.id; dirty = false; await load(); await changed();
       })); actions.lastElementChild.classList.add('primary'); panel.append(actions); body.append(panel); name.focus();
@@ -258,7 +317,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
       iconGrid.append(option);
     }
     iconCard.append(iconGrid);
-    const skills = cardInto(tabs.skills, '专属扩展 Skills', '只影响此 Runtime。取消勾选仅解除绑定，不删除当前账号的本机库文件。');
+    const skills = cardInto(tabs.skills, '选择扩展 Skills', '只影响此 Runtime。取消勾选仅停止在此 Runtime 启用，不删除当前账号的本机库文件。');
     const choices = []; const skillList = el('div', undefined, 'runtime-skill-options'); skills.append(skillList);
     if (!packages.length) skillList.append(el('p', '暂无可选的 Custom / 上传 Skill；此 Runtime 仍会使用内核 Skills。'));
     for (const pkg of packages) {
@@ -289,7 +348,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     iconCard.append(image, el('strong', `${icon.name} · ${icon.description}`));
     const enabledSkillIds = new Set(snapshot.configuration.skills.map(skill => skill.packageId));
     const selectedSkills = packages.filter(pkg => enabledSkillIds.has(pkg.packageId));
-    const skills = cardInto(tabs.skills, '已选择的扩展 Skills', '内核 Skills 默认加载；以下为该 Runtime 专属启用的扩展包。');
+    const skills = cardInto(tabs.skills, '已选择的扩展 Skills', '内核 Skills 默认加载；以下为该 Runtime 已选择的扩展包。');
     if (!selectedSkills.length) skills.append(el('p', '未选择扩展 Skill。'));
     else for (const pkg of selectedSkills) {
       const unavailable = pkg.validationStatus !== 'valid' || runtime.skillDiagnostics?.some(issue => issue.skillName === pkg.skillName);

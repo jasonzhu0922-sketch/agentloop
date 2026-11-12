@@ -15,7 +15,7 @@ import { LocalConnectorConfigurationStore, type LocalConnectorConfigurationInput
 import { LocalModelConfigurationStore, type LocalModelConfigurationInput } from "../persistence/local-model-configuration-store.ts";
 import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local-runtime-secret-store.ts";
 import { LocalSkillPackageInstaller, type LocalSkillUploadFile } from "./local-skill-package-installer.ts";
-import { generateSkillMetadata, type SkillMetadataModelInvoker } from "./local-skill-metadata-generator.ts";
+import { generateSkillMetadata, type SkillMetadataModelInvoker } from "@zhujun/agentloop-local-runtime";
 import { LOCAL_AGENT_VERSION } from "../config/local-agent-version.ts";
 import { LocalRuntimeArtifactReadPlane } from "../persistence/local-runtime-artifact-read-plane.ts";
 import { localConnectorCatalog } from "./local-connector-catalog.ts";

@@ -25,6 +25,125 @@ function cloudAuth(): CloudAuthPort {
     return { token, principal: user, expiresAt: Date.now() + 3_600_000 };
   }, async current(token) { return tokens.get(token)!; }, async logout(token) { tokens.delete(token); } };
 }
+
+test("Skill forms and requirement operations validate revisions and remain account isolated", async t => {
+  const f = await start(t); await f.login(aliceEmail);
+  const result = await f.json("/api/skills/import", { files: [
+    { path: "sample/SKILL.md", contentBase64: Buffer.from("---\nname: requirement-sample\ndescription: Requirement sample\n---\nRead local data.\n").toString("base64") },
+    { path: "sample/requirements.txt", contentBase64: Buffer.from("agentloop_test_runtime_dep_0917==1.0\n").toString("base64") },
+  ] });
+  const pkg = result.skills[0]; assert.equal(pkg.requirementsDiagnosis.status, "attention");
+  const metadata = await f.json(`/api/skills/${pkg.packageId}/metadata`);
+  assert.ok(metadata.editorSchema.groups.some((group: { id: string }) => group.id === "requirements"));
+  const invalid = await f.call(`/api/skills/${pkg.packageId}/metadata`, { declaration: { ...metadata.declaration, workflow: { ...metadata.declaration.workflow, roles: [] } }, revision: metadata.revision });
+  assert.equal(invalid.status, 400);
+  await f.json(`/api/skills/${pkg.packageId}/metadata`, { declaration: { ...metadata.declaration, requirements: { commands: ["node"] } }, revision: metadata.revision });
+  assert.equal((await f.call(`/api/skills/${pkg.packageId}/metadata`, { declaration: metadata.declaration, revision: metadata.revision })).status, 409);
+  const report = await f.json(`/api/skills/${pkg.packageId}/requirements/diagnose`, {});
+  assert.ok(report.checks.some((check: { label: string }) => check.label === "node"));
+  const plan = await f.json(`/api/skills/${pkg.packageId}/requirements/plan`, {}); assert.equal(plan.fingerprint.length, 64);
+  // A deliberately stale plan must terminate before invoking pip or changing the Runtime.
+  const accepted = await f.call(`/api/skills/${pkg.packageId}/requirements/install`, { fingerprint: "0".repeat(64) });
+  assert.equal(accepted.status, 202); const job = await accepted.json();
+  let status;
+  for (let count = 0; count < 100; count++) {
+    status = await f.json(`/api/skill-installations/${job.id}`); if (status.status !== "running") break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(status.status, "failed"); assert.equal(status.error, "skill_requirements_plan_stale");
+  assert.equal((await f.json("/api/runtimes")).runtimes[0].status, "ready");
+  await f.login(bobEmail);
+  assert.equal((await f.call(`/api/skills/${pkg.packageId}/requirements/diagnose`, {})).status, 404);
+  assert.equal((await f.call(`/api/skills/${pkg.packageId}/requirements/install`, { fingerprint: plan.fingerprint })).status, 404);
+  assert.equal((await f.call(`/api/skill-installations/${job.id}`)).status, 404);
+});
+
+test("Desktop upload uses the account's saved model order, persists recognition, and bypasses models for package declarations", async t => {
+  const calls: Array<{ model: string; authorization?: string }> = [];
+  const declaration = {
+    schema: "agentloop.skillDeclaration/v1", identity: { name: "model-sample", description: "Analyze local records" },
+    activation: { semanticTags: ["record-analysis"], intentExamples: ["分析本地记录"] },
+    workflow: { roles: ["primary_builder"], artifactKinds: ["none"], sourceKinds: ["dataset"], qaKinds: [], requiredSkills: [] },
+  };
+  const provider = createServer((request, response) => { void (async () => {
+    const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    calls.push({ model: body.model, authorization: request.headers.authorization });
+    const content = body.model === "z-first" ? "invalid metadata" : JSON.stringify(declaration);
+    if (body.stream) {
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      response.end(`data: ${JSON.stringify({ id: "metadata", choices: [{ delta: { role: "assistant", content }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+    } else {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ id: "metadata", choices: [{ message: { role: "assistant", content }, finish_reason: "stop" }] }));
+    }
+  })().catch(() => { response.writeHead(500); response.end(); }); });
+  await new Promise<void>(resolve => provider.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>(resolve => { provider.close(() => resolve()); provider.closeAllConnections(); }));
+  const address = provider.address(); assert.ok(address && typeof address !== "string");
+  const f = await start(t); await f.login(aliceEmail);
+  const original = await f.json("/api/model-configuration");
+  await f.json("/api/model-configuration", { revision: original.revision, configuration: { reuseCloudModels: false, providers: [{
+    key: "metadata", displayName: "Metadata", baseUrl: `http://127.0.0.1:${address.port}/v1`, apiKey: "synthetic-metadata-key",
+    models: ["z-first", "b-second", "a-unused"].map(key => ({ key, displayName: key, providerModel: key, protocol: "chat-completions", maxAttempts: 1 })),
+  }] } });
+  assert.equal(calls.length, 0);
+  const skill = Buffer.from("---\nname: model-sample\ndescription: Analyze local records\n---\nRead and analyze a local dataset.\n").toString("base64");
+  const upload = (sidecar?: unknown) => f.json("/api/skills/import", { files: [{ path: "sample/SKILL.md", contentBase64: skill },
+    ...(sidecar ? [{ path: "sample/agentloop.skill.json", contentBase64: Buffer.from(JSON.stringify(sidecar)).toString("base64") }] : [])] });
+  const pkg = (await upload()).skills[0];
+  assert.deepEqual(calls.map(call => call.model), ["z-first", "b-second"]);
+  assert.ok(calls.every(call => call.authorization === "Bearer synthetic-metadata-key"));
+  assert.equal(pkg.metadataGenerationMethod, "deterministic+model"); assert.equal(pkg.metadataGenerationStatus, "completed");
+  assert.equal(pkg.metadataModelKey, "local:b-second");
+  const metadata = await f.json(`/api/skills/${pkg.packageId}/metadata`);
+  assert.deepEqual(metadata.declaration, declaration);
+  assert.deepEqual(metadata.generation.attemptedModelKeys, ["local:z-first", "local:b-second"]);
+  assert.equal(metadata.fields["workflow.roles"].origin, "suggested");
+  await f.reopen(); await f.login(aliceEmail);
+  assert.deepEqual((await f.json(`/api/skills/${pkg.packageId}/metadata`)).declaration, declaration);
+  assert.equal(calls.length, 2, "reopening must not regenerate metadata");
+  await f.login(bobEmail);
+  const bob = (await upload()).skills[0];
+  assert.equal(bob.metadataGenerationMethod, "deterministic"); assert.equal(bob.metadataGenerationStatus, "fallback");
+  assert.equal(calls.length, 2, "another account must not use Alice's model catalog");
+  await f.login(aliceEmail);
+  const packaged = (await upload(declaration)).skills[0];
+  assert.equal(packaged.metadataGenerationMethod, "none"); assert.equal(packaged.metadataGenerationStatus, "not-needed");
+  assert.equal(calls.length, 2, "a package declaration must bypass model recognition");
+  const storedRoot = join(accountDataDirectory(f.root, owner(aliceEmail)), "skill-library", `uploaded-${(await f.json(`/api/skills/${packaged.packageId}/metadata`)).packageHash}`);
+  assert.equal(await readFile(join(storedRoot, "SKILL.md"), "base64"), skill);
+  assert.deepEqual(JSON.parse(await readFile(join(storedRoot, "agentloop.skill.json"), "utf8")), declaration);
+});
+
+test("upload and diagnosis preserve Runtime choices; multiple Runtimes independently select a shared Skill", async t => {
+  const f = await start(t); await f.login(aliceEmail);
+  const initialConfiguration = await f.json("/api/runtimes/desktop-default/configuration");
+  const uploaded = (await f.json("/api/skills/import", { files: [{ path: "shared/SKILL.md", contentBase64: Buffer.from("---\nname: shared-skill\ndescription: Shared library skill\n---\nFollow the instructions.\n").toString("base64") }] })).skills[0];
+  const initial = await f.json(`/api/skills/${uploaded.packageId}/setup`, {});
+  assert.equal(initial.scope, "device"); assert.equal(initial.modelsConfigured, false);
+  assert.deepEqual(initial.selectedBy, []); assert.equal(initial.requirements.scope, "device");
+  assert.equal(initial.requirements.status, "satisfied");
+  assert.deepEqual(await f.json("/api/runtimes/desktop-default/configuration"), initialConfiguration);
+  assert.equal((await f.call(`/api/skills/${uploaded.packageId}/setup`, { runtimeId: "desktop-default" })).status, 400);
+  assert.equal((await f.call(`/api/skills/${uploaded.packageId}/requirements/diagnose`, { runtimeId: "desktop-default" })).status, 400);
+  assert.equal((await f.call(`/api/skills/${uploaded.packageId}/bind`, { runtimeId: "desktop-default", revision: initialConfiguration.revision })).status, 404);
+  const second = (await f.json("/api/runtimes", { displayName: "Another Runtime" })).runtime;
+  async function choose(id: string, skills: string[]) {
+    if ((await f.json("/api/runtimes")).runtimes.find((runtime: any) => runtime.id === id).status !== "stopped") await f.json(`/api/runtimes/${id}/stop`, {});
+    const settings = await f.json(`/api/runtimes/${id}/configuration`);
+    await f.json(`/api/runtimes/${id}/configuration`, { revision: settings.revision, configuration: { iconKey: settings.configuration.iconKey, skillPackageIds: skills, mcpServerIds: settings.configuration.mcpServerIds } });
+  }
+  await choose("desktop-default", [uploaded.packageId]); await choose(second.id, [uploaded.packageId]);
+  assert.deepEqual((await f.json(`/api/skills/${uploaded.packageId}/setup`, {})).selectedBy.map((r: any) => r.id).sort(), ["desktop-default", second.id].sort());
+  await choose(second.id, []);
+  assert.deepEqual((await f.json("/api/runtimes/desktop-default/configuration")).configuration.skills.map((skill: any) => skill.packageId), [uploaded.packageId]);
+  assert.deepEqual((await f.json(`/api/skills/${uploaded.packageId}/setup`, {})).selectedBy.map((r: any) => r.id), ["desktop-default"]);
+  await f.json(`/api/runtimes/${second.id}/remove`, {});
+  assert.equal((await f.json(`/api/skills/${uploaded.packageId}/setup`, {})).metadata.packageId, uploaded.packageId);
+  await f.login(bobEmail);
+  assert.equal((await f.call(`/api/skills/${uploaded.packageId}/setup`, {})).status, 404);
+});
 async function start(t: test.TestContext, root?: string, models?: LocalModelProviderPort, directoryPicker?: () => Promise<string | undefined>) {
   root ??= await mkdtemp(join(tmpdir(), "desktop-account-isolation-"));
   const claim = await claimInstance(root, "development");
@@ -95,6 +214,11 @@ function configuration(key: string) {
 }
 
 test("account configuration, vaults and Runtime management stay isolated across switching and restart", async t => {
+  const nativeFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", ((input: string | URL | Request, init?: RequestInit) => {
+    if (new URL(input instanceof Request ? input.url : String(input)).hostname === "models.example.test") return Promise.reject(new Error("synthetic offline provider"));
+    return nativeFetch(input, init);
+  }) as typeof fetch);
   const mcp = createServer((req, res) => {
     let data = ""; req.on("data", chunk => { data += chunk; }); req.on("end", () => {
       const message = JSON.parse(data);
@@ -214,12 +338,23 @@ test("one account's active or unwinding Run cannot partially close another accou
   const entered = new Promise<void>(resolve => { enter = resolve; });
   const base = greetingModel();
   const f = await start(t, undefined, modelPort({ ...base, async complete(input, signal) {
+    if (input.runId.startsWith("skill-metadata:")) return base.complete(input, signal);
     enter(); await blocked; return base.complete(input, signal);
   } }));
   await f.login(aliceEmail); await f.login(bobEmail);
+  const uploaded = (await f.json("/api/skills/import", { files: [{ path: "idle-only/SKILL.md", contentBase64: Buffer.from("---\nname: idle-only\ndescription: Shared resource sample\n---\nFollow the instructions.\n").toString("base64") }] })).skills[0];
+  await f.json(`/api/skills/${uploaded.packageId}/setup`, {});
   const { run } = await f.json("/api/runs", { requestId: "blocked", input: "synthetic greeting", modelKey: "local:test" });
   await entered;
   try {
+    const install = await f.call(`/api/skills/${uploaded.packageId}/requirements/install`, { fingerprint: "0".repeat(64) });
+    assert.equal(install.status, 202);
+    let job = await install.json();
+    for (let attempts = 0; attempts < 100 && job.status === "running"; attempts++) {
+      await new Promise(resolve => setTimeout(resolve, 10)); job = await f.json(`/api/skill-installations/${job.id}`);
+    }
+    assert.equal(job.status, "failed"); assert.equal(job.error, "runtime_active_runs_prevent_reconfiguration");
+    assert.deepEqual((await f.json("/api/runtimes/desktop-default/configuration")).configuration.skills, []);
     await assert.rejects(f.close(), /runtime_active_runs_prevent_close/);
     await f.login(aliceEmail);
     await f.json("/api/runtimes/desktop-default/rename", { displayName: "Alice still usable" });

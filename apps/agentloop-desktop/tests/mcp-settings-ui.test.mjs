@@ -18,7 +18,7 @@ async function fixture(servers = [], probeResult = async () => ({ ok: true, tool
   const api = async (path, body) => { calls.push({ path, body }); if (body) return path === '/api/mcp/test' ? probeResult() : {}; if (path === '/api/mcp') return { servers }; throw Error(path); };
   const timers = new Map(); let timerId = 0;
   const sandbox = { setTimeout(fn, delay) { const id = ++timerId; timers.set(id, { fn, delay }); return id; }, clearTimeout(id) { timers.delete(id); }, document: { createElement: () => new Element(), querySelectorAll: () => [tab] }, installModelSettings: () => ({ canLeave: () => true }), Node: Element, confirm: () => true };
-  const install = runInNewContext(source.replace(/^import .*;\n/, '').replace('export function', 'function') + '\ninstallCapabilitySettings', sandbox);
+  const install = runInNewContext(source.replace(/^import .*;\n/gm, '').replace('export function', 'function') + '\ninstallCapabilitySettings', sandbox);
   install({ api, element, refreshModels() {}, status() {}, currentRuntime() {}, refreshCapabilities() {} });
   const settle = () => new Promise(resolve => setImmediate(resolve));
   const click = async control => { control.onclick(); await settle(); };

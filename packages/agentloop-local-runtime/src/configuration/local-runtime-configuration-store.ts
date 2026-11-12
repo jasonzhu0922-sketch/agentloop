@@ -9,6 +9,7 @@ import {
   detectSkillDeclaration,
   inspectSkillPackage,
   parseSkillDeclaration,
+  SKILL_DECLARATION_EDITOR_SCHEMA,
   type SkillDeclaration,
   parseMcpServersConfig,
   type AppDatabase,
@@ -43,6 +44,7 @@ export interface LocalSkillPackageSummary {
   readonly metadataNeedsReview: boolean;
   readonly metadataRevision?: number;
   readonly metadataGenerationMethod?: "none" | "legacy-projection" | "deterministic" | "model" | "deterministic+model" | "user";
+  readonly metadataGenerationStatus?: LocalSkillMetadataGeneration["generationStatus"];
   readonly metadataModelKey?: string;
   readonly updatedAt: number;
 }
@@ -58,6 +60,8 @@ export interface LocalSkillMetadata {
   readonly revision: number;
   readonly generation: Readonly<Record<string, unknown>>;
   readonly fields: Readonly<Record<string, LocalSkillMetadataField>>;
+  readonly editorSchema: typeof SKILL_DECLARATION_EDITOR_SCHEMA;
+  readonly semanticTagOptions: readonly string[];
 }
 
 export interface LocalSkillMetadataGeneration {
@@ -67,6 +71,10 @@ export interface LocalSkillMetadataGeneration {
   readonly attemptedModelKeys?: readonly string[];
   readonly generationError?: string;
   readonly fields?: Readonly<Record<string, LocalSkillMetadataField>>;
+  readonly packageEvidence?: {
+    readonly documents: readonly { readonly path: string; readonly kind: string; readonly sha256: string; readonly lineCount: number; readonly truncated: boolean }[];
+    readonly omitted: readonly { readonly path: string; readonly reason: string }[];
+  };
 }
 
 export interface LocalSkillMetadataField {
@@ -638,6 +646,8 @@ export class LocalRuntimeConfigurationStore {
       readonly agentLoop?: unknown;
       readonly declaration?: SkillDeclaration;
       readonly metadataSource?: "package" | "legacy-frontmatter" | "detected";
+      readonly instructions?: string;
+      readonly files?: readonly string[];
     };
     readonly metadataDeclaration?: SkillDeclaration;
     readonly metadataGeneration?: LocalSkillMetadataGeneration;
@@ -653,9 +663,9 @@ export class LocalRuntimeConfigurationStore {
     const metadataDeclaration = input.metadataDeclaration ?? input.inspection.declaration ?? detectSkillDeclaration(
       input.inspection.name,
       input.inspection.description,
-      "",
-      [],
-      false,
+      input.inspection.instructions ?? "",
+      input.inspection.files ?? [],
+      input.inspection.files?.includes("agentloop.executors.json") ?? false,
     );
     const metadataGeneration = input.metadataGeneration ?? {
       generationMethod: (input.inspection.metadataSource ?? input.metadataSource) === "legacy-frontmatter" ? "legacy-projection" as const : input.inspection.declaration === undefined ? "deterministic" as const : "none" as const,
@@ -776,6 +786,26 @@ export class LocalRuntimeConfigurationStore {
     const source = revision.metadata_source === "legacy-frontmatter" || revision.metadata_source === "detected" || revision.metadata_source === "package"
       ? revision.metadata_source
       : inspection.declarationSource ?? "detected";
+    // Use this account's current library declarations, including packages whose
+    // metadata editor has never been opened. Saved revisions override manifests.
+    const tagSources = await this.database.prepare(`
+      SELECT p.manifest_json, r.declaration_json
+      FROM local_skill_packages p
+      LEFT JOIN local_skill_metadata_revisions r ON r.package_id = p.package_id AND r.status = 'active'
+      WHERE p.validation_status = 'valid'
+    `).all() as Array<{ manifest_json: string; declaration_json: string | null }>;
+    const tagField = SKILL_DECLARATION_EDITOR_SCHEMA.groups[1].fields[0];
+    const tagPattern = new RegExp(tagField.pattern);
+    const tagOptions = new Set(declaration.activation.semanticTags);
+    for (const entry of tagSources) {
+      const metadata = entry.declaration_json === null
+        ? parseRecord(entry.manifest_json, "stored Skill manifest").agentLoop
+        : parseRecord(entry.declaration_json, "stored Skill declaration").activation;
+      const tags = (metadata as { semanticTags?: unknown } | undefined)?.semanticTags;
+      if (Array.isArray(tags)) for (const tag of tags) {
+        if (typeof tag === "string" && tag.length <= tagField.maxLength && tagPattern.test(tag)) tagOptions.add(tag);
+      }
+    }
     return {
       packageId,
       packageHash: inspection.packageHash,
@@ -787,7 +817,18 @@ export class LocalRuntimeConfigurationStore {
       revision: revision.revision,
       generation: parseRecord(revision.generation_json, "stored Skill metadata generation"),
       fields: parseRecord(revision.field_metadata_json, "stored Skill metadata fields") as Readonly<Record<string, LocalSkillMetadataField>>,
+      editorSchema: SKILL_DECLARATION_EDITOR_SCHEMA,
+      semanticTagOptions: [...tagOptions].sort(),
     };
+  }
+
+  async inspectSkill(packageId: string) {
+    const metadata = await this.skillMetadata(packageId);
+    const root = this.packageRoots.get(packageId);
+    if (root === undefined) throw new LocalRuntimeConfigurationStoreError(409, "skill_package_not_available");
+    const inspection = await inspectSkillPackage(root);
+    if (inspection.packageHash !== metadata.packageHash) throw new LocalRuntimeConfigurationStoreError(409, "skill_metadata_revision_stale");
+    return { metadata, inspection };
   }
 
   private async assertSkillRuntimeStopped(packageId: string): Promise<void> {
@@ -811,7 +852,7 @@ export class LocalRuntimeConfigurationStore {
   }
 
   /** Create a new metadata revision without changing the immutable uploaded package. */
-  async updateSkillMetadata(packageId: string, value: unknown): Promise<LocalSkillPackageSummary> {
+  async updateSkillMetadata(packageId: string, value: unknown, expectedRevision?: number): Promise<LocalSkillPackageSummary> {
     const row = await this.skillPackageRow(packageId);
     if (row.source_kind !== "uploaded") throw new LocalRuntimeConfigurationStoreError(403, "skill_metadata_not_editable");
     let activeBinding: { status: string } | undefined;
@@ -828,11 +869,14 @@ export class LocalRuntimeConfigurationStore {
     const root = this.packageRoots.get(packageId);
     if (root === undefined) throw new LocalRuntimeConfigurationStoreError(409, "skill_package_not_available");
     const before = await inspectSkillPackage(root);
-    const declaration = parseSkillDeclaration(value);
+    let declaration: SkillDeclaration;
+    try { declaration = parseSkillDeclaration(value); }
+    catch (error) { throw new LocalRuntimeConfigurationStoreError(400, error instanceof Error && /^skill_[a-z0-9_]+$/u.test(error.message) ? error.message : "skill_declaration_invalid"); }
     if (declaration.identity.name !== before.name || declaration.identity.description !== before.description) {
       throw new LocalRuntimeConfigurationStoreError(409, "skill_identity_immutable");
     }
     const active = await this.activeMetadataRevision(packageId);
+    if (expectedRevision !== undefined && active?.revision !== expectedRevision) throw new LocalRuntimeConfigurationStoreError(409, "skill_metadata_revision_stale");
     if (active !== undefined && active.package_hash !== before.packageHash) {
       throw new LocalRuntimeConfigurationStoreError(409, "skill_metadata_revision_stale");
     }
@@ -1674,6 +1718,7 @@ function toSkillSummary(row: SkillPackageRow): LocalSkillPackageSummary {
     ?? validMetadataSource(manifest.metadataSource);
   const generationMethod = validGenerationMethod(row.active_generation_method)
     ?? validGenerationMethod(manifest.metadataGenerationMethod);
+  const metadataGenerationStatus = generation?.generationStatus;
   const metadataModelKey = typeof generation?.modelKey === "string"
     ? generation.modelKey
     : typeof manifest.metadataModelKey === "string" ? manifest.metadataModelKey : undefined;
@@ -1693,6 +1738,7 @@ function toSkillSummary(row: SkillPackageRow): LocalSkillPackageSummary {
       : metadataSource !== undefined,
     ...(row.metadata_revision === null || row.metadata_revision === undefined ? {} : { metadataRevision: row.metadata_revision }),
     ...(generationMethod === undefined ? {} : { metadataGenerationMethod: generationMethod }),
+    ...(metadataGenerationStatus === "not-needed" || metadataGenerationStatus === "completed" || metadataGenerationStatus === "fallback" || metadataGenerationStatus === "failed" ? { metadataGenerationStatus } : {}),
     ...(metadataModelKey === undefined ? {} : { metadataModelKey }),
     updatedAt: row.updated_at,
   };
@@ -1724,6 +1770,12 @@ function userMetadataFields(): Readonly<Record<string, LocalSkillMetadataField>>
     "workflow.sourceKinds": editable,
     "workflow.qaKinds": editable,
     "workflow.requiredSkills": editable,
+    "requirements.python.version": editable,
+    "requirements.python.packages": editable,
+    "requirements.python.files": editable,
+    "requirements.commands": editable,
+    "requirements.environment": editable,
+    "requirements.mcpServers": editable,
     "identity.name": readonlyField,
     "identity.description": readonlyField,
   };
