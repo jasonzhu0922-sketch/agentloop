@@ -390,6 +390,8 @@ export interface TaskGroupSearchResult {
  */
 export interface MemorySettlementModel {
   readonly modelKey: string;
+  /** Provider-owned completion deadline; use the settlement default when absent. */
+  readonly completeTimeoutMs?: number;
   complete(input: {
     readonly runId: string;
     readonly systemPrompt: string;

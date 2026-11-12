@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
-import { createMemoryPlugin, InMemoryMemoryStore, MemorySettlementWorker, SqliteMemoryStore, SETTLEMENT_V2 } from "../src/index.ts";
+import { createMemoryPlugin, InMemoryMemoryStore, MemorySettlementWorker, SqliteMemoryStore, SETTLEMENT_V2, settleV2Batch } from "../src/index.ts";
 import type { MemorySettlementEvidence, MemorySettlementModel, MemoryStore } from "../src/types.ts";
 
 const scope = { tenantId: "device", ownerUserId: "alice" };
@@ -118,6 +118,178 @@ test("experience cases wait for the configured batch size and use one fusion cal
   assert.equal(result.status, "succeeded", result.reason);
   assert.equal(modelCalls, 1);
   assert.equal((await store.active(scope)).filter(({ item }) => item.subtype === "experience.task_group").length, 1);
+  const plugin = createMemoryPlugin({ store, resolveRunScope: async (runId) => ({ ...scope, runId }) });
+  const projection = await plugin.recall({ runId: "fresh", target: "planner", taskFingerprint: evidence("fresh").taskFingerprint, budget: { maxItems: 6, maxTokens: 2000 } });
+  assert.equal(projection?.target, "planner");
+  if (projection?.target === "planner") assert.deepEqual(projection.planningPriors[0]?.skillSuggestions, ["discovered:hr-data"]);
+});
+
+async function settleBatch(store: MemoryStore, values: MemorySettlementEvidence[], settlementModel = model()) {
+  return settleV2Batch({ store, evidences: values, jobs: values.map(value => ({
+    ...scope, runId: value.runId, terminalCommitRef: value.terminalCommitRef,
+    settlementJobId: `job:${value.runId}`, status: "processing" as const, attempts: 1, nextAttemptAt: 1000, enqueuedAt: 1000,
+  })), model: settlementModel, consolidate: true, now: 1000 });
+}
+
+for (const kind of ["memory", "sqlite"] as const) test(`${kind}: batch publication accumulates independent support, preserves reinforcement and suspends conflicts`, async () => {
+  const database = kind === "sqlite" ? new AppDatabase(":memory:") : undefined;
+  const store = database ? new SqliteMemoryStore(database) : new InMemoryMemoryStore();
+  const plugin = createMemoryPlugin({ store, resolveRunScope: async runId => ({ ...scope, runId }) });
+  const recall = () => plugin.recall({ runId: "fresh", target: "planner", taskFingerprint: evidence("fresh").taskFingerprint, budget: { maxItems: 6, maxTokens: 2000 } });
+  const currentOnly = model((input, output) => {
+    output.merge.supportingEpisodeIds = [input.currentEpisodeId];
+    output.classicPath[0].evidenceRefs = [`episode_${input.episodeIds.length}_step_1`];
+    output.toolUsage[0].evidenceRefs = [`episode_${input.episodeIds.length}_step_1`];
+    if (input.candidateGroupIds.length) output.classicPath[0].objective = "增强支持不应改写已经验证的方法";
+  });
+  try {
+    await settleBatch(store, [evidence("ignored-a"), evidence("one")], currentOnly);
+    assert.equal(await recall(), undefined);
+    await settleBatch(store, [evidence("ignored-b"), evidence("two")], currentOnly);
+    const active = await store.active(scope);
+    const group = active.find(({ item }) => item.subtype === "experience.task_group")!;
+    assert.deepEqual(group.revision.value.successfulRunIds, ["one", "two"]);
+    assert.equal((group.revision.value.supportingEpisodeRevisionIds as string[]).length, 2);
+    assert.equal((group.revision.value.taskGroup as any).classicPath[0].objective, learning().classicPath[0].objective);
+    const projection = await recall();
+    assert.equal(projection?.target, "planner");
+    if (projection?.target === "planner") assert.equal(projection.planningPriors.length, 1);
+    const otherUser = createMemoryPlugin({ store, resolveRunScope: async runId => ({ ...scope, ownerUserId: "bob", runId }) });
+    assert.equal(await otherUser.recall({ runId: "fresh", target: "planner", taskFingerprint: evidence("fresh").taskFingerprint, budget: { maxItems: 6, maxTokens: 2000 } }), undefined);
+    await settleBatch(store, [evidence("three"), evidence("four")], model((_input, output) => {
+      output.merge.decision = "contradict"; output.merge.conflicts = ["同类来源出现不同汇总口径"];
+    }));
+    assert.equal(await recall(), undefined);
+    await settleBatch(store, [evidence("five"), evidence("six")]);
+    assert.equal(await recall(), undefined, "reinforcement cannot silently clear an unresolved conflict");
+  } finally { await database?.close(); }
+});
+
+test("batch replay retries publication after a committed group without repeating fusion or duplicating support", async () => {
+  const store = new InMemoryMemoryStore();
+  const values = [evidence("one"), evidence("two")];
+  let calls = 0, fail = true;
+  const localModel = model(() => { calls += 1; });
+  const commit = store.commit.bind(store);
+  store.commit = async (...args) => {
+    if (fail && args[1].proposedSubtype === "experience.procedure") throw new Error("publication_interrupted");
+    return commit(...args);
+  };
+  await assert.rejects(settleBatch(store, values, localModel), /publication_interrupted/);
+  fail = false;
+  assert.equal((await settleBatch(store, values, localModel)).reason, "already_fused");
+  assert.equal((await settleBatch(store, values, localModel)).reason, "already_fused");
+  assert.equal(calls, 1);
+  const active = await store.active(scope);
+  assert.equal(active.filter(({ item }) => item.subtype === "experience.procedure").length, 1);
+  assert.deepEqual(active.find(({ item }) => item.subtype === "experience.task_group")!.revision.value.successfulRunIds, ["one", "two"]);
+});
+
+test("multiple commits of one Run and unverified cases cannot publish a batch procedure", async () => {
+  const store = new InMemoryMemoryStore();
+  await settleBatch(store, [evidence("same"), { ...evidence("same"), terminalCommitRef: "outcome:same:recommit" }]);
+  assert.equal((await store.active(scope)).some(({ item }) => item.subtype === "experience.procedure"), false);
+  await settleBatch(store, [evidence("failed"), evidence("disputed")].map(value => ({ ...value, quality: { ...value.quality, laterDisputed: true } })));
+  assert.equal((await store.active(scope)).some(({ item }) => item.subtype === "experience.procedure"), false);
+});
+
+test("a batch containing a previously fused last case still learns its new cases", async () => {
+  const store = new InMemoryMemoryStore();
+  let calls = 0;
+  const localModel = model(() => { calls += 1; });
+  await settleBatch(store, [evidence("one"), evidence("two")], localModel);
+  await settleBatch(store, [evidence("three"), evidence("two")], localModel);
+  assert.equal(calls, 2);
+  assert.deepEqual((await store.active(scope)).find(({ item }) => item.subtype === "experience.task_group")!.revision.value.successfulRunIds, ["one", "two", "three"]);
+});
+
+test("batch fusion receives sanitized execution and acceptance evidence rather than placeholder learning", async () => {
+  const store = new InMemoryMemoryStore();
+  const values = ["one", "two"].map(runId => ({ ...evidence(runId), observations: [{
+    id: "a", kind: "action" as const, toolName: "source.read", status: "succeeded",
+    summary: "读取星河科技有限公司的数据；先 describe-catalog，再按组织代码查最新月份；password=private-value",
+    sourceRefs: [{ type: "action" as const, runId, sourceId: "a" }],
+  }, { id: "qa", kind: "assessment" as const, status: "approved", summary: "组织范围和报表月份核对一致", sourceRefs: [{ type: "assessment" as const, runId }] }] }));
+  await settleBatch(store, values, model((input, output) => {
+    assert.equal(JSON.stringify(input).includes("等待批量案例归纳"), false);
+    assert.equal(JSON.stringify(input).includes("星河科技有限公司"), false);
+    assert.equal(JSON.stringify(input).includes("private-value"), false);
+    assert.match(input.episodes[0].observations[0].summary, /describe-catalog/);
+    assert.equal(input.episodes[0].verification.assessmentApproved, true);
+    assert.equal(input.episodes[0].observations[1].status, "approved");
+    const ref = input.episodes[0].observations[0].evidenceRefs[0];
+    assert.ok(ref in input.sources);
+    output.classicPath[0].evidenceRefs = [ref];
+  }));
+  assert.equal((await store.active(scope)).some(({ item }) => item.subtype === "experience.procedure"), true);
+});
+
+test("batch input budgeting retains its current case and removes references to omitted evidence", async () => {
+  const store = new InMemoryMemoryStore();
+  const values = Array.from({ length: 10 }, (_, index) => ({ ...evidence(`run-${index}`), observations: Array.from({length:24}, (_item, i) => ({
+    id: `a-${i}`, kind: "action" as const, toolName: "source.read", status: "succeeded", summary: "具体执行方法及验证结果".repeat(60), sourceRefs: [{type:"action" as const, runId:`run-${index}`}],
+  })) }));
+  await settleBatch(store, values, model((input) => {
+    assert.ok(input.episodeIds.includes(input.currentEpisodeId));
+    assert.ok(input.episodes.length < 10);
+    assert.equal(input.episodes.at(-1).id, input.currentEpisodeId);
+    assert.equal(Object.keys(input.sources).some(key => key.startsWith("episode_9_")), false);
+    assert.ok(JSON.stringify(input).length <= 60_000);
+  }));
+});
+
+test("settlement honors the provider completion deadline instead of cancelling at sixty seconds", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const store = new InMemoryMemoryStore();
+  const base = model();
+  let release!: () => void;
+  let signal: AbortSignal | undefined;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const operation = settleBatch(store, [evidence("one"), evidence("two")], {
+    ...base, completeTimeoutMs: 120_000, complete: async input => {
+      signal = input.signal;
+      await pending;
+      return base.complete(input);
+    },
+  });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  context.mock.timers.tick(60_001);
+  assert.equal(signal?.aborted, false);
+  release();
+  assert.equal((await operation).reason, "task_group_updated");
+});
+
+test("batch publication retains action provenance and namespaces earlier group evidence during refinement", async () => {
+  const store = new InMemoryMemoryStore();
+  await settleBatch(store, [evidence("one"), evidence("two")], model((input, output) => {
+    output.classicPath[0].evidenceRefs = input.episodes[0].observations[0].evidenceRefs;
+  }));
+  let group = (await store.active(scope)).find(({ item }) => item.subtype === "experience.task_group")!;
+  assert.ok(group.revision.sourceRefs.some(ref => ref.type === "action" && ref.runId === "one"));
+  await settleBatch(store, [evidence("three"), evidence("four")], model((input, output) => {
+    const ref = input.similarTaskGroups[0].learning.classicPath[0].evidenceRefs[0];
+    assert.match(ref, /^group_1_episode_1_observation_1$/);
+    assert.ok(ref in input.sources);
+    output.merge.decision = "refine";
+    output.classicPath[0].evidenceRefs = [ref];
+  }));
+  group = (await store.active(scope)).find(({ item }) => item.subtype === "experience.task_group")!;
+  const sources = group.revision.value.knowledgeSources as Record<string, any[]>;
+  assert.equal(sources.group_1_episode_1_observation_1[0].runId, "one");
+});
+
+test("fusion schema exposes only admitted sources, canonical Skills and existing group choices", async () => {
+  const base = model();
+  await settleBatch(new InMemoryMemoryStore(), [evidence("one"), evidence("two")], {
+    ...base, complete: async request => {
+      const schema = JSON.parse(request.systemPrompt.split("\n")[2]!);
+      assert.deepEqual(schema.properties.merge.properties.decision.enum, ["new", "no_learning"]);
+      assert.equal("targetGroupId" in schema.properties.merge.properties, false);
+      assert.deepEqual(schema.properties.classicPath.items.properties.skillIds.items.enum, ["discovered:hr-data"]);
+      assert.deepEqual(schema.properties.classicPath.items.properties.evidenceRefs.items.enum, Object.keys(request.input.sources as object));
+      return base.complete(request);
+    },
+  });
 });
 
 for (const kind of ["memory", "sqlite"] as const) test(`${kind}: deleted Run is discarded without consuming other batch attempts`, async () => {
@@ -197,7 +369,7 @@ test("two successful executions produce a Planner prior; third reinforces one gr
   assert.equal(projection?.target, "planner");
   if (projection?.target === "planner") {
     assert.equal(projection.planningPriors.length, 1);
-    assert.match(projection.planningPriors[0]!.strategy, /组织代码和最新报表月份/);
+    assert.match(String(projection.planningPriors[0]!.suggestedSteps[0]!.objective), /组织代码和最新报表月份/);
     assert.deepEqual(projection.planningPriors[0]!.skillSuggestions, ["discovered:hr-data"]);
   }
   const otherUser = createMemoryPlugin({ store, resolveRunScope: async (runId) => ({ ...scope, ownerUserId: "bob", runId }) });

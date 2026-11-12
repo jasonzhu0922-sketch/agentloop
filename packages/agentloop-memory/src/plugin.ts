@@ -190,7 +190,11 @@ export function createMemoryPlugin(options: MemoryPluginOptions): AgentLoopMemor
         .filter(({ revision }) => activationApplies(revision, input.taskFingerprint, currentNow))
         .slice(0, Math.max(0, input.budget.maxItems));
       if (matching.length === 0) return undefined;
-      const bounded = boundEntries(matching, input.budget.maxTokens);
+      const bounded = boundEntries(matching, input.budget.maxTokens, (entries) => compileProjection({
+        runId: input.runId, target: input.target, memoryEpoch: epoch, entries,
+        taskFingerprint: input.taskFingerprint, stepContext: input.stepContext,
+        now: currentNow, expiresAt: currentNow + projectionTtlMs,
+      }));
       if (bounded.length === 0) return undefined;
       const projection = compileProjection({
         runId: input.runId,
@@ -288,19 +292,39 @@ function matchesAny(values: readonly string[] | undefined, actual: unknown): boo
   return values === undefined || (typeof actual === "string" && values.includes(actual));
 }
 
-function boundEntries<T extends { readonly revision: MemoryRevision }>(entries: readonly T[], maxTokens: number): readonly T[] {
+/** Budget the target's semantic payload, not the durable audit record or
+ * envelope IDs. Rendered response text and structured preferences describe the
+ * same content; only the canonical representation is charged. */
+function projectionPayload(projection: MemoryProjection): unknown {
+  const preferences = projection.preferences?.map(({ subtype, value, contentMarkdown }) => ({ subtype, value, contentMarkdown }));
+  if (projection.target === "planner") return {
+    preferences,
+    facts: projection.relevantFacts.map(({ subtype, value }) => ({ subtype, value })),
+    planningPriors: projection.planningPriors.map(({ schema, id, source, sourceRefs, ...method }) => method),
+  };
+  if (projection.target === "response" || projection.target === "human_loop") return {
+    preferences, facts: projection.facts?.map(({ subtype, value }) => ({ subtype, value })),
+  };
+  return { preferences, augmentations: "augmentations" in projection
+    ? projection.augmentations.map(({ contentMarkdown }) => contentMarkdown) : [] };
+}
+
+function boundEntries<T>(entries: readonly T[], maxTokens: number, project: (entries: readonly T[]) => MemoryProjection): readonly T[] {
   if (maxTokens <= 0) return [];
   const result: T[] = [];
-  let used = 0;
   for (const entry of entries) {
-    // Values are projected too. Counting only a generic content label could
-    // admit many large preference values under a deceptively small budget.
-    const estimate = Math.max(1, Math.ceil((entry.revision.contentMarkdown.length + JSON.stringify(entry.revision.value).length) / 4));
-    if (used + estimate > maxTokens) continue;
-    result.push(entry);
-    used += estimate;
+    const proposed = [...result, entry];
+    const estimate = Math.max(1, Math.ceil(JSON.stringify(projectionPayload(project(proposed))).length / 4));
+    if (estimate <= maxTokens) result.push(entry);
   }
   return result;
+}
+
+// Audit provenance stays in the revision addressed by sourceRefs. Only method
+// fields cross the Planner boundary; omit empty arrays without truncating steps.
+function methodFields(value: Readonly<Record<string, unknown>>, fields: readonly string[]): Readonly<Record<string, unknown>> {
+  return Object.fromEntries(fields.filter((key) => value[key] !== undefined
+    && (!Array.isArray(value[key]) || value[key].length > 0)).map((key) => [key, value[key]]));
 }
 
 function compileProjection(input: {
@@ -387,9 +411,10 @@ function compileProjection(input: {
       .map(({ revision }) => {
         const pattern = recordValueAt(revision.value, "settlementPattern");
         const keySteps = Array.isArray(pattern?.classicPath)
-          ? pattern.classicPath.filter(isRecord).slice(0, 24)
+          ? pattern.classicPath.filter(isRecord).map((step) => methodFields(step,
+            ["order", "objective", "toolNames", "skillIds", "capabilityIds", "conditions", "verification", "requiredEvidenceKinds", "producedEvidenceKinds", "successCriteria"]))
           : Array.isArray(pattern?.keySteps) ? pattern.keySteps.filter(isRecord).slice(0, 24) : [];
-        const toolUsage = Array.isArray(pattern?.toolUsage) ? pattern.toolUsage.filter(isRecord).slice(0, 24) : [];
+        const toolUsage = Array.isArray(pattern?.toolUsage) ? pattern.toolUsage.filter(isRecord).map((tool) => methodFields(tool, ["toolName", "purpose", "stepOrders"])) : [];
         const evidenceExpectations = [...new Set(keySteps.flatMap((step) => [
           ...stringArrayAt(step, "requiredEvidenceKinds"),
           ...stringArrayAt(step, "producedEvidenceKinds"),
@@ -403,8 +428,6 @@ function compileProjection(input: {
         const cautions = Array.isArray(pattern?.cautions)
           ? pattern.cautions.filter((item): item is string => typeof item === "string").slice(0, 16)
           : [];
-        const classicPathText = keySteps.map((step) => stringAt(step, "objective")).filter((item): item is string => item !== undefined);
-        const toolText = toolUsage.map((tool) => stringAt(tool, "toolName")).filter((item): item is string => item !== undefined);
         const skillSuggestions = [...new Set(keySteps.flatMap((step) => stringArrayAt(step, "skillIds")))].slice(0, 24);
         const capabilitySuggestions = [...new Set(keySteps.flatMap((step) => stringArrayAt(step, "capabilityIds")))].slice(0, 24);
         return {
@@ -412,19 +435,13 @@ function compileProjection(input: {
           id: `prior_${revision.id}`,
           source: "experience_procedure" as const,
           applicability: revision.applicability.conditions.join(", "),
-          strategy: [
-            classicPathText.length === 0 ? undefined : `经典路径：${classicPathText.join(" → ")}`,
-            toolText.length === 0 ? undefined : `工具建议：${toolText.join("、")}`,
-            reusableKnowledge.length === 0 ? undefined : `可复用规则：${reusableKnowledge.join("；")}`,
-          ].filter((item): item is string => item !== undefined).join("\n"),
+          strategy: [stringAt(pattern ?? {}, "goalSummary"), ...reusableKnowledge].filter(Boolean).join("\n"),
           suggestedSteps: keySteps,
-          classicPath: keySteps,
           toolUsage,
           skillSuggestions,
           capabilitySuggestions,
           evidenceExpectations,
-          cautions,
-          warnings: [...revision.applicability.exclusions, ...cautions, ...failureWarnings].slice(0, 16),
+          warnings: [...new Set([...revision.applicability.exclusions, ...cautions, ...failureWarnings, ...stringArrayAt(pattern ?? {}, "recheckRules")])],
           confidence: revision.confidence,
           sourceRefs: [revision.id],
         };

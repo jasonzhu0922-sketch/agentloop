@@ -26,6 +26,16 @@ it is not recalled as a Planner prior. The local consolidator clusters
 independent verified-success episodes with similar task fingerprints before
 creating an `experience.procedure`. Failed episodes remain lessons/warnings.
 
+Batch settlement supplies canonical steps, executed actions and acceptance
+evidence to one fusion call; pending audit Episodes are not extracted learning.
+After committing a Task Group it publishes the matching Planner procedure when
+at least two distinct verified-success Runs support it. Reinforcement retains
+the established method and accumulates support across batches; conflicts suspend
+automatic recall. A persisted batch checkpoint lets retries finish publication
+without repeating fusion. Source references and canonical capability IDs remain
+bounded by the request-specific output schema. Settlement uses the selected
+model adapter's completion deadline, defaulting to 60 seconds when unspecified.
+
 Explicit preference intake is open-ended: the resolver proposes a stable dotted
 semantic key, a bounded JSON value, a subject/condition-preserving description,
 and a supporting `sourceQuote`. The plugin validates each proposal and commits
@@ -45,3 +55,5 @@ requires `memoryIntents=[]`, while `memoryAction=commit` requires at least one
 candidate. Missing or incoherent fields are repaired at the resolver boundary.
 The Runtime separately reports the actual commit outcome to response generation
 and assessment, so a model proposal cannot be presented as a successful save.
+
+Planner 召回按目标投影的语义内容估算预算，不按完整审计记录计费。流程只投影一份 `suggestedSteps`，保留全部步骤、工具、适用条件、验收标准、警示和复核规则；来源明细留在持久修订中，由 `sourceRefs` 引用。方法本身超预算时整条跳过，不截断后续步骤或条件。

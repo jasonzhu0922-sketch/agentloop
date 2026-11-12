@@ -464,3 +464,49 @@ test("SQLite migration repairs legacy contact email preferences", async () => {
   assert.equal(active[0]?.revision.preferenceEffect, undefined);
   await database.close();
 });
+
+
+test("Planner budgets the complete method rather than large provenance and preserves its boundaries", async () => {
+  const memory = plugin();
+  const audit = [{ type: "run", runId: "historical", quotedText: "auditable execution evidence ".repeat(4000) }];
+  const steps = ["Load required workflow", "List available scenarios", "Inspect catalog", "Inspect source schema", "Execute read-only query", "Read and verify output"]
+    .map((objective, index) => ({ order: index + 1, objective, toolNames: ["source.read"], skillIds: ["discovered:query"],
+      requiredEvidenceKinds: [], producedEvidenceKinds: [], successCriteria: ["Confirm complete output"],
+      conditions: ["User has selected the scenario"], verification: "Check source and scope", sourceRefs: audit }));
+  const pattern = {
+    goalSummary: "Acquire verified source data", classicPath: steps,
+    toolUsage: [{ toolName: "source.read", purpose: "Inspect and query the selected source", stepOrders: [3, 4, 5], sourceRefs: audit }],
+    applicability: { conditions: ["Structured source available"], exclusions: ["Unrelated tasks"] },
+    cautions: ["Keep the selected scope"], recheckRules: ["Reinspect schema after failures"],
+    reusableKnowledge: [{ rule: "Inspect schema before execution", sourceRefs: audit }],
+  };
+  const candidate: MemoryCandidate = {
+    schema: "agentloop.userMemoryCandidate/v1", id: "large-audit-procedure", tenantId: "tenant-1", ownerUserId: "user-a",
+    proposedKind: "experience", proposedSubtype: "experience.procedure", proposedCanonicalKey: "procedure:query",
+    proposedExperienceMaturity: "procedure", proposedValue: { settlementPromptSchemaVersion: "agentloop.semanticSettlement/v2", settlementPattern: pattern, knowledgeSources: audit },
+    proposedContentMarkdown: "Audit documentation ".repeat(5000), authority: "verified_run", sensitivity: "normal",
+    persistenceIntent: "future_oriented", activation: { mode: "task_match", taskKinds: ["lookup"] },
+    applicationTargets: ["planner"], sourceRefs: [{ type: "run", runId: "historical" }], confidence: 1, reason: "verified_procedure", decision: "pending",
+  };
+  const committed = await memory.store.commit(scopes.runA, candidate, 1_700_000_000_000);
+  const request = { runId: "runA2", target: "planner" as const, taskFingerprint: { taskKind: "lookup" }, budget: { maxItems: 12, maxTokens: 1200 } };
+  const projection = await memory.recall(request);
+  assert.equal(projection?.target, "planner");
+  if (projection?.target !== "planner") return;
+  const prior = projection.planningPriors[0]!;
+  assert.deepEqual(prior.suggestedSteps, steps.map(({ sourceRefs, requiredEvidenceKinds, producedEvidenceKinds, ...step }) => step));
+  assert.deepEqual(prior.sourceRefs, [committed.revision.id]);
+  assert.equal(prior.applicability, "Structured source available");
+  assert.deepEqual(prior.toolUsage, [{ toolName: "source.read", purpose: "Inspect and query the selected source", stepOrders: [3, 4, 5] }]);
+  assert.deepEqual(prior.warnings, ["Unrelated tasks", "Keep the selected scope", "Reinspect schema after failures"]);
+  assert.match(prior.strategy, /Inspect schema before execution/);
+  assert.equal(prior.classicPath, undefined, "method must be serialized only once");
+  assert.doesNotMatch(JSON.stringify(projection), /auditable execution evidence|Audit documentation|knowledgeSources/);
+  assert.ok(JSON.stringify(projection).length / 4 < 1200);
+  assert.equal(await memory.recall({ ...request, budget: { maxItems: 12, maxTokens: 20 } }), undefined, "a method is skipped whole instead of losing its final steps or conditions");
+  assert.equal(await memory.recall({ ...request, runId: "runB" }), undefined);
+  assert.equal(await memory.recall({ ...request, taskFingerprint: { taskKind: "unrelated" } }), undefined);
+  await memory.store.commit(scopes.runA, { ...candidate, id: "long-method", proposedValue: { ...candidate.proposedValue,
+    settlementPattern: { ...pattern, classicPath: steps.map(step => ({ ...step, objective: "Long substantive method ".repeat(200) })) } } }, 1_700_000_000_001);
+  assert.equal(await memory.recall(request), undefined, "large method content still counts even when its audit data is excluded");
+});
