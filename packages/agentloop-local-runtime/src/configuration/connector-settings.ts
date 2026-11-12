@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
-import type { AppDatabase } from "@zhujun/agentloop";
+import { AppError, type AppDatabase } from "@zhujun/agentloop";
 import type { ConnectorConnection } from "@zhujun/agentloop-connector-sdk";
 import { loadConnectorModules, type ConnectorModuleRegistration } from "../connectors/connector-module-loader.ts";
 import type { LocalConnectorConfigurationPort, LocalConnectorRuntimeResolution } from "../contracts/host.ts";
@@ -51,11 +51,12 @@ export class ConnectorSettings implements LocalConnectorConfigurationPort {
     description: definition.manifest.description, capabilities: definition.capabilities,
   })); }
   async list(owner: string) {
-    return (await this.rows()).filter(row => row.owner_id === owner).map(row => ({
+    return Promise.all((await this.rows()).filter(row => row.owner_id === owner).map(async row => ({
       id: row.id, connectionId: row.id, connectorKey: row.connector_key, displayName: row.display_name,
-      enabled: row.enabled === 1, scopes: JSON.parse(row.scopes) as string[], credentialConfigured: row.secret_ref !== null,
+      enabled: row.enabled === 1, scopes: JSON.parse(row.scopes) as string[],
+      credentialConfigured: row.secret_ref !== null && await this.secrets.read(row.secret_ref) !== undefined,
       moduleAvailable: this.modules.has(row.connector_key), updatedAt: row.updated_at,
-    }));
+    })));
   }
   async save(owner: string, input: ConnectorSettingInput) {
     if (!input || Object.keys(input).some(k => !["id", "connectorKey", "displayName", "enabled", "scopes", "credentials"].includes(k))
@@ -112,7 +113,11 @@ export class ConnectorSettings implements LocalConnectorConfigurationPort {
         const row = [...byId.values()].find(r => r.connection.credentialRef === reference);
         if (!row) throw new LocalManagementError(403, "connector_connection_not_authorized");
         if (!row.secret) return {};
-        const values = await secrets.read(row.secret); if (!values) throw new LocalManagementError(409, "connector_credentials_missing"); return values;
+        const values = await secrets.read(row.secret);
+        if (!values) throw new AppError("CAPABILITY_UNAVAILABLE", "所选 Connector 的凭据已丢失，请在设置中重新填写并保存。", 409, {
+          reasonCode: "connector_credentials_missing", connectionId: row.connection.id, connectorKey: row.connection.connectorKey,
+        });
+        return values;
       } },
     } };
   }
