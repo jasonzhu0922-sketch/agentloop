@@ -2,7 +2,7 @@
 
 "use strict";
 
-const { createHash } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const JSZip = require("jszip");
@@ -10,6 +10,7 @@ const PptxGenJS = require("pptxgenjs");
 
 const SPEC_SCHEMA = "agentloop.pptxDeckSpec/v1";
 const BUILD_RECEIPT_SCHEMA = "agentloop.pptxBuildReceipt/v1";
+const VALIDATION_SCHEMA = "agentloop.pptxSpecValidation/v1";
 const INSPECTION_SCHEMA = "agentloop.pptxInspection/v1";
 const API_CONTRACT = "agentloop.pptxGenJsApiContract/v1";
 const LAYOUTS = new Map([
@@ -46,11 +47,72 @@ async function main() {
     writeJson(await buildDeck(args[0], args[1]));
     return;
   }
+  if (action === "validate" && (args.length === 2 || args.length === 3)) {
+    const report = validateSpecFile(args[0], args[1], args[2]);
+    writeJson(report);
+    if (!report.valid) process.exitCode = 1;
+    return;
+  }
+  if (action === "assemble" && args.length === 3) {
+    const receipt = assembleDeck(args[0], args[1], args[2]);
+    writeJson(receipt);
+    if (!receipt.validation.valid) process.exitCode = 1;
+    return;
+  }
   if (action === "inspect" && args.length === 2) {
     writeJson(await inspectDeck(args[0], args[1]));
     return;
   }
-  throw new Error("Usage: pptx_runtime.cjs preflight | build <absolute-spec.json> <absolute-output.pptx> | inspect <absolute-input.pptx> <absolute-report.json>");
+  throw new Error("Usage: pptx_runtime.cjs preflight | assemble <absolute-assembly.json> <absolute-spec.json> <absolute-report.json> | build <absolute-spec.json> <absolute-output.pptx> | validate <absolute-spec.json> <absolute-report.json> [<absolute-previous-report.json>] | inspect <absolute-input.pptx> <absolute-report.json>");
+}
+
+/** Parts are complete JSON documents; only this adapter serializes the merged deck. */
+function assembleDeck(manifestPath, specPath, reportPath) {
+  for (const [value, label] of [[manifestPath, "assembly path"], [specPath, "spec path"], [reportPath, "report path"]]) requireAbsolutePath(value, label);
+  const manifestContent = fs.readFileSync(manifestPath);
+  const manifest = JSON.parse(manifestContent.toString("utf8"));
+  requiredRecord(manifest, "assembly");
+  if (manifest.schema !== "agentloop.pptxAssembly/v1") throw new Error("assembly schema must be agentloop.pptxAssembly/v1");
+  requiredRecord(manifest.deck, "assembly.deck");
+  if (Object.hasOwn(manifest.deck, "slides")) throw new Error("assembly.deck must omit slides; declare ordered parts instead");
+  if (!Array.isArray(manifest.parts) || manifest.parts.length < 1 || manifest.parts.length > 200) throw new Error("assembly.parts must contain 1-200 relative JSON paths");
+  const root = fs.realpathSync(path.dirname(manifestPath));
+  const sources = [], slides = [], seen = new Set([fs.realpathSync(manifestPath)]);
+  for (const [index, relative] of manifest.parts.entries()) {
+    requiredString(relative, `parts[${index}]`);
+    if (path.isAbsolute(relative)) throw new Error(`parts[${index}] must be relative to the assembly file`);
+    const resolved = fs.realpathSync(path.resolve(root, relative));
+    const within = path.relative(root, resolved);
+    if (within === ".." || within.startsWith(`..${path.sep}`) || path.isAbsolute(within)) throw new Error(`parts[${index}] escapes the assembly directory`);
+    if (seen.has(resolved)) throw new Error(`parts[${index}] duplicates an assembly input`);
+    seen.add(resolved);
+    const content = fs.readFileSync(resolved);
+    let part;
+    try { part = JSON.parse(content.toString("utf8")); }
+    catch (error) { throw new Error(`Invalid slide part ${relative}: ${error.message}; rewrite this part as one complete JSON document`); }
+    if (part?.schema !== "agentloop.pptxSlidePart/v1" || !Array.isArray(part.slides) || part.slides.length < 1) throw new Error(`Slide part ${relative} must be agentloop.pptxSlidePart/v1 with a nonempty slides array`);
+    if (slides.length + part.slides.length > 200) throw new Error("Assembled deck exceeds 200 slides");
+    sources.push({ path: resolved, sha256: sha256(content), bytes: content.length, firstSlide: slides.length + 1, slideCount: part.slides.length });
+    slides.push(...part.slides);
+  }
+  const outputIdentity = value => fs.existsSync(value) ? fs.realpathSync(value) : path.resolve(value);
+  if (seen.has(outputIdentity(specPath)) || seen.has(outputIdentity(reportPath)) || outputIdentity(specPath) === outputIdentity(reportPath)) throw new Error("Assembly inputs, spec, and report must use distinct paths");
+  const spec = { ...manifest.deck, slides };
+  const content = Buffer.from(`${JSON.stringify(spec, null, 2)}\n`);
+  const validation = validateSpec(spec, specPath, content);
+  const receipt = { schema: "agentloop.pptxAssemblyReceipt/v1", manifest: { path: manifestPath, sha256: sha256(manifestContent), bytes: manifestContent.length },
+    parts: sources, output: { ...validation.source, slideCount: slides.length, written: validation.valid }, validation };
+  // Invalid parts never replace the last valid assembled spec. No repair, clamping, or content dropping.
+  if (validation.valid) writeJsonAtomic(specPath, content);
+  writeJsonAtomic(reportPath, Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`));
+  return receipt;
+}
+
+function writeJsonAtomic(filePath, content) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.${randomUUID()}.tmp`;
+  try { fs.writeFileSync(temporary, content, { flag: "wx" }); fs.renameSync(temporary, filePath); }
+  finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
 }
 
 function preflight() {
@@ -91,8 +153,14 @@ async function buildDeck(specPath, outputPath) {
   if (path.extname(specPath).toLowerCase() !== ".json") throw new Error("Build spec must be a .json file");
   if (path.extname(outputPath).toLowerCase() !== ".pptx") throw new Error("Build output must use the .pptx extension");
   preflight();
-  const spec = parseJsonFile(specPath);
-  const canvas = validateDeckSpec(spec);
+  const specContent = fs.readFileSync(specPath);
+  const spec = JSON.parse(specContent.toString("utf8"));
+  const validation = validateSpec(spec, specPath, specContent);
+  if (!validation.valid) {
+    writeJson(validation);
+    throw new Error(`PPTX spec validation failed (${validation.diagnostics.length} issues): ${validation.diagnostics.slice(0, 8).map(item => item.message).join("; ")}. Full diagnostics are in the stdout report.`);
+  }
+  const canvas = CANVASES.get(spec.layout);
 
   const presentation = new PptxGenJS();
   presentation.layout = canvas.pptxLayout;
@@ -123,6 +191,7 @@ async function buildDeck(specPath, outputPath) {
     schema: BUILD_RECEIPT_SCHEMA,
     apiContract: API_CONTRACT,
     specSchema: SPEC_SCHEMA,
+    source: validation.source,
     moduleFormat: "commonjs",
     output: {
       path: outputPath,
@@ -136,41 +205,38 @@ async function buildDeck(specPath, outputPath) {
 }
 
 function addElement(presentation, slide, element, field, canvas) {
+  validateGeometry(element.options, `${field}.options`, canvas);
+  const { method, args } = elementArguments(presentation, element, field);
+  slide[method](...args.map(cloneJsonValue));
+}
+
+// Both the full-spec validator and the renderer use these exact content rules.
+function elementArguments(presentation, element, field) {
   requiredRecord(element, field);
   rejectUnsafeKeys(element, field);
   const options = requiredRecord(element.options, `${field}.options`);
-  rejectUnsafeKeys(options, `${field}.options`);
-  validateGeometry(options, `${field}.options`, canvas);
   switch (element.type) {
     case "text": {
       const text = element.text ?? element.runs;
       if (typeof text !== "string" && !Array.isArray(text)) throw new Error(`${field} requires text or runs`);
-      slide.addText(cloneJsonValue(text), cloneJsonValue(options));
-      return;
+      return { method: "addText", args: [text, options] };
     }
     case "shape": {
-      const shapeName = requiredString(element.shape, `${field}.shape`);
-      const shape = presentation.shapes?.[shapeName];
+      const shape = presentation.shapes?.[requiredString(element.shape, `${field}.shape`)];
       if (typeof shape !== "string") throw new Error(`${field}.shape must name a public presentation.shapes entry`);
-      slide.addShape(shape, cloneJsonValue(options));
-      return;
+      return { method: "addShape", args: [shape, options] };
     }
     case "image":
       if (typeof options.path === "string") requireAbsolutePath(options.path, `${field}.options.path`);
-      slide.addImage(cloneJsonValue(options));
-      return;
-    case "table": {
+      return { method: "addImage", args: [options] };
+    case "table":
       if (!Array.isArray(element.rows) || element.rows.length === 0) throw new Error(`${field}.rows must be a non-empty array`);
-      slide.addTable(cloneJsonValue(element.rows), cloneJsonValue(options));
-      return;
-    }
+      return { method: "addTable", args: [element.rows, options] };
     case "chart": {
-      const chartName = requiredString(element.chart, `${field}.chart`);
-      const chartType = presentation.ChartType?.[chartName];
-      if (typeof chartType !== "string") throw new Error(`${field}.chart must name a public presentation.ChartType entry`);
+      const chart = presentation.ChartType?.[requiredString(element.chart, `${field}.chart`)];
+      if (typeof chart !== "string") throw new Error(`${field}.chart must name a public presentation.ChartType entry`);
       if (!Array.isArray(element.data) || element.data.length === 0) throw new Error(`${field}.data must be a non-empty array`);
-      slide.addChart(chartType, cloneJsonValue(element.data), cloneJsonValue(options));
-      return;
+      return { method: "addChart", args: [chart, element.data, options] };
     }
     default:
       throw new Error(`${field}.type must be text, shape, image, table, or chart`);
@@ -218,7 +284,7 @@ async function inspectDeck(inputPath, reportPath) {
 
 function validateDeckSpec(spec) {
   requiredRecord(spec, "deck spec");
-  rejectUnsafeKeys(spec, "deck spec");
+  rejectUnsafeKeys(Object.fromEntries(Object.entries(spec).filter(([key]) => key !== "slides")), "deck spec");
   if (spec.schema !== SPEC_SCHEMA) throw new Error(`deck spec schema must be ${SPEC_SCHEMA}`);
   if (typeof spec.layout !== "string" || spec.layout.trim().length === 0) {
     throw new Error('deck spec layout is required; choose "16:9", "wide", or "4:3" explicitly');
@@ -227,28 +293,99 @@ function validateDeckSpec(spec) {
   if (!Array.isArray(spec.slides) || spec.slides.length === 0 || spec.slides.length > 200) {
     throw new Error("deck spec slides must contain 1-200 entries");
   }
-  for (const [index, slide] of spec.slides.entries()) {
-    requiredRecord(slide, `slides[${index}]`);
-    rejectUnsafeKeys(slide, `slides[${index}]`);
-    if (!Array.isArray(slide.elements)) throw new Error(`slides[${index}].elements must be an array`);
-    if (slide.elements.length > 500) throw new Error(`slides[${index}].elements exceeds 500 entries`);
-  }
   return CANVASES.get(spec.layout);
 }
 
-function validateGeometry(options, field, canvas) {
+function geometryDiagnostics(options, field, canvas) {
+  if (!isPlainObject(options)) return [{ code: "invalid_options", field: "", actual: options ?? null, message: `${field} must be an object` }];
+  const issues = [];
   for (const key of ["x", "y", "w", "h"]) {
     if (typeof options[key] !== "number" || !Number.isFinite(options[key])) {
-      throw new Error(`${field}.${key} must be a finite number`);
+      issues.push({ code: "non_finite_geometry", field: key, actual: options[key] ?? null, constraint: "finite number", message: `${field}.${key} must be a finite number` });
+    } else if ((key === "w" || key === "h") && options[key] <= 0) {
+      issues.push({ code: "non_positive_size", field: key, actual: options[key], constraint: "> 0", message: `${field}.${key} must be greater than zero` });
     }
   }
-  if (options.w <= 0 || options.h <= 0) throw new Error(`${field}.w and ${field}.h must be greater than zero`);
-  if (options.x < -GEOMETRY_EPSILON || options.y < -GEOMETRY_EPSILON) {
-    throw new Error(`${field} is outside the ${canvas.name} canvas (${canvas.width} x ${canvas.height} in)`);
+  if (canvas !== undefined) {
+    for (const [position, size, maximum] of [["x", "w", canvas.width], ["y", "h", canvas.height]]) {
+      if (!Number.isFinite(options[position])) continue;
+      if (options[position] < -GEOMETRY_EPSILON || (Number.isFinite(options[size]) && options[position] + options[size] > maximum + GEOMETRY_EPSILON)) {
+        issues.push({ code: "out_of_canvas", field: position, actual: { position: options[position], size: options[size] ?? null }, constraint: { minimum: 0, maximum }, message: `${field} is outside the ${canvas.name} canvas (${canvas.width} x ${canvas.height} in); check ${position}/${size}` });
+      }
+    }
   }
-  if (options.x + options.w > canvas.width + GEOMETRY_EPSILON || options.y + options.h > canvas.height + GEOMETRY_EPSILON) {
-    throw new Error(`${field} is outside the ${canvas.name} canvas (${canvas.width} x ${canvas.height} in)`);
+  return issues;
+}
+
+function validateGeometry(options, field, canvas) {
+  const issues = geometryDiagnostics(options, field, canvas);
+  if (issues.length > 0) throw new Error(issues.map(item => item.message).join("; "));
+}
+
+function objectKey(element) {
+  if (typeof element?.id === "string" && element.id.trim()) return `id:${element.id}`;
+  // A geometry edit preserves identity; identical anonymous objects remain
+  // ambiguous rather than being matched by a potentially shifted array index.
+  const content = isPlainObject(element) ? { ...element, options: isPlainObject(element.options)
+    ? Object.fromEntries(Object.entries(element.options).filter(([key]) => !["x", "y", "w", "h"].includes(key))) : element.options } : element;
+  return `content:${sha256(JSON.stringify(content))}`;
+}
+
+function validateSpec(spec, specPath, content) {
+  const diagnostics = [], objects = [];
+  let canvas;
+  const problem = (pointer, message, extra = {}) => diagnostics.push({ code: "invalid_spec", pointer, message, ...extra });
+  try { canvas = validateDeckSpec(spec); } catch (error) { problem("", error.message); }
+  const presentation = new PptxGenJS();
+  if (Array.isArray(spec?.slides) && spec.slides.length <= 200) {
+    for (const [si, slide] of spec.slides.entries()) {
+      const pointer = `/slides/${si}`;
+      if (!isPlainObject(slide)) { problem(pointer, `slides[${si}] must be an object`); continue; }
+      try {
+        rejectUnsafeKeys(Object.fromEntries(Object.entries(slide).filter(([key]) => key !== "elements")), `slides[${si}]`);
+        if (slide.background !== undefined) hexColor(slide.background, `slides[${si}].background`);
+        if (slide.notes !== undefined) (Array.isArray(slide.notes) ? slide.notes : [slide.notes]).forEach((note, ni) => requiredString(note, `slides[${si}].notes[${ni}]`));
+      } catch (error) { problem(pointer, error.message); }
+      if (!Array.isArray(slide.elements) || slide.elements.length > 500) { problem(`${pointer}/elements`, `slides[${si}].elements must be an array of at most 500 entries`); continue; }
+      for (const [ei, element] of slide.elements.entries()) {
+        const ep = `${pointer}/elements/${ei}`, key = objectKey(element), field = `slides[${si}].elements[${ei}]`;
+        objects.push({ key, pointer: ep });
+        const geometry = geometryDiagnostics(element?.options, `${field}.options`, canvas);
+        diagnostics.push(...geometry.map(issue => ({ ...issue, pointer: `${ep}/options${issue.field ? `/${issue.field}` : ""}`, objectKey: key })));
+        try { elementArguments(presentation, element, field); } catch (error) { problem(ep, error.message, { objectKey: key }); }
+      }
+    }
   }
+  return { schema: VALIDATION_SCHEMA, source: { path: specPath, sha256: sha256(content), bytes: content.length },
+    valid: diagnostics.length === 0, diagnostics, objects };
+}
+
+function compareValidation(previous, current) {
+  if (previous.schema !== VALIDATION_SCHEMA || !Array.isArray(previous.objects) || !Array.isArray(previous.diagnostics)
+    || typeof previous.source?.sha256 !== "string") throw new Error("Previous report must be a version-bound PPTX spec validation report");
+  const count = (report, key) => report.objects.filter(object => object.key === key).length;
+  const identity = issue => `${issue.objectKey}|${issue.code}|${issue.field ?? ""}`;
+  const resolved = [], remaining = [], unverifiable = [];
+  for (const issue of previous.diagnostics) {
+    const unique = issue.objectKey !== undefined && count(previous, issue.objectKey) === 1 && count(current, issue.objectKey) === 1;
+    if (!unique) { unverifiable.push({ ...issue, reason: "object_missing_or_ambiguous; array indices alone do not establish identity" }); continue; }
+    if (current.diagnostics.some(next => identity(next) === identity(issue))) remaining.push(issue);
+    else resolved.push(issue);
+  }
+  const introduced = current.diagnostics.filter(issue => !previous.diagnostics.some(old => identity(old) === identity(issue)));
+  return { previousSource: previous.source, currentSource: current.source, resolved, remaining, introduced, unverifiable };
+}
+
+function validateSpecFile(specPath, reportPath, previousPath) {
+  requireAbsolutePath(specPath, "spec path"); requireAbsolutePath(reportPath, "report path");
+  if (previousPath !== undefined) requireAbsolutePath(previousPath, "previous report path");
+  if (specPath === reportPath || specPath === previousPath || reportPath === previousPath) throw new Error("Spec, report, and previous report must use distinct paths");
+  const content = fs.readFileSync(specPath);
+  const report = validateSpec(JSON.parse(content.toString("utf8")), specPath, content);
+  if (previousPath !== undefined) report.repairComparison = compareValidation(parseJsonFile(previousPath), report);
+  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+  fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+  return report;
 }
 
 function parseJsonFile(filePath) {

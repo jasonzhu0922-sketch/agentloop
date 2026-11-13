@@ -36,6 +36,7 @@ export class ProviderTransport {
 
   readonly options: {
     protocol: ProviderProtocol;
+    sdkReasoning?: boolean;
     invocation: ModelInvocation;
     request: ModelRequestLogContext;
     apiKey: string;
@@ -71,8 +72,10 @@ export class ProviderTransport {
         delete wire.top_p;
         // Explicit server configuration is authoritative. The OpenAI catalog
         // may otherwise remove an effort or add a default summary for a proxy.
-        if (this.options.reasoning) wire.reasoning = this.options.reasoning;
-        else delete wire.reasoning;
+        if (!this.options.sdkReasoning) {
+          if (this.options.reasoning) wire.reasoning = this.options.reasoning;
+          else delete wire.reasoning;
+        }
         wire.input = (body.input ?? []).map((item: RecordValue) => {
           // A generic Responses server may require the opaque item itself.
           // Replaying its original envelope does not change remote store policy.

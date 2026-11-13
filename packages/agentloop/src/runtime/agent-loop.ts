@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import { isArtifactAcceptanceKind } from "../acceptance/artifact-acceptance.ts";
-import { createConcurrencyLimiter, mapWithConcurrencyLimit } from "../shared/concurrency.ts";
+import { OrderedExecutionScheduler } from "../shared/concurrency.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import { ContextAssembler, type ContextPolicy } from "./context-assembler.ts";
 import { isCommandResult } from "./command-result-projection.ts";
@@ -63,6 +63,8 @@ import {
   type CurrentDecisionWorkProductFacts,
 } from "./current-decision-view.ts";
 import { CompletionFailure } from "./completion-failure.ts";
+import { ArtifactRepairProgress, artifactRepairCheckpointAdvice, type ArtifactRepairCheckpoint } from "./artifact-repair-progress.ts";
+import { boundedAuthoringContext, parseOutputBudgetState, toolContentBudget, type OutputBudgetState, type ToolContentBudgetPolicy } from "./tool-content-budget.ts";
 
 export interface AgentLoopOptions {
   readonly runId: string;
@@ -74,6 +76,8 @@ export interface AgentLoopOptions {
   /** Complete, persisted exchanges from a prior interrupted execution. */
   readonly initialMessages?: readonly ModelMessage[];
   readonly initialToolEvidence?: readonly AgentLoopToolEvidence[];
+  readonly initialOutputBudgetState?: OutputBudgetState;
+  readonly contentBudgetPolicy?: ToolContentBudgetPolicy;
   /** Server-authored guidance already applicable before the first model turn. */
   readonly initialRuntimePromptAugmentations?: readonly RuntimePromptAugmentation[];
   /** Standard Runtime boundary after Tool facts commit and before the next model request. */
@@ -538,7 +542,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
   };
   const maxToolResultCharacters = options.maxToolResultCharacters ?? 50_000;
-  const maxParallelToolCalls = options.maxParallelToolCalls ?? 4;
+  const maxParallelToolCalls = options.maxParallelToolCalls ?? 5;
   const graceSteps = Math.max(0, options.convergenceGraceSteps ?? DEFAULT_CONVERGENCE_GRACE_STEPS);
   const candidateRepairGraceSteps = Math.max(0, options.candidateRepairGraceSteps ?? 0);
   const convergenceMaxOutputTokens = Math.max(1, options.convergenceMaxOutputTokens ?? CONVERGENCE_MAX_OUTPUT_TOKENS);
@@ -643,8 +647,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let convergenceRequested = false;
   let previousPrepareRejectionSignature: string | undefined;
   let consecutivePrepareRejectionSteps = 0;
-  let previousLengthTruncationSignature: string | undefined;
-  let consecutiveLengthTruncationSteps = 0;
+  let outputBudgetState = parseOutputBudgetState(options.initialOutputBudgetState)
+    ?? { shrinkCount: 0, consecutiveTruncations: 0 };
   let invalidHumanLoopAttempts = 0;
   let humanLoopRepairPending = false;
   let toolProgressState = initialRuntimeToolProgressState();
@@ -878,6 +882,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     readonly projectedToolEvidence: readonly AgentLoopToolEvidence[];
     readonly stepSemanticFrame?: Pick<StepSemanticFrame, "completionBoundary" | "evidenceMode" | "phaseRole">;
     readonly rejectionDirective: string;
+    readonly repairCheckpoint?: ArtifactRepairCheckpoint;
   }): Promise<AgentLoopResult | undefined> => {
     const evaluation = await evaluateCandidate(input.step, {
       output: input.output,
@@ -916,6 +921,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         toolEvidence,
         activatedSkillNames: [...activatedSkillNames],
       };
+    }
+    if (input.repairCheckpoint !== undefined) {
+      // Obtain the failed boundary from the ordinary assessor; the progress
+      // monitor cannot invent a semantic Gap or authorize a replacement plan.
+      throw await completionFailure(new AppError("STEP_NOT_COMPLETED",
+        "Local artifact repairs exhausted their progress window; Assessment must hand the unresolved boundary to Recovery.", 422,
+        { reason: "artifact_repair_no_progress", repairExhausted: true, feedback: evaluation.feedback,
+          repairCheckpoint: input.repairCheckpoint,
+          ...(evaluation.failedBoundary === undefined ? {} : { failedBoundary: evaluation.failedBoundary }) }),
+      input.step, input.output, evaluation);
     }
     await stopRepeatedAssessmentWithoutNewEvidence({
       step: input.step,
@@ -957,6 +972,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     return undefined;
   };
   let lastModelStep = 0;
+  const artifactRepairProgress = new ArtifactRepairProgress();
+  let repairEvidenceOffset = 0;
   const automaticArtifactAcceptanceAttempts = new Set<string>();
   try {
   for (let step = 1 + (options.initialModelSteps ?? 0); step <= currentLimit(); step += 1) {
@@ -984,6 +1001,32 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       toolEvidence,
       ...(workProductFacts === undefined ? {} : { workProducts: workProductFacts }),
     });
+    const repairCheckpoint = artifactRepairProgress.observe({
+      policy: options.progressPolicy, view: currentDecisionView,
+      latestEvidence: toolEvidence.slice(repairEvidenceOffset),
+      toolEffect: name => options.tools.effectOf(name),
+      toolCall: id => messages.flatMap(message => message.role === "assistant" ? message.toolCalls ?? [] : []).find(call => call.id === id),
+    });
+    repairEvidenceOffset = toolEvidence.length;
+    if (repairCheckpoint?.warning) {
+      const feedback = artifactRepairCheckpointAdvice(repairCheckpoint);
+      await emit({ type: "loop.artifact_repair_checkpoint", data: {
+        step, reason: "artifact_repair_no_progress", ...repairCheckpoint,
+        decisionBasisDigest: currentDecisionView.identity.decisionBasisDigest,
+      } });
+      if (repairCheckpoint.assessmentRequired) {
+        if (options.evaluateCandidate === undefined) throw new AppError("STEP_NOT_COMPLETED", feedback, 422, {
+          reason: "artifact_repair_no_progress", repairExhausted: true, repairCheckpoint,
+        });
+        const completion = await evaluateToolBackedCandidate({
+          step: Math.max(1, step - 1), output: "The requested artifact is not yet complete. Local repair attempts have not established a repaired deliverable; the committed intermediate files and diagnostic Results remain available for recovery.",
+          projectedToolEvidence: contextAssembler.projectToolEvidence(messages, toolEvidence),
+          stepSemanticFrame: options.stepSemanticFrame, rejectionDirective: feedback, repairCheckpoint,
+        });
+        if (completion !== undefined) return completion;
+      }
+      contextAssembler.setRuntimeDirective(feedback);
+    }
     const missingToolEvidenceKinds = stepEvidenceState?.missingToolEvidenceKinds ?? [];
     const canConvergeFromCurrentEvidence = missingToolEvidenceKinds.length === 0
       && stepEvidenceState?.pendingComputation === undefined
@@ -1015,9 +1058,20 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       );
     // Materialize before selecting the completion boundary so the same grant
     // snapshot owns both model visibility and call preparation.
+    if (outputBudgetState.consecutiveTruncations >= 3) { stalled = true; break; }
+    const turnMaxOutputTokens = convergenceOnly
+      ? Math.min(convergenceMaxOutputTokens, options.model.limits.maxOutputTokens)
+      : outputBudgetState.shrinkCount > 0
+        ? Math.min(LENGTH_REPAIR_MAX_OUTPUT_TOKENS, options.model.limits.maxOutputTokens)
+        : options.model.limits.maxOutputTokens;
+    const contentBudget = toolContentBudget(turnMaxOutputTokens, outputBudgetState, options.contentBudgetPolicy);
     const grantedMaterialized = options.tools.materialize(options.grant, {
       decisionLedger: options.runtimeContext?.decisionLedger,
+      contentBudget,
     });
+    contextAssembler.setAuthoringContext(boundedAuthoringContext(
+      grantedMaterialized.boundedContentTools, contentBudget, outputBudgetState, toolEvidence,
+    ));
     const completionPreparationDefinitions = convergenceOnly
       ? grantedMaterialized.completionPreparationDefinitions
       : [];
@@ -1135,6 +1189,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         preferredToolCount: stepExecutionDecision.toolCatalog.preferredToolNames.length,
         deprioritizedToolGroupCount: stepExecutionDecision.toolCatalog.deprioritizedToolGroups.length,
         promptProjectionMode: stepExecutionDecision.promptProjection.mode,
+          ...(grantedMaterialized.boundedContentTools.size === 0 ? {} : { contentBudget }),
         currentDecision: {
           ...currentDecisionView.identity,
           nextAction: currentDecisionView.nextAction,
@@ -1343,11 +1398,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         messages: assembly.messages,
         tools: modelStepDefinitions,
         ...(modelStepDefinitions.length === 0 ? {} : { toolChoice: "auto" as const }),
-        maxOutputTokens: convergenceOnly
-          ? Math.min(convergenceMaxOutputTokens, options.model.limits.maxOutputTokens)
-          : consecutiveLengthTruncationSteps > 0
-            ? Math.min(LENGTH_REPAIR_MAX_OUTPUT_TOKENS, options.model.limits.maxOutputTokens)
-            : options.model.limits.maxOutputTokens,
+        maxOutputTokens: turnMaxOutputTokens,
       };
       earlyOutcomes = new Map<string, ToolOutcome>();
       response = await completeWithStreamingAndDispatch({
@@ -1467,10 +1518,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       ].join("\n"));
       continue;
     }
-    if (response.finishReason !== "length") {
-      previousLengthTruncationSignature = undefined;
-      consecutiveLengthTruncationSteps = 0;
-    }
     // A length-truncated response can contain an incomplete native tool call.
     // Only calls that a provider explicitly marked ready may have executed, so
     // never carry the remaining calls into the next provider-native transcript.
@@ -1478,6 +1525,28 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const replayableToolCalls = response.finishReason === "length"
       ? response.toolCalls.filter((call) => earlyOutcomes.has(call.id))
       : response.toolCalls;
+
+    // Persist budget recovery before the assistant checkpoint so an interruption
+    // cannot retain a truncated turn while losing its reduced authoring budget.
+    if (response.finishReason === "length") {
+      const committedProgress = [...earlyOutcomes.values()].some(outcome => !outcome.isError && outcome.operationStatus === "succeeded"
+        && (grantedMaterialized.boundedContentTools.size === 0 || options.tools.effectOf(outcome.call.name) === "write"));
+      outputBudgetState = {
+        shrinkCount: outputBudgetState.shrinkCount + 1,
+        consecutiveTruncations: committedProgress ? 0 : outputBudgetState.consecutiveTruncations + 1,
+      };
+      await emit({ type: "loop.output_budget.updated", data: {
+        step, schema: "agentloop.outputBudgetState/v1", ...outputBudgetState,
+        reason: "output_truncated", maxOutputTokens: turnMaxOutputTokens,
+        nextContentBudget: toolContentBudget(Math.min(LENGTH_REPAIR_MAX_OUTPUT_TOKENS, options.model.limits.maxOutputTokens), outputBudgetState, options.contentBudgetPolicy),
+      } });
+      if (outputBudgetState.consecutiveTruncations > 1) {
+        await emit({ type: "loop.no_progress", data: {
+          step, phase: "execution", reason: "The model repeated an output-truncated Tool call or completion without producing an executable bounded action",
+          stalled: outputBudgetState.consecutiveTruncations >= 3,
+        } });
+      }
+    }
 
     // This awaited event is the durable checkpoint before any external effect.
     await emit({
@@ -1517,6 +1586,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         const feedback = `Completion candidate was not accepted because the model finished with ${response.finishReason}`;
         await emit({ type: "candidate.rejected", data: { step, output: response.content, feedback } });
         removeRejectedAssistantCandidate(messages, assistantMessage);
+        if (outputBudgetState.consecutiveTruncations >= 3) { stalled = true; break; }
         await grantCandidateRepairGrace(step, feedback);
         contextAssembler.setRuntimeDirective(lengthTruncationRepairDirective({
           feedback,
@@ -1880,6 +1950,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         }
       }
     }
+    if (response.finishReason !== "length" && outcomes.some(outcome => !outcome.isError && outcome.operationStatus === "succeeded"
+      && (grantedMaterialized.boundedContentTools.size === 0 || options.tools.effectOf(outcome.call.name) === "write"))
+      && outputBudgetState.consecutiveTruncations > 0) {
+      outputBudgetState = { ...outputBudgetState, consecutiveTruncations: 0 };
+      await emit({ type: "loop.output_budget.updated", data: {
+        step, schema: "agentloop.outputBudgetState/v1", ...outputBudgetState, reason: "committed_tool_progress",
+      } });
+    }
     const enrichment = await options.enrichRuntimeContext?.({ toolEvidence, latestToolEvidence });
     if (enrichment !== undefined) {
       const applied = contextAssembler.applyRuntimePromptAugmentations(enrichment.augmentations);
@@ -1924,29 +2002,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     // model can repeat the same oversized call until the Run budget expires.
     // Keep the full admitted catalog; this is a strategy repair, not a new
     // authorization boundary.
-    if (response.finishReason === "length" && outcomes.every((outcome) => outcome.isError)) {
-      const feedback = "The previous execution turn reached the output limit before any requested Tool call could execute";
-      const lengthTruncationSignature = signatureForLengthTruncatedToolCalls(response.toolCalls);
-      if (lengthTruncationSignature !== undefined && lengthTruncationSignature === previousLengthTruncationSignature) {
-        consecutiveLengthTruncationSteps += 1;
-      } else {
-        previousLengthTruncationSignature = lengthTruncationSignature;
-        consecutiveLengthTruncationSteps = 1;
-      }
-      const repeatedLengthTruncation = consecutiveLengthTruncationSteps > 1;
-      if (repeatedLengthTruncation) {
-        await emit({
-          type: "loop.no_progress",
-          data: {
-            step,
-            phase: "execution",
-            toolSignature: lengthTruncationSignature ?? "length_truncated_tool_call",
-            reason: "The model repeated an output-truncated Tool call without producing an executable bounded action",
-            stalled: consecutiveLengthTruncationSteps >= 3,
-          },
-        });
-      }
-      if (consecutiveLengthTruncationSteps >= 3) {
+    if (response.finishReason === "length") {
+      const feedback = "The previous execution turn reached the output limit. Only Tool calls with committed successful receipts contributed content; every rejected incomplete call contributed nothing";
+      if (outputBudgetState.consecutiveTruncations >= 3) {
         stalled = true;
         break;
       }
@@ -1955,7 +2013,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         feedback,
         convergenceOnly,
         toolAvailable: modelStepDefinitions.length > 0,
-        repeated: repeatedLengthTruncation,
+        repeated: outputBudgetState.consecutiveTruncations > 1,
       }));
       continue;
     }
@@ -2084,7 +2142,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         await emit({ type: "loop.no_progress", data: {
           step, phase: "execution", reason: "pending_computation_execution",
           failedToolCallId: pendingComputation.toolCallId,
-          ...(pendingComputation.sourcePath === undefined ? {} : { sourcePath: pendingComputation.sourcePath }),
           sourceMutationCount: pendingComputation.sourceMutationCount,
           computationRewriteTurns, stalled: computationRewriteTurns >= 3,
         } });
@@ -3019,9 +3076,9 @@ interface StreamingDispatchContext {
 /**
  * Prefer the model adapter's streaming path. As each tool call's arguments
  * complete (`tool_call_ready`), the call is durably committed through
- * `assistant.tool_call.committed` and, when no progress policy must admit the
- * whole tool batch first, dispatched through a bounded pool while the remainder
- * of the stream is still being consumed (OpenCode-style overlap).
+ * `assistant.tool_call.committed` and admitted through the same bounded,
+ * exclusive-aware scheduler as non-streamed calls while the remainder of the
+ * provider stream is still being consumed.
  * Resolves to the same aggregated ModelResponse; the caller still emits the
  * full `assistant.committed` checkpoint after this resolves.
  */
@@ -3029,8 +3086,18 @@ async function completeWithStreamingAndDispatch(
   context: StreamingDispatchContext,
   earlyOutcomes: Map<string, ToolOutcome>,
 ): Promise<ModelResponse> {
-  const limiter = createConcurrencyLimiter(Math.max(1, context.maxParallelToolCalls));
+  const schedule = createPreparedToolScheduler(context.grant, context.step, context.emit, context.signal,
+    context.maxToolResultCharacters, context.maxParallelToolCalls, context.actionTracker);
   const dispatches: Array<Promise<void>> = [];
+  // Normalize and prepare in source order, without blocking consumption of the
+  // provider stream or waiting for earlier Tool effects to finish.
+  let preparationTail = Promise.resolve();
+  const track = (dispatch: Promise<void>): void => {
+    dispatches.push(dispatch);
+    // Observe failures immediately, then drain every admitted operation before
+    // propagating them at the turn boundary.
+    void dispatch.catch(() => undefined);
+  };
   const readyCalls = new Map<string, ModelToolCall>();
   const earlyAdmittedCalls = new Map<string, number>();
 
@@ -3040,7 +3107,7 @@ async function completeWithStreamingAndDispatch(
     const admittedCalls = earlyAdmittedCalls.get(call.name) ?? 0;
     if (limit !== undefined && priorCalls + admittedCalls >= limit) {
       const message = `Tool call limit reached for ${call.name}: at most ${limit} call(s) are allowed for this Plan step`;
-      dispatches.push((async () => {
+      track((async () => {
         await context.emit({
           type: "tool.rejected",
           data: {
@@ -3066,55 +3133,45 @@ async function completeWithStreamingAndDispatch(
       return;
     }
     earlyAdmittedCalls.set(call.name, admittedCalls + 1);
-    dispatches.push((async () => {
-      await limiter.acquire();
+    const prepared = preparationTail.then(async (): Promise<PreparedEntry> => {
+      let entry: PreparedEntry;
       try {
-        let entry: PreparedEntry;
-        try {
-          const normalizedCall = await context.normalizeToolCall(call);
-          const value = context.prepare(normalizedCall);
-          await context.emit({
-            type: "tool.planned",
-            data: {
-              step: context.step,
-              toolCallId: normalizedCall.id,
-              toolName: normalizedCall.name,
-              arguments: normalizedCall.arguments,
-              replaySafe: value.tool.replaySafe,
-            },
-          });
-          entry = { kind: "ready", value };
-        } catch (error) {
-          const message = publicErrorMessage(error);
-          await context.emit({
-            type: "tool.rejected",
-            data: {
-              step: context.step,
-              toolCallId: call.id,
-              toolName: call.name,
-              reason: message,
-              invocationStatus: "rejected",
-              operationStatus: "unknown",
-              isError: true,
-              failurePhase: "prepare",
-            },
-          });
-          entry = { kind: "rejected", call, message };
-        }
-        const outcome = await executePrepared(
-          entry,
-          context.grant,
-          context.step,
-          context.emit,
-          context.signal,
-          context.maxToolResultCharacters,
-          context.actionTracker,
-        );
-        earlyOutcomes.set(call.id, outcome);
-      } finally {
-        limiter.release();
+        const normalizedCall = await context.normalizeToolCall(call);
+        const value = context.prepare(normalizedCall);
+        await context.emit({
+          type: "tool.planned",
+          data: {
+            step: context.step,
+            toolCallId: normalizedCall.id,
+            toolName: normalizedCall.name,
+            arguments: normalizedCall.arguments,
+            replaySafe: value.tool.replaySafe,
+          },
+        });
+        entry = { kind: "ready", value };
+      } catch (error) {
+        const message = publicErrorMessage(error);
+        await context.emit({
+          type: "tool.rejected",
+          data: {
+            step: context.step,
+            toolCallId: call.id,
+            toolName: call.name,
+            reason: message,
+            invocationStatus: "rejected",
+            operationStatus: "unknown",
+            isError: true,
+            failurePhase: "prepare",
+          },
+        });
+        entry = { kind: "rejected", call, message };
       }
-    })());
+      return entry;
+    });
+    preparationTail = prepared.then(() => undefined, () => undefined);
+    track(prepared.then(schedule).then((outcome) => {
+      earlyOutcomes.set(call.id, outcome);
+    }));
   };
 
   let response: ModelResponse;
@@ -3158,7 +3215,7 @@ async function completeWithStreamingAndDispatch(
       },
     });
   } catch (error) {
-    await Promise.all(dispatches);
+    await settleToolDispatches(dispatches);
     const recoveredCalls = [...readyCalls.values()].filter((call) => earlyOutcomes.get(call.id)?.failurePhase !== "prepare");
     if (!isRecoverableToolReadyStreamAbort(error) || recoveredCalls.length === 0) throw error;
     await context.emit({
@@ -3173,7 +3230,7 @@ async function completeWithStreamingAndDispatch(
     return { content: "", finishReason: "tool_calls", toolCalls: recoveredCalls };
   }
 
-  await Promise.all(dispatches);
+  await settleToolDispatches(dispatches);
   return response;
 }
 
@@ -3193,28 +3250,30 @@ async function executePreparedSchedule(
   concurrency: number,
   actionTracker: AgentLoopOptions["actionTracker"],
 ): Promise<ToolOutcome[]> {
-  const outcomes: ToolOutcome[] = [];
-  let next = 0;
-  while (next < entries.length) {
-    const first = entries[next];
-    if (first.kind === "ready" && first.value.tool.executionMode === "exclusive") {
-      outcomes.push(await executePrepared(first, grant, step, emit, signal, maxCharacters, actionTracker));
-      next += 1;
-      continue;
-    }
-    const group: PreparedEntry[] = [];
-    while (next < entries.length) {
-      const entry = entries[next];
-      if (group.length > 0 && entry.kind === "ready" && entry.value.tool.executionMode === "exclusive") break;
-      if (group.length === 0 && entry.kind === "ready" && entry.value.tool.executionMode === "exclusive") break;
-      group.push(entry);
-      next += 1;
-    }
-    outcomes.push(...await mapWithConcurrencyLimit(group, concurrency, (entry) =>
-      executePrepared(entry, grant, step, emit, signal, maxCharacters, actionTracker)
-    ));
-  }
-  return outcomes;
+  const schedule = createPreparedToolScheduler(grant, step, emit, signal, maxCharacters, concurrency, actionTracker);
+  return settleToolDispatches(entries.map(schedule));
+}
+
+async function settleToolDispatches<T>(dispatches: readonly Promise<T>[]): Promise<T[]> {
+  const settled = await Promise.allSettled(dispatches);
+  return settled.map((item) => {
+    if (item.status === "rejected") throw item.reason;
+    return item.value;
+  });
+}
+
+function createPreparedToolScheduler(
+  grant: CapabilityGrant,
+  step: number,
+  emit: RuntimeEventSink,
+  signal: AbortSignal | undefined,
+  maxCharacters: number,
+  concurrency: number,
+  actionTracker: AgentLoopOptions["actionTracker"],
+): (entry: PreparedEntry) => Promise<ToolOutcome> {
+  const scheduler = new OrderedExecutionScheduler(Math.max(1, concurrency));
+  return (entry) => scheduler.schedule(entry.kind === "ready" ? entry.value.tool.executionMode : "parallel", () =>
+    executePrepared(entry, grant, step, emit, signal, maxCharacters, actionTracker));
 }
 
 async function executePrepared(
@@ -3496,22 +3555,12 @@ function lengthTruncationRepairDirective(input: {
     "Do not repeat the same oversized native Tool arguments. Select an action whose complete arguments fit within the output budget; for larger deliverables, use the available bounded creation, patch, or generator workflow instead of embedding the full payload in one call.",
     ...(input.repeated === true ? [
       "The same Tool call has already been truncated more than once. Change the call shape now; repeating it will stop this Run.",
-      "For computer_write_file, write a bounded chunk with mode=create, then continue with separate mode=append calls using the same path. Keep every chunk within the Tool schema's content limit and do not attempt the full artifact in one call.",
     ] : []),
-    "If the requested artifact is incomplete, call a file-producing Tool with the complete intended content or use a purpose-built materialization Tool; do not publish a partial file as the deliverable.",
+    "The next turn has a smaller content budget. Follow the Tool's bounded authoring and continuation instructions immediately: for a new file create one complete small chunk, then append separate chunks to the same path from the last committed receipt. Never recreate committed content or execute incomplete native arguments.",
+    "If the requested artifact is incomplete, produce only the next bounded chunk or use an available materialization Tool. Complete the requested content across successful calls before publishing the deliverable.",
     "If the artifact appears complete but lacks acceptance evidence, call the available acceptance or verification Tool.",
     "Use read-only Tools only for one specifically missing fact that is not already available from recent evidence.",
   ].join("\n");
-}
-
-function signatureForLengthTruncatedToolCalls(calls: readonly ModelToolCall[]): string | undefined {
-  if (calls.length === 0) return undefined;
-  return calls.map((call) => {
-    const argumentsValue = typeof call.arguments === "string"
-      ? call.arguments
-      : JSON.stringify(call.arguments) ?? String(call.arguments);
-    return `${call.name}:${typeof call.arguments}:${argumentsValue.length}:${argumentsValue.slice(0, 256)}`;
-  }).join("|");
 }
 
 function humanLoopRequirementFromEvidence(evidence: readonly AgentLoopToolEvidence[]): { toolCallId: string; requirement: Record<string, unknown> } | undefined {
@@ -3865,6 +3914,10 @@ function omitUndefinedRecord(value: Record<string, unknown>): Record<string, unk
 }
 
 function publicErrorMessage(error: unknown): string {
+  if (error instanceof AppError && error.details?.patchRecovery !== undefined) {
+    return JSON.stringify({ error: `${error.code}: ${error.message}`, failureKind: error.details.failureKind,
+      patchRecovery: error.details.patchRecovery });
+  }
   if (error instanceof AppError) return `${error.code}: ${error.message}`;
   if (error instanceof Error && error.name === "AbortError") return "CANCELLED: Operation was cancelled";
   return "INTERNAL_ERROR: Tool execution failed";

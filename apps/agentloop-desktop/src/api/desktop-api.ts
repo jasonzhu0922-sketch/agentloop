@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { AppError } from "@zhujun/agentloop";
+import { AppError, MODEL_CONFIGURATION_EDITOR_SCHEMA } from "@zhujun/agentloop";
 import type { LocalRuntimeManager, ManagedLocalRuntime, LocalModelConfigurationInput, LocalExecutionContext } from "@zhujun/agentloop-local-runtime";
 import { assertLoopback, assertWriteOrigin, AccountSessions, HttpError, securityHeaders } from "../security/loopback.ts";
 import type { CloudAuthPort } from "../auth/cloud-auth.ts";
@@ -190,11 +190,15 @@ export class DesktopApi {
         const path = selected ? await this.accounts.grantSelectedStorage(context.ownerUserId, selected, body.kind) : undefined;
         json(response, 200, { path: path ?? null }); return;
       }
+      if (request.method === "GET" && url.pathname === "/api/model-configuration/schema") {
+        json(response, 200, MODEL_CONFIGURATION_EDITOR_SCHEMA); return;
+      }
       if (request.method === "GET" && url.pathname === "/api/model-configuration") {
         json(response, 200, await manager.modelConfiguration()); return;
       }
-      if (request.method === "POST" && url.pathname === "/api/model-configuration") {
-        const body = await readJson(request); fields(body, ["configuration", "revision"]);
+      if (request.method === "POST" && ["/api/model-configuration", "/api/model-configuration/test"].includes(url.pathname)) {
+        const testing = url.pathname.endsWith("/test");
+        const body = await readJson(request); fields(body, testing ? ["configuration", "revision", "modelKey"] : ["configuration", "revision"]);
         const input = body.configuration as LocalModelConfigurationInput;
         // Same model egress policy as the environment-configured CLI. This is
         // independent of the loopback-only Desktop listener and its auth gates.
@@ -202,7 +206,9 @@ export class DesktopApi {
         for (const provider of input.providers) {
           try { modelEndpoint(provider?.baseUrl); } catch { throw new HttpError(400, "model_endpoint_invalid"); }
         }
-        try { json(response, 200, await manager.configureModels(input, text(body, "revision", 64))); }
+        try { json(response, 200, testing
+          ? await manager.testModel(input, text(body, "revision", 64), text(body, "modelKey", 100))
+          : await manager.configureModels(input, text(body, "revision", 64))); }
         catch (error) { if (error instanceof TypeError) throw new HttpError(400, "model_configuration_invalid"); throw error; }
         return;
       }

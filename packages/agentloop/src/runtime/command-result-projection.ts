@@ -33,6 +33,7 @@ export function projectCommandResult(value: unknown): Record<string, unknown> | 
     evidenceReceipt: result.evidenceReceipt,
     computationReceipt: result.computationReceipt,
     computationEvidenceError: result.computationEvidenceError,
+    computationEvidenceFailure: result.computationEvidenceFailure,
     computationObservation: result.computationObservation,
     workflowEvidenceReceipt: result.workflowEvidenceReceipt,
     // Only the executor may promote Skill-root control signals. Raw stdout is content.

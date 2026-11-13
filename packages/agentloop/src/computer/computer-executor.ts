@@ -92,6 +92,11 @@ interface CommandComputationInput {
   readonly path: string;
 }
 
+interface CommandComputationFailure {
+  readonly kind: "missing_inputs" | "input_changed" | "command_failed" | "truncated_output" | "binding_mismatch" | "invalid_output";
+  readonly remedy: "repair_command_contract" | "repair_computation_binding" | "repair_computation";
+}
+
 interface CapturedCommandComputationInput {
   readonly path: string;
   readonly sha256: string;
@@ -197,6 +202,7 @@ interface WrittenFileInspection {
   readonly outline: readonly WrittenFileOutlineEntry[];
   readonly outlineTruncated: boolean;
   readonly sampleRanges: readonly WrittenFileSampleRange[];
+  readonly tail: { readonly characterOffset: number; readonly content: string };
 }
 
 interface WrittenFileOutlineEntry {
@@ -494,8 +500,8 @@ export class ComputerExecutor {
   }
 
   /**
-   * File content hashes remain server-only. Callers receive an opaque handle
-   * which is bound to this Run namespace and the resolved workspace path.
+   * Revision records remain server-only. Callers use an opaque handle bound
+   * to this Run namespace and path; a reported hash cannot replace the handle.
    */
   private async issueFileRevision(
     file: ResolvedReadableFile,
@@ -1367,10 +1373,55 @@ export class ComputerExecutor {
     const beforeContent = await fs.readFile(target, "utf8");
     if (beforeContent.includes("\0")) throw badRequest("Patch target must be a UTF-8 text file");
     const beforeInspection = inspectWrittenText(beforeContent);
-    await this.assertCurrentFileRevision(input.baseRevisionId, workspacePath, beforeInspection.sha256);
     const beforeLines = splitTextLines(beforeContent);
-    const resolvedHunks = input.hunks.map((hunk, index) => {
-      if (hunk.startLine !== undefined) return hunk as PatchFileHunkInput & { startLine: number };
+    const patchFailure = async (error: AppError): Promise<AppError> => {
+      // Bind the recovery read to the same bytes as its revision. Never turn a
+      // failed precondition into an automatic write or silently rebase a hunk.
+      if (await sha256File(target) !== beforeInspection.sha256) return error;
+      const revision = await this.issueFileRevision({ absolutePath: canonicalTarget, workspacePath }, beforeInspection.sha256);
+      let remainingCharacters = 12_000;
+      const failedHunkIndex = error.details?.hunkIndex;
+      const hunkIndices = [...new Set([
+        ...(typeof failedHunkIndex === "number" && input.hunks[failedHunkIndex] !== undefined ? [failedHunkIndex] : []),
+        ...input.hunks.map((_, index) => index),
+      ])].slice(0, 4);
+      const hunks = hunkIndices.map(hunkIndex => {
+        const hunk = input.hunks[hunkIndex]!;
+        const candidateStartLines: number[] = [];
+        if (hunk.expectedLines.length > 0) {
+          for (let index = 0; index <= beforeLines.length - hunk.expectedLines.length; index += 1) {
+            if (linesEqual(beforeLines.slice(index, index + hunk.expectedLines.length), hunk.expectedLines)) candidateStartLines.push(index + 1);
+            if (candidateStartLines.length === 21) break;
+          }
+        }
+        const locations = [...new Set([...(hunk.startLine === undefined ? [] : [hunk.startLine]), ...candidateStartLines.slice(0, 3)])];
+        const ranges = locations.map(line => {
+          const startLine = Math.max(1, Math.min(line - 2, beforeLines.length));
+          const endLine = Math.min(beforeLines.length, startLine + Math.min(hunk.expectedLines.length + 4, 20) - 1);
+          const text = beforeLines.slice(startLine - 1, endLine).join("\n");
+          const content = text.slice(0, Math.max(0, remainingCharacters));
+          remainingCharacters -= content.length;
+          return { startLine, endLine, content, truncated: content.length < text.length };
+        });
+        return { hunkIndex, candidateStartLines, matchCount: candidateStartLines.length,
+          matchesTruncated: candidateStartLines.length === 21, ranges };
+      });
+      return new AppError(error.code, error.message, error.status, { ...error.details,
+        patchRecovery: { schema: "agentloop.patchRecovery/v1", path: workspacePath,
+          current: { ...revision, sha256: beforeInspection.sha256, totalLines: beforeLines.length },
+          hunks, hunksTruncated: input.hunks.length > hunks.length,
+          instruction: "Review the current content and form new hunks using current.revisionId. Never replay old hunks just by replacing their revision. Use match=unique only for an exact block with one match; read the target when the supplied ranges are insufficient." },
+      });
+    };
+    try {
+      await this.assertCurrentFileRevision(input.baseRevisionId, workspacePath, beforeInspection.sha256);
+    } catch (error) {
+      if (error instanceof AppError && error.code === "CONFLICT" && this.fileRevisionScope !== undefined) throw await patchFailure(error);
+      throw error;
+    }
+    const resolvedHunks = [] as Array<PatchFileHunkInput & { startLine: number }>;
+    for (const [index, hunk] of input.hunks.entries()) {
+      if (hunk.startLine !== undefined) { resolvedHunks.push(hunk as PatchFileHunkInput & { startLine: number }); continue; }
       if (hunk.match !== "unique" || hunk.expectedLines.length === 0) {
         throw badRequest(`hunks[${index}] must provide startLine, or match="unique" with non-empty expectedLines`);
       }
@@ -1383,7 +1434,7 @@ export class ComputerExecutor {
       }
       if (candidateStartLines.length !== 1) {
         const count = candidateStartLines.length > 20 ? ">20" : String(candidateStartLines.length);
-        throw conflict(
+        throw await patchFailure(conflict(
           `Patch precondition failed: unique expectedLines match ${count} locations at hunks[${index}]; reread the target and provide a unique anchor`,
           {
             failureKind: "patch_anchor_not_unique",
@@ -1391,10 +1442,10 @@ export class ComputerExecutor {
             matchCount: candidateStartLines.length > 20 ? 21 : candidateStartLines.length,
             candidateStartLines,
           },
-        );
+        ));
       }
-      return { ...hunk, startLine: candidateStartLines[0] };
-    });
+      resolvedHunks.push({ ...hunk, startLine: candidateStartLines[0] });
+    }
     let previousStartLine = 0;
     let previousEndLineExclusive = 0;
     for (const [index, hunk] of resolvedHunks.entries()) {
@@ -1408,12 +1459,12 @@ export class ComputerExecutor {
       const firstLineIndex = hunk.startLine - 1;
       const actualLines = beforeLines.slice(firstLineIndex, firstLineIndex + hunk.expectedLines.length);
       if (!linesEqual(actualLines, hunk.expectedLines)) {
-        throw conflict(`Patch precondition failed: expectedLines do not match the current file at hunks[${index}]; reread the target before patching`, {
+        throw await patchFailure(conflict(`Patch precondition failed: expectedLines do not match the current file at hunks[${index}]; reread the target before patching`, {
           failureKind: "patch_expected_lines_mismatch",
           hunkIndex: index,
           startLine: hunk.startLine,
           expectedLineCount: hunk.expectedLines.length,
-        });
+        }));
       }
       previousStartLine = hunk.startLine;
       previousEndLineExclusive = endLineExclusive;
@@ -1488,6 +1539,7 @@ export class ComputerExecutor {
     computationReceipt?: Record<string, unknown>;
     workflowEvidenceReceipt?: Record<string, unknown>;
     computationEvidenceError?: string;
+    computationEvidenceFailure?: CommandComputationFailure;
     /** Facts parsed from a computation envelope whose source binding was not accepted. */
     computationObservation?: Record<string, unknown>;
     executionReceipt: {
@@ -1523,6 +1575,19 @@ export class ComputerExecutor {
     await this.assertCommandArgumentsDoNotEscape(args, cwdResolution);
     const cwd = cwdResolution.path;
     if (!(await fs.stat(cwd)).isDirectory()) throw badRequest("cwd must be a directory");
+    const executable = basename(this.executableAliases.get(input.command) ?? input.command).replace(/\.exe$/iu, "");
+    if (isSourceFileInterpreter(executable) && !args.some(arg => ["-e", "--eval", "-c", "-m", "-"].includes(arg))) {
+      const entrypoint = args.find(arg => !arg.startsWith("-") && isPotentialEntrypointPath(arg));
+      if (entrypoint !== undefined) {
+        const entrypointPath = await fs.realpath(resolve(cwd, entrypoint)).catch(() => undefined);
+        for (const source of input.computationInputs ?? []) {
+          const sourcePath = await this.resolveReadablePath(source.path);
+          if (sourcePath.absolutePath === entrypointPath) {
+            throw badRequest("The executable entrypoint is not a computation data input; omit it from computationInputs. Generation and in-place transformation use execution/file-change receipts.");
+          }
+        }
+      }
+    }
     await this.captureCommandComputationInputs(input.computationInputs ?? []);
   }
 
@@ -1551,6 +1616,7 @@ export class ComputerExecutor {
     computationReceipt?: Record<string, unknown>;
     workflowEvidenceReceipt?: Record<string, unknown>;
     computationEvidenceError?: string;
+    computationEvidenceFailure?: CommandComputationFailure;
     computationObservation?: Record<string, unknown>;
     executionReceipt: {
       schema: "agentloop.commandExecutionReceipt/v1";
@@ -1707,6 +1773,7 @@ export class ComputerExecutor {
               ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
               ...(computationEvidence.receipt === undefined ? {} : { computationReceipt: computationEvidence.receipt }),
               ...(computationEvidence.error === undefined ? {} : { computationEvidenceError: computationEvidence.error }),
+              ...(computationEvidence.failure === undefined ? {} : { computationEvidenceFailure: computationEvidence.failure }),
               ...(computationEvidence.observation === undefined ? {} : { computationObservation: computationEvidence.observation }),
               ...(workflowEvidence === undefined ? {} : { workflowEvidenceReceipt: workflowEvidence }),
             });
@@ -1744,6 +1811,7 @@ export class ComputerExecutor {
   }): Promise<{
     readonly receipt?: Record<string, unknown>;
     readonly error?: string;
+    readonly failure?: CommandComputationFailure;
     readonly observation?: Record<string, unknown>;
   }> {
     const observed = parseCommandComputationObservation(input.stdout);
@@ -1770,29 +1838,31 @@ export class ComputerExecutor {
       // authorized, hashable source declaration.
       if (parseJsonRecord(input.stdout)?.schema === "agentloop.commandComputation/v1") {
         return {
-          error: "Command declared agentloop.commandComputation/v1 but did not pass computationInputs. Rerun with the exact source files in computationInputs, and emit inputRefs (not inputs) with those same paths in stdout; Runtime cannot verify computation input/output provenance without source identity.",
+          failure: { kind: "missing_inputs", remedy: "repair_command_contract" },
+          error: "Command declared agentloop.commandComputation/v1 but did not pass computationInputs. Inspect exitCode and fileChanges before deciding whether another execution is needed. Generation and in-place transformation use operation receipts; only immutable-input computation should declare exact data files in computationInputs and emit inputRefs (not inputs) with those same paths in stdout. Runtime cannot authenticate derived facts without source identity.",
           ...(observation === undefined ? {} : { observation }),
         };
       }
       return {};
     }
     if (input.exitCode !== 0 || input.signal !== null) {
-      return { error: "Command did not succeed, so computation provenance cannot be verified." };
+      return { error: "Command did not succeed, so computation provenance cannot be verified.", failure: { kind: "command_failed", remedy: "repair_computation" } };
     }
     if (input.truncated) {
-      return { error: "Command stdout was truncated, so its computation artifact cannot be bound." };
+      return { error: "Command stdout was truncated, so its computation artifact cannot be bound.", failure: { kind: "truncated_output", remedy: "repair_computation" } };
     }
     for (const source of input.inputs) {
-      const resolved = await this.resolveReadablePath(source.path);
-      const currentSha256 = await sha256File(resolved.absolutePath);
+      const currentSha256 = await this.resolveReadablePath(source.path).then(resolved => sha256File(resolved.absolutePath)).catch(() => undefined);
       if (currentSha256 !== source.sha256) {
-        return { error: `Computation input changed during command execution: ${source.path}` };
+        return { error: `Computation input changed during command execution: ${source.path}. The operation may have succeeded, but this is not an immutable-input computation. Inspect fileChanges; use a transformation receipt for in-place edits, or repair the computation to preserve its declared source.`,
+          failure: { kind: "input_changed", remedy: "repair_command_contract" } };
       }
     }
     const artifact = parseCommandComputationArtifact(input.stdout, input.inputs);
     if (artifact === undefined) {
       const mismatch = observed !== undefined && !samePaths(observed.inputRefs, declaredInputPaths);
       return {
+        failure: { kind: mismatch ? "binding_mismatch" : "invalid_output", remedy: mismatch ? "repair_computation_binding" : "repair_computation" },
         error: mismatch
           ? `Command computation facts were observed but source binding mismatched. declared computationInputs=${JSON.stringify(declaredInputPaths)}; stdout inputRefs=${JSON.stringify(observed?.inputRefs ?? [])}. Rerun with computationInputs set to the exact stdout inputRefs and emit those same paths in inputRefs; Runtime cannot verify computation input/output provenance until they match.`
           : "No valid agentloop.commandComputation/v1 artifact was found in stdout. Output one JSON document with matching input paths and a non-empty facts object.",
@@ -2341,6 +2411,7 @@ function inspectWrittenText(content: string): WrittenFileInspection {
     outline,
     outlineTruncated: outlineCount > outline.length,
     sampleRanges: writtenFileSampleRanges(lines),
+    tail: { characterOffset: Math.max(0, content.length - 800), content: content.slice(-800) },
   };
 }
 

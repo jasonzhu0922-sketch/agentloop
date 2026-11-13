@@ -1,12 +1,14 @@
 import type { ResolvedLocalModelConfiguration } from "../contracts/host.ts";
 export type { ResolvedLocalModelConfiguration } from "../contracts/host.ts";
-import { LlmProviderRegistry, type AppDatabase, type ModelAdapter } from "@zhujun/agentloop";
+import { LlmProviderRegistry, modelProviderDefinition, modelServicePreset, type ModelServicePresetId, type ModelProviderKind, type ModelReasoning, type AppDatabase, type ModelAdapter } from "@zhujun/agentloop";
 import type { LocalRuntimeSecretStore } from "./local-runtime-configuration-store.ts";
 
 export interface LocalModelProviderInput {
   readonly key: string;
   readonly displayName: string;
   readonly baseUrl: string;
+  readonly kind?: ModelProviderKind;
+  readonly preset?: ModelServicePresetId;
   readonly apiKey?: string;
   readonly credentialConfigured?: boolean;
   readonly models: readonly LocalModelInput[];
@@ -18,6 +20,8 @@ export interface LocalModelInput {
   readonly displayName: string;
   readonly providerModel: string;
   readonly protocol?: "responses" | "chat-completions";
+  readonly reasoning?: ModelReasoning;
+  readonly providerOptions?: Readonly<Record<string, unknown>>;
   readonly contextWindowTokens?: number;
   readonly maxOutputTokens?: number;
   readonly temperature?: number;
@@ -93,26 +97,8 @@ export class LocalModelConfigurationStore {
   }
 
   async write(value: LocalModelConfigurationInput): Promise<LocalModelConfigurationInput> {
-    value = normalizeInput(value);
-    const previous = await this.row();
-    const secretValues: Record<string, string> = {};
-    const previousSecrets = previous?.secret_storage_key ? await this.secrets.read(previous.secret_storage_key) : undefined;
-    const previousProviders = previous === undefined ? [] : (JSON.parse(previous.configuration_json) as LocalModelConfigurationInput).providers;
-    const providers = value.providers.map((provider): LocalModelProviderInput => {
-      const apiKeyEnv = `LOCAL_MODEL_KEY_${provider.key.toUpperCase().replace(/-/g, "_")}`;
-      const previousProvider = previousProviders.find((entry) => entry.key === provider.key);
-      // A saved credential cannot silently move to a newly supplied endpoint.
-      const key = provider.apiKey?.trim() || (previousProvider?.baseUrl === provider.baseUrl ? previousSecrets?.[apiKeyEnv] : undefined);
-      if (key === undefined) throw new TypeError("local_model_api_key_required");
-      if (key !== undefined) secretValues[apiKeyEnv] = key;
-      const { apiKey: _apiKey, ...publicProvider } = provider;
-      return { ...publicProvider, credentialConfigured: key !== undefined };
-    });
-    const registry = registryConfiguration({ ...value, providers });
-    if (registry !== undefined) {
-      try { LlmProviderRegistry.fromConfigObject(registry, secretValues); }
-      catch { throw new TypeError("local_model_configuration_invalid"); }
-    }
+    const { configuration: valueWithCredentials, registry, secretValues } = await this.prepare(value);
+    const providers = valueWithCredentials.providers;
     const secretStorageKey = Object.keys(secretValues).length > 0 ? await this.secrets.write(secretValues) : null;
     const stored: LocalModelConfigurationInput = {
       reuseCloudModels: value.reuseCloudModels,
@@ -132,6 +118,45 @@ export class LocalModelConfigurationStore {
       registryConfig: registry, environment: secretValues,
     };
     return stored;
+  }
+
+  /** Validate and resolve draft credentials without publishing or persisting anything. */
+  private async prepare(value: LocalModelConfigurationInput) {
+    value = normalizeInput(value);
+    const previous = await this.row();
+    const secretValues: Record<string, string> = {};
+    const previousSecrets = previous?.secret_storage_key ? await this.secrets.read(previous.secret_storage_key) : undefined;
+    const previousProviders = previous === undefined ? [] : (JSON.parse(previous.configuration_json) as LocalModelConfigurationInput).providers;
+    const providers = value.providers.map((provider): LocalModelProviderInput => {
+      const apiKeyEnv = `LOCAL_MODEL_KEY_${provider.key.toUpperCase().replace(/-/g, "_")}`;
+      const previousProvider = previousProviders.find((entry) => entry.key === provider.key);
+      // A saved credential cannot silently move to a newly supplied endpoint.
+      const key = provider.apiKey?.trim() || (previousProvider?.baseUrl === provider.baseUrl ? previousSecrets?.[apiKeyEnv] : undefined);
+      if (key === undefined) throw new TypeError("local_model_api_key_required");
+      if (key !== undefined) secretValues[apiKeyEnv] = key;
+      const { apiKey: _apiKey, ...publicProvider } = provider;
+      return { ...publicProvider, credentialConfigured: key !== undefined };
+    });
+    const configuration = { ...value, providers };
+    const registry = registryConfiguration(configuration);
+    if (registry !== undefined) {
+      try { LlmProviderRegistry.fromConfigObject(registry, secretValues); }
+      catch { throw new TypeError("local_model_configuration_invalid"); }
+    }
+    return { configuration, registry, secretValues };
+  }
+
+  async createDraftModelAdapter(value: LocalModelConfigurationInput, modelKey: string): Promise<ModelAdapter> {
+    const { registry, secretValues } = await this.prepare(value);
+    if (!registry) throw new TypeError("local_model_unavailable");
+    const draft = structuredClone(registry) as { models: Record<string, Record<string, unknown>> };
+    const model = draft.models[modelKey];
+    if (!model) throw new TypeError("local_model_unavailable");
+    // Keep generation parameters intact so a probe validates the actual profile.
+    // The manager supplies a hard deadline; retries are disabled for probes.
+    model.timeoutMs = Math.min(Number(model.timeoutMs ?? 120000), 15000);
+    model.maxAttempts = 1;
+    return LlmProviderRegistry.fromConfigObject(draft, secretValues).create(modelKey);
   }
 
   async snapshot(): Promise<LocalModelConfigurationSnapshot> {
@@ -187,9 +212,9 @@ function registryConfiguration(config: LocalModelConfigurationInput): unknown {
   const models: Record<string, unknown> = {};
   for (const provider of activeProviders) {
     providers[provider.key] = {
-      kind: "openai-compatible", baseUrl: provider.baseUrl,
+      kind: provider.kind ?? "openai-compatible", baseUrl: provider.baseUrl,
       apiKeyEnv: `LOCAL_MODEL_KEY_${provider.key.toUpperCase().replace(/-/g, "_")}`,
-      defaultModel: provider.models[0]!.providerModel, protocol: "responses",
+      defaultModel: provider.models[0]!.providerModel, protocol: provider.preset === undefined ? modelProviderDefinition(provider.kind ?? "openai-compatible").defaultProtocol : modelServicePreset(provider.preset).defaultProtocol,
     };
     for (const model of provider.models) {
       const { key, ...configuration } = model;
@@ -209,7 +234,9 @@ function normalizeInput(value: LocalModelConfigurationInput): LocalModelConfigur
   const modelKeys = new Set<string>();
   const providers = (value.providers as readonly LocalModelProviderInput[]).map((provider): LocalModelProviderInput => {
     if (!provider || typeof provider !== "object" || typeof provider.key !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(provider.key) || keys.has(provider.key) || provider.key.length > 80 || !Array.isArray(provider.models) || provider.models.length > 100) throw new TypeError("local_model_configuration_invalid");
-    if (Object.keys(provider).some((key) => !["key", "displayName", "baseUrl", "apiKey", "credentialConfigured", "models"].includes(key))) throw new TypeError("local_model_provider_parameter_unknown");
+    if (Object.keys(provider).some((key) => !["key", "displayName", "baseUrl", "kind", "preset", "apiKey", "credentialConfigured", "models"].includes(key))) throw new TypeError("local_model_provider_parameter_unknown");
+    modelProviderDefinition(provider.kind ?? "openai-compatible");
+    if (provider.preset !== undefined && modelServicePreset(provider.preset).kind !== (provider.kind ?? "openai-compatible")) throw new TypeError("local_model_service_driver_mismatch");
     keys.add(provider.key);
     let url: URL;
     try { url = new URL(provider.baseUrl); } catch { throw new TypeError("local_model_base_url_invalid"); }
@@ -229,6 +256,8 @@ function normalizeInput(value: LocalModelConfigurationInput): LocalModelConfigur
       return { ...model, key: model.key, displayName: text(model.displayName, 100), providerModel: text(model.providerModel, 160) };
     });
     return { key: provider.key, displayName: text(provider.displayName, 100), baseUrl: url.href.replace(/\/$/, ""),
+      ...(provider.kind === undefined ? {} : { kind: provider.kind }),
+      ...(provider.preset === undefined ? {} : { preset: provider.preset }),
       ...(provider.apiKey === undefined ? {} : { apiKey: provider.apiKey.trim() }), models };
   });
   return { reuseCloudModels: value.reuseCloudModels, providers };

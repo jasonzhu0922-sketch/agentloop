@@ -375,3 +375,6 @@ export {
 
 export { RunInputRepository } from "./runtime/run-input-repository.ts";
 export type { RunInputMessage, RunInputStatus } from "./runtime/run-input-repository.ts";
+
+export { MODEL_CONFIGURATION_EDITOR_SCHEMA, MODEL_PROVIDER_DEFINITIONS, MODEL_SERVICE_PRESETS, modelProviderDefinition, modelServicePreset } from "./runtime/model-configuration-schema.ts";
+export type { ModelProviderKind, ModelReasoning, ModelServicePresetId } from "./runtime/model-configuration-schema.ts";

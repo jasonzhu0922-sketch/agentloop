@@ -219,8 +219,7 @@ export function deriveCurrentDecisionView(input: {
   const nextAction = awaitingDecision.some((gap) => gap.suggestedAction === "fail") ? "stop"
     : awaitingDecision.some((gap) => gap.suggestedAction === "ask_user") ? "request_input"
     : awaitingDecision.some((gap) => gap.suggestedAction === "revise_plan") ? "revise_plan"
-    : evidence?.pendingComputation !== undefined && (evidence.nextAction === "execute_authored_computation"
-      || evidence.nextAction === "execute_repaired_computation" || evidence.nextAction === "repair_computation_binding") ? evidence.nextAction
+    : evidence?.pendingComputation !== undefined && (evidence.nextAction === "execute_repaired_computation" || evidence.nextAction === "repair_computation_binding") ? evidence.nextAction
     : awaitingDecision.some((gap) => gap.missingEvidenceKinds.length > 0) ? "resolve_evidence_gap"
     : awaitingDecision.length > 0 ? "revise_completion_candidate"
     : evidence?.nextAction ?? input.stepSemanticFrame?.phaseRole ?? "inspect_current_state";

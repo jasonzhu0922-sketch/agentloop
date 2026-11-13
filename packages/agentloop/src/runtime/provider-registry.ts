@@ -8,6 +8,7 @@ import {
   ResponsesModel,
   type ResponsesReasoningContinuationStore,
 } from "./models.ts";
+import { MODEL_SDK_RESERVED_OPTION_KEYS, modelProviderDefinition, validateModelEditorFields, type ModelProviderKind, type ModelReasoning } from "./model-configuration-schema.ts";
 import type { RuntimeContextPlacement } from "./prompt-protocol.ts";
 
 const PROVIDER_KEY_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -21,19 +22,19 @@ const MODEL_PARAMETER_NAMES = [
   "providerKey", "providerModel", "displayName", "contextWindowTokens", "maxOutputTokens", "timeoutMs",
   "maxAttempts", "retryDelayMs", "toolChoiceMode", "runtimeContextPlacement", "reasoningSummary",
   "reasoningEncryptedContent", "reasoningEffort", "temperature", "topP", "thinkingMode", "enableThinking",
-  "thinkingEffort", "reasoningVisibility", "planningThinkingMode", "chatTemplateKwargs", "protocol",
+  "thinkingEffort", "reasoningVisibility", "planningThinkingMode", "chatTemplateKwargs", "protocol", "reasoning", "providerOptions",
 ] as const;
 
 const PROVIDER_PARAMETER_NAMES = [
   "kind", "baseUrl", "apiKey", "apiKeyEnv", "defaultModel", "contextWindowTokens", "maxOutputTokens",
   "timeoutMs", "maxAttempts", "retryDelayMs", "toolChoiceMode", "runtimeContextPlacement", "reasoningSummary",
   "reasoningEncryptedContent", "reasoningEffort", "temperature", "topP", "thinkingMode", "enableThinking",
-  "thinkingEffort", "reasoningVisibility", "planningThinkingMode", "chatTemplateKwargs", "protocol",
+  "thinkingEffort", "reasoningVisibility", "planningThinkingMode", "chatTemplateKwargs", "protocol", "reasoning", "providerOptions",
 ] as const;
 
 export interface LlmProviderSummary {
   readonly key: string;
-  readonly kind: "openai-compatible";
+  readonly kind: ModelProviderKind;
   readonly defaultModel: string;
 }
 
@@ -42,7 +43,7 @@ export interface LlmModelSummary {
   readonly displayName: string;
   readonly providerKey: string;
   readonly providerModel: string;
-  readonly kind: "openai-compatible";
+  readonly kind: ModelProviderKind;
 }
 
 interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
@@ -68,6 +69,8 @@ interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
   readonly reasoningVisibility: "visible" | "hidden";
   readonly planningThinkingMode?: "enabled" | "disabled";
   readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
+  readonly reasoning?: ModelReasoning;
+  readonly providerOptions?: Readonly<Record<string, unknown>>;
   readonly providerParameters: Readonly<Record<string, unknown>>;
   readonly protocol: "chat-completions" | "responses";
 }
@@ -95,6 +98,8 @@ interface OpenAICompatibleModelConfig extends LlmModelSummary {
   readonly reasoningVisibility: "visible" | "hidden";
   readonly planningThinkingMode?: "enabled" | "disabled";
   readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
+  readonly reasoning?: ModelReasoning;
+  readonly providerOptions?: Readonly<Record<string, unknown>>;
   readonly providerParameters: Readonly<Record<string, unknown>>;
   readonly protocol: "chat-completions" | "responses";
 }
@@ -230,6 +235,9 @@ export class LlmProviderRegistry {
       throw new AppError("MODEL_ERROR", `LLM model "${model.key}" is not configured`, 503);
     }
     const modelOptions = {
+      providerKind: model.kind,
+      reasoning: model.reasoning,
+      providerOptions: model.providerOptions,
       baseUrl: model.baseUrl,
       apiKey,
       model: model.providerModel,
@@ -316,10 +324,9 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
   const label = `LLM provider "${providerKey}"`;
   const config = requireObject(value, label);
   const providerParameters = collectProviderParameters(config, PROVIDER_PARAMETER_NAMES, `${label}.providerParameters`);
-  if (config.kind !== "openai-compatible") {
-    throw new Error(`${label} has unsupported kind`);
-  }
+  const definition = modelProviderDefinition(String(config.kind));
   const baseUrl = requireHttpUrl(config.baseUrl, `${label}.baseUrl`);
+  if ("strictToolBasePathSuffix" in definition && !new URL(baseUrl).pathname.replace(/\/$/, "").endsWith(definition.strictToolBasePathSuffix)) throw new TypeError(`${label}.baseUrl: ${definition.hint}`);
   const apiKey = config.apiKey === undefined ? undefined : requireNonEmptyString(config.apiKey, `${label}.apiKey`, 8_192);
   const apiKeyEnv = config.apiKeyEnv === undefined ? undefined : requireEnvironmentKey(config.apiKeyEnv, `${label}.apiKeyEnv`);
   if ((apiKey === undefined) === (apiKeyEnv === undefined)) {
@@ -377,7 +384,8 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
   const reasoningVisibility = optionalReasoningVisibility(config.reasoningVisibility, `${label}.reasoningVisibility`);
   const planningThinkingMode = optionalThinkingMode(config.planningThinkingMode, `${label}.planningThinkingMode`);
   const chatTemplateKwargs = optionalJsonObject(config.chatTemplateKwargs, `${label}.chatTemplateKwargs`);
-  const protocol = optionalProtocol(config.protocol, `${label}.protocol`);
+  const protocol = optionalProtocol(config.protocol, `${label}.protocol`, definition.id === "openai-compatible" ? "chat-completions" : definition.defaultProtocol);
+  validateSdkConfiguration(config, definition.id, protocol, label);
   if (thinkingMode !== undefined && protocol !== "chat-completions") {
     throw new Error(`${label}.thinkingMode is supported only with chat-completions`);
   }
@@ -393,9 +401,10 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
   if (reasoningEffort !== undefined && protocol !== "responses" && reasoningEffort !== "none") {
     throw new Error(`${label}.reasoningEffort for chat-completions must be none; low, medium, and high require responses`);
   }
+  validateModelEditorFields(config, label);
   return {
     key: providerKey,
-    kind: "openai-compatible",
+    kind: definition.id,
     baseUrl,
     ...(apiKey === undefined ? {} : { apiKey }),
     ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
@@ -418,6 +427,8 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     reasoningVisibility,
     ...(planningThinkingMode === undefined ? {} : { planningThinkingMode }),
     ...(chatTemplateKwargs === undefined ? {} : { chatTemplateKwargs }),
+    ...(config.reasoning === undefined ? {} : { reasoning: config.reasoning as ModelReasoning }),
+    ...(config.providerOptions === undefined ? {} : { providerOptions: optionalJsonObject(config.providerOptions, `${label}.providerOptions`) }),
     providerParameters,
     protocol,
   };
@@ -457,6 +468,7 @@ function parseModel(
     `${label}.contextWindowTokens`,
   );
   const protocol = optionalProtocol(config.protocol, `${label}.protocol`, provider.protocol);
+  validateSdkConfiguration({ ...provider, ...config }, provider.kind, protocol, label);
   const thinkingMode = optionalThinkingMode(config.thinkingMode, `${label}.thinkingMode`, provider.thinkingMode);
   const enableThinking = optionalBoolean(config.enableThinking, provider.enableThinking ?? false, `${label}.enableThinking`);
   const planningThinkingMode = optionalThinkingMode(
@@ -512,6 +524,7 @@ function parseModel(
   if (reasoningEffort !== undefined && protocol !== "responses" && reasoningEffort !== "none") {
     throw new Error(`${label}.reasoningEffort for chat-completions must be none; low, medium, and high require responses`);
   }
+  validateModelEditorFields(config, label);
   return {
     key: modelKey,
     displayName: optionalDisplayName(config.displayName, providerModel, `${label}.displayName`),
@@ -553,6 +566,8 @@ function parseModel(
     reasoningVisibility,
     ...(planningThinkingMode === undefined ? {} : { planningThinkingMode }),
     ...(chatTemplateKwargs === undefined ? {} : { chatTemplateKwargs }),
+    reasoning: config.reasoning as ModelReasoning | undefined ?? provider.reasoning,
+    providerOptions: optionalJsonObject(config.providerOptions, `${label}.providerOptions`, provider.providerOptions),
     providerParameters,
     protocol,
   };
@@ -587,6 +602,8 @@ function legacyModelsFromProviders(
     reasoningVisibility: provider.reasoningVisibility,
     ...(provider.planningThinkingMode === undefined ? {} : { planningThinkingMode: provider.planningThinkingMode }),
     ...(provider.chatTemplateKwargs === undefined ? {} : { chatTemplateKwargs: provider.chatTemplateKwargs }),
+    reasoning: provider.reasoning,
+    providerOptions: provider.providerOptions,
     providerParameters: provider.providerParameters,
     protocol: provider.protocol,
   }));
@@ -812,4 +829,16 @@ function optionalSamplingNumber(value: unknown, max: number, label: string, inhe
     throw new Error(`${label} must be a number between 0 and ${max}`);
   }
   return value;
+}
+
+function validateSdkConfiguration(config: Record<string, unknown>, kind: ModelProviderKind, protocol: string, label: string): void {
+  const definition = modelProviderDefinition(kind);
+  if (!(definition.protocols as readonly string[]).includes(protocol)) throw new TypeError(`${label}.protocol is unsupported by ${kind}`);
+  if (config.reasoning !== undefined && ["reasoningEffort", "thinkingMode", "thinkingEffort", "enableThinking", "planningThinkingMode"].some(key => config[key] !== undefined)) throw new TypeError(`${label}.reasoning cannot be combined with legacy thinking controls`);
+  if (kind !== "openai-compatible" && ["thinkingMode", "thinkingEffort", "enableThinking", "planningThinkingMode", "chatTemplateKwargs"].some(key => config[key] !== undefined)) throw new TypeError(`${label} uses native SDK options; use providerOptions for vendor controls`);
+  if (config.providerOptions !== undefined) {
+    const options = requireObject(config.providerOptions, `${label}.providerOptions`);
+    if (JSON.stringify(options).length > 65536) throw new TypeError(`${label}.providerOptions is too large`);
+    if (Object.keys(options).some(key => (MODEL_SDK_RESERVED_OPTION_KEYS as readonly string[]).includes(key))) throw new TypeError(`${label}.providerOptions contains reserved fields`);
+  }
 }

@@ -154,6 +154,7 @@ import {
   type RunRecoveryState,
 } from "./recovery-repository.ts";
 import { reconstructRecoveryTranscript } from "./recovery-transcript.ts";
+import { parseOutputBudgetState } from "./tool-content-budget.ts";
 import { assessDecisionBindings, decisionCommitsFromEvents, type RuntimeDecisionCommit } from "./decision-ledger.ts";
 import { buildUserAuthorityContext, type RuntimeUserAuthorityContext } from "./user-authority.ts";
 import {
@@ -3712,6 +3713,7 @@ export class RunService {
         ...(recovery === undefined ? {} : {
           initialMessages: recovery.messages,
           initialCandidateRejections: recovery.facts.candidateRejections,
+          initialOutputBudgetState: parseOutputBudgetState(recovery.facts.outputBudgetState),
         }),
         ...(initialToolEvidence.length === 0 ? {} : { initialToolEvidence }),
         ...(input.initialRuntimePromptAugmentations === undefined ? {} : {

@@ -17,6 +17,62 @@
           "result": "An agentloop.pptxGenJsApiContract/v1 readiness receipt."
         },
         {
+          "id": "assemble",
+          "description": "Assemble ordered complete slide-part JSON documents into one validated deck spec without text concatenation.",
+          "inputs": [
+            {
+              "name": "assembly-path",
+              "description": "Absolute workspace path of an agentloop.pptxAssembly/v1 manifest with deck metadata and ordered relative part paths.",
+              "required": true
+            },
+            {
+              "name": "spec-path",
+              "description": "Absolute workspace path for the assembled deck spec; written only when all parts pass validation.",
+              "required": true
+            },
+            {
+              "name": "report-path",
+              "description": "Absolute workspace path for the assembly receipt with input hashes and all validation diagnostics.",
+              "required": true
+            }
+          ],
+          "args": [
+            "assemble",
+            "{{assembly-path}}",
+            "{{spec-path}}",
+            "{{report-path}}"
+          ],
+          "result": "An agentloop.pptxAssemblyReceipt/v1 with ordered part hashes, slide ranges, output identity, and validation. Invalid assemblies exit nonzero without replacing the previous spec."
+        },
+        {
+          "id": "validate",
+          "description": "Validate the whole deck spec and compare repaired objects with a previous version-bound report when supplied.",
+          "inputs": [
+            {
+              "name": "spec-path",
+              "description": "Absolute workspace path of the agentloop.pptxDeckSpec/v1 JSON input.",
+              "required": true
+            },
+            {
+              "name": "report-path",
+              "description": "Absolute workspace path for the full validation JSON report.",
+              "required": true
+            },
+            {
+              "name": "previous-report-path",
+              "description": "Optional absolute workspace path of the previous validation report for repair comparison; omit this argument on first validation.",
+              "required": false
+            }
+          ],
+          "args": [
+            "validate",
+            "{{spec-path}}",
+            "{{report-path}}",
+            "{{previous-report-path}}"
+          ],
+          "result": "An agentloop.pptxSpecValidation/v1 report with source hash, all diagnostics, and resolved/remaining/introduced/unverifiable repair issues. Invalid specs exit nonzero after writing the report."
+        },
+        {
           "id": "build",
           "description": "Build an editable PPTX from an agentloop.pptxDeckSpec/v1 JSON document using only the package-owned public API adapter.",
           "inputs": [

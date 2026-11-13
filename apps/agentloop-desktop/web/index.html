@@ -49,18 +49,27 @@
     <div class="desktop-settings-layout agent-settings-layout"><nav class="desktop-settings-nav agent-settings-nav" aria-label="设置分类">
       <button type="button" data-settings-tab="general" class="active">常规</button><button type="button" data-settings-tab="models">模型配置</button><button type="button" data-settings-tab="web-search">联网搜索</button><button type="button" data-settings-tab="skills">Skill 管理</button><button type="button" data-settings-tab="connectors">Connector 配置</button><button type="button" data-settings-tab="mcp">MCP 配置</button><button type="button" data-settings-tab="runtimes">Runtime 管理</button>
     </nav><section id="settings-models" class="desktop-settings-content agent-settings-content" data-settings-page="models">
-      <div class="settings-page-heading"><div><h2>模型配置</h2><p>使用 JSON 管理 Provider、模型和调用参数。新任务使用保存后的配置。</p></div><span class="settings-local-badge">仅本机保存</span></div>
-      <p class="desktop-security-note">API Key 单独填写并加密保存，不写入配置 JSON。当前使用本机文件密钥，不是 OS Keychain；无法防护同用户恶意程序或拿到完整数据目录的攻击者。远程推理会向你指定的模型服务发送内容。支持 HTTP/HTTPS；HTTP 不加密传输 API Key 和推理内容，请优先使用 HTTPS，HTTP 仅用于可信网络。</p>
-      <div class="settings-section-title"><strong>本机 Providers</strong><button id="provider-add" type="button">＋ 添加 Provider</button></div>
+      <div class="settings-page-heading"><div><h2>模型配置</h2><p>配置模型服务、添加模型并调整调用参数。新任务使用保存后的配置。</p></div><span class="settings-local-badge">仅本机保存</span></div>
+      <details class="model-connection"><summary>凭据与连接说明</summary><p class="desktop-security-note">API Key 单独填写并加密保存，不写入配置 JSON。当前使用本机文件密钥，不是 OS Keychain；无法防护同用户恶意程序或拿到完整数据目录的攻击者。远程推理会向你指定的模型服务发送内容。支持 HTTP/HTTPS；HTTP 不加密传输 API Key 和推理内容，请优先使用 HTTPS，HTTP 仅用于可信网络。</p></details>
+      <div class="settings-section-title"><strong>模型服务</strong><button id="provider-add" type="button">＋ 添加服务</button></div>
       <div id="provider-list" class="desktop-provider-list" aria-label="Providers"></div>
-      <p id="provider-empty" class="desktop-settings-empty">尚无 Provider。添加后配置服务连接与模型列表。</p>
+      <p id="provider-empty" class="desktop-settings-empty">尚无模型服务。添加服务后配置连接与模型。</p>
       <div id="provider-editors" hidden>
-        <div class="settings-section-title"><label for="provider-json"><strong>Provider 配置</strong></label><div><button id="provider-format" type="button">格式化</button><button id="provider-delete" class="danger" type="button">删除 Provider</button></div></div>
-        <textarea id="provider-json" class="desktop-json" spellcheck="false" autocomplete="off" autocapitalize="off" rows="7"></textarea>
-        <label class="desktop-secret-label" for="provider-api-key">API Key <small id="provider-key-hint"></small></label><input id="provider-api-key" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off" maxlength="4096" placeholder="新增或更新凭据；已保存时留空保留">
-        <div class="settings-section-title"><label for="models-json"><strong>模型列表与参数</strong></label><button id="models-format" type="button">格式化</button></div>
-        <textarea id="models-json" class="desktop-json" spellcheck="false" autocomplete="off" autocapitalize="off" rows="12"></textarea>
-        <details class="desktop-model-help"><summary>配置字段说明</summary><p>Provider 必填：key（小写 ID）、displayName、baseUrl（HTTP 或 HTTPS；HTTP 为明文传输）。更换地址时必须重新填写 API Key，不会沿用旧地址的凭据。URL 不能包含账号、密码、查询参数或片段。</p><p>模型填写 JSON 数组，每项包含 key、displayName、providerModel。protocol 可选 responses 或 chat-completions；建议显式设置 contextWindowTokens、maxOutputTokens，并按服务能力设置 temperature、topP、reasoningEffort、thinkingMode、timeoutMs 等参数。模型 key 在本机全局唯一；不会自动添加模型或选择默认模型。</p><p>保存不会发起网络连接，也不证明模型可用。保存后需在对话中显式选择模型并实际执行任务。存在活动任务时禁止保存；其他标签页修改后须重新读取，不能覆盖。</p></details>
+        <details id="provider-connection" class="model-connection" open>
+          <summary id="provider-connection-title">服务连接与凭据</summary><div class="model-connection-body">
+        <div class="settings-section-title"><strong>服务信息</strong><button id="provider-delete" class="danger" type="button">删除服务</button></div>
+        <div id="provider-form"></div>
+        <label class="desktop-secret-label" for="provider-api-key">API Key <small id="provider-key-hint"></small></label><input id="provider-api-key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096" placeholder="新增或更新凭据；已保存时留空保留">
+          </div>
+        </details>
+        <div class="settings-section-title"><strong>模型</strong><div class="model-actions"><button id="model-add" type="button">＋ 添加模型</button><button id="model-delete" class="danger" type="button">删除模型</button></div></div>
+        <div id="model-list" class="model-choice-list" aria-label="模型列表"></div>
+        <p id="model-empty" class="desktop-settings-empty">此服务尚无模型。添加模型后可配置参数并测试调用。</p>
+        <div id="model-editor">
+          <div id="model-form"></div>
+          <div class="model-probe"><button id="model-test" type="button">测试调用</button><span>测试当前模型 · 最长 15 秒 · 产生 Token 用量，不保存配置</span></div>
+          <p id="model-test-status" role="status" aria-live="polite"></p>
+        </div>
       </div>
       <div class="desktop-settings-save"><p id="model-settings-status" role="status" aria-live="polite"></p><div><button id="model-settings-discard" type="button">放弃更改并重新读取</button><button id="model-settings-save" class="primary" type="button" disabled>保存配置</button></div></div>
     </section>

@@ -103,7 +103,7 @@ function gap(overrides: Partial<CanonicalGoalGap> = {}): CanonicalGoalGap {
     ...overrides };
 }
 
-test("a pending first execution supplies the next action while the assessment gap stays open", () => {
+test("writing auxiliary source preserves the assessed evidence gap without inventing a computation", () => {
   const data = input();
   data.context.canonicalState.gaps = [gap()];
   data.evidence = deriveRuntimeStepEvidenceState({ policy: runtimeStepToolProgressPolicy(["source_summary"]), evidence: [{
@@ -112,11 +112,10 @@ test("a pending first execution supplies the next action while the assessment ga
   }] });
   const view = deriveCurrentDecisionView(data);
   const projection = projectCurrentDecisionView(view);
-  assert.equal(view.nextAction, "execute_authored_computation");
+  assert.equal(view.nextAction, "resolve_evidence_gap");
   assert.equal(view.currentGap.assessmentGaps[0].status, "open");
   assert.deepEqual(view.currentGap.assessmentGaps[0].missingEvidenceKinds, ["source_summary"]);
-  assert.equal(projection.evidence?.pendingComputation?.sourcePath, "compute.py");
-  assert.match(projection.evidence!.instruction, /compute.py/);
+  assert.equal(projection.evidence?.pendingComputation, undefined);
   for (const [suggestedAction, expected] of [["fail", "stop"], ["ask_user", "request_input"], ["revise_plan", "revise_plan"]] as const) {
     data.context.canonicalState.gaps = [gap({ suggestedAction })];
     assert.equal(deriveCurrentDecisionView(data).nextAction, expected);

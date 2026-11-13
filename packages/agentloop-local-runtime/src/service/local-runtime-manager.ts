@@ -80,6 +80,7 @@ export type ManagedLocalRuntime = Omit<LocalRuntime, "close" | "definition" | "m
 export interface LocalRuntimeManager {
   modelConfiguration(): Promise<LocalModelSettings>;
   configureModels(input: LocalModelConfigurationInput, expectedRevision: string): Promise<LocalModelSettings>;
+  testModel(input: LocalModelConfigurationInput, expectedRevision: string, modelKey: string): Promise<{ ok: boolean; durationMs: number; message: string }>;
   deviceMemoryConfiguration(): Promise<ResolvedLocalMemoryConfiguration>;
   configureDeviceMemory(input: LocalRuntimeMemoryConfigurationInput): Promise<ResolvedLocalMemoryConfiguration>;
   deviceStorageConfiguration(): Promise<ResolvedLocalRuntimeDeviceStorage>;
@@ -234,6 +235,35 @@ class RuntimeManager implements LocalRuntimeManager {
       });
       this.#modelUpdate = update.catch(() => undefined);
       return update;
+    });
+  }
+
+  testModel(input: LocalModelConfigurationInput, expectedRevision: string, modelKey: string) {
+    return this.guard(async () => {
+      await this.#modelUpdate;
+      if (!this.#modelsEditable || !this.#models) throw new AppError("CONFLICT", "model_configuration_read_only", 409);
+      if (!input || input.reuseCloudModels !== false || Object.keys(input).some(key => !["reuseCloudModels", "providers"].includes(key))) throw new TypeError("local_model_configuration_invalid");
+      if (modelRevision(await this.#models.snapshot()) !== expectedRevision) throw new AppError("CONFLICT", "model_configuration_stale", 409);
+      return this.#supervisor.withDeviceReconfiguration(async () => {
+        // Check again inside the same gate used by configuration writes.
+        if (modelRevision(await this.#models!.snapshot()) !== expectedRevision) throw new AppError("CONFLICT", "model_configuration_stale", 409);
+        const model = await this.#models!.createDraftModelAdapter(input, modelKey);
+        const started = Date.now();
+        try {
+          const result = await model.complete({ runId: `configuration-probe-${crypto.randomUUID()}`, phase: "execution", systemPrompt: "This is a connection test. Reply with OK only.", messages: [{ role: "user", content: "Reply OK." }], tools: [] }, AbortSignal.timeout(15000));
+          const ok = result.content.trim().length > 0 && result.finishReason !== "error";
+          return { ok, durationMs: Date.now() - started, message: ok ? "基础调用通过；工具调用和实际任务能力仍需在任务中验证。" : "服务未返回有效文本，请检查模型和输出参数。" };
+        } catch (error) {
+          const status = error instanceof AppError && typeof error.details?.status === "number" ? error.details.status : undefined;
+          // Kernel bounds the provider body and redacts the effective API key.
+          const reason = error instanceof AppError && typeof error.details?.providerErrorBody === "string" ? error.details.providerErrorBody : undefined;
+          const configurationError = error instanceof AppError && typeof error.details?.sdkConfigurationError === "string" ? error.details.sdkConfigurationError : undefined;
+          return { ok: false, durationMs: Date.now() - started, message: configurationError ? `配置未通过 SDK 校验：${configurationError}` : status ? `调用失败（HTTP ${status}）${reason ? `：${reason}` : ""}` : "调用未完成，请检查服务地址、网络、模型 ID 和参数。" };
+        }
+      }).catch(error => {
+        if (error instanceof LocalRuntimeSupervisorError) throw new AppError("CONFLICT", error.message, error.status);
+        throw error;
+      });
     });
   }
 

@@ -1,5 +1,9 @@
+import { createAlibaba } from "@ai-sdk/alibaba";
+import { createDeepSeek } from "@ai-sdk/deepseek";
+import { modelProviderDefinition, MODEL_REASONING_LEVELS, type ModelProviderKind, type ModelReasoning } from "./model-configuration-schema.ts";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { UnsupportedFunctionalityError, InvalidArgumentError } from "@ai-sdk/provider";
 import type { LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4GenerateResult, LanguageModelV4Prompt, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { AppError } from "../shared/errors.ts";
 import type { ModelAdapter, ModelInvocation, ModelRequestLogContext, ModelResponse, ModelRetryReporter, ModelStreamRawCaptureWriter, ModelStreamSink, ModelToolCall } from "./contracts.ts";
@@ -15,6 +19,9 @@ class AiSdkModel implements ModelAdapter {
   readonly completeTimeoutMs: number;
   readonly operationTimeoutMs: number;
   readonly reasoningVisibility: "visible" | "hidden";
+  private readonly providerKind: ModelProviderKind;
+  private readonly reasoning?: ModelReasoning;
+  private readonly providerOptions?: Readonly<Record<string, unknown>>;
   private readonly endpoint: URL;
   private readonly apiKey: string;
   private readonly model: string;
@@ -42,6 +49,12 @@ class AiSdkModel implements ModelAdapter {
   private readonly protocol: ProviderProtocol;
   constructor(options: OpenAICompatibleModelOptions, protocol: ProviderProtocol) {
     this.protocol = protocol;
+    this.providerKind = options.providerKind ?? "openai-compatible";
+    const definition = modelProviderDefinition(this.providerKind);
+    if (!(definition.protocols as readonly string[]).includes(protocol)) throw new TypeError("SDK provider does not support the configured protocol");
+    this.reasoning = options.reasoning;
+    this.providerOptions = options.providerOptions;
+    if (this.reasoning !== undefined && !(MODEL_REASONING_LEVELS as readonly string[]).includes(this.reasoning)) throw new TypeError("Invalid SDK reasoning level");
     const base = new URL(options.baseUrl.endsWith("/") ? options.baseUrl : `${options.baseUrl}/`);
     if (base.protocol !== "https:" && base.protocol !== "http:") {
       throw new TypeError("LLM base URL must use http or https");
@@ -225,6 +238,7 @@ class AiSdkModel implements ModelAdapter {
     };
     return {
       prompt, abortSignal: signal, includeRawChunks: true,
+      ...(this.reasoning === undefined ? {} : { reasoning: this.reasoning }),
       maxOutputTokens: Math.min(invocation.maxOutputTokens ?? this.limits.maxOutputTokens, this.limits.maxOutputTokens),
       ...(this.protocol === "chat-completions" ? { temperature: this.temperature, topP: this.topP } : {}),
       tools: invocation.tools.map(tool => ({ type: "function", name: tool.name, description: tool.description,
@@ -234,12 +248,15 @@ class AiSdkModel implements ModelAdapter {
         ...(tool.strict === undefined ? {} : { strict: tool.strict }),
       })),
       toolChoice: this.sdkToolChoice(invocation),
-      providerOptions: this.protocol === "chat-completions" ? { agentloop: vendorOptions as any } : { openai: {
+      providerOptions: this.protocol === "chat-completions"
+        ? { [modelProviderDefinition(this.providerKind).namespace]: { ...(this.providerKind === "openai-compatible" ? vendorOptions : {}), ...this.providerOptions } as any }
+        : { openai: {
         instructions: String(encoded.find(message => message.role === "system")?.content ?? ""),
-        forceReasoning: this.reasoningSummary !== undefined || this.reasoningEffort !== undefined || this.reasoningEncryptedContent,
+        ...(this.providerKind === "openai-compatible" ? { forceReasoning: (this.reasoning !== undefined && this.reasoning !== "provider-default") || this.reasoningSummary !== undefined || this.reasoningEffort !== undefined || this.reasoningEncryptedContent } : {}),
         ...(this.reasoningSummary === undefined ? {} : { reasoningSummary: this.reasoningSummary }),
         ...(this.reasoningEffort === undefined ? {} : { reasoningEffort: this.reasoningEffort }),
         ...(this.reasoningEncryptedContent ? { include: ["reasoning.encrypted_content"] } : {}),
+        ...this.providerOptions as any,
       } },
     };
   }
@@ -247,6 +264,9 @@ class AiSdkModel implements ModelAdapter {
   private provider(fetch: typeof globalThis.fetch): LanguageModelV4 {
     const suffix = this.protocol === "responses" ? "responses" : "chat/completions";
     const baseURL = this.endpoint.href.slice(0, -suffix.length).replace(/\/$/u, "");
+    if (this.providerKind === "alibaba") return createAlibaba({ baseURL, apiKey: this.apiKey, fetch })(this.model);
+    if (this.providerKind === "deepseek") return createDeepSeek({ baseURL, apiKey: this.apiKey, fetch })(this.model);
+    if (this.providerKind === "openai" && this.protocol === "chat-completions") return createOpenAI({ baseURL, apiKey: this.apiKey, fetch }).chat(this.model);
     return this.protocol === "responses"
       ? createOpenAI({ baseURL, apiKey: this.apiKey, fetch }).responses(this.model)
       : createOpenAICompatible({ baseURL, apiKey: this.apiKey, name: "agentloop", fetch }).chatModel(this.model);
@@ -299,6 +319,7 @@ class AiSdkModel implements ModelAdapter {
       const timeout = policy.createStreamingModelTimeout(this.timeoutMs, signal);
       const budget = policy.createModelResponseBudget(invocation, this.limits);
       const transport = new ProviderTransport({ protocol: this.protocol, invocation, request, apiKey: this.apiKey, model: this.model,
+        sdkReasoning: this.reasoning !== undefined || this.providerOptions !== undefined || this.providerKind !== "openai-compatible",
         budget, parameters: this.providerParameters, recordActivity: timeout.recordActivity, writer: this.streamRawCaptureWriter,
         continuation: this.reasoningEncryptedContent ? this.reasoningContinuationStore?.get(this.reasoningContinuationScope, invocation.runId) : undefined,
         reasoning: this.reasoningEffort !== undefined || this.reasoningSummary !== undefined ? {
@@ -332,10 +353,12 @@ class AiSdkModel implements ModelAdapter {
         // SDK wrappers may otherwise obscure the original transport failure.
         let error = caught instanceof AppError || caught instanceof policy.StreamConsumptionError || transport.failure instanceof JsonProviderResponse
           ? caught : transport.failure ?? caught;
+        const sdkConfigurationFailure = UnsupportedFunctionalityError.isInstance(error) || InvalidArgumentError.isInstance(error);
+        if (sdkConfigurationFailure) error = new AppError("MODEL_ERROR", "SDK provider rejected model configuration", 400, { sdkConfigurationError: error.message.slice(0, 500), request });
         const response = transport.response;
         const emitted = transport.diagnostics.hadSinkEmission;
         const httpFailure = error instanceof AppError && typeof error.details?.status === "number" ? error.details.status as number : undefined;
-        const retry = attempt < this.maxAttempts && !emitted && (timeout.aborted
+        const retry = !sdkConfigurationFailure && attempt < this.maxAttempts && !emitted && (timeout.aborted
           ? policy.isRetryableStreamingAbort(timeout.abortReason)
           : httpFailure !== undefined ? policy.isRetryableStatus(httpFailure)
             : !response || error instanceof policy.StreamConsumptionError || (!stream && !(error instanceof AppError)));
@@ -387,7 +410,17 @@ class AiSdkModel implements ModelAdapter {
       else budget.addOutputBytes(raw, "toolCall.arguments");
       const tool = { id, name, arguments: policy.parseToolArguments(raw || "{}") };
       calls.set(id, tool);
-      if (early && !ready.has(id)) { ready.add(id); await emit({ type: "tool_call_ready", index: existing?.index ?? calls.size - 1, ...tool }); }
+      if (early) {
+        // Completion events may interleave. A later call must not overtake an
+        // earlier, still incomplete exclusive operation at Runtime admission.
+        for (const [inputId, input] of [...inputs].sort((left, right) => left[1].index - right[1].index)) {
+          const completed = calls.get(inputId);
+          if (!completed) break;
+          if (ready.has(inputId)) continue;
+          ready.add(inputId);
+          await emit({ type: "tool_call_ready", index: input.index, ...completed });
+        }
+      }
     };
     try {
       const result = await provider.doStream(call);
@@ -400,6 +433,7 @@ class AiSdkModel implements ModelAdapter {
             if (raw.type === "response.output_item.added" && raw.item?.type === "function_call") {
               itemIds.set(raw.item.id, { id: raw.item.call_id, index: raw.output_index });
               wireIndexes.set(raw.item.call_id, raw.output_index);
+              inputs.set(raw.item.call_id, { index: raw.output_index, name: raw.item.name, raw: "" });
             }
             // The SDK emits a tool-call for output_item.done. Compatible servers
             // can use arguments.done as the authoritative earlier completion.
@@ -450,7 +484,8 @@ class AiSdkModel implements ModelAdapter {
     }
     let snapshot: ModelResponse | undefined;
     if (transport.terminal) snapshot = await this.decodeSnapshot(transport.terminal, call);
-    const toolCalls = snapshot?.toolCalls.length ? snapshot.toolCalls : [...calls.values()];
+    const toolCalls = snapshot?.toolCalls.length ? snapshot.toolCalls : [...calls.values()].sort((left, right) =>
+      (inputs.get(left.id)?.index ?? 0) - (inputs.get(right.id)?.index ?? 0));
     const response: ModelResponse = {
       ...policy.providerResponseIdentity({ id: transport.diagnostics.providerResponseId }),
       content: snapshot?.content || content, toolCalls,

@@ -20,7 +20,7 @@ Paths are relative to this skill's directory. Everything else is plain Python, `
 
 | Script | What it does |
 |---|---|
-| `scripts/pptx_runtime.cjs preflight/build/inspect` | Versioned CommonJS adapter for the installed `pptxgenjs` public API. Builds editable PPTX files from neutral JSON specs and extracts ordered slide text/package facts without probing the module at runtime |
+| `scripts/pptx_runtime.cjs preflight/assemble/validate/build/inspect` | Versioned CommonJS adapter for the installed `pptxgenjs` public API. Assembles complete slide parts, builds editable PPTX files, and extracts ordered slide text/package facts |
 | `scripts/thumbnail.py deck.pptx [prefix]` | Labeled grid of every slide, for picking template layouts. `.pptx` only. Pass `prefix` — it defaults to `thumbnails`, which overwrites the grids of any other deck done in the same directory |
 | `scripts/apply_unified_theme.py inventory/apply` | One safe primitive for a colour/font-only theme transformation. It inventories actual colours/fonts and applies a supplied declarative mapping without regex-editing OOXML. |
 | `scripts/add_slide.py unpacked/ slide2.xml [--after slideN.xml]` | Duplicate a slide (or a `slideLayoutN.xml`) with all the package bookkeeping. Also takes a `.pptx` directly with `-o out.pptx` |
@@ -32,11 +32,37 @@ Paths are relative to this skill's directory. Everything else is plain Python, `
 
 For a new deck, write an `agentloop.pptxDeckSpec/v1` JSON file in the task workspace and call the loaded Skill's `native-pptx build` action. The package adapter owns the module format, the installed `pptxgenjs` API shape, public shape/chart enumeration lookup, output writing, and the build receipt. Its neutral element types are `text`, `shape`, `image`, `table`, and `chart`; every element has an `options` object, shapes name a public uppercase `presentation.shapes` key, and charts name a public `presentation.ChartType` key. Run `native-pptx inspect` on the result, then the required artifact acceptance and visual QA.
 
+### Structured authoring
+
+For decks authored across multiple calls, write independent complete JSON slide parts and an ordered assembly manifest. Never append serialized slides or comma/bracket fragments to a deck JSON document: its root and slides array may already be closed. Do not repair JSON by deleting punctuation globally.
+
+Each part (for example `parts/01.json`) is `{"schema":"agentloop.pptxSlidePart/v1","slides":[...]}` using the slide/element shape below. Keep each part small enough for one complete tool call. Give elements stable, deck-wide unique IDs. The manifest (for example `deck/assembly.json`) is:
+
+```json
+{
+  "schema": "agentloop.pptxAssembly/v1",
+  "deck": { "schema": "agentloop.pptxDeckSpec/v1", "layout": "wide", "title": "Deck title" },
+  "parts": ["parts/01.json", "parts/02.json"]
+}
+```
+
+Call `native-pptx assemble <assembly-path> <spec-path> <report-path>` (or `node scripts/pptx_runtime.cjs assemble @workspace/deck/assembly.json @workspace/build/deck.json @workspace/build/assembly-report.json` with `cwd: "@skills/pptx"`). The adapter parses each complete part, preserves the explicit order, validates every element, and atomically writes the spec only on success. Its receipt binds input hashes, slide ranges, output hash, and all diagnostics. Fix the named part or its generator and reassemble; retain the previous receipt for comparison. An invalid assembly leaves the previous spec intact, so do not build that older spec as though the repair succeeded. After a successful assembly, build from the receipt's exact output path/hash, inspect the PPTX, then perform acceptance and visual QA.
+
+If using a generator, compose JavaScript objects/arrays and serialize with `JSON.stringify`, rather than emitting JSON punctuation in chunks. Execute a small first part through assembly/build before expanding the deck. Helpers calculating text areas must reserve positive space for padding and headings; change the actual layout when content does not fit. Do not clamp invalid heights or discard content to obtain a passing report.
+
+### Generation and repair receipts
+
+Generating a spec or editing it in place is a file operation: use the command's exit status and Runtime `fileChanges`, and emit a generation/transformation receipt. Do not emit `agentloop.commandComputation/v1` with empty inputs, declare the generator itself as `computationInputs`, or declare an in-place output as an immutable computation input. When deriving facts from unchanged source data, use the separate immutable-input computation contract.
+
+Run `native-pptx validate` on the complete spec before building. Pass workspace spec and report paths; omit the optional previous-report argument on the first pass. The action writes a source-hash-bound `agentloop.pptxSpecValidation/v1` report and returns **all** detectable spec/geometry errors in `diagnostics`, exiting nonzero for an invalid spec. `build` uses the same validation and returns the full diagnostic report on failure. Inspect exact reports through `read_result` or bounded reads of the report file; do not repeat a build just to obtain the next error.
+
+For each repair, preserve the previous report, fix the generator, regenerate the spec, then call `validate <spec> <new-report> <previous-report>` before rebuilding. Give elements stable, deck-wide unique `id` values, especially repeated shapes/tables. Inspect `repairComparison.remaining`, `introduced`, and `unverifiable`: a successful patch or changed hash does not prove that the reported object was fixed. Anonymous identical objects, removed objects, or edits that lose object identity are unverifiable; array positions alone cannot establish a repair across reordered pages. Resolve or explicitly inspect those cases. Do not clamp all shapes, discard elements, or rewrite whole scripts merely to clear validation. Use `native-pptx inspect` to extract the built deck's slide text; do not write an ad hoc ZIP parser when the package action already provides it. Geometry validation does not replace rendered visual QA.
+
 ### Canvas contract (required)
 
 `layout` is mandatory in every deck spec. Never rely on a library default: `pptxgenjs` defaults to `16:9` at **10 × 5.625 inches**, while a wide deck is **13.333 × 7.5 inches** (the usual 13.3″ × 7.5″ design canvas). Use `layout: "wide"` for coordinates designed on that canvas; use `layout: "16:9"` or `layout: "4:3"` only when the coordinates were designed for those dimensions.
 
-All elements must declare finite, positive `x`, `y`, `w`, and `h` values, and the complete rectangle must stay within the selected canvas: `0 ≤ x`, `0 ≤ y`, `x + w ≤ canvas width`, and `y + h ≤ canvas height`. The adapter rejects a missing layout, negative coordinates, zero-sized elements, and any out-of-bounds rectangle before writing the file. Do not use clipped decorative circles or cards as a substitute for choosing the correct layout. The build receipt reports the resolved canvas; treat any non-zero geometry error as a failed build that must be fixed in the spec.
+All elements must declare finite `x`, `y`, `w`, and `h` values with positive `w` and `h`, and the complete rectangle must stay within the selected canvas: `0 ≤ x`, `0 ≤ y`, `x + w ≤ canvas width`, and `y + h ≤ canvas height`. The adapter rejects a missing layout, negative coordinates, zero-sized elements, and any out-of-bounds rectangle before writing the file. Do not use clipped decorative circles or cards as a substitute for choosing the correct layout. The build receipt reports the resolved canvas; treat any non-zero geometry error as a failed build that must be fixed in the spec.
 
 Minimal spec shape:
 

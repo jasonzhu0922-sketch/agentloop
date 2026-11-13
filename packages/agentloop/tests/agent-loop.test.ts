@@ -29,7 +29,7 @@ import { ToolRegistry } from "../src/tools/tool-registry.ts";
 import type { RuntimeTool } from "../src/tools/tool-registry.ts";
 import { TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
 
-test("authored auxiliary source stays pending before its first execution and survives unrelated successes", () => {
+test("authoring a helper does not declare a computation or discharge missing source facts", () => {
   const policy = runtimeStepToolProgressPolicy(["source_summary"]);
   const source = { toolCallId: "write-source", toolName: "computer_write_file", isError: false,
     result: JSON.stringify({ path: "compute.py", bytes: 100, sha256: "a".repeat(64) }) };
@@ -37,10 +37,9 @@ test("authored auxiliary source stays pending before its first execution and sur
     result: JSON.stringify({ exitCode: 0, stdout: "ready" }) };
   const evidence = [source, unrelated];
   const pending = deriveRuntimeStepEvidenceState({ policy, evidence });
-  assert.deepEqual(pending?.pendingComputation, { toolCallId: "write-source", sourceMutationCount: 1, sourcePath: "compute.py" });
-  assert.equal(pending?.nextAction, "execute_authored_computation");
-  assert.match(pending!.instruction, /compute.py/);
-  assert.match(pending!.instruction, /inputRefs/);
+  assert.equal(pending?.pendingComputation, undefined);
+  assert.equal(pending?.nextAction, "acquire_source_evidence");
+  assert.ok(pending?.missingToolEvidenceKinds.includes("source_summary"));
   assert.equal(pending?.workProduct.status, "none", "Auxiliary code is not a deliverable");
   const completed = deriveRuntimeStepEvidenceState({ policy, evidence: [...evidence, {
     toolCallId: "execute", toolName: "computer_run_command", isError: false,
@@ -51,7 +50,7 @@ test("authored auxiliary source stays pending before its first execution and sur
   assert.equal(deriveRuntimeStepEvidenceState({ policy: artifactStepToolProgressPolicy(["artifact_path"], { expectedArtifactKind: "pdf" }), evidence: [source] })?.pendingComputation, undefined);
 });
 
-test("source-only computation executes after its first write with canonical decision instructions", async () => {
+test("source-only step still needs source evidence after writing a helper", async () => {
   let turns = 0;
   let executions = 0;
   const tools: RuntimeTool<unknown>[] = [
@@ -70,8 +69,8 @@ test("source-only computation executes after its first write with canonical deci
       turns += 1;
       if (turns === 1) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "author", name: "computer_write_file", arguments: { path: "compute.py", content: "compute source" } }] };
       if (turns === 2) {
-        assert.match(request.runtimeContext!.content, /execute_authored_computation/);
-        assert.match(request.runtimeContext!.content, /The authored auxiliary source is compute.py/);
+        assert.doesNotMatch(request.runtimeContext!.content, /execute_authored_computation/);
+        assert.match(request.runtimeContext!.content, /acquire_source_evidence/);
         assert.equal(request.tools.length, tools.length);
         return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "compute", name: "computer_run_command", arguments: { command: "python3", args: ["compute.py"], computationInputs: [{ path: "records.json" }] } }] };
       }
@@ -83,31 +82,12 @@ test("source-only computation executes after its first write with canonical deci
   assert.equal(turns, 3);
 });
 
-test("identical source rewrites before any execution enter computation recovery", async () => {
-  let turns = 0;
-  const events: RuntimeEvent[] = [];
-  const tools: RuntimeTool<unknown>[] = [
-    { name: "computer_write_file", description: "Author source", inputSchema: { type: "object" }, parse: value => value,
-      execute: async () => ({ path: "compute.py", bytes: 100, sha256: "a".repeat(64) }) },
-    { name: "computer_run_command", description: "Compute", inputSchema: { type: "object" }, parse: value => value,
-      execute: async () => { assert.fail("The stuck model never requests execution"); } },
-  ];
-  const grant = makeGrant(tools.map(tool => tool.name));
-  await assert.rejects(() => runAgentLoop({ runId: grant.runId, systemPrompt: "Compute the total.", input: "Compute the total.",
-    grant, tools: new ToolRegistry(tools), maxSteps: 64, progressPolicy: runtimeStepToolProgressPolicy(["source_summary"]),
-    emit: event => { events.push(event); },
-    model: { limits: TEST_MODEL_LIMITS, complete: async request => {
-      if (request.tools.length === 0) return { content: "The computation has not executed.", finishReason: "stop", toolCalls: [] };
-      turns += 1;
-      return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `write-${turns}`, name: "computer_write_file",
-        arguments: { path: "compute.py", mode: "overwrite", content: "same source" } }] };
-    } },
-  }), error => error instanceof AppError && error.code === "STEP_NOT_COMPLETED" && error.details?.reason === "pending_computation_execution");
-  assert.equal(turns, 4);
-  const stopped = events.filter(event => event.type === "loop.no_progress");
-  assert.deepEqual(stopped.map(event => event.data.stalled), [false, true]);
-  assert.equal(stopped.at(-1)?.data.sourcePath, "compute.py");
-  assert.equal(events.some(event => event.type === "loop.limit_exceeded"), false);
+test("repeated helper rewrites do not invent a computation execution obligation", () => {
+  const evidence = Array.from({ length: 3 }, (_, index) => ({ toolCallId: `write-${index}`,
+    toolName: "computer_write_file", isError: false, result: JSON.stringify({ path: "compute.py", sha256: "a".repeat(64) }) }));
+  const state = deriveRuntimeStepEvidenceState({ policy: runtimeStepToolProgressPolicy(["source_summary"]), evidence });
+  assert.equal(state?.pendingComputation, undefined);
+  assert.ok(state?.missingToolEvidenceKinds.includes("source_summary"));
 });
 
 test("a failed computation is executed after its repair instead of converging on the write receipt", async () => {

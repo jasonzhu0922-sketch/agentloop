@@ -8,6 +8,7 @@ import { AppError, badRequest, forbidden } from "../shared/errors.ts";
 import { markActionFailedBeforeEffect } from "../runtime/action-effect.ts";
 import type { RuntimeDecisionCommit } from "../runtime/decision-ledger.ts";
 import type { ToolExecutionPlugin } from "./tool-execution-plugin.ts";
+import { assertToolContentBudget, projectBoundedToolDefinition, type BoundedToolContent, type ToolContentBudget } from "../runtime/tool-content-budget.ts";
 
 export interface ToolExecutionContext {
   readonly grant: CapabilityGrant;
@@ -60,6 +61,7 @@ export interface RuntimeTool<TInput = unknown> {
   readonly effect?: "read" | "write";
   readonly source?: ToolSourceDescriptor;
   readonly inputSchema: JsonSchema;
+  readonly boundedContent?: BoundedToolContent;
   readonly executionMode: "parallel" | "exclusive";
   readonly replaySafe: boolean;
   /**
@@ -109,6 +111,7 @@ export interface PreparedToolCall {
 }
 
 export interface MaterializedTools {
+  readonly boundedContentTools: ReadonlyMap<string, BoundedToolContent>;
   readonly definitions: readonly ModelToolDefinition[];
   readonly completionPreparationDefinitions: readonly ModelToolDefinition[];
   readonly prepare: (call: ModelToolCall) => PreparedToolCall;
@@ -117,6 +120,9 @@ export interface MaterializedTools {
 export class ToolRegistry {
   private readonly tools = new Map<string, RuntimeTool<unknown>>();
   private readonly plugins: readonly ToolExecutionPlugin[];
+
+  /** Host-owned effect metadata; consulting it does not grant tool access. */
+  effectOf(name: string): RuntimeTool["effect"] { return this.tools.get(name)?.effect; }
 
   constructor(tools: readonly RuntimeTool<unknown>[], options: { readonly plugins?: readonly ToolExecutionPlugin[] } = {}) {
     this.plugins = Object.freeze([...(options.plugins ?? [])]);
@@ -144,29 +150,31 @@ export class ToolRegistry {
 
   materialize(
     grant: CapabilityGrant,
-    options: { readonly decisionLedger?: readonly RuntimeDecisionCommit[] } = {},
+    options: { readonly decisionLedger?: readonly RuntimeDecisionCommit[]; readonly contentBudget?: ToolContentBudget } = {},
   ): MaterializedTools {
     const visible = [...this.tools.values()].filter((tool) => grant.allowedToolNames.has(tool.name)
       && (grant.toolEffectScope !== "read" || tool.effect === "read"));
     const byName = new Map(visible.map((tool) => [tool.name, tool]));
+    const preparedContentTargets = new Set<string>();
+    const definitionFor = (tool: RuntimeTool<unknown>): ModelToolDefinition => {
+      const definition = { name: tool.name, description: tool.description, inputSchema: tool.inputSchema };
+      return tool.boundedContent !== undefined && options.contentBudget !== undefined
+        ? projectBoundedToolDefinition(definition, tool.boundedContent, options.contentBudget) : definition;
+    };
     return {
-      definitions: visible.map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema,
-      })),
+      boundedContentTools: new Map(visible.flatMap(tool => tool.boundedContent === undefined ? [] : [[tool.name, tool.boundedContent] as const])),
+      definitions: visible.map(definitionFor),
       completionPreparationDefinitions: visible
         .filter((tool) => tool.availableDuringCompletionPreparation === true)
-        .map((tool) => ({
-          name: tool.name,
-          description: tool.description,
-          inputSchema: tool.inputSchema,
-        })),
+        .map(definitionFor),
       prepare: (call) => {
         const tool = byName.get(call.name);
         if (tool === undefined) throw forbidden(`Tool "${call.name}" is not available in this run`);
         let input: unknown;
         try {
+          if (tool.boundedContent !== undefined && options.contentBudget !== undefined) {
+            assertToolContentBudget(call, tool.boundedContent, options.contentBudget);
+          }
           input = tool.parse(call.arguments);
         } catch (error) {
           if (error instanceof Error) throw badRequest(`Invalid arguments for ${call.name}: ${error.message}`);
@@ -174,6 +182,14 @@ export class ToolRegistry {
         }
         assertDecisionBinding(tool, input, grant, options.decisionLedger ?? []);
         assertResolvedOperationBinding(tool, input, grant);
+        if (tool.boundedContent !== undefined && options.contentBudget !== undefined && input !== null && typeof input === "object") {
+          const target = (input as Record<string, unknown>)[tool.boundedContent.targetField];
+          if (typeof target === "string") {
+            const key = `${tool.name}:${target}`;
+            if (preparedContentTargets.has(key)) throw badRequest("Only one bounded content call for the same target is allowed in this model turn; wait for its committed receipt before continuing.");
+            preparedContentTargets.add(key);
+          }
+        }
         const execute = async (context: ToolExecutionContext): Promise<unknown> => {
           try {
             for (const plugin of this.plugins) {

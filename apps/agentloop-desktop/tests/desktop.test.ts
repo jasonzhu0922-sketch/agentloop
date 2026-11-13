@@ -669,3 +669,24 @@ test("a cancelled Desktop Run cannot accept an old Human Loop answer", async t =
   assert.equal((await call(`${path}/${request.id}/respond`, { expectedRevision: request.revision, value: ['summary'] })).status, 409);
   assert.equal((await jsonCall(call, `/api/runs/${run.id}`)).run.status, 'cancelled');
 });
+
+
+test("model editor schema and draft probe use account auth, CSRF and the persisted configuration revision", async t => {
+  const { app } = await fixture(t, null); const auth = await session(app.origin); const call = client(app.origin, auth);
+  const schema = await jsonCall(call, "/api/model-configuration/schema");
+  assert.deepEqual(schema.providers.map((provider: { id: string }) => provider.id), ["openai-compatible", "openai", "deepseek", "alibaba"]);
+  assert.equal((await fetch(`${app.origin}/api/model-configuration/schema`)).status, 401);
+  const initial = await jsonCall(call, "/api/model-configuration");
+  const upstream = await fixtureProvider(); t.after(() => upstream.close());
+  const configuration = { reuseCloudModels: false, providers: [{ key: "bailian", displayName: "百炼", kind: "alibaba", baseUrl: upstream.baseUrl, apiKey: "fixture-probe-key", models: [{ key: "qwen", displayName: "Qwen", providerModel: "qwen3-max", reasoning: "medium" }] }] };
+  const input = { revision: initial.revision, configuration, modelKey: "qwen" };
+  assert.equal((await fetch(`${app.origin}/api/model-configuration/test`, { method: "POST", headers: { Cookie: auth.cookie, Origin: app.origin, "Content-Type": "application/json" }, body: JSON.stringify(input) })).status, 403);
+  const result = await jsonCall(call, "/api/model-configuration/test", input);
+  assert.equal(result.ok, true); assert.equal(JSON.stringify(result).includes("fixture-probe-key"), false);
+  assert.equal(upstream.calls.length, 1); assert.equal(upstream.calls[0]?.body.enable_thinking, true);
+  assert.deepEqual(await jsonCall(call, "/api/model-configuration"), initial);
+  assert.equal((await call("/api/model-configuration/test", { ...input, modelKey: "missing" })).status, 400);
+  const stored = await jsonCall(call, "/api/model-configuration", { revision: initial.revision, configuration });
+  assert.equal((await call("/api/model-configuration/test", input)).status, 409);
+  assert.equal((await jsonCall(call, "/api/model-configuration")).revision, stored.revision);
+});

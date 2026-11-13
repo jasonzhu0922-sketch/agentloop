@@ -20,6 +20,47 @@ export function createConcurrencyLimiter(limit: number): {
   return { acquire, release };
 }
 
+/** FIFO admission: an exclusive operation fences both earlier and later work. */
+export class OrderedExecutionScheduler {
+  private readonly queue: Array<{ mode: "parallel" | "exclusive"; start: () => void }> = [];
+  private active = 0;
+  private exclusive = false;
+  private readonly limit: number;
+
+  constructor(limit: number) {
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError("Concurrency must be a positive integer");
+    this.limit = limit;
+  }
+
+  schedule<T>(mode: "parallel" | "exclusive", operation: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.queue.push({ mode, start: () => {
+        this.active += 1;
+        this.exclusive = mode === "exclusive";
+        const finish = (): void => {
+          this.active -= 1;
+          this.exclusive = false;
+          this.drain();
+        };
+        void Promise.resolve().then(operation).then(
+          (value) => { finish(); resolve(value); },
+          (error: unknown) => { finish(); reject(error); },
+        );
+      } });
+      this.drain();
+    });
+  }
+
+  private drain(): void {
+    while (!this.exclusive && this.active < this.limit && this.queue.length > 0) {
+      const next = this.queue[0]!;
+      if (next.mode === "exclusive" && this.active > 0) return;
+      this.queue.shift();
+      next.start();
+    }
+  }
+}
+
 // Preallocated result slots preserve source order without serializing
 // independent work.
 export async function mapWithConcurrencyLimit<TInput, TOutput>(

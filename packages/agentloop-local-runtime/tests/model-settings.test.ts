@@ -78,6 +78,7 @@ test("active Run blocks model changes without discarding the saved configuration
   try {
     await started;
     await assert.rejects(manager.configureModels({ reuseCloudModels: false, providers: [] }, saved.revision), /runtime_active_runs_prevent_reconfiguration/);
+    await assert.rejects(manager.testModel(saved.configuration, saved.revision, 'reasoner'), /runtime_active_runs_prevent_reconfiguration/);
     assert.equal((await manager.modelConfiguration()).revision, saved.revision);
   } finally { release(); await settle(manager, run.id); }
 });
@@ -137,4 +138,80 @@ test("post-commit cleanup failure is reported without restoring a potentially de
   assert.equal((await manager.modelConfiguration()).revision, updated.revision);
   assert.deepEqual(await manager.runtime("default").models(), ["local:reasoner"]);
   assert.equal((await secrets.listKeys()).length, 1);
+});
+
+test('draft probes reuse the saved credential without persisting edits or changing revision', async t => {
+  const { manager, secrets } = await setup(t);
+  const initial = await manager.modelConfiguration();
+  const saved = await manager.configureModels(configuration('https://probe.example/v1', 'chat-completions'), initial.revision);
+  const vaultBefore = await secrets.listKeys(); let sent: any;
+  t.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    assert.equal((init.headers as Record<string, string>).authorization, `Bearer ${credential}`);
+    sent = JSON.parse(String(init.body));
+    return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'OK' } }] }), { headers: { 'content-type': 'application/json' } });
+  });
+  const draft = structuredClone(saved.configuration);
+  (draft.providers[0]!.models[0] as any).reasoning = 'medium';
+  (draft.providers[0]!.models[0] as any).providerModel = 'edited-upstream';
+  const result = await manager.testModel(draft, saved.revision, 'reasoner');
+  assert.equal(result.ok, true); assert.equal(sent.model, 'edited-upstream'); assert.equal(sent.reasoning_effort, 'medium');
+  assert.equal(sent.max_tokens, 8192, 'a probe must retain the configured generation budget');
+  assert.deepEqual(await manager.modelConfiguration(), saved); assert.deepEqual(await secrets.listKeys(), vaultBefore);
+  await assert.rejects(manager.testModel(draft, initial.revision, 'reasoner'), /model_configuration_stale/);
+  const moved = { ...draft, providers: [{ ...draft.providers[0]!, baseUrl: 'https://different.example/v1' }] };
+  await assert.rejects(manager.testModel(moved, saved.revision, 'reasoner'), /local_model_api_key_required/);
+  assert.deepEqual(await manager.modelConfiguration(), saved);
+});
+
+test('failed draft probes preserve a bounded provider reason and redact the effective key', async t => {
+  const { manager } = await setup(t); const initial = await manager.modelConfiguration();
+  const input = configuration('https://probe.example/v1', 'chat-completions');
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ error: { message: `invalid model; reflected ${credential}` } }), { status: 400 }));
+  const result = await manager.testModel(input, initial.revision, 'reasoner');
+  assert.equal(result.ok, false); assert.match(result.message, /HTTP 400/); assert.match(result.message, /invalid model/); assert.doesNotMatch(result.message, new RegExp(credential));
+  assert.deepEqual(await manager.modelConfiguration(), initial);
+});
+
+test('native provider kind, standard reasoning and SDK extensions survive persistence and reopening', async t => {
+  const { manager, reopen } = await setup(t); const initial = await manager.modelConfiguration();
+  const input = { reuseCloudModels: false, providers: [{ key: 'bailian', displayName: '百炼', kind: 'alibaba' as const, baseUrl: 'https://example.test/compatible-mode/v1', apiKey: credential,
+    models: [{ key: 'qwen', displayName: 'Qwen', providerModel: 'qwen3-max', reasoning: 'medium' as const, providerOptions: { thinkingBudget: 2048 } }] }] };
+  const saved = await manager.configureModels(input, initial.revision);
+  assert.equal(saved.configuration.providers[0]?.kind, 'alibaba');
+  const restored = await reopen(); assert.deepEqual(await restored.modelConfiguration(), saved);
+  assert.equal(JSON.stringify(saved).includes(credential), false);
+});
+
+test('SiliconFlow preset persists independently of model name and sends its documented thinking switch', async t => {
+  const { manager, reopen } = await setup(t); const initial = await manager.modelConfiguration();
+  const input: LocalModelConfigurationInput = { reuseCloudModels: false, providers: [{
+    key: 'siliconflow', displayName: '硅基流动', preset: 'siliconflow', kind: 'openai-compatible',
+    baseUrl: 'https://proxy.example/v1', apiKey: credential,
+    models: [{ key: 'hosted-deepseek', displayName: 'DeepSeek', providerModel: 'deepseek-ai/DeepSeek-V4-Flash', enableThinking: false }],
+  }] };
+  const requests: { url: string; body: any }[] = [];
+  t.mock.method(globalThis, 'fetch', async (url: unknown, init: RequestInit) => {
+    requests.push({ url: String(url), body: JSON.parse(String(init.body)) });
+    return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'OK' } }] }), { headers: { 'content-type': 'application/json' } });
+  });
+  assert.equal((await manager.testModel(input, initial.revision, 'hosted-deepseek')).ok, true);
+  assert.equal(requests[0]?.url, 'https://proxy.example/v1/chat/completions');
+  assert.equal(requests[0]?.body.enable_thinking, false);
+  assert.equal(requests[0]?.body.reasoning_effort, undefined);
+  assert.equal(requests[0]?.body.thinking, undefined);
+  const saved = await manager.configureModels(input, initial.revision);
+  const restored = await reopen(); assert.deepEqual(await restored.modelConfiguration(), saved);
+  assert.equal((await restored.testModel(saved.configuration, saved.revision, 'hosted-deepseek')).ok, true);
+  assert.equal(requests[1]?.url, requests[0]?.url);
+  const moved = { ...saved.configuration, providers: saved.configuration.providers.map(provider => ({ ...provider, baseUrl: 'https://api.siliconflow.cn/v1' })) };
+  await assert.rejects(restored.configureModels(moved, saved.revision), /api_key_required/);
+  assert.deepEqual(await restored.modelConfiguration(), saved);
+});
+
+test('a platform preset cannot claim a different SDK driver', async t => {
+  const { manager } = await setup(t); const initial = await manager.modelConfiguration();
+  const input = configuration('https://example.test/v1', 'chat-completions');
+  const invalid = { ...input, providers: input.providers.map(provider => ({ ...provider, preset: 'siliconflow' as const, kind: 'deepseek' as const })) };
+  await assert.rejects(manager.configureModels(invalid, initial.revision), /service_driver_mismatch/);
+  assert.deepEqual(await manager.modelConfiguration(), initial);
 });

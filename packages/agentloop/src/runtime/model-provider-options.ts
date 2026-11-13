@@ -1,7 +1,12 @@
+import type { ModelProviderKind, ModelReasoning } from "./model-configuration-schema.ts";
 import type { ModelRetryReporter, ModelStreamRawCaptureWriter } from "./contracts.ts";
 import type { RuntimeContextPlacement } from "./prompt-protocol.ts";
 
 export interface OpenAICompatibleModelOptions {
+  readonly providerKind?: ModelProviderKind;
+  readonly reasoning?: ModelReasoning;
+  /** Options in the selected SDK provider namespace. */
+  readonly providerOptions?: Readonly<Record<string, unknown>>;
   readonly baseUrl: string;
   readonly apiKey: string;
   readonly model: string;

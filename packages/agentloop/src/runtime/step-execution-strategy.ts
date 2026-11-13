@@ -444,13 +444,13 @@ function activeToolNamesForEvidenceState(
       return state.recentPatchPreconditionFailure
         ? uniqueStrings([...setupToolNames, ...state.exploratoryToolNames, ...state.evidenceProducingToolNames])
         : uniqueStrings([...setupToolNames, ...state.evidenceProducingToolNames]);
+    case "repair_command_contract":
     case "repair_artifact_source":
       return state.recentPatchPreconditionFailure
         ? uniqueStrings([...setupToolNames, ...state.exploratoryToolNames, ...state.evidenceProducingToolNames])
         : uniqueStrings([...setupToolNames, ...state.evidenceProducingToolNames]);
     case "repair_computation_binding":
     case "execute_repaired_computation":
-    case "execute_authored_computation":
       // The progress policy has already narrowed this state to the exact
       // command rerun needed to rebind declared computation inputs. Keep that
       // command preferred without inventing a second, looser recovery path.
@@ -515,12 +515,12 @@ function unlockWhenForEvidenceState(state: RuntimeStepEvidenceState): string {
       return "the authorized Runtime Result set is materialized and Assessment can verify its provenance, or the evidence state names a different next action";
     case "produce_artifact":
       return "a deliverable artifact exists, an actionable diagnostic requires repair, or source acquisition becomes the next action";
+    case "repair_command_contract":
     case "repair_artifact_source":
       return "the artifact source has been repaired, rerun, or the evidence state names a different next action";
     case "repair_computation_binding":
       return "the command is rerun with declared computationInputs bound to its exact inputRefs, or the evidence state names a different next action";
     case "execute_repaired_computation":
-    case "execute_authored_computation":
       return "the committed computation is executed and its result is verified, or a new execution diagnostic requires repair";
     case "verify_existing_artifact":
       return "artifact acceptance is recorded or verification produces a diagnostic requiring repair";

@@ -283,3 +283,88 @@ test("reflected provider credentials are redacted in HTTP failures and retry tel
     assert.equal(JSON.stringify(retries).includes(settings.apiKey), false);
   } finally { globalThis.fetch = previous; }
 });
+
+// Configuration uses portable SDK options; vendor request fields are SDK-owned.
+import { LlmProviderRegistry } from '../src/runtime/provider-registry.ts';
+
+function sdkRegistry(kind: string, model: Record<string, unknown> = {}) {
+  return LlmProviderRegistry.fromConfigObject({
+    defaultModelKey: 'configured', providers: { service: { kind, baseUrl: kind === 'deepseek' ? 'https://provider.example.test/beta' : settings.baseUrl, apiKey: settings.apiKey, defaultModel: 'custom-model', maxAttempts: 1 } },
+    models: { configured: { providerKey: 'service', providerModel: kind === 'alibaba' ? 'qwen3-max' : kind === 'deepseek' ? 'deepseek-chat' : kind === 'openai' ? 'gpt-5' : 'custom-model', ...model } },
+  });
+}
+for (const kind of ['alibaba', 'deepseek', 'openai', 'openai-compatible']) test(`portable reasoning reaches ${kind}'s actual SDK request`, async t => {
+  const protocol = kind === 'openai' ? 'responses' : 'chat-completions';
+  let sent: any;
+  t.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    sent = JSON.parse(String(init.body));
+    return new Response(JSON.stringify(protocol === 'responses' ? { status: 'completed', output_text: 'OK' }
+      : { id: 'sdk-config', object: 'chat.completion', created: 1, model: 'configured', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'OK' } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { headers: { 'content-type': 'application/json' } });
+  });
+  const result = await sdkRegistry(kind, { protocol, reasoning: 'medium' }).create().complete({ ...invocation, tools: [] });
+  assert.equal(result.content, 'OK');
+  if (protocol !== 'responses') assert.equal(sent.reasoning, undefined);
+  assert.equal(sent.providerOptions, undefined, 'SDK options must never leak as a wire wrapper');
+  if (kind === 'alibaba') { assert.equal(sent.enable_thinking, true); assert.ok(sent.thinking_budget > 0); assert.equal(sent.reasoning_effort, undefined); }
+  else if (kind === 'deepseek') { assert.deepEqual(sent.thinking, { type: 'enabled' }); }
+  else if (protocol === 'responses') assert.equal(sent.reasoning.effort, 'medium');
+  else assert.equal(sent.reasoning_effort, 'medium');
+});
+
+test('Alibaba SDK options control thinking without AgentLoop converting the fields', async t => {
+  let sent: any;
+  t.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    sent = JSON.parse(String(init.body));
+    return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'OK' } }] }), { headers: { 'content-type': 'application/json' } });
+  });
+  await sdkRegistry('alibaba', { reasoning: 'high', providerOptions: { enableThinking: false } }).create().complete({ ...invocation, tools: [] });
+  assert.equal(sent.enable_thinking, false);
+  assert.equal(sent.thinking_budget, undefined);
+});
+
+test('invalid SDK selections and mixed thinking controls fail at configuration admission', () => {
+  for (const [kind, model] of [
+    ['alibaba', { protocol: 'responses' }], ['deepseek', { protocol: 'responses' }],
+    ['alibaba', { thinkingMode: 'enabled' }], ['openai-compatible', { reasoning: 'medium', enableThinking: false }],
+    ['openai', { reasoning: 'invented' }], ['alibaba', { providerOptions: { apiKey: 'must-not-be-accepted' } }],
+    ['openai', { providerOptions: { instructions: 'must-not-replace-the-runtime-prompt' } }],
+    ['openai-compatible', { providerOptions: { max_tokens: 1000000 } }],
+  ] as const) assert.throws(() => sdkRegistry(kind, model));
+});
+
+
+test('portable Responses reasoning and a summary survive the transport for a custom endpoint', async t => {
+  let sent: any;
+  t.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    sent = JSON.parse(String(init.body));
+    return new Response(JSON.stringify({ status: 'completed', output_text: 'OK' }), { headers: { 'content-type': 'application/json' } });
+  });
+  await sdkRegistry('openai-compatible', { protocol: 'responses', reasoning: 'medium', reasoningSummary: 'auto' }).create().complete({ ...invocation, tools: [] });
+  assert.deepEqual(sent.reasoning, { effort: 'medium', summary: 'auto' });
+});
+
+for (const kind of ['alibaba', 'deepseek']) test(`${kind} SDK streaming preserves Runtime tool schemas, call identity and matching results`, async t => {
+  let sent: any;
+  t.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    sent = JSON.parse(String(init.body));
+    return response(sse(chunk({ tool_calls: [{ index: 0, id: 'native-call', function: { name: 'lookup', arguments: '{"q":"native"}' } }] }, 'tool_calls'), '[DONE]'));
+  });
+  const events: ModelStreamEvent[] = [];
+  const result = await sdkRegistry(kind, { reasoning: 'medium' }).create().streamComplete(invocation, event => { events.push(event); });
+  assert.deepEqual(result.toolCalls, [{ id: 'native-call', name: 'lookup', arguments: { q: 'native' } }]);
+  assert.deepEqual(sent.tools[0].function.parameters, invocation.tools[0].inputSchema);
+  assert.equal(events.filter(event => event.type === 'tool_call_ready').length, 1);
+  assert.equal(result.streamReceipt?.doneEventCount, 1);
+});
+
+
+test('SDK configuration rejection remains actionable and is never retried as a network failure', async () => {
+  let retries = 0;
+  const model = new OpenAICompatibleModel({ ...settings, providerKind: 'deepseek', maxAttempts: 3, onRetry: () => { retries++; } });
+  await assert.rejects(model.streamComplete(invocation, () => {}), error => {
+    assert.ok(error instanceof AppError);
+    assert.match(String(error.details?.sdkConfigurationError), /beta base URL/);
+    assert.doesNotMatch(error.message, /unreachable/); return true;
+  });
+  assert.equal(retries, 0);
+});

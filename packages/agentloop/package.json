@@ -27,6 +27,8 @@
     "test:full": "node --test --test-isolation=process tests/*.test.ts"
   },
   "dependencies": {
+    "@ai-sdk/alibaba": "2.0.89",
+    "@ai-sdk/deepseek": "3.0.85",
     "@ai-sdk/openai": "4.0.111",
     "@ai-sdk/openai-compatible": "3.0.87",
     "@ai-sdk/provider": "4.0.37",

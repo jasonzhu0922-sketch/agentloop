@@ -248,7 +248,9 @@ export type ModelStreamEvent =
        * the provider signals a per-item completion (Responses API
        * `function_call_arguments.done`) or, for Chat Completions streaming
        * where only the terminal chunk is authoritative, once the stream ends.
-       * The Runtime may dispatch the tool immediately on this event.
+       * Ready events must preserve provider source order: hold a completed
+       * later call until earlier declared calls are complete. The Runtime may
+       * dispatch immediately and relies on this order for exclusive barriers.
        */
       readonly type: "tool_call_ready";
       readonly index: number;

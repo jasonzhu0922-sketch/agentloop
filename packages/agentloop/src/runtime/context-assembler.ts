@@ -173,6 +173,7 @@ export class ContextAssembler {
   private compactionAttempt = 0;
   private contextRevision = 0;
   private runtimeDirective?: string;
+  private authoringContext?: string;
   private readonly runtimePromptAugmentations = new Map<string, RuntimePromptAugmentation>();
   private runtimeStepFrame?: string;
   private promptProjectionPolicy?: PromptProjectionDecision;
@@ -214,6 +215,13 @@ export class ContextAssembler {
     const normalized = value?.trim() || undefined;
     if (this.runtimeDirective === normalized) return;
     this.runtimeDirective = normalized;
+    this.contextRevision += 1;
+    this.invalidateSnapshot();
+  }
+
+  setAuthoringContext(value: string | undefined): void {
+    if (this.authoringContext === value) return;
+    this.authoringContext = value;
     this.contextRevision += 1;
     this.invalidateSnapshot();
   }
@@ -1206,6 +1214,9 @@ export class ContextAssembler {
         "<runtime_directive>",
         this.runtimeDirective,
         "</runtime_directive>",
+      ]),
+      ...(this.authoringContext === undefined ? [] : [
+        "<runtime_bounded_authoring source=\"server\">", this.authoringContext, "</runtime_bounded_authoring>",
       ]),
       ...[...this.runtimePromptAugmentations.values()].map((augmentation) => [
         `<runtime_prompt_augmentation source=\"server\" id=\"${escapeXmlAttribute(augmentation.id)}\">`,

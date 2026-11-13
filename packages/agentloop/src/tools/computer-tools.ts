@@ -462,10 +462,15 @@ export function createComputerTools(
     {
       name: "computer_write_file",
       effect: "write",
+      boundedContent: {
+        field: "content", targetField: "path",
+        continuationInstruction: "For a new file, write one complete bounded chunk with mode=create, then continue the same path with separate mode=append calls from the last successful receipt. Append concatenates the content verbatim: it inserts NO newline, separator, or whitespace. Preserve every intended boundary character explicitly in content, including trailing newlines or a leading newline in the next chunk; use the committed tail to choose the exact continuation. If the entire file fits this turn's budget, one call suffices. Do not put the complete large artifact in one call or repeat already committed chunks.",
+      },
       description: [
         "Create, overwrite, or append to a UTF-8 file under the workspace root; requires dangerous-tool consent.",
         "path must be relative to the workspace root; absolute paths are rejected.",
         "Use only mode for write behavior: create, overwrite, or append; omit mode for create. Append requires an existing file.",
+        "Append inserts no separator, newline, or whitespace. Include all required boundary characters in content explicitly; the inspection tail records the exact committed ending. Never assume a new call starts a new line.",
         "This Tool may write authored HTML/CSS/JS directly, including paginated HTML, HTML-PPT, browser slide decks, custom visual pages, dashboards, apps, and interactions.",
         `Keep each content value within the advertised ${MAX_WRITE_CONTENT_CHARACTERS}-character bound. For larger files, use one mode=create call followed by one mode=append call per bounded chunk, keeping the same path; never put the entire large artifact in one model tool call.`,
         "When this write is the final instance of one Runtime-admitted delivery target, pass its deliveryTargetId. This selects an already-admitted target; it never creates a target and is optional for process/support files.",
@@ -536,6 +541,7 @@ export function createComputerTools(
         "All hunks are validated against the same revision before any write; they must be ordered by strictly increasing startLine and must not overlap. Any mismatch rejects the entire patch without changing the file.",
         "This is a surgical edit: at most 64 hunks and 50000 total expected/replacement characters are accepted. For a larger new file body, use computer_write_file with the complete intended replacement or a purpose-built materialization Tool.",
         "Do not pass a hash or derive a version from any tool-result hash. If the revision is stale, reread the file and use its new revisionId.",
+        "A failed patch may return patchRecovery with bounded current content, exact anchor candidates, and current.revisionId. Review that content and form new hunks; do not replay old hunks by swapping their revision. Read only missing target ranges if recovery content is insufficient. Successful patches return the next revisionId.",
         "When this patch advances the final instance of one Runtime-admitted delivery target, pass its deliveryTargetId; omit it for process/support files.",
         "The result includes schema agentloop.filePatch/v2, before/after sha256 and byte counts, hunk line metadata, final inspection, and a standard artifactReceipt. After patching a deliverable, call verify_artifact_acceptance for the patched artifact.",
       ].join(" "),
@@ -620,6 +626,7 @@ export function createComputerTools(
         "Do not pass multi-line or large inline programs through command arguments; write reusable scripts with computer_write_file, then run the script with a short command.",
         "Original stdout/stderr belongs to the committed Runtime Result. The model-visible view may contain previews; read exact output through the same resultRef using read_result with pointer /stdout or /stderr and bounded character windows. Do not reopen a file or rerun the command solely to recover omitted output.",
         "The result includes bounded fileChanges for workspace files created, modified, or deleted by the command; use that structured receipt instead of inferring artifacts from stdout text.",
+        "Generating code/specs/deliverables and modifying files in place are file operations, not immutable-input computations. Omit computationInputs for those operations and emit an operation-specific receipt rather than agentloop.commandComputation/v1. A computationEvidenceFailure rejects only the computation declaration; inspect exitCode and fileChanges before repeating any operation.",
         "For a command that creates final user deliverables, outputBindings may declare the admitted targetId for each exact output path. Runtime validates this mapping after result commit; it does not create targets or trust stdout declarations.",
         "computationInputs identifies immutable data files consumed by the command; never include the interpreter entrypoint, executable source file, or package-owned Skill script itself.",
         "A package action that acquires facts directly from an external source and emits its own evidenceReceipt must omit computationInputs unless it also consumes an immutable workspace data file declared by the action as an evidence input.",

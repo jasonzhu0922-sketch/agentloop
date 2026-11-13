@@ -7,6 +7,81 @@ import { CanonicalRunStateRepository } from "../src/runtime/canonical-run-state-
 import { PlanRepository } from "../src/planning/plan-repository.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+test("artifact repair stagnation creates one canonical Gap and Recovery completes a different construction plan", async t => {
+  const root = await mkdtemp(join(tmpdir(), "artifact-repair-recovery-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const database = new AppDatabase(":memory:");
+  t.after(() => database.close());
+  const goal = "Create an HTML training document from the supplied text: structured authoring preserves content.";
+  const deliverables = [{ targetId: "training", purpose: "The HTML training document", expectedArtifactCount: 1,
+    action: "create" as const, kind: "html" as const, surface: "workspace_artifact" as const }];
+  const capabilities = ["workspace_artifact_write", "artifact_acceptance", "construction_probe"];
+  let turns = 0, recoveries = 0, repaired = false, failureReports = 0;
+  const runs = new RunService({ database, workspaceRoot: root, skills: new SkillService(database), maxSteps: 64,
+    tools: [{ name: "construction_probe", effect: "write", description: "Probe artifact construction", inputSchema: { type: "object" },
+      source: { id: "construction", capabilities: [{ id: "construction_probe", category: "artifact_build" }] },
+      executionMode: "exclusive", replaySafe: false, parse: value => value,
+      execute: async () => { throw new AppError("BAD_REQUEST", `unrepaired construction error ${turns}`, 400); } }],
+    plannerFactory: () => ({ plan: async () => ({ goal, selectedSkillIds: [], steps: [{ id: "training", objective: goal,
+      dependencies: [], skillIds: [], requiredCapabilities: capabilities, targetIds: ["training"],
+      successCriteria: [{ id: "training-created", description: "Deliver an openable HTML document preserving the supplied text.", source: "task" }] }] }) }),
+    assessorFactory: approvingTestAssessor,
+    planRevisionAssessorFactory: () => ({ assess: async () => ({ approved: true, feedback: "", evidenceRefs: [] }) }),
+    recoveryPlannerFactory: () => ({ decide: async input => {
+      recoveries += 1;
+      assert.ok(input.canonicalGap);
+      assert.equal(input.action.metadata?.localRepairExhausted, true);
+      assert.ok(input.events.some(event => event.type === "loop.artifact_repair_checkpoint"));
+      assert.ok(input.events.some(event => event.type === "tool.completed" && event.data.toolName === "computer_write_file" && event.data.resultRef));
+      const repair = repairLeafForFailedBoundary(input.plan!.steps.find(step => step.id === input.failedBoundary!.stepId)!, input.failedBoundary!, input.plan!.version);
+      return { actionId: input.action.id, expectedActionRevision: input.action.revision, decision: "revise_plan" as const,
+        rationale: "Keep the intermediate source; construct the HTML directly using the supplied content.", evidenceRefs: [],
+        planRevision: { schema: "agentloop.outcomePlan/v2" as const, shape: "recovery_patch" as const,
+          goal, selectedSkillIds: [], steps: [{ ...repair, id: "direct-construction" }] } };
+    } }),
+    modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+      if (request.runId.startsWith("conversation-turn:")) return { content: "", finishReason: "tool_calls", toolCalls: [{
+        id: "resolve", name: "resolve_conversation_turn", arguments: { mode: "execute", relation: "new_goal", inputMode: "none",
+          effectiveGoal: goal, evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+          userConstraints: [], memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [],
+          taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "create_artifact", requiresExecution: true, deliverables } },
+      }] };
+      if ((request.runtimeContext?.content ?? "").includes("<runtime_failure_report>")) {
+        failureReports += 1;
+        return { content: "Construction failed.", finishReason: "stop", toolCalls: [] };
+      }
+      if (recoveries > 0) {
+        if (!repaired) {
+          repaired = true;
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "direct-write", name: "computer_write_file",
+            arguments: { path: "training.html", deliveryTargetId: "training", content: "<!doctype html><html><meta charset='utf-8'><title>Training</title><body><h1>Training</h1><p>Structured authoring preserves content.</p></body></html>" } }] };
+        }
+        return { content: "The HTML training document is ready.", finishReason: "stop", toolCalls: [] };
+      }
+      turns += 1;
+      return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `repair-${turns}`,
+        name: turns % 3 === 1 ? "construction_probe" : "computer_write_file",
+        arguments: turns % 3 === 1 ? {} : { path: "source.json", mode: turns === 2 ? "create" : "overwrite", content: JSON.stringify({ variant: turns }) } }] };
+    } }),
+  });
+  const run = await runs.executeConversation("owner", goal, { allowDangerousTools: true });
+  const events = await runs.events("owner", run.id);
+  assert.equal(run.status, "completed", JSON.stringify(events.filter(event => /failed|rejected/.test(event.type))));
+  assert.equal(recoveries, 1);
+  assert.equal(turns, 10);
+  assert.equal(failureReports, 0, "Successful Recovery must not generate a premature failure report");
+  const runWorkspace = events.find(event => event.type === "run.started")!.data.workspaceRoot as string;
+  assert.ok((await readFile(join(runWorkspace, "source.json"), "utf8")).includes('"variant":9'));
+  const state = await new CanonicalRunStateRepository(database).get(run.id);
+  assert.equal(state.gaps.filter(gap => gap.stepId !== undefined).length, 1);
+  assert.ok(state.gaps.every(gap => gap.status === "resolved"));
+  assert.equal(events.some(event => event.type === "loop.limit_exceeded"), false);
+  assert.equal(events.filter(event => event.type === "terminal.delivery_committed").length, 1);
+});
 
 for (const finish of ["complete", "stop"] as const) {
   test(`revised prerequisites converge, unread Result rejection persists the shared Gap, and recovery can ${finish}`, async () => {

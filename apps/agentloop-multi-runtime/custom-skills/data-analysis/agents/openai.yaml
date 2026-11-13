@@ -1,6 +1,6 @@
 interface:
   display_name: "数据查询与分析"
-  short_description: "由当前 Agent 规划、生成 SQL、查询并分析真实数据"
-  default_prompt: "Use $data-analysis to resolve the question from current business metadata, generate SQL, execute it through the read-only data gateway, and analyze the evidence in this Run."
+  short_description: "集团财务、经营、人力、钢联行情与采购合同分析，以及采购销售库存演示问数"
+  default_prompt: "使用 $data-analysis 分析集团财务、经营指标、人力、钢联行情或采购合同，或查询采购销售库存演示数据；先确认数据场景，再按业务口径查询并给出可追溯的结论。"
 policy:
   allow_implicit_invocation: true

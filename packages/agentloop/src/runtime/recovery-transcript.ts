@@ -1,6 +1,7 @@
 import type { AgentLoopToolEvidence, ModelMessage, ModelToolCall } from "./contracts.ts";
 import { parseRuntimeResultRef, type RuntimeResultRef } from "./runtime-result.ts";
 import { decisionCommitsFromEvents, type RuntimeDecisionCommit } from "./decision-ledger.ts";
+import { parseOutputBudgetState, type OutputBudgetState } from "./tool-content-budget.ts";
 import {
   classifyToolOperationOutcome,
   type ToolInvocationStatus,
@@ -23,6 +24,7 @@ export interface RecoveryTranscript {
     candidateOutputs: readonly string[];
     candidateRejections: readonly { readonly output: string; readonly feedback: string }[];
     decisionLedger: readonly RuntimeDecisionCommit[];
+    outputBudgetState?: OutputBudgetState;
   }>;
 }
 
@@ -74,6 +76,7 @@ export function reconstructRecoveryTranscript(input: {
     return activeStepId === input.stepId;
   });
   const outcomes = new Map<string, ToolOutcome>();
+  let outputBudgetState: OutputBudgetState | undefined;
   const assistants: AssistantCheckpoint[] = [];
   const candidateOutputs: string[] = [];
   const candidateRejections: Array<{ output: string; feedback: string }> = [];
@@ -83,6 +86,9 @@ export function reconstructRecoveryTranscript(input: {
   const coveredToolCallIds = new Set<string>();
   const committedResultRefs = new Map<string, RuntimeResultRef>();
   for (const event of scope) {
+    if (event.type === "loop.output_budget.updated" && event.data.schema === "agentloop.outputBudgetState/v1") {
+      outputBudgetState = parseOutputBudgetState(event.data) ?? outputBudgetState;
+    }
     if (event.type !== "tool.result_committed" || typeof event.data.toolCallId !== "string") continue;
     const ref = parseRuntimeResultRef(event.data.resultRef);
     if (ref !== undefined) committedResultRefs.set(event.data.toolCallId, ref);
@@ -303,6 +309,7 @@ export function reconstructRecoveryTranscript(input: {
       candidateOutputs,
       candidateRejections,
       decisionLedger: decisionCommitsFromEvents(scope),
+      ...(outputBudgetState === undefined ? {} : { outputBudgetState }),
     },
   };
 }
