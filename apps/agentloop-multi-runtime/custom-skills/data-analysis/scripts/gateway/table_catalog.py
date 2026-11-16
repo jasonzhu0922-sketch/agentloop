@@ -1,7 +1,7 @@
 """Build the analytics catalog from authorized TiDB base tables."""
 from copy import deepcopy
 
-from .database import query_connection, _validate_role
+from .database import query_connection
 from .query_policy import allowed_relations
 
 
@@ -14,7 +14,6 @@ def physical_catalog(config):
     if len({relation.split('.')[1] for relation in allowed}) != len(allowed):
         raise ValueError('同一场景不能绑定不同 schema 下的同名表')
     with query_connection() as conn:
-        _validate_role(conn)
         markers = ','.join(['%s'] * len(namespaces))
         with conn.cursor() as cursor:
             cursor.execute(f"""

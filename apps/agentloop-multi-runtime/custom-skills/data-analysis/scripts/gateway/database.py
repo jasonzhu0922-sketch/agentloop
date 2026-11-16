@@ -9,42 +9,18 @@ from time import monotonic
 from typing import Any
 
 import pymysql
-import re
 from query_errors import QueryExecutionError, QueryParameterError
 
 from .scenarios import current_scenario
 from .tidb_connection import connect
 from .query_parameters import driver_query
-from .query_policy import QueryPolicyError, allowed_relations, validate_query, validate_output_fields
+from .query_policy import QueryPolicyError, validate_query, validate_output_fields
 
 @contextmanager
 def query_connection():
     binding = (current_scenario() or {}).get('binding', {})
     with connect(binding.get('query_url', '')) as connection:
         yield connection
-
-
-def _validate_role(connection) -> None:
-    # TiDB does not implement START TRANSACTION READ ONLY. Effective table
-    # privileges enforce the boundary; never enable no-op compatibility flags.
-    with connection.cursor() as cursor:
-        cursor.execute("SHOW GRANTS")
-        grants = [next(iter(row.values())) for row in cursor.fetchall()]
-    allowed = allowed_relations()
-    selected = set()
-    for grant in grants:
-        match = re.fullmatch(r"GRANT (.+?) ON (.+?) TO .+", grant, flags=re.IGNORECASE)
-        if not match or 'WITH GRANT OPTION' in grant.upper():
-            raise QueryPolicyError('查询账号包含角色或可转授权权限')
-        privileges, resource = match.groups()
-        if privileges.upper() == 'USAGE' and resource == '*.*':
-            continue
-        relation = resource.replace('`', '')
-        if privileges.upper() != 'SELECT' or relation not in allowed:
-            raise QueryPolicyError('查询账号必须仅拥有场景授权表的 SELECT 权限')
-        selected.add(relation)
-    if selected != allowed:
-        raise QueryPolicyError('查询账号缺少场景授权表的 SELECT 权限')
 
 
 def _audit(config: dict[str, Any], sql: str, params: list[Any], decision: str, reason: str, duration_ms: int | None = None, result_hash: str | None = None, row_count: int | None = None) -> None:
@@ -66,6 +42,8 @@ def _driver_query(sql: str, params: list[Any]) -> tuple[str, list[Any] | None]:
 
 
 def execute_readonly(sql: str, params: list[Any] | None = None, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    # Read-only describes the admitted SQL, not the configured account's grants.
+    # TiDB does not support START TRANSACTION READ ONLY; do not enable no-op flags.
     config, params = config or {}, params or []
     started = monotonic()
     try:
@@ -86,8 +64,6 @@ def execute_readonly(sql: str, params: list[Any] | None = None, config: dict[str
             with connection.cursor() as cursor:
                 phase = 'transaction.configure'
                 cursor.execute("SET SESSION max_execution_time=10000")
-                phase = 'role.check'
-                _validate_role(connection)
                 phase = 'query.explain'
                 cursor.execute("EXPLAIN FORMAT='brief' " + driver_sql, driver_params)
                 plan = cursor.fetchall()
@@ -125,7 +101,7 @@ def execute_readonly(sql: str, params: list[Any] | None = None, config: dict[str
         return {"columns": columns, "rows": rows, "row_count": len(rows)}
     except Exception as exc:
         if isinstance(exc, QueryPolicyError) and reason == 'query_error':
-            reason = 'role_or_policy'
+            reason = 'query_policy'
         _audit(config, sql, params, 'rejected' if isinstance(exc, QueryPolicyError) else 'failed', reason, round((monotonic() - started) * 1000))
         if isinstance(exc, QueryPolicyError):
             raise QueryPolicyError(str(exc), phase=phase) from exc

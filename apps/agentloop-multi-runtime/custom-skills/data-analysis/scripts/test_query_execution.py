@@ -84,22 +84,23 @@ class QueryExecutionTest(unittest.TestCase):
                     cursor.mogrify(statement, values)
         explain.execute.side_effect = bind
         results.execute.side_effect = bind
-        with patch.object(database, "query_connection", return_value=nullcontext(connection)), \
-             patch.object(database, "_validate_role"):
+        with patch.object(database, "query_connection", return_value=nullcontext(connection)):
             result = self.gateway.execute_sql("selected", sql, params)
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["dataset"]["rows"], [{"revenue": 12.3}])
         explain.execute.assert_any_call("EXPLAIN FORMAT='brief' " + sql, params)
+        self.assertFalse(any(c.args[0] == "SHOW GRANTS" for c in explain.execute.call_args_list))
         results.execute.assert_called_once_with(sql, params)
         self.assertEqual(self.store.record_query_audit.call_args.args[0]["decision"], "completed")
 
     def test_explain_execute_and_fetch_failures_keep_their_phase_without_raw_messages(self):
-        for phase in ("query.explain", "query.execute", "result.fetch"):
-            with self.subTest(phase=phase):
+        for phase, vendor_code in (("query.explain", 1054), ("query.explain", 1142),
+                                   ("query.execute", 1054), ("result.fetch", 1054)):
+            with self.subTest(phase=phase, vendor_code=vendor_code):
                 connection, explain, results = self.connection()
                 target = {"query.explain": explain.execute, "query.execute": results.execute,
                           "result.fetch": results.fetchmany}[phase]
-                error = pymysql.err.ProgrammingError(1054, "password=SECRET; private row")
+                error = pymysql.err.ProgrammingError(vendor_code, "password=SECRET; private row")
                 if phase == "query.explain":
                     def fail_explain(statement, values=None):
                         if statement.startswith("EXPLAIN"):
@@ -107,12 +108,11 @@ class QueryExecutionTest(unittest.TestCase):
                     target.side_effect = fail_explain
                 else:
                     target.side_effect = error
-                with patch.object(database, "query_connection", return_value=nullcontext(connection)), \
-                     patch.object(database, "_validate_role"):
+                with patch.object(database, "query_connection", return_value=nullcontext(connection)):
                     result = self.gateway.execute_sql("selected", f"SELECT amount FROM {TABLE}", [])
                 self.assertEqual(result["status"], "failed")
                 self.assertEqual(result["error"]["diagnostic"]["phase"], phase)
-                self.assertEqual(result["error"]["diagnostic"]["vendor_code"], 1054)
+                self.assertEqual(result["error"]["diagnostic"]["vendor_code"], vendor_code)
                 self.assertNotIn("SECRET", json.dumps(result["error"]))
                 self.assertNotIn("private row", json.dumps(result["error"]))
                 self.assertNotIn("dataset", result)

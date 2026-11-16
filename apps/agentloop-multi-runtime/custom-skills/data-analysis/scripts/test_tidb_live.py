@@ -1,4 +1,4 @@
-"""Opt-in checks of the configured TiDB Skill, including actual account grants.
+"""Opt-in checks of configured TiDB catalogs and query policy with any account.
 
 DATA_ANALYSIS_TIDB_LIVE=1 python3 -B scripts/test_tidb_live.py
 Business data is read-only; ordinary query audit rows are written by the Skill.
@@ -9,9 +9,7 @@ import sys
 import unittest
 sys.dont_write_bytecode = True
 
-import pymysql
 from data_access import load_gateway
-from gateway.tidb_connection import connect
 from runtime_config import connections
 
 
@@ -21,9 +19,18 @@ class TiDBLiveTest(unittest.TestCase):
         self.config = connections()
         self.gateway = load_gateway()
 
-    def test_both_migrated_scenarios_have_complete_catalogs_and_dialect(self):
+    def test_readonly_queries_work_for_configured_accounts(self):
+        for scenario, binding in self.config['query_databases'].items():
+            table = binding['allowed_relations'][0]
+            with self.subTest(scenario=scenario):
+                result = self.gateway.execute_sql(scenario, f'SELECT 1 AS sample FROM {table} LIMIT 1', [])
+                self.assertEqual(result['status'], 'completed', result.get('error'))
+                self.assertLessEqual(result['dataset']['row_count'], 1)
+
+    def test_group_is_the_only_scenario_and_has_complete_catalog_and_dialect(self):
         scenarios = self.gateway.scenarios()
-        self.assertEqual({row["id"] for row in scenarios}, set(self.config["query_databases"]))
+        self.assertEqual(set(self.config["query_databases"]), {"group"})
+        self.assertEqual([row["id"] for row in scenarios], ["group"])
         for row in scenarios:
             with self.subTest(scenario=row["id"]):
                 catalog = self.gateway.catalog(row["id"])
@@ -75,18 +82,13 @@ class TiDBLiveTest(unittest.TestCase):
                     self.assertIn(term, expanded['terms'])
                     self.assertEqual(catalog['catalog_revision'], expanded['catalog_revision'])
 
-    def test_parameterized_dates_and_join_match_migrated_demo(self):
-        sql = """SELECT o.region, COUNT(DISTINCT o.sales_order_id) AS orders,
-                 SUM(i.quantity*i.unit_price) AS revenue
-                 FROM nl2sql_demo.sales_orders o JOIN nl2sql_demo.sales_order_items i
-                 ON o.sales_order_id=i.sales_order_id
-                 WHERE o.status=%s AND o.sale_date>=CAST(%s AS DATE) AND o.sale_date<CAST(%s AS DATE)
-                 GROUP BY o.region ORDER BY revenue DESC"""
-        result = self.gateway.execute_sql("demo", sql, ["completed", "2026-06-01", "2026-07-01"])
-        self.assertEqual(result["status"], "completed", result.get("error"))
-        self.assertEqual(result["dataset"]["row_count"], 5)
-        self.assertEqual(sum(row["orders"] for row in result["dataset"]["rows"]), 360)
-        self.assertAlmostEqual(sum(row["revenue"] for row in result["dataset"]["rows"]), 3397394.20, places=2)
+    def test_unconfigured_scenarios_cannot_be_read_or_queried(self):
+        for action in (
+            lambda: self.gateway.catalog('demo'),
+            lambda: self.gateway.execute_sql('demo', 'SELECT 1', []),
+        ):
+            with self.subTest(action=action), self.assertRaises(ValueError):
+                action()
 
     def test_group_streaming_preserves_more_than_preview_size(self):
         sql = "SELECT COUNT(*) AS n FROM nl2sql_group.v_fawhzhss0401"
@@ -100,28 +102,28 @@ class TiDBLiveTest(unittest.TestCase):
         self.assertEqual(result["dataset"]["row_count"], min(700, count["dataset"]["rows"][0]["n"]))
         self.assertEqual(len(result["dataset"]["rows"]), result["dataset"]["row_count"])
 
-    def test_actual_query_accounts_deny_writes_and_other_scenarios(self):
+    def test_gateway_denies_writes_and_other_scenarios_for_configured_accounts(self):
         for scenario, binding in self.config["query_databases"].items():
-            with self.subTest(scenario=scenario), connect(binding["query_url"]) as connection, connection.cursor() as cursor:
-                table = binding["allowed_relations"][0]
-                # A zero-row statement proves database-level denial even when
-                # the SQL policy is bypassed, without modifying business data.
-                with self.assertRaises(pymysql.err.OperationalError) as denied:
-                    cursor.execute(f"DELETE FROM {table} WHERE 1=0")
-                self.assertEqual(denied.exception.args[0], 1142)
-                other = next(v for k, v in self.config["query_databases"].items() if k != scenario)
-                with self.assertRaises(pymysql.err.OperationalError) as denied:
-                    cursor.execute(f"SELECT 1 FROM {other['allowed_relations'][0]} LIMIT 1")
-                self.assertEqual(denied.exception.args[0], 1142)
+            table = binding["allowed_relations"][0]
+            unauthorized = next((relation
+                for other in self.config["query_databases"].values()
+                for relation in other['allowed_relations']
+                if relation not in binding['allowed_relations']), 'information_schema.tables')
+            for sql in (f"DELETE FROM {table} WHERE 1=0", f"SELECT 1 FROM {unauthorized} LIMIT 1"):
+                with self.subTest(scenario=scenario, sql=sql):
+                    result = self.gateway.execute_sql(scenario, sql, [])
+                    self.assertEqual(result['status'], 'rejected')
+                    self.assertEqual(result['error']['code'], 'query_policy_rejected')
+                    self.assertEqual(result['error']['diagnostic']['phase'], 'query.validate')
 
     def test_policy_and_parameter_errors_remain_explicit(self):
         for sql, params, code in [
             ("SELECT 1", [], "query_policy_rejected"),
-            ("SELECT COUNT(*) FROM nl2sql_group.v_fawhzhss0401", [], "query_policy_rejected"),
-            ("SELECT sales_order_id FROM nl2sql_demo.sales_orders WHERE status=$1", ["completed"], "query_parameter_invalid"),
+            ("SELECT COUNT(*) FROM information_schema.tables", [], "query_policy_rejected"),
+            ("SELECT COUNT(*) AS n FROM nl2sql_group.v_fawhzhss0401 WHERE %s=%s", ["202201"], "query_parameter_invalid"),
         ]:
             with self.subTest(code=code):
-                result = self.gateway.execute_sql("demo", sql, params)
+                result = self.gateway.execute_sql("group", sql, params)
                 self.assertEqual(result["status"], "rejected")
                 self.assertEqual(result["error"]["code"], code)
                 self.assertNotIn("dataset", result)

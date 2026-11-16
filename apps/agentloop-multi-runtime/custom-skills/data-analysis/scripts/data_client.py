@@ -13,7 +13,6 @@ import tempfile
 sys.dont_write_bytecode = True
 from data_access import load_gateway
 from runtime_config import ConnectionConfigurationError
-from scenario_selection import selection_requirement
 from entity_binding import EntityBindingError
 
 
@@ -80,10 +79,6 @@ def save_result(value, output):
             receipt['dataset_complete'] = True
             receipt['dataset'] = value['dataset']
             receipt['read_contract']['inline_dataset_root'] = '/dataset'
-    if isinstance(value, dict) and value.get("schema") == "agentloop.humanLoopRequirement/v1":
-        # Runtime consumes this native control structure from registered,
-        # immutable Skill command roots and persists a blocking HIL request.
-        receipt["humanLoopRequirement"] = value["humanLoopRequirement"]
     if isinstance(value, dict) and value.get("status") == "completed" and value.get("schema") == "nl2sql.query-result/v1":
         receipt["evidenceReceipt"] = {
             "schema": "agentloop.toolEvidenceReceipt/v1",
@@ -97,8 +92,6 @@ def main(argv=None):
     actions = parser.add_subparsers(dest="action", required=True)
     scenarios = actions.add_parser("scenarios")
     scenarios.add_argument("--output")
-    selection = actions.add_parser("select-scenario")
-    selection.add_argument("--output", required=True)
     for name in ("catalog", "execute", "resolve-entity"):
         command = actions.add_parser(name)
         command.add_argument("--scenario-id", required=True, type=text_arg)
@@ -152,9 +145,6 @@ def main(argv=None):
         if args.action == "scenarios":
             phase = "catalog.scenarios"
             result = gateway.scenarios()
-        elif args.action == "select-scenario":
-            phase = "scenario.selection"
-            result = selection_requirement(gateway.scenarios(), str(Path(args.output).resolve()))
         elif args.action == "catalog":
             phase = "catalog.read"
             result = gateway.catalog(args.scenario_id, args.source_id, args.question)

@@ -17,7 +17,6 @@ from data_access import Gateway
 import data_client
 import runtime_config
 from data_api import create_app
-from scenario_selection import selection_requirement
 import httpx
 
 
@@ -356,46 +355,59 @@ class BundledPolicyTest(unittest.TestCase):
         self.assertEqual(_driver_query(literal, []), (literal, None))
 
 
-class ScenarioSelectionTest(unittest.TestCase):
-    def test_single_available_scenario_still_requires_user_selection(self):
-        result = selection_requirement([{"id": "warehouse", "name": "经营数据", "description": "已配置范围"}], "selection.json")
-        requirement = result["humanLoopRequirement"]
-        self.assertEqual(requirement["kind"], "selection")
-        self.assertEqual(requirement["responseSchema"], {
-            "type": "select", "minSelections": 1, "maxSelections": 1,
-            "options": [{"id": "warehouse", "label": "经营数据", "description": "已配置范围",
-                         "identityRefs": ["data-analysis:scenario:warehouse"]}]})
-        self.assertEqual(requirement["resume"], {"mode": "continue_step"})
-        self.assertNotIn("scenario_id", result)
+class ConfiguredScenarioScopeTest(unittest.TestCase):
+    def setUp(self):
+        from gateway.store import CatalogStore
+        from gateway.scenarios import scenario_scope
+        from gateway.query_policy import QueryPolicyError
+        configured = {"catalog_database_url": "tidb://root@localhost/catalog",
+                      "query_databases": {"group": {"query_url": "tidb://root@localhost/business",
+                                                    "allowed_relations": ["group.staff"]}}}
+        self.store = CatalogStore(configured)
+        self.physical = unittest.mock.Mock()
+        self.execute = unittest.mock.Mock()
+        self.gateway = Gateway(self.store, scenario_scope, self.physical, self.execute, QueryPolicyError)
 
-    def test_options_use_live_identities_without_recommendation_or_invented_defaults(self):
-        scenarios = [{"id": "a", "name": "同名目录", "description": "业务 A"},
-                     {"id": "b", "name": "同名目录", "description": "业务 B"}]
-        options = selection_requirement(scenarios, "selection.json")["humanLoopRequirement"]["responseSchema"]["options"]
-        self.assertEqual([o["id"] for o in options], ["a", "b"])
-        self.assertEqual([o["description"] for o in options], ["业务 A", "业务 B"])
-        for invalid in [[], scenarios + [scenarios[0]]]:
-            with self.assertRaises(ValueError):
-                selection_requirement(invalid, "selection.json")
+    def test_catalog_directory_only_exposes_configured_group_even_if_demo_exists_in_database(self):
+        with patch.object(self.store, "connect") as connect:
+            cursor = connect.return_value.__enter__.return_value
+            cursor.fetchall.return_value = [
+                {"id": "demo", "name": "演示", "description": "unconfigured"},
+                {"id": "group", "name": "集团经营分析", "description": "configured"}]
+            scenarios = self.gateway.scenarios()
+        self.assertEqual(scenarios, [{"id": "group", "name": "集团经营分析", "description": "configured"}])
 
-    def test_cli_emits_native_hil_without_querying_metadata_even_for_large_directory(self):
+    def test_demo_metadata_entity_resolution_and_queries_are_rejected_before_database_access(self):
+        with patch.object(self.store, "connect") as connect:
+            for action in (
+                lambda: self.gateway.catalog("demo"),
+                lambda: self.gateway.resolve_entity("demo", {"source_id": "staff", "mention": "test"}),
+                lambda: self.gateway.execute_sql("demo", "SELECT amount FROM group.staff", []),
+            ):
+                with self.subTest(action=action), self.assertRaises(ValueError):
+                    action()
+            connect.assert_not_called()
+            self.physical.assert_not_called()
+            self.execute.assert_not_called()
+
+    def test_declared_catalog_action_binds_group_without_requesting_a_scenario_choice(self):
+        root = Path(__file__).resolve().parent.parent
+        manifest = json.loads((root/"agentloop.executors.json").read_text())
+        action = next(a for e in manifest["executors"] for a in e["actions"] if a["id"] == "search-sources")
+        question = "宝山 2022 年 1 月份的两金周转天数"
+        gateway = unittest.mock.Mock()
+        gateway.catalog.return_value = {"schema": "nl2sql.data-catalog/v1", "scenario_id": "group", "tables": []}
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary)/"hil"/"selection.json"
-            gateway = unittest.mock.Mock()
-            gateway.scenarios.return_value = [{"id": "one", "name": "场景一", "description": "范围" * 4000},
-                                             {"id": "two", "name": "场景二", "description": "其他范围"}]
+            output = Path(temporary)/"catalog.json"
+            values = {"question": question, "output": str(output)}
+            args = [values.get(arg[2:-2], arg) if arg.startswith("{{") else arg for arg in action["args"]]
             with patch.object(data_client, "load_gateway", return_value=gateway), redirect_stdout(io.StringIO()) as stream:
-                code = data_client.main(["select-scenario", "--output", str(output)])
+                code = data_client.main(args)
             self.assertEqual(code, 0)
-            saved = json.loads(output.read_text())
-            receipt = json.loads(stream.getvalue())
-            self.assertEqual(saved["schema"], "agentloop.humanLoopRequirement/v1")
-            self.assertEqual(receipt["humanLoopRequirement"], saved["humanLoopRequirement"])
-            self.assertFalse(receipt["content_complete"])
-            self.assertEqual(saved["humanLoopRequirement"]["evidenceRefs"], [str(output.resolve())])
-            gateway.scenarios.assert_called_once_with()
-            gateway.catalog.assert_not_called()
-            gateway.execute_sql.assert_not_called()
+            gateway.catalog.assert_called_once_with("group", None, question)
+            gateway.scenarios.assert_not_called()
+            self.assertNotIn("humanLoopRequirement", json.loads(stream.getvalue()))
+            self.assertEqual(json.loads(output.read_text())["scenario_id"], "group")
 
 
 if __name__ == "__main__":

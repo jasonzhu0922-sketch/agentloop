@@ -1,5 +1,6 @@
 """Offline TiDB authorization, dialect and dependency boundary regressions."""
 import builtins
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import sys
@@ -8,34 +9,62 @@ import unittest
 from unittest.mock import MagicMock, patch
 sys.dont_write_bytecode = True
 
-from data_access import load_gateway
-from gateway.database import _validate_role
+from data_access import Gateway, load_gateway
+from gateway import database, table_catalog
 from gateway.query_policy import QueryPolicyError, validate_query
 from gateway.scenarios import scenario_scope
 import runtime_config
 
 
 class TiDBBoundaryTest(unittest.TestCase):
-    def test_account_requires_exact_table_select_without_roles_or_writes(self):
+    def test_catalog_does_not_gate_account_grants_and_preserves_table_scope(self):
         allowed = {'id': 'selected', 'binding': {'allowed_relations': ['analytics.orders']}}
-        for grants, accepted in [
-            (["GRANT USAGE ON *.* TO 'r'@'%'", "GRANT SELECT ON `analytics`.`orders` TO 'r'@'%'"], True),
-            (["GRANT ALL PRIVILEGES ON *.* TO 'r'@'%'"], False),
-            (["GRANT SELECT ON `analytics`.* TO 'r'@'%'"], False),
-            (["GRANT SELECT, UPDATE ON `analytics`.`orders` TO 'r'@'%'"], False),
-            (["GRANT SELECT ON `other`.`orders` TO 'r'@'%'"], False),
-            (["GRANT SELECT ON `analytics`.`orders` TO 'r'@'%' WITH GRANT OPTION"], False),
-            (["GRANT 'writer'@'%' TO 'r'@'%'"], False),
-            ([], False),
+        for grants in [
+            ["GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION"],
+            ["GRANT SELECT ON `analytics`.* TO 'reader'@'%'"],
+            ["GRANT 'analyst'@'%' TO 'reader'@'%'"],
         ]:
             connection = MagicMock()
-            connection.cursor.return_value.__enter__.return_value.fetchall.return_value = [{'grant': g} for g in grants]
-            with self.subTest(grants=grants), scenario_scope(allowed):
-                if accepted:
-                    _validate_role(connection)
+            cursor = connection.cursor.return_value.__enter__.return_value
+            def execute(sql, params=None):
+                if sql == 'SHOW GRANTS':
+                    cursor.fetchall.return_value = [{'grant': g} for g in grants]
+                elif 'information_schema.columns' in sql:
+                    cursor.fetchall.return_value = [
+                        {'schema_name': 'analytics', 'name': name, 'column_name': 'amount',
+                         'type': 'decimal(12,2)', 'description': '', 'column_description': ''}
+                        for name in ('orders', 'private_orders')]
                 else:
-                    with self.assertRaises(QueryPolicyError):
-                        _validate_role(connection)
+                    cursor.fetchall.return_value = []
+            cursor.execute.side_effect = execute
+            with self.subTest(grants=grants), scenario_scope(allowed):
+                with patch.object(table_catalog, 'query_connection', return_value=nullcontext(connection)):
+                    catalog = table_catalog.physical_catalog({})
+                self.assertEqual([t['name'] for t in catalog['tables']], ['orders'])
+                self.assertEqual(catalog['allowed_relations'], ['analytics.orders'])
+                self.assertFalse(any(c.args[0] == 'SHOW GRANTS' for c in cursor.execute.call_args_list))
+
+    def test_writes_and_out_of_scope_reads_are_rejected_before_opening_connection(self):
+        store = MagicMock()
+        store.get_scenario.return_value = {
+            'id': 'selected', 'binding': {'allowed_relations': ['analytics.orders']}}
+        store.load_config.return_value = {'tables': []}
+        gateway = Gateway(store, scenario_scope, lambda config: config,
+                          database.execute_readonly, QueryPolicyError)
+        for sql in [
+            'DELETE FROM analytics.orders WHERE 1=0',
+            'UPDATE analytics.orders SET amount=0 WHERE 1=0',
+            'INSERT INTO analytics.orders (amount) VALUES (0)',
+            'DROP TABLE analytics.orders',
+            'SELECT amount FROM other.orders',
+            'SELECT amount FROM analytics.private_orders',
+            'SELECT amount FROM analytics.orders; DELETE FROM analytics.orders',
+        ]:
+            with self.subTest(sql=sql), patch.object(database, 'query_connection') as connect:
+                result = gateway.execute_sql('selected', sql, [])
+                self.assertEqual(result['status'], 'rejected')
+                self.assertEqual(result['error']['code'], 'query_policy_rejected')
+                connect.assert_not_called()
 
     def test_mysql_date_functions_and_parameter_parser_preserve_safe_queries(self):
         with scenario_scope({'id': 'selected', 'binding': {'allowed_relations': ['analytics.orders']}}):

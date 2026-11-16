@@ -1,6 +1,6 @@
 interface:
   display_name: "数据查询与分析"
-  short_description: "集团财务、经营、人力、钢联行情与采购合同分析，以及采购销售库存演示问数"
-  default_prompt: "使用 $data-analysis 分析集团财务、经营指标、人力、钢联行情或采购合同，或查询采购销售库存演示数据；先确认数据场景，再按业务口径查询并给出可追溯的结论。"
+  short_description: "集团经营分析：财务报表、经营指标、人力、钢联行情与采购合同问数"
+  default_prompt: "使用 $data-analysis 在 group 集团经营分析场景中，按业务口径查询财务、经营指标、人力、钢联行情或采购合同，并给出可追溯的结论。"
 policy:
   allow_implicit_invocation: true

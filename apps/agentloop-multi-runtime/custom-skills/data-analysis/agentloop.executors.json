@@ -3,30 +3,13 @@
   "executors": [
     {
       "id": "data-access",
-      "description": "Read metadata or execute caller SQL using the complete deterministic TiDB/MySQL gateway and root connection configuration bundled in this Skill. No external project or model workflow.",
+      "description": "Read group business metadata or execute caller SQL using the deterministic TiDB/MySQL gateway and connection configuration bundled in this Skill. No external project or model workflow.",
       "command": "python3",
       "script": "scripts/data_client.py",
       "actions": [
         {
-          "id": "select-scenario",
-          "description": "Required when the user has not explicitly chosen a scenario for this task. List live scenarios and emit a native blocking HIL single-choice request; do not read scenario metadata or run SQL before the accepted answer.",
-          "inputs": [
-            {
-              "name": "output",
-              "description": "Workspace JSON file for the scenario selection requirement.",
-              "required": true
-            }
-          ],
-          "args": [
-            "select-scenario",
-            "--output",
-            "{{output}}"
-          ],
-          "result": "Native humanLoopRequirement with one required selection, live scenario identities and continue_step resume. Runtime pauses the Run for the user."
-        },
-        {
           "id": "scenarios",
-          "description": "List configured data scenarios.",
+          "description": "Read the configured group scenario identity.",
           "inputs": [
             {
               "name": "output",
@@ -39,17 +22,12 @@
             "--output",
             "{{output}}"
           ],
-          "result": "Complete scenario directory and persisted file receipt."
+          "result": "Group scenario identity and persisted file receipt."
         },
         {
           "id": "catalog",
           "description": "Read all authorized source identities and compact metric/term identities for one explicitly selected scenario. Full definitions are retrieved by question or selected source.",
           "inputs": [
-            {
-              "name": "scenario-id",
-              "description": "Selected scenario id.",
-              "required": true
-            },
             {
               "name": "output",
               "description": "Workspace JSON result path.",
@@ -59,7 +37,7 @@
           "args": [
             "catalog",
             "--scenario-id",
-            "{{scenario-id}}",
+            "group",
             "--output",
             "{{output}}"
           ],
@@ -69,11 +47,6 @@
           "id": "search-sources",
           "description": "Rank all authorized sources for the user's question using stored summaries, metrics and business terms. Ranking never selects a scenario or excludes tables.",
           "inputs": [
-            {
-              "name": "scenario-id",
-              "description": "Explicitly selected scenario id.",
-              "required": true
-            },
             {
               "name": "question",
               "description": "User question, up to 4000 characters.",
@@ -88,7 +61,7 @@
           "args": [
             "catalog",
             "--scenario-id",
-            "{{scenario-id}}",
+            "group",
             "--question",
             "{{question}}",
             "--output",
@@ -100,11 +73,6 @@
           "id": "source-details",
           "description": "Read complete selected-source fields, summaries, metric definitions, entity and period contracts, plus terms referenced by the source or matched by the current question.",
           "inputs": [
-            {
-              "name": "scenario-id",
-              "description": "Selected scenario id.",
-              "required": true
-            },
             {
               "name": "source-id",
               "description": "Table name from the source index.",
@@ -124,7 +92,7 @@
           "args": [
             "catalog",
             "--scenario-id",
-            "{{scenario-id}}",
+            "group",
             "--source-id",
             "{{source-id}}",
             "--question",
@@ -139,11 +107,6 @@
           "description": "Bind a matched business term and its interpreted canonical name to a source-specific entity definition. Query the exact canonical name and return all candidate codes, lookup evidence and an entity query_plan. Do not retry with the original short-name LIKE.",
           "inputs": [
             {
-              "name": "scenario-id",
-              "description": "Explicitly selected scenario id.",
-              "required": true
-            },
-            {
               "name": "request-json",
               "description": "JSON with mention, matched_term, canonical_name, source_id and entity_id from current catalog definitions.",
               "required": true
@@ -157,7 +120,7 @@
           "args": [
             "resolve-entity",
             "--scenario-id",
-            "{{scenario-id}}",
+            "group",
             "--request-json",
             "{{request-json}}",
             "--output",
@@ -169,11 +132,6 @@
           "id": "execute-entity-sql",
           "description": "Execute SQL with a saved combined entity/metric/time query plan. Verify exact entity codes, metric project values and declared time ranges in each physical source WHERE before execution.",
           "inputs": [
-            {
-              "name": "scenario-id",
-              "description": "Explicitly selected scenario id.",
-              "required": true
-            },
             {
               "name": "request-json",
               "description": "JSON with SQL and separate params generated by the current Agent.",
@@ -194,7 +152,7 @@
           "args": [
             "execute",
             "--scenario-id",
-            "{{scenario-id}}",
+            "group",
             "--request-json",
             "{{request-json}}",
             "--query-plan",
@@ -213,11 +171,6 @@
           "description": "Execute caller SQL with inline query_plan binding selected metric names, source time ranges and resolved entities. Combine plan and SQL in this call; do not omit existing bindings. Definition probes may run without a plan.",
           "inputs": [
             {
-              "name": "scenario-id",
-              "description": "Selected scenario id.",
-              "required": true
-            },
-            {
               "name": "request-json",
               "description": "JSON with sql, separate params, and query_plan (schema, scenario_id, catalog_revision, metric_bindings, time_bindings, entity_bindings as applicable). See references/input-contract.md.",
               "required": true
@@ -231,7 +184,7 @@
           "args": [
             "execute",
             "--scenario-id",
-            "{{scenario-id}}",
+            "group",
             "--request-json",
             "{{request-json}}",
             "--output",

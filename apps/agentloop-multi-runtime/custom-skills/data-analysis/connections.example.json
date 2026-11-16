@@ -1,10 +1,16 @@
 {
-  "catalog_database_url": "tidb://<catalog-user>:<password>@127.0.0.1:4000/nl2sql_skill",
+  "catalog_database_url": "tidb://root@10.251.40.47:6000/nl2sql_skill",
   "query_databases": {
-    "<scenario-id>": {
-      "query_url": "tidb://<readonly-user>:<password>@127.0.0.1:4000/<business-database>",
+    "group": {
+      "query_url": "tidb://root@10.251.40.47:6000/nl2sql_group",
       "allowed_relations": [
-        "<database>.<table>"
+        "nl2sql_group.t_ads_fact_bwg_ind_all_02_real",
+        "nl2sql_group.t_ads_fact_bwg_ind_all_03_real",
+        "nl2sql_group.t_dwd_fact_cgcz_pcontract_info",
+        "nl2sql_group.t_dwd_fact_cwgl_merge_report",
+        "nl2sql_group.v_fawhzhss0401",
+        "nl2sql_group.mb_index_main_data",
+        "nl2sql_group.mb_index_main_info"
       ]
     }
   }
