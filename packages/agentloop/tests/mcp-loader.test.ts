@@ -154,7 +154,7 @@ test("MCP startup handshake and discovery honor the configured request timeout",
 });
 
 
-test("reply read effects require trusted MCP read-only annotations independently of replay safety", async () => {
+test("MCP effect metadata requires trusted read-only annotations independently of replay safety", async () => {
   const config = parseMcpServersConfig({ servers: [
     { key: "trusted", transport: "http", url: "https://mcp.example.test", trust: "trusted" },
     { key: "untrusted", transport: "http", url: "https://mcp.example.test", trust: "untrusted" },

@@ -75,6 +75,7 @@ export function connectorOperationTools(
     description: operationDescription(instance.definition.capabilities, operation),
     source,
     inputSchema: operation.inputSchema,
+    effect: operation.mode,
     executionMode: operation.executionMode,
     replaySafe: operation.replaySafe,
     timeoutMs: operation.timeoutMs,

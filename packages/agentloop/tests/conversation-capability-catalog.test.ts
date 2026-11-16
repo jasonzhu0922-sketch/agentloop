@@ -245,7 +245,7 @@ test("intent resolution sees the authorized Run capability catalog before decidi
 });
 
 for (const mode of ["reply", "clarify"] as const) {
-  test(`capability metadata does not grant execution authority to ${mode} turns`, async () => {
+  test(`capability metadata does not force Tool invocation in ${mode} turns`, async () => {
     const root = await mkdtemp(join(tmpdir(), `agentloop-catalog-${mode}-`));
     const database = new AppDatabase(":memory:");
     const tool = fixtureTool("archive_find", "connector");
@@ -262,6 +262,7 @@ for (const mode of ["reply", "clarify"] as const) {
             return resolution(mode, goal);
           }
           assertReplyTools(request.tools, mode);
+          assert.equal(request.tools.some(item => item.name === tool.name), mode === "reply");
           return { content: mode === "reply" ? "Hello." : "Which archive and topic do you want?", finishReason: "stop", toolCalls: [] };
         } }),
       });
@@ -543,7 +544,6 @@ function assertReplyTools(tools: readonly { name: string }[], mode: "reply" | "c
   const names = tools.map(tool => tool.name);
   assert.ok(names.includes("read_result"));
   assert.ok(names.includes("computer_read_file"));
-  for (const denied of ["load_skill", "computer_write_file", "computer_run_command", "materialize_result_json", "archive_find"]) {
-    assert.equal(names.includes(denied), false, `${denied} is not authorized by a reply or descriptive inventory`);
-  }
+  assert.equal(names.includes("load_skill"), false, "an unselected Skill is not executable");
+  assert.ok(names.includes("materialize_result_json"));
 }

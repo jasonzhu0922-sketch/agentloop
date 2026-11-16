@@ -326,8 +326,6 @@ export interface ModelAdapter {
 }
 
 export interface CapabilityGrant {
-  /** Read replies retain this restriction through execution and recovery. */
-  readonly toolEffectScope?: "read";
   readonly actorUserId: string;
   readonly runId: string;
   readonly planId?: string;

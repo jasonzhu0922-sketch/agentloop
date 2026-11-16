@@ -38,7 +38,7 @@ test("stable general knowledge can be answered without invoking available reader
           } }] };
         }
         assert.ok(request.tools.some(tool => tool.name === "read_result"));
-        assert.equal(request.tools.some(tool => tool.name === "computer_write_file"), false);
+        assert.equal(request.tools.some(tool => tool.name === "computer_write_file"), true);
         return { content: "浙江省的省会是杭州。", finishReason: "stop", toolCalls: [] };
       } }),
     });
@@ -282,7 +282,7 @@ test("Conversation entry classifies with Runtime-owned external context handles"
     assert.equal(planner.availableToolNameSnapshots[0]?.includes("visible_find_files"), true);
     assert.equal(planner.availableToolNameSnapshots[0]?.includes("visible_read_files"), true);
     assert.ok(planner.availableToolNameSnapshots[1]?.includes("visible_read_files"));
-    assert.equal(planner.availableToolNameSnapshots[1]?.includes("computer_write_file"), false);
+    assert.equal(planner.availableToolNameSnapshots[1]?.includes("computer_write_file"), true);
     assert.deepEqual((await runs.events(owner.user.id, executionRun.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
     assert.deepEqual((await runs.events(owner.user.id, replyRun.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "reply" });
   } finally {

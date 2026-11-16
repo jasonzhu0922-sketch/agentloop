@@ -6,7 +6,7 @@ import test from "node:test";
 import { LocalRuntimeFactory } from "@zhujun/agentloop-local-runtime/host";
 import { greetingModel, modelPort } from "./fixtures/models.ts";
 
-test("shared Factory carries configured MCP knowledge into a read-only reply without invoking services", async t => {
+test("shared Factory carries configured MCP knowledge into a reply without invoking services", async t => {
   const root = await mkdtemp(join(tmpdir(), "shared-capability-inventory-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const skills = join(root, "skills"); await mkdir(skills);
@@ -45,10 +45,9 @@ test("shared Factory carries configured MCP knowledge into a read-only reply wit
         return { ...response, toolCalls };
       }
       if (input.tools.some(tool => tool.name === "submit_assessment")) return response;
-      assert.ok(input.tools.length > 0, "the reply retains authorized readers");
-      const readers = new Set(["computer_list_directory", "computer_read_file", "computer_find_files", "computer_search_text",
-        "computer_read_json", "computer_summarize_table_artifact", "verify_artifact_acceptance", "read_result", "read_source"]);
-      assert.ok(input.tools.every(tool => readers.has(tool.name)), "the reply cannot receive writers or undeclared MCP tools");
+      assert.ok(input.tools.some(tool => tool.name === "read_result"));
+      assert.ok(input.tools.some(tool => tool.name === "computer_write_file"), "reply preserves Run-authorized writers");
+      assert.ok(input.tools.some(tool => tool.name.endsWith("archive_search")), "reply preserves MCP tools without effect declarations");
       const content = input.runtimeContext!.content;
       assert.match(content, /runtime_configured/);
       assert.match(content, /loaded_for_runtime/);

@@ -4,11 +4,11 @@ import type { ConnectorInstance } from "../src/types.ts";
 import { connectorOperationTools } from "../src/agentloop-adapter.ts";
 import { resolveCapabilityRequirements } from "../../agentloop/src/planning/capability-requirements.ts";
 
-function project(key: string, connectionId: string, operationId: string) {
+function project(key: string, connectionId: string, operationId: string, mode: "read" | "write" = "read") {
   const instance: ConnectorInstance = {
     definition: { manifest: { schema: "agentloop.connectorManifest/v1", key, version: "1.0.0", displayName: "fixture", description: "fixture", agentloopSdk: "*" }, capabilities: [] },
     connection: { id: connectionId, connectorKey: key, ownerType: "user", ownerId: "owner", scopes: [], credentialRef: "fixture", status: "active" },
-    operations: [{ id: operationId, capabilityId: "fixture.inspect", mode: "read", inputSchema: { type: "object" }, executionMode: "parallel", replaySafe: true }],
+    operations: [{ id: operationId, capabilityId: "fixture.inspect", mode, inputSchema: { type: "object" }, executionMode: "parallel", replaySafe: true }],
     execute: async () => ({ operationId, data: {} }), mapEvidence: () => [],
   };
   return connectorOperationTools(instance, { runId: "run", actorUserId: "owner", connection: instance.connection, credentialProvider: { get: async () => ({}) } })[0]!;
@@ -20,6 +20,7 @@ test("Connector wire names are bounded, deterministic and retain complete source
   const operation = "documents.very-long-operation-".repeat(5);
   const tool = project(key, connection, operation);
   assert.match(tool.name, /^[A-Za-z0-9_]{1,64}$/);
+  assert.equal(tool.effect, "read");
   assert.equal(project(key, connection, operation).name, tool.name);
   assert.notEqual(project(key, `${connection}-other`, operation).name, tool.name);
   assert.notEqual(project(key, connection, `${operation}-other`).name, tool.name);
@@ -55,4 +56,9 @@ test("explicit Connector service and account names resolve only to an unambiguou
   assert.deepEqual(resolve("126 邮箱", both).missing, [{ kind: "tool_source", reference: "126 邮箱" }]);
   assert.deepEqual(resolve("工作邮箱", both).toolSourceIds, ["connector.126-mail.second"]);
   assert.deepEqual(resolve("不存在的邮箱", both).missing, [{ kind: "tool_source", reference: "不存在的邮箱" }]);
+});
+
+test("Connector operation modes survive Runtime Tool projection independently of replay safety", () => {
+  assert.equal(project("provider", "connection", "inspect", "read").effect, "read");
+  assert.equal(project("provider", "connection", "update", "write").effect, "write");
 });

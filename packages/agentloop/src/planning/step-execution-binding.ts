@@ -87,7 +87,9 @@ export function createStepExecutionBinding(input: {
     resolvedToolNames,
     evidenceProducers,
     sourceKinds: inferSourceKinds(requiredCapabilities, evidenceKinds),
-    sideEffect: inferSideEffect(requiredCapabilities),
+    sideEffect: requiredCapabilities.includes("authorized_tool_use")
+      ? authorizedToolSideEffect((input.availableTools ?? []).filter(tool => resolvedToolNames.includes(tool.name)))
+      : inferSideEffect(requiredCapabilities),
     evidenceKinds,
     targetIds,
     ...(artifactTargets.length === 0 ? {} : { artifactTargets }),
@@ -171,13 +173,12 @@ export function planningCapabilitiesFromTools(
   sources?: readonly UploadedSourceSummary[],
 ): PlanningCapability[] {
   const staticCapabilities = planningCapabilitiesFromToolNames(tools.map((tool) => tool.name), sources);
-  const readers = tools.filter(tool => tool.effect === "read");
-  if (readers.length > 0) staticCapabilities.push({
-    id: "read_only_observation", category: "information_retrieval", label: "Observe authorized resources",
-    description: "Inspect information using host-declared read-effect Tools without selecting a source or mutating its state.",
+  if (tools.length > 0) staticCapabilities.push({
+    id: "authorized_tool_use", category: "tool_use", label: "Use Run-authorized Tools",
+    description: "Use the existing Run-authorized Tool catalog without selecting a mandatory source or granting additional operation authority.",
     produces: ["source_summary", "explicit_caveats"], sourceKinds: [],
-    sourceIds: [...new Set(readers.flatMap(tool => tool.source === undefined ? [] : [tool.source.id]))],
-    sideEffect: "external_read", risk: "medium",
+    sourceIds: [...new Set(tools.flatMap(tool => tool.source === undefined ? [] : [tool.source.id]))],
+    sideEffect: authorizedToolSideEffect(tools), risk: "high",
   });
   const dynamic = new Map<string, PlanningCapability>();
   for (const tool of tools) {
@@ -393,7 +394,7 @@ export function unresolvedToolSourceIds(
 }
 
 export function capabilityRequiresTool(capability: string): boolean {
-  if (capability === "read_only_observation") return true;
+  if (capability === "authorized_tool_use") return true;
   if (capability === "external_api_call") return true;
   if (capability === "custom_tool_call") return true;
   const binding = CAPABILITY_TOOL_BINDINGS[capability];
@@ -433,9 +434,9 @@ export function resolveToolNamesForCapabilities(
 ): string[] {
   const resolved = new Set<string>();
   for (const capability of capabilities) {
-    if (capability === "read_only_observation") {
+    if (capability === "authorized_tool_use") {
       for (const tool of availableTools) {
-        if (tool.effect === "read" && availableToolNames.has(tool.name)) resolved.add(tool.name);
+        if (availableToolNames.has(tool.name)) resolved.add(tool.name);
       }
       continue;
     }
@@ -521,6 +522,13 @@ function isSkillSourceKind(value: string): value is SourceKind {
     || value === "rubric";
 }
 
+/** Unknown effects remain conservatively described; metadata never grants access. */
+function authorizedToolSideEffect(tools: readonly PlanningToolSummary[]): CapabilitySideEffect {
+  if (tools.some(tool => tool.effect === undefined || (tool.effect === "write" && tool.source !== undefined))) return "external_write";
+  if (tools.some(tool => tool.effect === "write")) return "workspace_write";
+  return tools.some(tool => tool.source !== undefined) ? "external_read" : tools.length > 0 ? "workspace_read" : "none";
+}
+
 function inferSideEffect(capabilities: readonly string[]): CapabilitySideEffect {
   if (capabilities.includes("external_side_effect")) return "external_write";
   if (
@@ -530,7 +538,6 @@ function inferSideEffect(capabilities: readonly string[]): CapabilitySideEffect 
     || capabilities.includes("artifact_acceptance")
   ) return "workspace_write";
   if (capabilities.includes("custom_tool_call")) return "workspace_write";
-  if (capabilities.includes("read_only_observation")) return "external_read";
   if (capabilities.includes("web_research")) return "external_read";
   if (capabilities.includes("external_api_call")) return "external_read";
   if (capabilities.includes("skill_local_script_execution")) return "external_read";
@@ -604,7 +611,7 @@ function isTabularUpload(extension: string): boolean {
 }
 
 const CAPABILITY_TOOL_BINDINGS: Record<string, readonly string[]> = {
-  read_only_observation: [],
+  authorized_tool_use: [],
   uploaded_source_read: ["read_source"],
   uploaded_source_materialization: ["materialize_source_file"],
   uploaded_table_extraction: ["extract_source_tables"],

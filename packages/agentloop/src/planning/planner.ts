@@ -597,7 +597,7 @@ function withoutReasoningContent(response: import("../runtime/contracts.ts").Mod
 function responseOnlyPlan(task: TaskSpec): PlanProposal {
   const input = planningIntentObjective(task);
   const targetIds = Object.keys(task.canonicalState.targets);
-  const canRead = task.availableToolNames.length > 0;
+  const hasTools = task.availableToolNames.length > 0;
   return {
     goal: input.trim().slice(0, 20_000) || "Answer the latest user message",
     schema: "agentloop.outcomePlan/v2",
@@ -606,28 +606,28 @@ function responseOnlyPlan(task: TaskSpec): PlanProposal {
     selectedSkillIds: [],
     steps: [{
       id: "response",
-      objective: canRead
-        ? "Answer the latest user message. Use authorized read-only Tools as needed to inspect relevant information, preserving input identities and caveats. A Result reference or truncated summary is not its full content. Do not execute Skills, write files, or change external state."
+      objective: hasTools
+        ? "Answer the latest user message. Use Run-authorized Tools as needed to fulfill the requested outcome, preserving input identities and caveats. A Result reference or truncated summary is not its full content. Stay within the user's requested actions, resource grants and operation policies; conversation mode does not grant additional authority."
         : "Answer the latest user message directly from the supplied context.",
       dependencies: [],
       role: "deliver",
       skillIds: [],
-      requiredCapabilities: canRead ? ["conversation_delivery", "read_only_observation"] : ["conversation_delivery"],
+      requiredCapabilities: hasTools ? ["conversation_delivery", "authorized_tool_use"] : ["conversation_delivery"],
       targetIds,
       // Resource access remains the Run grant; do not turn every offered
       // directory or upload into a mandatory primary input.
       ...(task.canonicalState.intent.requiredToolSourceIds.length > 0 ? {
         sourceConstraint: { requiredToolSourceIds: task.canonicalState.intent.requiredToolSourceIds },
       } : {}),
-      ...(canonicalTurnResolution(task)?.evidenceDemand !== "none" && canRead ? {
+      ...(canonicalTurnResolution(task)?.evidenceDemand !== "none" && hasTools ? {
         evidenceContract: { requiredKinds: ["source_summary" as const], caveatPolicy: "mark_unverified_facts" as const },
       } : {}),
       successCriteria: [{
         id: "answered",
-        description: canRead ? "The answer addresses the latest user request using the supplied context and any needed read observations, preserving material uncertainty."
+        description: hasTools ? "The answer addresses the latest user request using the supplied context and any needed Tool evidence, preserving material uncertainty."
           : "A non-empty direct answer is returned.",
         source: "planner",
-        verification: canRead ? "model_judged" : "deterministic",
+        verification: hasTools ? "model_judged" : "deterministic",
       }],
     }],
   };

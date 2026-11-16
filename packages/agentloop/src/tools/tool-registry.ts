@@ -56,7 +56,7 @@ export interface RuntimeTool<TInput = unknown> {
   /**
    * Host-owned effect on the observed resource, independent of replay safety.
    * Read tools may persist Runtime audit/results, but cannot mutate user or
-   * external state. Missing declarations do not authorize reply-time access.
+   * external state. Effect metadata does not grant or revoke Run-authorized tool access.
    */
   readonly effect?: "read" | "write";
   readonly source?: ToolSourceDescriptor;
@@ -152,8 +152,7 @@ export class ToolRegistry {
     grant: CapabilityGrant,
     options: { readonly decisionLedger?: readonly RuntimeDecisionCommit[]; readonly contentBudget?: ToolContentBudget } = {},
   ): MaterializedTools {
-    const visible = [...this.tools.values()].filter((tool) => grant.allowedToolNames.has(tool.name)
-      && (grant.toolEffectScope !== "read" || tool.effect === "read"));
+    const visible = [...this.tools.values()].filter((tool) => grant.allowedToolNames.has(tool.name));
     const byName = new Map(visible.map((tool) => [tool.name, tool]));
     const preparedContentTargets = new Set<string>();
     const definitionFor = (tool: RuntimeTool<unknown>): ModelToolDefinition => {

@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { RunService } from "../src/runtime/run-service.ts";
+import { RunService, repairLeafForFailedBoundary } from "../src/runtime/run-service.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { toolNamesForConversationMode } from "../src/runtime/conversation-tool-policy.ts";
 import { ToolRegistry, type RuntimeTool } from "../src/tools/tool-registry.ts";
@@ -11,6 +11,9 @@ import { AppDatabase } from "../src/storage/database.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { approvingTestAssessor, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
 import type { ModelResponse } from "../src/runtime/contracts.ts";
+import { connectorOperationTools } from "../../connector-sdk/src/agentloop-adapter.ts";
+import { create126MailConnector } from "../../connector-126-mail/src/index.ts";
+import { queryScope, timeCoverage } from "../../connector-126-mail/src/mail-query.ts";
 
 function resolve(goal: string, extra: Record<string, unknown> = {}): ModelResponse {
   return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "resolve", name: "resolve_conversation_turn", arguments: {
@@ -31,21 +34,18 @@ function tool(name: string, effect?: "read" | "write", replaySafe = true): Runti
     inputSchema: { type: "object" }, parse: input => input, execute: async () => ({ value: "live-observation" }) };
 }
 
-test("reply authority uses declared effects independently of tool names, replay safety and metadata availability", () => {
-  const tools = [tool("observe", "read", false), tool("read_but_mutate", "write"), tool("get_unknown"), tool("not_authorized", "read")];
-  const authorized = ["observe", "read_but_mutate", "get_unknown"];
-  assert.deepEqual(toolNamesForConversationMode("reply", tools, authorized), ["observe"]);
-  assert.deepEqual(toolNamesForConversationMode("clarify", tools, authorized), []);
-  assert.deepEqual(toolNamesForConversationMode("execute", tools, authorized), authorized);
-  // Even an old recovery name-list cannot restore writers or newly reclassified tools.
+test("conversation modes retain Run authority independently of effect declarations", () => {
+  const tools = [tool("observe", "read", false), tool("mutate", "write"), tool("unclassified"), tool("not_authorized", "read")];
+  const authorized = ["observe", "mutate", "unclassified"];
+  assert.deepEqual(toolNamesForConversationMode("reply", authorized), authorized);
+  assert.deepEqual(toolNamesForConversationMode("clarify", authorized), []);
+  assert.deepEqual(toolNamesForConversationMode("execute", authorized), authorized);
   const grant = createCapabilityGrant({ actorUserId: "owner", runId: "run", depth: 0,
-    allowedToolNames: authorized, allowedSkillIds: [], toolEffectScope: "read" });
+    allowedToolNames: authorized, allowedSkillIds: [] });
   const materialized = new ToolRegistry(tools).materialize(grant);
-  assert.deepEqual(materialized.definitions.map(item => item.name), ["observe"]);
-  for (const name of ["read_but_mutate", "get_unknown", "not_authorized"]) {
-    assert.throws(() => materialized.prepare({ id: "denied", name, arguments: {} }), /not available/);
-  }
-  assert.deepEqual(new ToolRegistry([tool("observe", "write")]).materialize(grant).definitions, []);
+  assert.deepEqual(materialized.definitions.map(item => item.name), authorized);
+  assert.throws(() => materialized.prepare({ id: "denied", name: "not_authorized", arguments: {} }), /not available/);
+  assert.deepEqual(new ToolRegistry([tool("observe", "write")]).materialize(grant).definitions.map(item => item.name), ["observe"]);
 });
 
 test("reply can select a generic service reader and then a visible file without becoming execute", async () => {
@@ -70,9 +70,10 @@ test("reply can select a generic service reader and then a visible file without 
         const names = request.tools.map(item => item.name);
         assert.ok(names.includes("observe_catalog"));
         assert.ok(names.includes("visible_read_file"));
-        for (const denied of ["read_mutation", "unclassified", "computer_run_command", "computer_write_file", "visible_extract_tables"]) {
-          assert.equal(names.includes(denied), false);
+        for (const available of ["read_mutation", "unclassified", "visible_extract_tables"]) {
+          assert.ok(names.includes(available), `${available} remains authorized in reply mode`);
         }
+        assert.equal(names.includes("load_skill"), false, "no Skill is selected by this step");
         executionTurns++;
         if (executionTurns === 1) return call("observe_catalog", {});
         if (executionTurns === 2) return call("visible_read_file", { rootId: "visible_dir_1", path: "state.txt" });
@@ -101,7 +102,7 @@ test("reply can select a generic service reader and then a visible file without 
     const row = await db.prepare("SELECT context_json FROM run_planning_recovery WHERE run_id = ?").get(run.id) as { context_json: string };
     const persisted = JSON.parse(row.context_json);
     assert.ok(persisted.allowedToolNames.includes("observe_catalog"));
-    assert.equal(persisted.allowedToolNames.includes("computer_write_file"), false);
+    assert.equal(persisted.allowedToolNames.includes("computer_write_file"), true);
   } finally { db.close(); await rm(root, { recursive: true, force: true }); await rm(visible, { recursive: true, force: true }); }
 });
 
@@ -157,25 +158,119 @@ test("a reply reads a bound prior Result exactly and publishes its provenance wi
   } finally { db.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("a reply cannot execute a writer even when the model requests one", async () => {
-  const root = await mkdtemp(join(tmpdir(), "agentloop-denied-reply-"));
+test("reply tool calls still obey operation policies before any side effect", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-policy-reply-"));
   const db = new AppDatabase(":memory:");
-  let writes = 0, turns = 0;
+  let writes = 0, turns = 0, policyChecks = 0;
   try {
     const service = new RunService({ database: db, skills: new SkillService(db), workspaceRoot: root,
       tools: [{ ...tool("mutate_resource", "write"), execute: async () => { writes++; return "changed"; } }],
+      toolExecutionPlugins: [{ id: "resource-policy", version: "1", evaluate: ({ tool }) => {
+        policyChecks++;
+        return tool.name === "mutate_resource"
+          ? { decision: "deny", code: "mutation_not_authorized", reason: "This resource only permits observation." }
+          : { decision: "allow" };
+      } }],
       assessorFactory: () => approvingTestAssessor(),
       modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
         if (request.runId.startsWith("conversation-turn:")) return resolve("Explain the resource");
-        assert.equal(request.tools.some(item => item.name === "mutate_resource"), false);
+        assert.ok(request.tools.some(item => item.name === "mutate_resource"));
         if (turns++ === 0) return call("mutate_resource", {});
-        return text("The requested mutation was not authorized.");
+        return text("The operation policy denied the mutation.");
       } }),
     });
     const run = await service.executeConversation("owner", "Explain the resource");
     const events = await service.events("owner", run.id);
+    assert.equal(run.status, "completed");
     assert.equal(writes, 0);
-    assert.ok(events.some(event => event.type === "tool.rejected" && event.data.toolName === "mutate_resource"));
-    assert.equal(events.some(event => event.type === "tool.completed" && event.data.toolName === "mutate_resource"), false);
+    assert.equal(policyChecks, 1);
+    assert.ok(events.some(event => event.type === "tool.failed" && event.data.toolName === "mutate_resource" && event.data.isError));
   } finally { db.close(); await rm(root, { recursive: true, force: true }); }
 });
+
+for (const recovery of [false, true]) {
+  test(`126 Mail remains callable in reply ${recovery ? "after a plan revision" : "without effect metadata"}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentloop-mail-reply-"));
+    const db = new AppDatabase(":memory:");
+    const connection = { id: "mail", connectorKey: "126-mail", ownerType: "user" as const,
+      ownerId: "owner", scopes: [], credentialRef: "fixture", status: "active" as const };
+    const credentialProvider = { get: async () => ({}) };
+    const range = { receivedAtGte: "2026-11-15T16:00:00.000Z", receivedAtLt: "2026-11-16T07:31:00.000Z", timeZone: "Asia/Shanghai" };
+    const message = { id: "message-1", from: "fixture@example.test", subject: "Review request",
+      receivedAt: "2026-11-16T01:00:00.000Z", text: "Please review the proposal." };
+    const operations: string[] = [];
+    let revisions = 0;
+    const turns = new Map<string, number>();
+    const instance = await create126MailConnector(async () => ({
+      count: async query => { operations.push("count"); return { count: 1,
+        dailyCounts: [{ date: "2026-11-16", weekday: "Monday", count: 1 }], complete: true,
+        scope: queryScope(query), temporalCoverage: timeCoverage(query, true), observedAt: range.receivedAtLt }; },
+      search: async query => { operations.push("search"); return { messages: [message], totalMatches: 1,
+        totalMatchesExact: true, returnedCount: 1, complete: true, scope: queryScope(query),
+        temporalCoverage: timeCoverage(query, true), observedAt: range.receivedAtLt }; },
+      read: async input => { operations.push("read"); assert.equal(input.messageId, message.id); return message; },
+    })).connect({ connection, credentialProvider });
+    try {
+      const service = new RunService({ database: db, skills: new SkillService(db), workspaceRoot: root,
+        runToolProvider: { resolve: async input => {
+          assert.deepEqual(input.connectionIds, [connection.id]);
+          return connectorOperationTools(instance, { ...input, connection, credentialProvider })
+            .map(({ effect: _effect, ...tool }) => tool); // Other authorized providers may omit effect metadata.
+        } },
+        assessorFactory: () => ({ assess: async input => {
+          const approved = await approvingTestAssessor().assess(input);
+          if (recovery && input.step.id === "response") return { ...approved, approved: false,
+            criteria: approved.criteria.map(item => ({ ...item, satisfied: false })), feedback: "Acquire the mailbox evidence before answering.",
+            failedBoundary: { stepId: input.step.id, missingEvidenceKinds: ["source_summary" as const],
+              violatedSkillRequirements: [], reusableEvidenceRefs: [], suggestedRepairShape: "revise_plan" as const } };
+          assert.deepEqual(operations, ["count", "search", "read"]);
+          assert.equal(input.evidence.toolCalls.filter(item => item.toolName.startsWith("connector_126_mail_")).length, 3);
+          return approved;
+        } }),
+        planRevisionAssessorFactory: () => ({ assess: async () => ({ approved: true, feedback: "", evidenceRefs: [] }) }),
+        recoveryPlannerFactory: () => ({ decide: async input => {
+          revisions++;
+          const failed = input.plan!.steps.find(step => step.id === input.failedBoundary!.stepId)!;
+          const repair = repairLeafForFailedBoundary(failed, input.failedBoundary!, input.plan!.version);
+          return { actionId: input.action.id, expectedActionRevision: input.action.revision, decision: "revise_plan" as const,
+            rationale: "Use the authorized mailbox operations to complete the requested reply.", evidenceRefs: [],
+            planRevision: { schema: "agentloop.outcomePlan/v2" as const, shape: "recovery_patch" as const,
+              goal: input.plan!.goal, selectedSkillIds: [], steps: [{ ...repair,
+                requiredCapabilities: ["conversation_delivery", "email.count", "email.search", "email.read"] }] } };
+        } }),
+        modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+          if (request.runId.startsWith("conversation-turn:")) return resolve("整理我今天收到的邮件", {
+            evidenceStrategy: "source_grounded", requiredCapabilityReferences: [{ kind: "tool_source", reference: "126 邮箱" }],
+          });
+          const toolFor = (operation: string) => request.tools.find(tool => tool.description.includes(`Connector operation: ${operation}`))!;
+          for (const operation of ["email.count", "email.search", "email.read"]) assert.ok(toolFor(operation), operation);
+          assert.equal(request.tools.some(tool => tool.name === "computer_run_command"), false);
+          assert.equal(request.tools.some(tool => tool.name === "computer_write_file"), false);
+          if (recovery && revisions === 0) return text("Mailbox evidence is still missing.");
+          const turn = turns.get(request.runId) ?? 0;
+          turns.set(request.runId, turn + 1);
+          if (turn === 0) return call(toolFor("email.count").name, range);
+          if (turn === 1) return call(toolFor("email.search").name, range);
+          if (turn === 2) return call(toolFor("email.read").name, { messageId: message.id });
+          return text("今天收到 1 封邮件：fixture@example.test，Review request，请审阅提案。");
+        } }),
+      });
+      const run = await service.executeConversation("owner", "用126 邮箱整理我今天收到的邮件", {
+        connectorConnectionIds: [connection.id], allowDangerousTools: false,
+      });
+      const events = await service.events("owner", run.id);
+      assert.equal(run.status, "completed", JSON.stringify(events.filter(event => /failed|rejected/.test(event.type))));
+      assert.equal(events.find(event => event.type === "conversation.turn.resolved")!.data.mode, "reply");
+      assert.deepEqual(operations, ["count", "search", "read"]);
+      assert.equal(revisions, recovery ? 1 : 0);
+      assert.equal(events.filter(event => event.type === "run.completed").length, 1);
+      assert.equal(events.some(event => event.type === "recovery.decision_rejected"), false);
+      const { plan } = await service.plan("owner", run.id);
+      const completed = plan.steps.find(step => step.retiredAt === undefined)!;
+      for (const operation of ["email_count", "email_search", "email_read"]) {
+        assert.ok(completed.executionBinding.resolvedToolNames.some(name => name.includes(operation)));
+      }
+      assert.ok(completed.evidence?.publishedResult?.inputs.length);
+    } finally { db.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
