@@ -6196,13 +6196,20 @@ export function selectPlanningSkillRoles(
   // presentation format wording, so combining it with the dedicated format
   // field preserves artifact recall without handing that format to domain or
   // source-provider matching.
-  const artifactSignal = normalizePlanningSignal(
+  const requestedFileFormats = new Set([
+    understanding.format,
+    ...(understanding.artifactTargets ?? []).map((target) => target.format),
+    ...(understanding.deliverables ?? [])
+      .filter((target) => target.surface === "workspace_artifact")
+      .map((target) => target.format),
+  ].filter((format): format is string => format !== undefined && format.length > 0)
+    .map(canonicalArtifactFormatFamily));
+  const artifactSignal = normalizePlanningSignal([
     understanding.deliverable.action !== "none" && understanding.deliverable.kind !== "none"
       ? `${understanding.deliverable.action} ${understanding.deliverable.kind}`
-      : [planningArtifactSignal(understanding.task), understanding.format]
-        .filter((value): value is string => value !== undefined && value.length > 0)
-        .join("\n"),
-  );
+      : planningArtifactSignal(understanding.task),
+    ...requestedFileFormats,
+  ].join("\n"));
   const semanticSignal = normalizePlanningSignal([
     understanding.subject.text,
     understanding.task,
@@ -6214,7 +6221,6 @@ export function selectPlanningSkillRoles(
   const roleBySkillId = new Map<string, SelectedSkillRole>();
   const bound = new Set(boundSkillIds);
   const sourceKinds = sourceKindsFromUploadedSources(sources);
-  const requestedFileFormats = requestedPlanningFileFormats(artifactSignal);
   const memorySuggestedSkillIds = planningMemorySuggestedSkillIds(memoryProjection);
   const roleEligibleSkills = skills.filter((skill) => {
     const selection = selectFirstRoundSkillRole(
@@ -6310,14 +6316,30 @@ export function selectPlanningSkillRoles(
       })
       .sort((left, right) => right.score - left.score || left.index - right.index)[0]
     : undefined;
-  const outputArtifactCandidate = requestsArtifactBuild(artifactSignal)
+  // Source recall is scored on the subject alone. An artifact-format bonus
+  // must not evict the relevant source workflow from the Planner catalog.
+  // A domain owner can acquire its own evidence; its declared companions are
+  // expanded below without forcing an unrelated independent provider.
+  const sourceProviderCandidate = sourceWorkRequested && domainAnalysisCandidate === undefined
     ? scored
-      .filter((entry) => matchesRequestedArtifactKind(
+      .filter((entry) => roleBySkillId.get(entry.skill.id)?.role === "source_provider"
+        && entry.semanticAffinity >= MIN_PLANNING_SKILL_SCORE)
+      .sort((left, right) => right.score - left.score || left.index - right.index)[0]
+    : undefined;
+  const outputArtifactCandidates = requestsArtifactBuild(artifactSignal)
+    ? scored
+      .filter((entry) => roleBySkillId.get(entry.skill.id)?.role === "primary_builder" && matchesRequestedArtifactKind(
         artifactSignal,
         new Set(entry.skill.agentLoop?.artifactKinds ?? []),
       ))
-      .sort((left, right) => right.score - left.score || left.index - right.index)[0]
-    : undefined;
+      .sort((left, right) => right.score - left.score || left.index - right.index)
+    : [];
+  // A delivery category is not a file format. Without a resolved format,
+  // expose the compatible native workflows for Planner review rather than
+  // turning a lexical winner for "document" into a Word-only catalog.
+  const requiredOutputCandidates = outputArtifactCandidates.slice(0, requestedFileFormats.size === 0
+    ? MAX_PLANNING_SKILLS - (domainAnalysisCandidate === undefined && sourceProviderCandidate === undefined ? 0 : 1)
+    : 1);
   // Preserve both required work surfaces without exceeding the bounded
   // candidate budget. The lowest-ranked incidental candidate gives way to a
   // missing domain-analysis or output-artifact owner.
@@ -6325,7 +6347,7 @@ export function selectPlanningSkillRoles(
   // providers compete through ordinary relevance ranking; a source_provider
   // role alone must not force a second source into every analysis. Declared
   // provider dependencies are expanded below regardless of their lexical rank.
-  const requiredSurfaceCandidates = [domainAnalysisCandidate, outputArtifactCandidate]
+  const requiredSurfaceCandidates = [domainAnalysisCandidate, sourceProviderCandidate, ...requiredOutputCandidates]
     .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined)
     .filter((entry, index, entries) => entries.findIndex((other) => other.skill.id === entry.skill.id) === index);
   if (requiredSurfaceCandidates.length > 0) {
@@ -6335,10 +6357,10 @@ export function selectPlanningSkillRoles(
       ...requiredSurfaceCandidates,
     ];
     const domainId = domainAnalysisCandidate?.skill.id;
-    const outputId = outputArtifactCandidate?.skill.id;
+    const outputIds = new Set(requiredOutputCandidates.map((entry) => entry.skill.id));
     if (requestsArtifactBuild(artifactSignal)) selected = selected.filter((entry) => {
       if (roleBySkillId.get(entry.skill.id)?.role !== "primary_builder") return true;
-      if (entry.skill.id === domainId || entry.skill.id === outputId) return true;
+      if (entry.skill.id === domainId || outputIds.has(entry.skill.id)) return true;
       return matchesRequestedArtifactKind(
         artifactSignal,
         new Set(entry.skill.agentLoop?.artifactKinds ?? []),
@@ -6652,16 +6674,6 @@ function scorePlanningSkillSemanticAffinity(
     if (isPresentationBuilderSkill(text)) score += 3;
   }
   return score;
-}
-
-function requestedPlanningFileFormats(
-  signal: string,
-): Set<string> {
-  const formats = new Set<string>();
-  for (const match of signal.matchAll(/\.([a-z0-9]{2,8})(?=$|[^a-z0-9])/giu)) {
-    formats.add(canonicalArtifactFormatFamily(match[1]));
-  }
-  return formats;
 }
 
 function scorePlanningFileFormatOwnership(

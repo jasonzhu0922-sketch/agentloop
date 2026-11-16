@@ -792,7 +792,7 @@ function nativeTransformationSkillBindingRepair(
   planningError: AppError,
   task: TaskSpec,
 ): PlannerContractRetry | undefined {
-  if (!/uploaded artifact transformation must use one primary-builder leaf/i.test(planningError.message)) return undefined;
+  if (planningError.details?.planningContract !== "native_transformation_skill_binding") return undefined;
   const candidateSkillIds = nativePrimaryBuilderSkillIds(task, planningTaskProfile(task).artifactKind ?? "none");
   if (candidateSkillIds.length === 0) return undefined;
   return {
@@ -801,7 +801,7 @@ function nativeTransformationSkillBindingRepair(
     directive: [
       "Your previous submit_outcome_plan call was rejected by Runtime Admission.",
       `Validation error: ${summarizePlanningError(planningError.message)}.`,
-      "The prior OutcomePlan attempted a native uploaded-file transformation without binding its primary format Skill.",
+      "The prior OutcomePlan attempted a native artifact transformation without binding its primary format Skill.",
       `Eligible primary-builder Skill IDs: ${JSON.stringify(candidateSkillIds)}.`,
       "Select exactly the Skill that owns the native input format, include it in selectedSkillRoles as primary_builder, and bind that same ID to the single producer leaf.",
       "Do not create a source-summary/fact-acquisition leaf, and do not copy an eligible Skill into the Plan unless that leaf executes it.",
@@ -1896,11 +1896,19 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
           selection.skillId === skillId && selection.role === "primary_builder"
         ) === true
       );
+    if (!ownsNativeTransformation) {
+      throw new AppError(
+        "PLANNING_ERROR",
+        `An artifact transformation must bind its native primary-builder Skill in both selectedSkillRoles and the producer leaf's skillIds; eligible primary-builder Skills: ${primaryBuilderSkillIds.join(", ")}`,
+        422,
+        { planningContract: "native_transformation_skill_binding", eligibleSkillIds: primaryBuilderSkillIds,
+          artifactKind: taskIntent.artifactKind, deliverySurface: taskIntent.deliverySurface },
+      );
+    }
     if (
       !hasSingleNativeTransformationBoundary
       || proposal.steps.length !== 1
       || onlyStep?.role === "fact_acquisition"
-      || !ownsNativeTransformation
     ) {
       throw new AppError(
         "PLANNING_ERROR",
