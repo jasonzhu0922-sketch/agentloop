@@ -1233,36 +1233,21 @@ test("Runtime Host images build and verify the Plan Template workspace they impo
   assert.match(overlay, /npm run build --workspace @zhujun\/agentloop-plan-template/);
 });
 
-test("Web keeps execution evidence collapsed and attaches final artifacts to the assistant reply", async () => {
-  const [app, html, overrides] = await Promise.all([
+test("Web follows Desktop process folding and attaches compact artifacts to terminal replies", async () => {
+  const [app, html] = await Promise.all([
     readFile(new URL("../web/client/app.js", import.meta.url), "utf8"),
     readFile(new URL("../web/pages/app.html", import.meta.url), "utf8"),
-    readFile(new URL("../web/styles/runtime-overrides.css", import.meta.url), "utf8"),
   ]);
-  assert.match(app, /function renderExecutionTrace\(message\)/);
-  assert.match(app, /classList\.toggle\("artifact-open"/);
-  assert.match(app, /artifactPanelOpen = true/);
-  assert.match(app, /data-trace-toggle/);
-  assert.match(app, /查看工具 \$\{tools\.length\} 次/);
-  assert.match(app, /function renderInlineArtifacts\(assistant\)/);
-  assert.doesNotMatch(app, /function renderInlineArtifacts\(assistant\)\s*\{\s*if \(!assistant \|\| assistant\.status !== "completed"\) return "";/);
-  assert.match(app, /const generatedBlock = assistant\.status !== "completed"/);
-  assert.match(app, /已生成产物/);
-  assert.match(app, /isArtifactProjectionEvent\(event\)/);
-  assert.match(app, /function openSelectedArtifactFullscreen\(\)/);
-  assert.match(app, /artifact-panel-close/);
-  assert.match(app, /inline-skill-summary/);
-  assert.match(app, /本轮 Skill 状态/);
-  assert.match(app, /skillStatus/);
-  assert.match(app, /function renderArtifactCard\(artifact, assistantId(?:, assistantStatus(?: = "completed")?)?\)/);
-  assert.match(app, /data-other-artifacts-toggle/);
-  assert.match(app, /查看其他产物/);
-  assert.match(app, /data-artifact-assistant/);
+  assert.match(app, /renderProcess.*from "\.\.\/\.\.\/\.\.\/\.\.\/packages\/agentloop-conversation-ui\/process.js"/);
+  assert.match(app, /data-process-toggle/);
+  assert.match(app, /message.processOpen === undefined \? isLive/);
+  assert.match(app, /slice\(0, 3\)/);
+  assert.match(app, /data-artifacts-toggle/);
+  assert.match(app, /尚非成功交付/);
+  assert.match(html, /packages\/agentloop-conversation-ui\/conversation.css/);
   assert.match(app, /function fetchStructuredPreview\(endpoint, headers\)/);
   assert.match(html, /id="artifact-inline-preview"/);
   assert.match(html, /id="artifact-fullscreen"/);
-  assert.match(overrides, /\.execution-trace-list/);
-  assert.match(overrides, /\.artifact-inline-preview/);
 });
 
 test("Web keeps an earlier reply's artifact preview selected while a newer turn is active", async () => {
@@ -1387,28 +1372,25 @@ test("execution details reserve the side panel for observable execution evidence
   assert.doesNotMatch(html, /id="details-skills"|id="details-tools"|id="details-commands"|id="events-section"/);
   assert.match(app, /const reasoning = isLive && message\.reasoning/);
   assert.match(app, /assistant\.reasoning = ""/);
-  assert.match(app, /function renderExecutionTrace\(message\)/);
+  assert.match(app, /const process = renderProcess/);
   assert.match(app, /class="live-step-toggle"/);
   assert.match(app, /data-plan-toggle/);
   assert.doesNotMatch(app, /class="turn-planner"/);
   assert.doesNotMatch(overrides, /\.turn-planner/);
 });
 
-test("Web renders live tool and script execution as three compact rows and keeps ordinary events terse", async () => {
-  const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
-  const overrides = await readFile(new URL("../web/styles/runtime-overrides.css", import.meta.url), "utf8");
-  assert.match(app, /item\.title/);
-  assert.match(app, /主要参数：/);
-  assert.match(app, /结果：/);
-  assert.match(app, /#\$\{seq\} · \$\{eventTypeLabel\(type\)\}/);
-  assert.match(app, /toolResult\(toolName, event, command\)/);
-  assert.match(app, /toolParameters\(toolName, args\)/);
-  assert.match(app, /tools\.filter\(\(item\) => item\.active\)/);
-  assert.match(app, /class="execution-tools"/);
-  assert.match(app, /function renderLiveEventIndicator\(message\)/);
-  assert.match(app, /class="live-event-indicator/);
-  assert.match(overrides, /\.execution-trace-copy \.execution-trace-result/);
-  assert.match(overrides, /\.live-event-indicator\.active \.live-event-number/);
+test("Web renders Desktop compact tool calls from the shared ordered process", async () => {
+  const { renderProcess } = await import("../../../packages/agentloop-conversation-ui/process.js");
+  const html = renderProcess({ status: "running", events: [
+    { seq: 1, type: "tool.planned", data: { toolCallId: "call", toolName: "computer_run_command", arguments: { command: "python3", args: ["report.py"] } } },
+    { seq: 2, type: "tool.dispatched", data: { toolCallId: "call" } },
+    { seq: 3, type: "tool.completed", data: { toolCallId: "call", result: JSON.stringify({ exitCode: 0, stdout: "full result" }) } },
+  ] });
+  assert.equal((html.match(/data-tool-call="call"/g) || []).length, 1);
+  assert.match(html, /data-tool-call="call"><summary>/);
+  assert.match(html, /python3 report.py/);
+  assert.match(html, /full result/);
+  assert.doesNotMatch(html, /主要参数：/);
 });
 
 test("execution details preserve loaded Skills and complete command evidence per tool call", () => {
@@ -1437,20 +1419,11 @@ test("execution details preserve loaded Skills and complete command evidence per
   assert.equal(activities.commands[0]?.stderr, "complete stderr");
 });
 
-test("command activity opens a stable detail dialog instead of a native dropdown", async () => {
-  const [app, html, overrides] = await Promise.all([
-    readFile(new URL("../web/client/app.js", import.meta.url), "utf8"),
-    readFile(new URL("../web/pages/app.html", import.meta.url), "utf8"),
-    readFile(new URL("../web/styles/runtime-overrides.css", import.meta.url), "utf8"),
-  ]);
-  assert.doesNotMatch(app, /<details class="command-card/);
-  assert.match(app, /data-command-detail/);
-  assert.match(app, /function openCommandDetail/);
-  assert.match(app, /function renderCommandDetailModal/);
-  assert.match(app, /data-command-detail-close/);
-  assert.match(html, /id="command-detail-modal"/);
-  assert.match(overrides, /.command-card:focus-visible/);
-  assert.match(overrides, /.command-detail-dialog/);
+test("command detail opens inline through the shared Desktop process", async () => {
+  const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  assert.doesNotMatch(app, /command-detail-modal|function openCommandDetail/);
+  assert.match(app, /toolEvidence: message.commandEvidence/);
+  assert.match(app, /hydrateCommandEvidence\(message/);
 });
 
 test("conversation Agent replies select their own Run execution detail", async () => {
@@ -1459,8 +1432,7 @@ test("conversation Agent replies select their own Run execution detail", async (
     readFile(new URL("../web/styles/runtime-overrides.css", import.meta.url), "utf8"),
   ]);
   assert.match(app, /data-assistant-message/);
-  assert.match(app, /function selectAssistantTurn\(conversation, messageId\)/);
-  assert.match(app, /conversation\.selectedAssistantId = assistant\.id/);
+  assert.match(app, /function syncConversationMessages\(conversation, messages\)/);
   assert.match(app, /selectedAssistantMessage\(conversation, messages\)/);
   assert.match(app, /selectedAssistantMessage\(activeConversation\(\)\)/);
   assert.match(app, /assistant\.detailEvents \|\| assistant\.events/);
@@ -1480,7 +1452,8 @@ test("selecting reply text does not activate the reply card", async () => {
   const emptySelection = { isCollapsed: true, rangeCount: 0, toString: () => "" };
   assert.equal(hasSelectedTextWithin(selectedInsideCard, card), true);
   assert.equal(hasSelectedTextWithin(emptySelection, card), false);
-  assert.match(app, /if \(hasSelectedTextWithin\(window\.getSelection\(\), card\)\) return;/);
+  assert.match(app, /if \(previous && hasSelectedTextWithin\(window\.getSelection\(\), previous\)\) return previous;/);
+  assert.doesNotMatch(app, /aria-label="查看该轮执行详情"/);
 });
 
 test("conversation message copy actions are delegated for every message role", async () => {
@@ -1551,7 +1524,7 @@ test("Web projects durable Plan transitions, formats final Markdown, and preserv
     readFile(new URL("../web/client/projections/execution-detail-projection.js", import.meta.url), "utf8"),
   ]);
   assert.match(app, /replayPersistedRunEvents/);
-  assert.match(app, /\/v1\/assignments\/\$\{encodeURIComponent\(assistant\.assignmentId\)\}\/events\/latest/);
+  assert.match(app, /\/v1\/assignments\/\$\{encodeURIComponent\(assistant\.assignmentId\)\}\/events\?afterSeq=0/);
   assert.doesNotMatch(app, /replayPersistedRunEvents[\s\S]{0,500}\/events`/);
   assert.match(app, /function projectPlanStatuses\(plan, events, runStatus\)/);
   assert.match(app, /projectAssistantEvent\(assistant, event\)/);
@@ -1562,9 +1535,7 @@ test("Web projects durable Plan transitions, formats final Markdown, and preserv
   assert.match(app, /从检查点启动/);
   assert.doesNotMatch(app, /data-recovery-advance/);
   assert.match(app, /import \{[^}]*openArtifactPreview[^}]*renderMarkdown[^}]*\} from "\/artifact-preview\.js"/);
-  assert.match(app, /function toolOutcomeLabel\(tool\)/);
   assert.match(detailProjection, /completedCalls: 0, rejectedCalls: 0, failedCalls: 0, runningCalls: 0/);
-  assert.match(app, /\$\{tool\.rejectedCalls\} 次被拒绝/);
   assert.match(overrides, /\.tool-tag\.partial \.tool-status-dot/);
   assert.match(overrides, /\.live-output-text\.md\s*\{[^}]*line-height:\s*1\.5;[^}]*white-space:\s*normal;/s);
 });
@@ -1639,24 +1610,22 @@ test("Web clears answered Human-in-the-Loop requests during persisted event repl
   assert.equal(assistant.humanLoop, undefined);
 });
 
-test("Web keeps an open Human-in-the-Loop request reachable outside the bounded conversation scroller", async () => {
-  const [app, html, overrides] = await Promise.all([
+test("Web uses Desktop inline HIL with explicit answers and preserves the same request form", async () => {
+  const [app, html] = await Promise.all([
     readFile(new URL("../web/client/app.js", import.meta.url), "utf8"),
     readFile(new URL("../web/pages/app.html", import.meta.url), "utf8"),
-    readFile(new URL("../web/styles/runtime-overrides.css", import.meta.url), "utf8"),
   ]);
-  assert.match(html, /id="conversation-scroll"[\s\S]*id="human-loop-panel"[\s\S]*id="composer"/);
-  assert.match(app, /function renderHumanLoopSurfaces\(messages\)/);
-  assert.match(app, /function renderHumanLoopCard\(message\)/);
-  assert.match(app, /function currentHumanLoopMessage\(messages\)/);
-  assert.match(app, /panel\.hidden = false;/);
-  assert.match(app, /confirmationRejected/);
-  assert.match(app, /AgentLoop 会停止本次任务/);
-  assert.match(app, /humanLoopConfirmationDrafts[\s\S]*saveSessions\(\);\s*render\(\);/);
-  assert.doesNotMatch(app, /data-human-loop-open/);
-  assert.match(overrides, /\.human-loop-panel\s*\{[^}]*position:\s*absolute;[^}]*top:\s*50%;[^}]*width:\s*min\(780px, calc\(100% - 48px\)\);[^}]*height:\s*min\(760px, calc\(100% - 48px\)\);[^}]*overflow:\s*hidden/s);
-  assert.match(overrides, /\.human-loop-panel-body\s*\{[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain/s);
-  assert.doesNotMatch(overrides, /\.human-loop-card\s*\{[^}]*max-height:/s);
+  assert.doesNotMatch(html, /id="human-loop-panel"/);
+  assert.match(app, /renderInlineHumanLoop\(message.humanLoop\)/);
+  assert.match(app, /bindHumanLoop\(form, message.humanLoop/);
+  assert.match(app, /oldForm.dataset.requestRevision === nextForm.dataset.requestRevision/);
+  assert.match(app, /nextForm.replaceWith\(oldForm\)/);
+  assert.match(app, /expectedRevision: request.revision/);
+  const { renderHumanLoop } = await import("../../../packages/agentloop-conversation-ui/human-loop.js");
+  const htmlForm = renderHumanLoop({ id: "question", revision: 1, title: "Confirm", prompt: "Continue?", responseSchema: { type: "confirm", acceptLabel: "Yes", rejectLabel: "No", requireReasonOnReject: true } });
+  assert.match(htmlForm, /<form/);
+  assert.doesNotMatch(htmlForm, / checked/);
+  assert.match(htmlForm, /拒绝时必填/);
 });
 
 test("Web renders resolved Human-in-the-Loop values with the labels the user selected", async () => {

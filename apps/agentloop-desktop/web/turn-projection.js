@@ -43,28 +43,4 @@ export function updateTurn(turn, run, incoming = [], artifacts, humanLoop, round
 export function hasTerminalEvent(turn) {
   return turn.events.some(event => ['run.completed', 'run.failed', 'run.cancelled'].includes(event.type));
 }
-export function visibleToolCalls(events, runStatus) {
-  const calls = new Map();
-  for (const event of events) {
-    const data = event.data || {}; const id = data.toolCallId;
-    if (!id || !['tool.planned', 'assistant.tool_call.committed', 'tool.dispatched', 'tool.effect_pending', 'tool.completed', 'tool.failed', 'tool.rejected'].includes(event.type)) continue;
-    const call = calls.get(id) || { id, name: data.toolName || data.name || '工具', status: 'queued', arguments: {} };
-    call.seq = event.seq;
-    if (data.toolName || data.name) call.name = data.toolName || data.name;
-    if (data.arguments && typeof data.arguments === 'object') call.arguments = data.arguments;
-    if (event.type === 'tool.completed') call.status = 'completed';
-    else if (event.type === 'tool.failed') call.status = 'failed';
-    else if (event.type === 'tool.rejected') call.status = 'rejected';
-    else if (['tool.dispatched', 'tool.effect_pending'].includes(event.type)) call.status = 'running';
-    if (event.type === 'tool.failed') call.error = data.error;
-    if (event.type === 'tool.rejected') call.error = data.reason;
-    if (event.type === 'tool.completed') {
-      let result = data.result;
-      if (typeof result === 'string') { try { result = JSON.parse(result); } catch { result = undefined; } }
-      if (Number.isFinite(result?.exitCode)) call.exitCode = result.exitCode;
-      if (data.isError === true) { call.status = 'failed'; call.error = '工具返回错误'; }
-    }
-    calls.set(id, call);
-  }
-  return [...calls.values()].map(call => ({ ...call, status: runStatus === 'cancelled' && ['queued', 'running'].includes(call.status) ? 'cancelled' : call.status }));
-}
+export { visibleToolCalls } from '../../../packages/agentloop-conversation-ui/process.js';

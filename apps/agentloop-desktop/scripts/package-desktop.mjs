@@ -89,6 +89,7 @@ try {
   await writeFile(join(backend, 'package.json'), '{"private":true,"type":"module"}\n');
   await cp(join(appRoot, 'dist'), join(backend, 'dist'), { recursive: true });
   await cp(join(appRoot, 'web'), join(backend, 'web'), { recursive: true });
+  await cp(join(repositoryRoot, 'packages/agentloop-conversation-ui'), join(backend, 'web/conversation-ui'), { recursive: true });
   await bundle({ stdin: { contents: 'export { renderMarkdown, artifactPreviewMode, renderBlobPreview, renderStructuredPreview, updateArtifactPreviewMarkup } from "@zhujun/agentloop-artifact-preview";', resolveDir: appRoot, loader: 'js' }, bundle: true, format: 'esm', platform: 'browser', minify: true, outfile: join(backend, 'web/markdown.js') });
   await cp(join(repositoryRoot, 'packages/agentloop-artifact-preview/markdown.css'), join(backend, 'web/markdown.css'));
   await copyRuntimeDependencies(repositoryRoot, backend, ['@zhujun/agentloop', '@zhujun/agentloop-identity', '@zhujun/agentloop-local-runtime', '@zhujun/connector-feishu', '@zhujun/connector-126-mail', '@zhujun/connector-wps']);

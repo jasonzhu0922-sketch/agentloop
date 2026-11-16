@@ -543,6 +543,14 @@ export class LocalAgentService {
     return this.supervisor.withRuntimeUse(runtimeId, async runtime => ({ events: (await runtime.runs.events(session.ownerUserId, runId)).filter((event) => event.seq > afterSeq) }));
   }
 
+  async strictLocalHumanLoop(session: LocalSession, runtimeId: string, runId: string): Promise<unknown> {
+    return this.supervisor.withRuntimeUse(runtimeId, async runtime => ({ request: await runtime.runs.currentHumanLoop(session.ownerUserId, runId) }));
+  }
+
+  async respondStrictLocalHumanLoop(session: LocalSession, runtimeId: string, runId: string, requestId: string, value: unknown, expectedRevision: unknown): Promise<unknown> {
+    return this.supervisor.withRuntimeUse(runtimeId, async runtime => ({ response: await runtime.runs.respondHumanLoop(session.ownerUserId, runId, requestId, value, expectedRevision) }));
+  }
+
   async cancelStrictLocalRun(session: LocalSession, runtimeId: string, runId: string): Promise<unknown> {
     return this.supervisor.withRuntimeUse(runtimeId, async runtime => {
       const run = await runtime.runs.cancel(session.ownerUserId, runId);

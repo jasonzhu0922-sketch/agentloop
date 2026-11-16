@@ -61,12 +61,12 @@ test("failed message shows its report once with the failure status and no boiler
     renderMarkdown: (value: string) => `<p>${value}</p>`, formatText: String, escapeHtml: String,
     formatMessageTime: empty, formatConversationDuration: empty, renderLiveEventIndicator: empty,
     renderMessageFooter: empty, renderRoundHistory: empty, renderExecutionTrace: empty,
-    renderInlineArtifacts: empty, renderSteerMessages: empty,
+    renderInlineArtifacts: empty, renderSteerMessages: empty, renderProcess: empty, liveProgressForEvent: empty,
   });
   const message = { id: "failed-report", status: "failed", error: "通用错误说明", partialText: report };
   const html = render(message);
   assert.match(html, /assistant-state failed/);
-  assert.match(html, /AgentLoop · 未完成/);
+  assert.match(html, /未完成<span aria-hidden/);
   assert.equal(html.split(report).length - 1, 1);
   assert.match(html, /查看恢复选项/);
   assert.doesNotMatch(html, /通用错误说明|failure-title|执行总结|阶段性说明|尚非成功交付/);
@@ -81,7 +81,7 @@ test("failed message shows its report once with the failure status and no boiler
 test("artifact cards disclose observed verification scope and retain stage-file actions", () => {
   const source = readFileSync(new URL("../web/client/app.js", import.meta.url), "utf8");
   const start = source.indexOf("function renderArtifactCard(");
-  const end = source.indexOf("\nfunction renderExecutionTrace", start);
+  const end = source.indexOf("\nfunction renderLiveEventIndicator", start);
   const render = runInNewContext(`(${source.slice(start, end).trim()})`, {
     escapeHtml: (value: unknown) => String(value).replaceAll("<", "&lt;"), formatBytes: (value: unknown) => `${value} B`,
     artifactVerificationLabel, isFinalDeliveryArtifact,

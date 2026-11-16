@@ -59,6 +59,12 @@ async function assets(webDirectory?: string): Promise<ReadonlyMap<string, Static
     ...["qinglong", "baihu", "zhuque", "qilin", "taotie", "yinglong", "pixiu"].map(key => [`/assets/runtime-${key}.png`, `runtime-${key}.png`, "image/png"]),
     ...["presentation/assistant-message-presentation.js", "projections/assistant-event-projection.js", "projections/execution-detail-projection.js", "ui/scroll-follow.js", "ui/composer-input.js", "ui/message-selection.js", "ui/steer-queue.js"].map(file => [`/reference/${file}`, `reference/${file}`, "text/javascript; charset=utf-8"]),
   ].map(async ([route, file, type]) => [route!, { content: await readFile(webDirectory ? join(webDirectory, file!) : new URL(`../web/${file}`, import.meta.url)), type: type! }] as const));
+  for (const file of ["process.js", "human-loop.js", "conversation.css"]) {
+    entries.push([`/packages/agentloop-conversation-ui/${file}`, {
+      content: await readFile(webDirectory ? join(webDirectory, "conversation-ui", file) : new URL(`../../../packages/agentloop-conversation-ui/${file}`, import.meta.url)),
+      type: file.endsWith(".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8",
+    }]);
+  }
   if (webDirectory) {
     entries.push(["/markdown.js", { content: await readFile(join(webDirectory, "markdown.js")), type: "text/javascript; charset=utf-8" }]);
     entries.push(["/markdown.css", { content: await readFile(join(webDirectory, "markdown.css")), type: "text/css; charset=utf-8" }]);

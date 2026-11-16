@@ -119,6 +119,15 @@ export function createWebServer({ installerDirectory = process.env.LOCAL_AGENT_D
       }
       return;
     }
+    if (/^\/packages\/agentloop-conversation-ui\/(process\.js|human-loop\.js|conversation\.css)$/.test(pathname)) {
+      const file = fileURLToPath(new URL(`../../../${pathname.slice(1)}`, import.meta.url));
+      try {
+        const content = await readFile(file);
+        response.writeHead(200, { "content-type": pathname.endsWith(".css") ? types[".css"] : types[".js"] });
+        response.end(content);
+      } catch { response.writeHead(404); response.end(); }
+      return;
+    }
     if (pathname === "/marked.js") {
       try {
         await stat(sharedMarked);

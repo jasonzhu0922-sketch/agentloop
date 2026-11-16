@@ -48,15 +48,18 @@ test('process preserves ordered cumulative messages and tools, then collapses be
   assert.equal(renderAssistant(replay), final);
 });
 
-test('readable progress and tool changes stay ordered while technical events update the footer', () => {
+test('readable progress stays ordered while each tool updates in place and technical events update the footer', () => {
   const turn = createTurn(run());
   updateTurn(turn, run(), [event(1, 'assistant.streaming', { content: '先检查' }), event(2, 'tool.dispatched', { toolCallId: 'a', toolName: 'read_file' }), event(3, 'assistant.streaming', { content: '先检查再分析' }), event(4, 'model.request.started', { purpose: 'conversation_turn_resolver' }), event(5, 'tool.completed', { toolCallId: 'a' }), event(6, 'assistant.committed', { content: '先检查再分析' }), event(7, 'runtime.capability_snapshot.created')]);
   const html = renderAssistant(turn);
-  const positions = ['先检查', '结果：执行中', '再分析', '正在理解本轮需求', '结果：已完成'].map(text => html.indexOf(text));
+  const positions = ['先检查', 'data-tool-call="a"', '再分析', '正在理解本轮需求'].map(text => html.indexOf(text));
   assert.ok(positions.every(position => position >= 0));
   assert.deepEqual(positions, [...positions].sort((a, b) => a - b));
   assert.equal((html.match(/先检查/g) || []).length, 1);
   assert.equal((html.match(/再分析/g) || []).length, 1);
+  assert.equal((html.match(/data-tool-call="a"/g) || []).length, 1);
+  assert.match(html, /process-tool-status[^>]*title="已完成"/);
+  assert.doesNotMatch(html, /process-tool-status[^>]*title="执行中"/);
   assert.doesNotMatch(html.split('<div class="message-footer event-feedback">')[0], /capability_snapshot/);
   assert.match(html, /data-event-seq="7"[^>]*>[\s\S]*#7[\s\S]*runtime capability_snapshot created/);
 });
@@ -220,6 +223,33 @@ test('tool calls retain arguments, real result/error and sequence without manufa
   const calls = visibleToolCalls(events, 'completed'); assert.equal(calls.length, 2); assert.equal(calls[0].arguments.command, 'echo'); assert.equal(calls[0].exitCode, 2); assert.equal(calls[1].status, 'failed');
 });
 
+test('one collapsed row per call retains complete arguments and escaped output across lifecycle updates', () => {
+  const turn = createTurn(run());
+  const command = 'python3 scripts/analyze.py';
+  const args = { command, args: ['--report', 'data/report.json'], content: '<script>argument</script>' };
+  const events = [event(1, 'tool.planned', { toolCallId: 'command', toolName: 'computer_run_command', arguments: args }), event(2, 'tool.dispatched', { toolCallId: 'command' })];
+  updateTurn(turn, run(), events);
+  assert.match(renderAssistant(turn), /data-tool-call="command"><summary>[\s\S]*?执行中/);
+  const output = { exitCode: 2, stdout: '<img src=x onerror=alert(1)>\n完整输出', stderr: '检查失败' };
+  updateTurn(turn, run(), [event(3, 'tool.completed', { toolCallId: 'command', result: JSON.stringify(output) })]);
+  const html = renderAssistant(turn);
+  assert.equal((html.match(/data-tool-call="command"/g) || []).length, 1);
+  assert.match(html, /data-tool-group="1"><summary>/, 'list stays collapsed with a stable first-event key');
+  assert.match(html, /data-tool-call="command"><summary>/, 'call details stay collapsed');
+  const summary = html.match(/data-tool-call="command"><summary>(.*?)<\/summary>/s)![1]!;
+  assert.match(summary, /python3 scripts\/analyze.py --report data\/report.json/);
+  assert.match(summary, /退出码 2/);
+  assert.doesNotMatch(summary, /主要参数|<pre>|<br>|完整输出/);
+  assert.match(html, /&lt;script&gt;argument&lt;\/script&gt;/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;\n完整输出/);
+  assert.match(html, /检查失败/);
+  assert.doesNotMatch(html, /<script>|<img src=x/);
+  const expanded = renderAssistant(turn, { tools: { 1: true }, toolDetails: { command: true } });
+  assert.match(expanded, /data-tool-group="1" open>/);
+  assert.match(expanded, /data-tool-call="command" open>/);
+  assert.equal(turn.events.length, 3, 'durable lifecycle events are retained');
+});
+
 test('terminal reconciliation clears stale waiting state and keeps every artifact visible', () => {
   const turn = createTurn(run()); updateTurn(turn, run(), [event(1, 'run.waiting_user', { request: { id: 'request', status: 'open' } })]);
   assert.match(renderAssistant(turn), /等待你的输入/);
@@ -229,15 +259,31 @@ test('terminal reconciliation clears stale waiting state and keeps every artifac
   assert.doesNotMatch(renderAssistant(turn), /data-toggle="artifacts"/);
 });
 
-test('many stage artifacts remain accessible in their own bounded list', async () => {
+test('artifact list shows three files by default and expands the remaining files', () => {
   const turn = createTurn(run('completed'));
   turn.artifacts = Array.from({ length: 20 }, (_, index) => ({ id: `file-${index}`, name: `file-${index}.txt`, role: 'process', bytes: 1 }));
   const html = renderAssistant(turn);
   assert.match(html, /class="desktop-artifact-list stage-artifact-list" role="region" aria-label="阶段产物列表" tabindex="0"/);
-  assert.equal((html.match(/class="desktop-artifact-row"/g) || []).length, 20);
+  assert.equal((html.match(/class="desktop-artifact-row"/g) || []).length, 3);
   assert.match(html, /20 个文件/);
-  const css = await readFile(new URL('../web/styles.css', import.meta.url), 'utf8');
-  assert.match(css, /\.stage-artifact-list\s*\{[^}]*max-height:\s*200px;[^}]*overflow-y:\s*auto/s);
+  assert.match(html, /data-toggle="artifactsExpanded" aria-expanded="false" aria-controls="artifacts-run-a">展开其余 17 个文件/);
+  const expanded = renderAssistant(turn, { artifactsExpanded: true });
+  assert.equal((expanded.match(/class="desktop-artifact-row"/g) || []).length, 20);
+  assert.match(expanded, /data-toggle="artifactsExpanded" aria-expanded="true"[^>]*>收起/);
+  assert.match(expanded, /data-artifact-id="file-19"/);
+  assert.equal((renderAssistant(turn).match(/class="desktop-artifact-row"/g) || []).length, 3);
+});
+
+test('three-file limit spans final and stage groups, with final files first', () => {
+  const turn = createTurn(run('completed'));
+  turn.artifacts = Array.from({ length: 6 }, (_, index) => ({ id: `file-${index}`, name: `file-${index}.txt`, role: index % 3 === 0 ? 'final' : 'process', bytes: 1 }));
+  const html = renderAssistant(turn);
+  assert.deepEqual([...html.matchAll(/data-artifact-id="([^"]+)"/g)].map(match => match[1]), ['file-0', 'file-3', 'file-1']);
+  assert.match(html, /最终产物/);
+  assert.match(html, /阶段产物 · 尚非成功交付/);
+  assert.match(html, /展开其余 3 个文件/);
+  turn.artifacts = turn.artifacts.slice(0, 3);
+  assert.doesNotMatch(renderAssistant(turn), /data-toggle="artifactsExpanded"/);
 });
 
 test('polling retains artifacts during execution and shows them on completion', async () => {

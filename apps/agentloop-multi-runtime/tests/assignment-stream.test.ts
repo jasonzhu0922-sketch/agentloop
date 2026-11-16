@@ -267,6 +267,10 @@ test("a later turn's live event repaints only its own assistant card", async () 
     isNearBottom: () => true,
     nextScrollTop: () => 0,
     renderMessage: (message: { id: string }) => `<article>${message.id}</article>`,
+    updateMessageNode: (message: { id: string }, previous: { outerHTML: string }) => {
+      previous.outerHTML = `<article>${message.id}</article>`;
+      return cards.get(message.id);
+    },
     bindAssistantCard: (_card: unknown, _conversation: unknown, messages: Array<{ id: string }>) => bindings.push(messages.find((message) => message.id === "streaming")?.id || "missing"),
     render: () => { fullRenders += 1; },
     liveUpdates: { request() {}, flush() {} },

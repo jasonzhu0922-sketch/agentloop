@@ -232,6 +232,13 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
       }
       const strictEvents = url.pathname.match(/^\/v1\/strict-local-runs\/([^/]+)\/([^/]+)\/events$/);
       if (request.method === "GET" && strictEvents !== null) return json(response, 200, await service.strictLocalEvents(await session(request, service), decodeURIComponent(strictEvents[1]), decodeURIComponent(strictEvents[2]), Number(url.searchParams.get("afterSeq") ?? 0)));
+      const strictHumanLoop = url.pathname.match(/^\/v1\/strict-local-runs\/([^/]+)\/([^/]+)\/human-loop\/current$/);
+      if (request.method === "GET" && strictHumanLoop !== null) return json(response, 200, await service.strictLocalHumanLoop(await session(request, service), decodeURIComponent(strictHumanLoop[1]), decodeURIComponent(strictHumanLoop[2])));
+      const strictHumanResponse = url.pathname.match(/^\/v1\/strict-local-runs\/([^/]+)\/([^/]+)\/human-loop\/([^/]+)\/respond$/);
+      if (request.method === "POST" && strictHumanResponse !== null) {
+        const localSession = await session(request, service); const input = await body(request);
+        return json(response, 200, await service.respondStrictLocalHumanLoop(localSession, decodeURIComponent(strictHumanResponse[1]), decodeURIComponent(strictHumanResponse[2]), decodeURIComponent(strictHumanResponse[3]), input.value, input.expectedRevision));
+      }
       const strictCancel = url.pathname.match(/^\/v1\/strict-local-runs\/([^/]+)\/([^/]+)\/cancel$/);
       if (request.method === "POST" && strictCancel !== null) return json(response, 200, await service.cancelStrictLocalRun(await session(request, service), decodeURIComponent(strictCancel[1]), decodeURIComponent(strictCancel[2])));
 

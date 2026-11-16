@@ -1,9 +1,11 @@
+import { renderProcess } from "../../../../packages/agentloop-conversation-ui/process.js";
+import { renderHumanLoop as renderInlineHumanLoop, bindHumanLoop } from "../../../../packages/agentloop-conversation-ui/human-loop.js";
 import { createSteerDrafts, createSteerQueueView, renderSteerMessages } from "./ui/steer-queue.js";
 import { createLocalModelSettings } from "./local-runtime/local-model-settings.js";
 import { createLocalMemorySettings } from "./local-runtime/local-memory-settings.js";
 import { createLocalConnectorSettings } from "./local-runtime/local-connector-settings.js";
 import { clearToast, showToast } from "./ui/toast.js";
-import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "./projections/assistant-event-projection.js";
+import { hasIncompleteCompletedPlan, liveProgressForEvent, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "./projections/assistant-event-projection.js";
 import { conversationMessagesFromTurns } from "./projections/conversation-history.js";
 import { commandToolCallIds, executionActivities } from "./projections/execution-detail-projection.js";
 import { executionProvenanceParts } from "./projections/execution-provenance.js";
@@ -62,7 +64,6 @@ const sessionState = createSessionState({ storage: sessionStorage, authTokenKey:
 const localRuntimeState = createLocalRuntimeState();
 const runState = createRunState();
 let renderedConversationId;
-let commandDetailSelection;
 let inlineArtifactPreview;
 let inlineArtifactPreviewUrl;
 let artifactPanelOpen = false;
@@ -148,6 +149,7 @@ $("model-select").addEventListener("change", () => {
   modelSelection.choose($("model-select").value, modelCatalogContext());
   setStatus(modelSelectionStatus(availableModels, $("model-select").value), "ok");
 });
+document.addEventListener("selectionchange", () => { if (window.getSelection()?.isCollapsed) { for (const message of activeConversation()?.messages || []) if (message.role === "assistant") runState.pendingLiveAssistantIds.add(message.id); liveUpdates.request(); } });
 $("messages").addEventListener("click", (event) => {
   const button = event.target instanceof Element ? event.target.closest("[data-copy-message]") : null;
   if (!(button instanceof HTMLButtonElement)) return;
@@ -263,7 +265,7 @@ $("runtime-create-form").addEventListener("submit", (event) => { event.preventDe
 $("runtime-detail-close").addEventListener("click", closeLocalRuntimeDetails);
 $("runtime-detail-modal").addEventListener("click", (event) => { if (event.target === event.currentTarget) closeLocalRuntimeDetails(); });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") { closeCommandDetail(); closeCreateLocalRuntime(); closeLocalRuntimeDetails(); closeLocalAgentSettings(); closeLocalAgentInstall(); closeConfigureLocalRuntime(); }
+  if (event.key === "Escape") { closeCreateLocalRuntime(); closeLocalRuntimeDetails(); closeLocalAgentSettings(); closeLocalAgentInstall(); closeConfigureLocalRuntime(); }
 });
 window.addEventListener("focus", reconcileRunsAfterPageReturn);
 window.addEventListener("online", reconcileRunsAfterPageReturn);
@@ -1591,10 +1593,8 @@ async function selectConversation(conversationId) {
     // assignment artifact endpoint owns downloadable artifact identities.
     // Rehydrate every historical assistant turn so a final artifact remains
     // attached to the reply that delivered it after reload or another device
-    // opens the conversation. Running turns additionally need status/events.
-    await Promise.allSettled(assistants.map((assistant) => assistant.status === "running"
-      ? hydratePersistedAssistant(assistant, tenantId, userId)
-      : refreshArtifacts(assistant.assignmentId, assistant, tenantId, userId)));
+    // opens the conversation. Every turn also restores its ordered process.
+    await Promise.allSettled(assistants.map((assistant) => hydratePersistedAssistant(assistant, tenantId, userId)));
     syncModelSelection();
     const selected = selectedAssistantMessage(conversation);
     if (selected?.assignmentId) {
@@ -1626,7 +1626,7 @@ function resetArtifactWorkspace() {
 }
 
 async function hydratePersistedAssistant(assistant, tenantId, userId, includeCommandEvidence = false) {
-  let runLoaded = false;
+  let runLoaded = false; let recoveredRun;
   try {
     const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}`, {
       headers: { "x-tenant-id": tenantId, "x-user-id": userId },
@@ -1634,15 +1634,17 @@ async function hydratePersistedAssistant(assistant, tenantId, userId, includeCom
     if (response.ok) {
       const body = await response.json();
       runLoaded = body?.run !== undefined;
-      applyRecoveredRunState(assistant, body?.run);
+      recoveredRun = body?.run;
+      applyRecoveredRunState(assistant, recoveredRun);
     }
   } catch {}
   await refreshRounds(assistant.assignmentId, assistant, tenantId, userId);
   try { assistant.inputMessages = await steerRequest(assistant.assignmentId); } catch { /* Offline Runtime retains the last persisted projection. */ }
   const eventsLoaded = await replayPersistedRunEvents(assistant, tenantId, userId);
   if (!runLoaded && !eventsLoaded) throw new Error("无法读取该轮的 Runtime Run");
+  if (recoveredRun) applyRecoveredRunState(assistant, recoveredRun);
   // Artifact projection is independent from terminal Run status: a generated
-  // product must survive reconnects and remain visible while the Run is live.
+  // product must survive reconnects and remain retained until terminal display.
   await refreshArtifacts(assistant.assignmentId, assistant, tenantId, userId);
   if (assistant.status === "running") await refreshHumanLoop(assistant.assignmentId, assistant, tenantId, userId);
   if (includeCommandEvidence) await hydrateCommandEvidence(assistant, tenantId, userId);
@@ -1708,6 +1710,7 @@ function applyRecoveredRunState(assistant, run) {
     return modelChanged || modelDisplayNameChanged;
   }
   if (!run || !["completed", "failed", "cancelled"].includes(run.status)) return false;
+  if (assistant.status === "running") assistant.processOpen = false;
   assistant.status = run.status;
   assistant.connection = undefined;
   assistant.error = undefined;
@@ -1754,18 +1757,16 @@ function recoveredFailureMessage(run) {
 
 async function replayPersistedRunEvents(assistant, tenantId, userId) {
   try {
-    const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/events/latest`, { headers: { "x-tenant-id": tenantId, "x-user-id": userId } });
+    const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/events?afterSeq=0`, { headers: { "x-tenant-id": tenantId, "x-user-id": userId } });
     if (!response.ok) return false;
     const body = await response.json();
-    const event = body?.event;
-    if (!event || !Number.isSafeInteger(event.seq) || typeof event.type !== "string") return false;
-    const terminal = replayAssistantEvents(assistant, [event]);
-    setVolatile(assistant, "detailEvents", mergeDetailEvents(assistant.detailEvents, [event]));
-    if (terminal) completeAssistantMessage(assistant, event);
+    if (!Array.isArray(body.events)) return false;
+    const events = mergeDetailEvents([], body.events);
+    const terminal = replayAssistantEvents(assistant, events);
+    setVolatile(assistant, "detailEvents", mergeDetailEvents(assistant.detailEvents, events));
+    if (terminal) completeAssistantMessage(assistant, events.filter(event => ["run.completed", "run.failed", "run.cancelled"].includes(event.type)).at(-1));
     return true;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
 async function hydrateCommandEvidence(assistant, tenantId, userId) {
@@ -2157,7 +2158,7 @@ async function observeStrictLocalRun(conversation, assistant, activeRun) {
   const runId = assistant.localRunId;
   if (!runtimeId || !runId) throw new Error("strict_local_run_identity_missing");
   activeRun.abortController = new AbortController();
-  let afterSeq = Math.max(0, ...(assistant.events || []).map((event) => Number.isSafeInteger(event.seq) ? event.seq : 0));
+  let afterSeq = Math.max(0, ...(assistant.detailEvents || []).map((event) => Number.isSafeInteger(event.seq) ? event.seq : 0));
   let transientFailures = 0;
   while (!activeRun.abortController.signal.aborted && assistant.status === "running") {
     try {
@@ -2174,6 +2175,7 @@ async function observeStrictLocalRun(conversation, assistant, activeRun) {
         onEvent(event, conversation, assistant);
       }
       applyRecoveredRunState(assistant, runBody.run);
+      if (assistant.status === "running") await refreshStrictLocalHumanLoop(assistant);
       if (["completed", "failed", "cancelled"].includes(assistant.status)) {
         releaseTerminalComposerLock(conversation, assistant);
         flushTerminalAssistantUpdate(assistant);
@@ -2257,7 +2259,7 @@ function onEvent(event, conversation, assistant) {
   if (assistant.assignmentId && isArtifactProjectionEvent(event)) {
     void refreshArtifacts(assistant.assignmentId, assistant, $("tenant-id").value.trim(), $("user-id").value.trim());
   }
-  if (terminal) { assistant.connection = undefined; completeAssistantMessage(assistant, event); }
+  if (terminal) { assistant.processOpen = false; assistant.connection = undefined; completeAssistantMessage(assistant, event); }
   conversation.updatedAt = Math.max(finiteNumber(conversation.updatedAt, 0), finiteNumber(event.createdAt, 0));
   if (event.type === "run.waiting_user" && assistant.assignmentId) {
     void refreshHumanLoop(assistant.assignmentId, assistant, $("tenant-id").value.trim(), $("user-id").value.trim()).then((changed) => { if (changed) { saveSessions(); render(); } });
@@ -2459,7 +2461,7 @@ function renderPendingLiveAssistantMessages() {
   coordination.pendingLiveAssistantIds.clear();
   const conversation = activeConversation();
   if (!conversation || renderedConversationId !== conversation.id) { render(); return; }
-  const messages = (conversation.messages || []).filter((message) => message?.role === "assistant" && messageIds.includes(message.id) && message.status === "running");
+  const messages = (conversation.messages || []).filter((message) => message?.role === "assistant" && messageIds.includes(message.id));
   // Events for a background conversation have no visible surface to update.
   if (messages.length === 0) return;
   const cards = messages.map((message) => ({
@@ -2476,8 +2478,7 @@ function renderPendingLiveAssistantMessages() {
     const previousOutput = card.querySelector(".live-output-text");
     const followOutput = previousOutput === null || isNearBottom(previousOutput);
     const previousOutputTop = previousOutput?.scrollTop ?? 0;
-    card.outerHTML = renderMessage(message);
-    const replacement = document.querySelector(`[data-assistant-message="${CSS.escape(message.id)}"]`);
+    const replacement = updateMessageNode(message, card);
     if (replacement === null) { render(); return; }
     bindAssistantCard(replacement, conversation, conversation.messages || []);
     const output = replacement.querySelector(".live-output-text");
@@ -2521,24 +2522,7 @@ function render() {
     button.disabled = runState.deletingConversationIds.has(button.dataset.deleteSession);
     button.addEventListener("click", () => void deleteConversation(button.dataset.deleteSession));
   });
-  const messages = conversation.messages || []; $("empty-state").hidden = messages.length > 0; $("messages").innerHTML = messages.map(renderMessage).join("");
-  renderHumanLoopSurfaces(messages);
-  document.querySelectorAll("[data-assistant-message]").forEach((card) => bindAssistantCard(card, conversation, messages));
-  document.querySelectorAll("[data-human-loop-submit]").forEach((button) => button.addEventListener("click", () => submitHumanLoop(button.dataset.humanLoopSubmit)));
-  document.querySelectorAll("[data-human-loop-option]").forEach((input) => input.addEventListener("change", () => {
-    rememberHumanLoopSelection(
-      input.dataset.humanLoopMessage,
-      input.dataset.humanLoopRequest,
-      input.value,
-      input.checked,
-      Number(input.dataset.humanLoopMaxSelections),
-    );
-  }));
-  document.querySelectorAll("[data-human-loop-form-field]").forEach((field) => field.addEventListener("input", () => rememberHumanLoopFormValue(field.dataset.humanLoopMessage, field.dataset.humanLoopRequest, field.dataset.humanLoopFormField, field.value)));
-  document.querySelectorAll("[data-human-loop-confirm]").forEach((input) => input.addEventListener("change", () => {
-    if (input.checked) rememberHumanLoopConfirmation(input.dataset.humanLoopMessage, input.dataset.humanLoopRequest, input.value);
-  }));
-  document.querySelectorAll("[data-checkpoint-start]").forEach((button) => button.addEventListener("click", () => void startFromCheckpoint(button.dataset.checkpointStart)));
+  const messages = conversation.messages || []; $("empty-state").hidden = messages.length > 0; syncConversationMessages(conversation, messages);
   const selectedAssistant = selectedAssistantMessage(conversation, messages);
   const activeRun = runState.activeByConversation.get(conversation.id);
   const cancelTarget = cancellationTarget(activeRun, messages);
@@ -2559,20 +2543,7 @@ function render() {
   // user can still preview a product from any earlier assistant reply. Do not
   // let the conversation's current (usually latest) selection hide that pane.
   renderArtifacts();
-  document.querySelectorAll("[data-artifact-card]").forEach((card) => card.addEventListener("click", (event) => {
-    if (event.target.closest("button, a, input, select, textarea")) return;
-    if (card.dataset.artifactPreviewable === "false") return;
-    event.stopPropagation();
-    void previewArtifact(card.dataset.artifactCard, card.dataset.artifactAssistant);
-  }));
-  document.querySelectorAll("[data-artifact-download]").forEach((button) => button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    void downloadArtifact(button.dataset.artifactDownload, button.dataset.artifactAssistant);
-  }));
-  document.querySelectorAll("[data-artifact-preview]").forEach((button) => button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    void previewArtifact(button.dataset.artifactPreview, button.dataset.artifactAssistant);
-  }));
+  bindArtifactActions($("artifacts-section"));
   conversationScroll.scrollTop = nextScrollTop(conversationScroll, followConversation, conversationScroll.scrollTop);
   const reasoningBody = document.querySelector(".reasoning-body");
   if (reasoningBody) reasoningBody.scrollTop = nextScrollTop(reasoningBody, followReasoning, previousReasoningTop);
@@ -2584,36 +2555,83 @@ function render() {
   renderedConversationId = conversation.id;
 }
 
+function captureAssistantUi(card, message) {
+  for (const [attribute, key] of [["data-tool-group", "processTools"], ["data-tool-call", "processToolDetails"], ["data-protocol-seq", "processProtocol"]]) {
+    for (const details of card.querySelectorAll(`[${attribute}]`)) {
+      message[key] ||= {}; message[key][details.getAttribute(attribute)] = details.open;
+    }
+  }
+  const reasoning = card.querySelector(".live-reasoning"), rounds = card.querySelector(".round-history");
+  if (reasoning) message.reasoningOpen = reasoning.open;
+  if (rounds) message.roundHistoryOpen = rounds.open;
+}
+
+function updateMessageNode(message, previous) {
+  if (previous && hasSelectedTextWithin(window.getSelection(), previous)) return previous;
+  if (previous && message.role === "assistant") captureAssistantUi(previous, message);
+  const markup = renderMessage(message);
+  if (previous?.messageMarkup === markup) return previous;
+  const template = document.createElement("template"); template.innerHTML = markup;
+  const next = template.content.firstElementChild;
+  next.dataset.messageId = message.id; next.messageMarkup = markup;
+  const oldForm = previous?.querySelector("form[data-human-loop]"), nextForm = next.querySelector("form[data-human-loop]");
+  const sameRequest = oldForm && nextForm && oldForm.dataset.humanLoop === nextForm.dataset.humanLoop && oldForm.dataset.requestRevision === nextForm.dataset.requestRevision;
+  const focused = previous?.contains(document.activeElement) ? document.activeElement : undefined;
+  if (sameRequest) nextForm.replaceWith(oldForm);
+  if (previous) previous.replaceWith(next);
+  if (sameRequest && oldForm.contains(focused)) focused.focus({ preventScroll: true });
+  return next;
+}
+
+function syncConversationMessages(conversation, messages) {
+  const container = $("messages");
+  if (renderedConversationId !== conversation.id) container.replaceChildren();
+  const previous = new Map([...container.children].map(node => [node.dataset.messageId, node]));
+  const ids = new Set(messages.map(message => message.id));
+  for (const [id, node] of previous) if (!ids.has(id)) node.remove();
+  let cursor = container.firstElementChild;
+  for (const message of messages) {
+    const old = previous.get(message.id);
+    const node = updateMessageNode(message, old);
+    if (cursor === old) cursor = node;
+    if (!node.parentNode) container.insertBefore(node, cursor);
+    else if (node !== cursor) container.insertBefore(node, cursor);
+    cursor = node.nextElementSibling;
+    if (message.role === "assistant") bindAssistantCard(node, conversation, messages);
+  }
+}
+
 function bindAssistantCard(card, conversation, messages) {
-    const select = () => void selectAssistantTurn(conversation, card.dataset.assistantMessage);
-    card.addEventListener("click", (event) => {
-      if (event.target.closest("button, input, label, a")) return;
-      // Selecting a reply fires click on mouse-up.  Rendering here would
-      // replace the DOM and discard the selection before the user can copy it.
-      if (hasSelectedTextWithin(window.getSelection(), card)) return;
-      select();
-    });
-    card.addEventListener("keydown", (event) => { if ((event.key === "Enter" || event.key === " ") && !event.target.closest("button, input, label, a")) { event.preventDefault(); select(); } });
-  card.querySelectorAll("[data-plan-toggle]").forEach((button) => button.addEventListener("click", () => {
-    const assistant = messages.find((message) => message.id === button.dataset.planToggle);
-    if (!assistant) return;
-    assistant.planOpen = assistant.planOpen !== true;
-    render();
-  }));
-  card.querySelectorAll("[data-trace-toggle]").forEach((button) => button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    const assistant = messages.find((message) => message.id === button.dataset.traceToggle);
-    if (!assistant) return;
-    assistant.traceOpen = assistant.traceOpen !== true;
-    render();
-  }));
-  card.querySelectorAll("[data-other-artifacts-toggle]").forEach((button) => button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    const assistant = messages.find((message) => message.id === button.dataset.otherArtifactsToggle);
-    if (!assistant) return;
-    assistant.otherArtifactsOpen = assistant.otherArtifactsOpen !== true;
-    render();
-  }));
+  const message = messages.find(message => message.id === card.dataset.assistantMessage);
+  if (!message || card.controlsBound) return;
+  card.controlsBound = true;
+  for (const [selector, key] of [["data-process-toggle", "processOpen"], ["data-plan-toggle", "planOpen"], ["data-artifacts-toggle", "artifactsExpanded"]]) {
+    card.querySelectorAll(`[${selector}]`).forEach(button => { button.onclick = () => {
+      message[key] = button.getAttribute("aria-expanded") !== "true";
+      if (key === "planOpen" && message.planOpen) message.processOpen = true;
+      render();
+    }; });
+  }
+  const form = card.querySelector("form[data-human-loop]");
+  if (form && !form.responseBound) {
+    form.responseBound = true;
+    bindHumanLoop(form, message.humanLoop, (request, value) => submitHumanLoop(message.id, request, value));
+  }
+  card.querySelectorAll('[data-tool-call]').forEach(details => { details.ontoggle = () => {
+    if (!details.open || !message.assignmentId || message.commandEvidence?.[details.dataset.toolCall]) return;
+    void hydrateCommandEvidence(message, $("tenant-id").value.trim(), $("user-id").value.trim()).then(() => requestLiveAssistantUpdate(message));
+  }; });
+  bindArtifactActions(card);
+  card.querySelectorAll("[data-checkpoint-start]").forEach(button => { button.onclick = () => void startFromCheckpoint(button.dataset.checkpointStart); });
+}
+
+function bindArtifactActions(container) {
+  container?.querySelectorAll("[data-artifact-card]").forEach(card => { card.onclick = event => {
+    if (event.target.closest("button, a, input, select, textarea") || card.dataset.artifactPreviewable === "false") return;
+    void previewArtifact(card.dataset.artifactCard, card.dataset.artifactAssistant);
+  }; });
+  container?.querySelectorAll("[data-artifact-download]").forEach(button => { button.onclick = () => void downloadArtifact(button.dataset.artifactDownload, button.dataset.artifactAssistant); });
+  container?.querySelectorAll("[data-artifact-preview]").forEach(button => { button.onclick = () => void previewArtifact(button.dataset.artifactPreview, button.dataset.artifactAssistant); });
 }
 
 async function deleteConversation(conversationId) {
@@ -2657,31 +2675,6 @@ function selectedAssistantMessage(conversation, messages = conversation?.message
   return selected || [...messages].reverse().find((message) => message.role === "assistant");
 }
 
-function assistantTurnNumber(messages, assistant) {
-  if (!assistant) return 0;
-  return messages.filter((message) => message.role === "assistant").findIndex((message) => message.id === assistant.id) + 1;
-}
-
-async function selectAssistantTurn(conversation, messageId) {
-  const assistant = (conversation?.messages || []).find((message) => message.role === "assistant" && message.id === messageId);
-  if (!assistant) return;
-  conversation.selectedAssistantId = assistant.id;
-  saveSessions();
-  render();
-  if (!assistant.assignmentId || runState.hydratedDetailAssignmentIds.has(assistant.assignmentId)) return;
-  assistant.detailsLoading = true;
-  render();
-  try {
-    await hydratePersistedAssistant(assistant, $("tenant-id").value.trim(), $("user-id").value.trim(), true);
-    runState.hydratedDetailAssignmentIds.add(assistant.assignmentId);
-  } catch (error) {
-    assistant.detailsError = error instanceof Error ? error.message : String(error);
-  } finally {
-    assistant.detailsLoading = false;
-    saveSessions();
-    render();
-  }
-}
 
 function conversationTurnLabel(conversation) {
   if (conversation.messages?.length) return `${Math.ceil(conversation.messages.length / 2)} 轮`;
@@ -2693,21 +2686,21 @@ function renderMessage(message) {
   if (message.role === "user") {
     const attachments = Array.isArray(message.attachments) ? message.attachments : (message.files || []).map((name) => ({ originalName: name }));
     const askedAt = formatMessageTime(message.createdAt);
-    return `<article class="msg user"><div class="msg-body"><div class="msg-bubble"><div class="msg-role">你</div>${attachments.length ? `<div class="msg-source-row" aria-label="本轮上传文件">${attachments.map(renderAttachmentChip).join("")}</div>` : ""}<div class="msg-text">${escapeHtml(message.text)}</div>${renderMessageFooter(message, askedAt ? `提问于 ${askedAt}` : "", "提问")}</div></div></article>`;
+    return `<article class="msg user" data-message-id="${escapeHtml(message.id)}"><div class="msg-body"><div class="msg-bubble"><div class="msg-role">你</div>${attachments.length ? `<div class="msg-source-row" aria-label="本轮上传文件">${attachments.map(renderAttachmentChip).join("")}</div>` : ""}<div class="msg-text">${escapeHtml(message.text)}</div>${renderMessageFooter(message, askedAt ? `提问于 ${askedAt}` : "", "提问")}</div></div></article>`;
   }
   const presentation = assistantMessagePresentation(message.status);
   const isSelected = selectedAssistantMessage(activeConversation())?.id === message.id;
   const isLive = presentation.isLive;
   const plan = projectPlanStatuses(message.plan || [], message.events || [], message.status);
   const provenance = renderExecutionProvenance(message);
-  const reasoning = isLive && message.reasoning ? `<details class="live-reasoning" open><summary>模型思考</summary><div class="reasoning-body">${formatText(message.reasoning)}</div></details>` : "";
+  const reasoning = isLive && message.reasoning ? `<details class="live-reasoning"${message.reasoningOpen !== false ? " open" : ""}><summary>模型思考</summary><div class="reasoning-body">${formatText(message.reasoning)}</div></details>` : "";
   const humanLoop = renderHumanLoop(message);
   const recovery = renderRecovery(message);
   const interimOutput = message.text ? (message.status === "completed" ? renderMarkdown(message.text) : formatText(message.text)) : "";
   // A pending Human-in-the-Loop request is the current actionable state. Keep
   // any useful interim model text, but never let it displace the response
   // controls the user needs in order to continue the Run.
-  const projectedOutput = `${interimOutput}${humanLoop}${recovery}`;
+  const projectedOutput = `${interimOutput}${recovery}`;
   const artifactSummary = message.status === "completed" ? completedArtifactSummary(message.artifacts) : "";
   const emptyOutput = isLive
     ? (typeof message.progress === "string" && message.progress.trim()
@@ -2727,13 +2720,16 @@ function renderMessage(message) {
   const planPanelId = `plan-${message.id}`;
   const stepToggle = hasPlan ? `<button type="button" class="live-step-toggle" data-plan-toggle="${message.id}" aria-expanded="${message.planOpen === true}" aria-controls="${planPanelId}">步骤 ${plan.filter((step) => step.status === "completed").length}/${plan.length}<span class="live-step-caret" aria-hidden="true">⌄</span></button>` : "";
   const planPanel = hasPlan && message.planOpen === true ? `<ol class="inline-plan-steps" id="${planPanelId}">${plan.map((step, index) => `<li><span class="step-dot ${step.status === "completed" ? "done" : step.status === "running" ? "running" : step.status === "failed" ? "error" : "pending"}"></span><span><b>${String(index + 1).padStart(2, "0")} ${escapeHtml(step.objective || step.id || "未命名步骤")}</b><small>${planStepLabel(step.status)}</small></span></li>`).join("")}</ol>` : "";
-  const roundHistory = renderRoundHistory(message.rounds);
-  const executionTrace = renderExecutionTrace(message);
+  const roundHistory = renderRoundHistory(message.rounds, message.roundHistoryOpen);
+  const processOpen = message.processOpen === undefined ? isLive : message.processOpen === true;
+  const process = renderProcess({ ...message, events: message.detailEvents || message.events || [], toolEvidence: message.commandEvidence }, message.processTools, message.processProtocol, processOpen, message.processToolDetails, liveProgressForEvent);
+  const planning = roundHistory || stepToggle ? `<div class="planning-overview"><div class="planning-overview-head">${roundHistory}${stepToggle}</div>${planPanel}</div>` : "";
+  const processHeading = `${stateLabel}${!isLive && duration ? ` · 耗时 ${duration}` : ""}`;
   const inlineArtifacts = renderInlineArtifacts(message);
-  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><img class="msg-avatar logo-image" src="/assets/xuanwu-mascot-icon.png" alt="玄武" /><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop · ${stateLabel}</span>${provenance}${stepToggle}</div>${renderSteerMessages(message.inputMessages)}${roundHistory}${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${executionTrace}${inlineArtifacts}${responseTiming}</div></div></article>`;
+  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}"><img class="msg-avatar logo-image" src="/assets/xuanwu-mascot-icon.png" alt="Runtime" /><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><button type="button" class="process-toggle" data-process-toggle="${escapeHtml(message.id)}" aria-expanded="${processOpen}" aria-controls="process-${escapeHtml(message.id)}">${escapeHtml(processHeading)}<span aria-hidden="true">${processOpen ? "⌄" : "›"}</span></button>${provenance}</div><div class="execution-process" id="process-${escapeHtml(message.id)}"${!processOpen && !(message.inputMessages || []).length ? " hidden" : ""}>${reasoning ? `<div${processOpen ? "" : " hidden"}>${reasoning}</div>` : ""}${process || (isLive ? emptyOutput : "")}${planning ? `<div${processOpen ? "" : " hidden"}>${planning}</div>` : ""}</div>${isLive ? "" : `<div class="live-output-text md">${output}</div>`}${isLive ? humanLoop + recovery : ""}${inlineArtifacts}${responseTiming}</div></div></article>`;
 }
 
-function renderRoundHistory(rounds) {
+function renderRoundHistory(rounds, open = false) {
   if (!Array.isArray(rounds) || rounds.length === 0) return "";
   const items = rounds.map((round) => {
     const result = round?.result;
@@ -2743,7 +2739,7 @@ function renderRoundHistory(rounds) {
     const scopeText = scope ? `<div class="round-history-output">${escapeHtml(scope.kind === 'prerequisite' ? '前置研究' : '交付推进')}：${escapeHtml(scope.purpose)}<br>本轮完成条件：${escapeHtml(scope.completionBoundary)}<br>后续方向：${escapeHtml(scope.continuation)}</div>` : '';
     return `<li><span>第 ${Number(round.roundNumber) || "?"} 轮</span><b>${escapeHtml(decision)}</b>${scopeText}${output}</li>`;
   }).join("");
-  return `<details class="round-history"><summary>目标循环 · ${rounds.length} 轮</summary><ol>${items}</ol></details>`;
+  return `<details class="round-history"${open ? " open" : ""}><summary>目标循环 · ${rounds.length} 轮</summary><ol>${items}</ol></details>`;
 }
 
 function renderExecutionProvenance(message) {
@@ -2751,53 +2747,24 @@ function renderExecutionProvenance(message) {
 }
 
 function renderInlineArtifacts(assistant) {
-  if (!assistant) return "";
-  const artifacts = [...(Array.isArray(assistant.artifacts) ? assistant.artifacts : [])]
-    .filter((artifact) => artifact && typeof artifact.id === "string" && !isExecutionLogArtifact(artifact))
-    .sort((left, right) => (left.role === "final" ? -1 : 0) - (right.role === "final" ? -1 : 0));
-  const finalArtifacts = artifacts.filter(isFinalDeliveryArtifact);
-  const otherArtifacts = artifacts.filter((artifact) => !isFinalDeliveryArtifact(artifact));
-  const events = assistant.detailEvents || assistant.events || [];
-  const skills = executionActivities(events, assistant.commandEvidence).skills.filter((skill) => ["completed", "bound", "selected"].includes(skill.status));
-  if (!finalArtifacts.length && !otherArtifacts.length && !skills.length) {
-    if (assistant.artifactState === "unavailable") {
-      return `<section class="inline-artifacts" aria-label="本轮产物状态"><div class="artifact-inline-error">产物暂不可用：${escapeHtml(assistant.artifactError || "本地 Runtime 当前不可用，请启动后重试")}</div></section>`;
-    }
-    return "";
-  }
-  const failed = assistant.status === "failed";
-  const artifactBlock = finalArtifacts.length ? `<div class="inline-artifacts-head"><span>${failed ? "已生成文件" : "最终产物"}</span><small>${failed ? "尚未完成最终验收" : `${finalArtifacts.length} 个文件`}</small></div><div class="artifact-list">${finalArtifacts.map((artifact) => renderArtifactCard(artifact, assistant.id, assistant.status)).join("")}</div>` : "";
-  const generatedBlock = assistant.status !== "completed" && otherArtifacts.length
-    ? `<div class="inline-artifacts-head"><span>已生成产物</span><small>${failed ? "本轮部分结果" : `${otherArtifacts.length} 个文件`}</small></div><div class="artifact-list">${otherArtifacts.map((artifact) => renderArtifactCard(artifact, assistant.id, assistant.status)).join("")}</div>`
-    : "";
-  const otherBlock = assistant.status === "completed" && otherArtifacts.length ? `<button type="button" class="other-artifacts-toggle" data-other-artifacts-toggle="${escapeHtml(assistant.id)}" aria-expanded="${assistant.otherArtifactsOpen === true}">${assistant.otherArtifactsOpen === true ? "收起其他产物" : `查看其他产物 ${otherArtifacts.length} 个`}<span aria-hidden="true">⌄</span></button>${assistant.otherArtifactsOpen === true ? `<div class="artifact-list other-artifacts-list">${otherArtifacts.map((artifact) => renderArtifactCard(artifact, assistant.id, assistant.status)).join("")}</div>` : ""}` : "";
-  const skillStatus = (skill) => skill.status === "completed" ? "已加载" : skill.status === "bound" ? "已绑定" : "已选择";
-  const skillBlock = skills.length ? `<div class="inline-skill-summary"><span>本轮 Skill 状态</span><div class="inline-skill-list">${skills.map((skill) => `<span class="inline-skill-chip">${escapeHtml(skill.name)} · ${skillStatus(skill)}</span>`).join("")}</div></div>` : "";
-  return `<section class="inline-artifacts" aria-label="本轮产物和 Skill">${artifactBlock}${generatedBlock}${otherBlock}${skillBlock}</section>`;
+  if (!assistant || !["completed", "failed", "cancelled"].includes(assistant.status)) return "";
+  const artifacts = (assistant.artifacts || []).filter(artifact => artifact && typeof artifact.id === "string" && !isExecutionLogArtifact(artifact));
+  const final = artifacts.filter(isFinalDeliveryArtifact), other = artifacts.filter(artifact => !isFinalDeliveryArtifact(artifact));
+  const expanded = assistant.artifactsExpanded === true;
+  const visible = expanded ? [...final, ...other] : [...final, ...other].slice(0, 3);
+  const group = (items, label) => items.some(item => visible.includes(item)) ? `<div class="inline-artifacts-head"><span>${label}</span><small>${items.length} 个文件</small></div><div class="desktop-artifact-list">${items.filter(item => visible.includes(item)).map(item => renderArtifactCard(item, assistant.id, assistant.status)).join("")}</div>` : "";
+  if (!artifacts.length) return assistant.artifactState === "unavailable" ? `<section class="inline-artifacts"><div class="artifact-inline-error">产物暂不可用：${escapeHtml(assistant.artifactError || "Runtime 当前不可用")}</div></section>` : "";
+  return `<section class="inline-artifacts" aria-label="本轮产物"><div class="artifact-summary"><span class="artifact-summary-icon" aria-hidden="true">▤</span><span><strong>本轮产物</strong><small>${artifacts.length} 个文件</small></span></div>${group(final, assistant.status === "completed" ? "最终产物" : "已生成文件 · 尚非成功交付")}${group(other, "阶段产物 · 尚非成功交付")}${artifacts.length > 3 ? `<button type="button" class="artifact-list-toggle" data-artifacts-toggle="${escapeHtml(assistant.id)}" aria-expanded="${expanded}">${expanded ? "收起" : `展开其余 ${artifacts.length - 3} 个文件`}</button>` : ""}</section>`;
 }
 
 function renderArtifactCard(artifact, assistantId, assistantStatus = "completed") {
   const previewLabel = artifact.previewable === false ? "预览不可用" : "预览";
-  const extension = String(artifact.name || artifact.path || "").split(".").pop()?.toUpperCase() || "FILE";
-  const label = isFinalDeliveryArtifact(artifact) ? "已交付" : "阶段产物";
+  const label = assistantStatus === "completed" && isFinalDeliveryArtifact(artifact) ? "已交付" : "阶段产物";
   const verification = artifactVerificationLabel(artifact);
   const limitations = Array.isArray(artifact.verification?.limitations) ? artifact.verification.limitations : [];
-  return `<article class="artifact-card" data-artifact-card="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}" data-artifact-previewable="${artifact.previewable === false ? "false" : "true"}"><div class="artifact-file-icon">${escapeHtml(extension.slice(0, 4))}</div><div class="artifact-card-main"><div class="artifact-head"><strong>${escapeHtml(artifact.name || artifact.path)}</strong><span class="artifact-role ${escapeHtml(artifact.role || "process")}">${label}</span></div><div class="artifact-meta">${escapeHtml(artifact.mimeType || "文件")} · ${formatBytes(artifact.bytes)}${artifact.previewable ? " · 可预览" : ""} · ${escapeHtml(verification)}</div>${limitations.length ? `<div class="artifact-limitations">${limitations.map(escapeHtml).join("；")}</div>` : ""}</div><div class="artifact-actions"><button type="button" data-artifact-preview="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}" ${artifact.previewable === false ? "disabled" : ""}>${previewLabel}</button><button type="button" data-artifact-download="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}">下载</button></div></article>`;
+  return `<div class="desktop-artifact-row" data-artifact-card="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}" data-artifact-previewable="${artifact.previewable === false ? "false" : "true"}"><button type="button" class="desktop-artifact" data-artifact-preview="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}"${artifact.previewable === false ? " disabled" : ""}><span class="desktop-artifact-icon" aria-hidden="true">▤</span><span class="desktop-artifact-name" title="${escapeHtml(artifact.name || artifact.path)}">${escapeHtml(artifact.name || artifact.path)}</span><small title="${escapeHtml([label, verification, ...limitations].join(" · "))}">${formatBytes(artifact.bytes)} · ${previewLabel}</small></button><button type="button" class="desktop-artifact-download" data-artifact-download="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}" aria-label="下载 ${escapeHtml(artifact.name || artifact.path)}">下载</button></div>`;
 }
 
-function renderExecutionTrace(message) {
-  const events = Array.isArray(message.detailEvents) && message.detailEvents.length ? message.detailEvents : (message.events || []);
-  const activities = executionActivities(events, message.commandEvidence);
-  const items = executionTraceItems(events, activities);
-  if (!items.length) return "";
-  const tools = items.filter((item) => item.kind === "tool");
-  const latestTool = tools.filter((item) => item.active).at(-1) || tools.at(-1);
-  const traceId = `trace-${message.id}`;
-  const expanded = message.traceOpen === true;
-  const rows = expanded && tools.length > 1 ? `<div class="execution-trace-list" id="${traceId}">${[...tools].reverse().map(renderExecutionTraceItem).join("")}</div>` : "";
-  const toolBlock = latestTool ? `<div class="execution-tools" aria-label="工具执行"><div class="execution-trace-head"><div class="execution-trace-latest">${renderExecutionTraceItem(latestTool, true)}</div>${tools.length > 1 ? `<button type="button" class="execution-trace-toggle" data-trace-toggle="${escapeHtml(message.id)}" aria-expanded="${expanded}" aria-controls="${traceId}">${expanded ? "收起工具" : `查看工具 ${tools.length} 次`}<span aria-hidden="true">⌄</span></button>` : ""}</div>${rows}</div>` : "";
-  return `<section class="execution-trace ${expanded ? "open" : ""}" aria-label="本轮工具执行状态">${toolBlock}</section>`;
-}
 
 function renderLiveEventIndicator(message) {
   const events = Array.isArray(message?.detailEvents) && message.detailEvents.length ? message.detailEvents : (message?.events || []);
@@ -2812,111 +2779,11 @@ function renderLiveEventIndicator(message) {
   return `<span class="live-event-indicator ${running ? "active" : ""} ${terminal ? "terminal" : ""} ${escapeHtml(message?.status || "")}" data-event-seq="${escapeHtml(seq ?? "pending")}" title="${running ? "当前运行进度" : "最新运行事件"}" ${running ? 'role="status" aria-live="polite"' : ""}><i class="live-event-pulse" aria-hidden="true"></i><span class="live-event-number">${escapeHtml(eventNumber)}</span><small>${escapeHtml(eventLabel)}</small></span>`;
 }
 
-function executionTraceItems(events, activities) {
-  const commandsById = new Map(activities.commands.map((command) => [command.id, command]));
-  const toolItems = new Map();
-  const items = [];
-  for (const [index, event] of (Array.isArray(events) ? events : []).entries()) {
-    const data = recordValue(event?.data) || {};
-    const type = stringValue(event?.type) || "runtime.event";
-    const toolCallId = stringValue(data.toolCallId);
-    const command = toolCallId ? commandsById.get(toolCallId) : undefined;
-    const toolName = stringValue(data.toolName) || stringValue(data.name);
-    const args = recordValue(data.arguments);
-    if (toolCallId && toolName && (type.startsWith("tool.") || type === "assistant.tool_call.committed")) {
-      const key = toolCallId || `tool-${index}`;
-      const previous = toolItems.get(key);
-      const item = previous || { id: key, seq: numberValue(event?.seq) ?? index, kind: "tool", active: false, title: toolName, parameters: "主要参数：-", result: "结果：等待执行" };
-      item.seq = Math.max(item.seq, numberValue(event?.seq) ?? index);
-      item.active = ["assistant.tool_call.committed", "tool.planned", "tool.effect_pending", "tool.dispatched"].includes(type);
-      if (!previous || args) {
-        item.title = toolName === "computer_run_command" ? stringValue(args?.command) || "computer_run_command" : toolName;
-        item.parameters = `主要参数：${toolParameters(toolName, args)}`;
-      }
-      item.result = `结果：${toolResult(toolName, event, command)}`;
-      toolItems.set(key, item);
-      continue;
-    }
-    const seq = numberValue(event?.seq) ?? index;
-    items.push({ id: `${seq}-${index}`, seq, kind: "event", title: `#${seq} · ${eventTypeLabel(type)}`, parameters: "", result: "" });
-  }
-  items.push(...toolItems.values());
-  return items.map((item) => {
-    const { title, parameters, result, kind, seq, id, active } = item;
-    return { id, seq, kind, title, detail: parameters, result, active };
-  }).sort((left, right) => left.seq - right.seq);
-}
 
 function eventTypeLabel(type) {
   return type.replaceAll(".", " ");
 }
 
-function toolParameters(toolName, args) {
-  if (!args) return "-";
-  if (toolName === "computer_run_command") {
-    const command = stringValue(args.command) || "?";
-    const commandArgs = Array.isArray(args.args) ? args.args.map((value) => String(value)).filter((value) => value !== "").join(" ") : "";
-    return traceClip(`${command}${commandArgs ? ` ${commandArgs}` : ""}`, 120);
-  }
-  const entries = Object.entries(args).filter(([key]) => !["input", "content", "body"].includes(key));
-  if (!entries.length) return "-";
-  return traceClip(entries.map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`).join(" · "), 120);
-}
-
-function toolResult(toolName, event, command) {
-  const type = stringValue(event?.type) || "";
-  if (type === "tool.dispatched" || type === "tool.effect_pending") return "执行中";
-  if (type === "tool.rejected") return traceClip(stringValue(event?.data?.reason) || "被拒绝", 120);
-  if (type === "tool.failed") return traceClip(stringValue(event?.data?.error) || "执行失败", 120);
-  if (command) {
-    const status = commandTraceStatus(command);
-    const output = command.status === "completed" && (command.stdout || command.stderr) ? traceClip(command.stdout || command.stderr, 80) : "";
-    return output ? `${status} · ${output}` : status;
-  }
-  if (type === "tool.completed") {
-    const result = recordValue(traceParseResult(event?.data?.result));
-    if (result?.exitCode !== undefined) return result.exitCode === 0 ? "执行成功" : `退出码 ${result.exitCode}`;
-    return "已完成";
-  }
-  return "等待执行";
-}
-
-function renderExecutionTraceItem(item, latest = false) {
-  const result = item.result ? `<small class="execution-trace-result">${escapeHtml(item.result)}</small>` : "";
-  return `<div class="execution-trace-item ${escapeHtml(item.kind)} ${latest ? "latest" : ""}"><span class="execution-trace-dot ${escapeHtml(item.kind)}"></span><span class="execution-trace-copy"><strong>${escapeHtml(item.title)}</strong>${item.detail ? `<small>${escapeHtml(item.detail)}</small>` : ""}${result}</span>${item.kind === "event" ? "" : `<span class="execution-trace-seq">#${escapeHtml(item.seq)}</span>`}</div>`;
-}
-
-function commandTraceStatus(command) {
-  if (command.status === "running") return "执行中";
-  if (command.status === "completed") return command.exitCode === undefined ? "已完成" : `已完成 · 退出码 ${command.exitCode}`;
-  if (command.status === "failed") return command.error || "执行失败";
-  if (command.status === "rejected") return command.error || "被拒绝";
-  return "等待执行";
-}
-
-function traceEventDetail(event) {
-  const data = recordValue(event?.data) || {};
-  if (stringValue(data.stepId)) return `step ${data.stepId}`;
-  if (stringValue(data.message)) return data.message;
-  if (stringValue(data.error)) return data.error;
-  return "Runtime 流式事件";
-}
-
-function traceClip(value, limit) {
-  const text = String(value ?? "").replace(/\s+/g, " ").trim();
-  return text.length <= limit ? text : `${text.slice(0, limit)}…`;
-}
-
-function traceParseResult(value) {
-  if (value && typeof value === "object" && !Array.isArray(value)) return value;
-  if (typeof value !== "string") return {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
 
 function renderMessageFooter(message, timing, kind, eventFeedback = "") {
   const label = `复制${kind}`;
@@ -2924,7 +2791,7 @@ function renderMessageFooter(message, timing, kind, eventFeedback = "") {
 }
 
 async function copyConversationMessage(message, button) {
-  const text = typeof message?.text === "string" ? message.text : "";
+  const text = message?.status === "failed" ? (message.partialText || "") : (typeof message?.text === "string" ? message.text : "");
   const kind = message?.role === "user" ? "提问" : "回答";
   if (!text) { setStatus(`暂无可复制的${kind}内容`, "error"); return; }
   try {
@@ -2967,6 +2834,12 @@ async function copyText(text) {
   if (!copied) throw new Error("Clipboard copy was rejected");
 }
 
+async function refreshStrictLocalHumanLoop(assistant) {
+  const response = await localAgentFetch(`/v1/strict-local-runs/${encodeURIComponent(assistant.localRuntimeId)}/${encodeURIComponent(assistant.localRunId)}/human-loop/current`);
+  const body = await readJsonResponse(response);
+  assistant.humanLoop = body.request?.status === "open" ? body.request : undefined;
+}
+
 async function refreshHumanLoop(assignmentId, assistant, tenantId, userId) {
   try {
     const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assignmentId)}/human-loop/current`, { headers: { "x-tenant-id": tenantId, "x-user-id": userId } });
@@ -2980,9 +2853,7 @@ async function refreshHumanLoop(assignmentId, assistant, tenantId, userId) {
 }
 
 function renderHumanLoop(message) {
-  const request = message.humanLoop;
-  if (request?.status === "open") return `<section class="human-loop-inline-notice"><b>正在等待你的决策</b><span>${escapeHtml(request.title)}</span></section>`;
-  return renderResolvedHumanLoops(message);
+  return message.status === "running" && message.humanLoop?.status === "open" ? renderInlineHumanLoop(message.humanLoop) : renderResolvedHumanLoops(message);
 }
 
 function renderResolvedHumanLoops(message) {
@@ -2995,95 +2866,6 @@ function renderResolvedHumanLoops(message) {
   }).join("")}</section>`;
 }
 
-function renderHumanLoopCard(message) {
-  const request = message.humanLoop;
-  if (!request || request.status !== "open") return "";
-  const schema = request.responseSchema || {};
-  const key = `${message.id}-${request.id}`;
-  let fields = "";
-  if (schema.type === "select") {
-    const selections = humanLoopSelections(message, request.id);
-    fields = `<div class="human-loop-options">${(schema.options || []).map((option) => `<label class="human-loop-option"><input type="${schema.maxSelections === 1 ? "radio" : "checkbox"}" name="human-${key}" value="${escapeHtml(option.id)}" data-human-loop-option data-human-loop-message="${escapeHtml(message.id)}" data-human-loop-request="${escapeHtml(request.id)}" data-human-loop-max-selections="${escapeHtml(String(schema.maxSelections || 0))}" ${selections.has(option.id) ? "checked" : ""}/><span><b>${escapeHtml(option.label)}</b>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span></label>`).join("")}</div>`;
-  }
-  else if (schema.type === "form") fields = `<div class="human-loop-form">${(schema.fields || []).map((field) => {
-    const value = humanLoopFormValue(message, request.id, field.id);
-    return `<label>${escapeHtml(field.label)}${field.required ? " *" : ""}${field.valueType === "textarea" ? `<textarea data-human-field="${escapeHtml(field.id)}" data-human-loop-form-field="${escapeHtml(field.id)}" data-human-loop-message="${escapeHtml(message.id)}" data-human-loop-request="${escapeHtml(request.id)}" ${field.required ? "required" : ""}>${escapeHtml(value)}</textarea>` : `<input data-human-field="${escapeHtml(field.id)}" data-human-loop-form-field="${escapeHtml(field.id)}" data-human-loop-message="${escapeHtml(message.id)}" data-human-loop-request="${escapeHtml(request.id)}" type="${field.valueType === "date" ? "date" : field.valueType === "number" ? "number" : "text"}" value="${escapeHtml(value)}" ${field.required ? "required" : ""}/>`}${field.description ? `<small>${escapeHtml(field.description)}</small>` : ""}</label>`;
-  }).join("")}</div>`;
-  else {
-    const confirmation = humanLoopConfirmation(message, request.id);
-    fields = `<div class="human-loop-confirm"><label><input type="radio" name="human-${key}" value="accept" data-human-loop-confirm data-human-loop-message="${escapeHtml(message.id)}" data-human-loop-request="${escapeHtml(request.id)}" ${confirmation !== "reject" ? "checked" : ""}/>${escapeHtml(schema.acceptLabel || "确认")}</label><label><input type="radio" name="human-${key}" value="reject" data-human-loop-confirm data-human-loop-message="${escapeHtml(message.id)}" data-human-loop-request="${escapeHtml(request.id)}" ${confirmation === "reject" ? "checked" : ""}/>${escapeHtml(schema.rejectLabel || "拒绝")}</label></div>`;
-  }
-  const selectionHint = schema.type === "select" ? `<span class="human-loop-selection-hint">${schema.minSelections === schema.maxSelections ? `请选择 ${schema.maxSelections} 项` : `请选择 ${schema.minSelections}–${schema.maxSelections} 项`}</span>` : "";
-  return `<section class="human-loop-card" data-human-loop="${escapeHtml(request.id)}" data-human-kind="${escapeHtml(schema.type || "")}" data-human-revision="${request.revision}"><div class="human-loop-card-copy"><p>${escapeHtml(request.prompt)}</p>${selectionHint}</div>${fields}<small class="human-loop-error" aria-live="polite"></small></section>`;
-}
-
-function currentHumanLoopMessage(messages) {
-  return [...messages].reverse().find((message) => message?.role === "assistant" && message.humanLoop?.status === "open");
-}
-
-function renderHumanLoopSurfaces(messages) {
-  const message = currentHumanLoopMessage(messages);
-  const panel = $("human-loop-panel");
-  if (!message) {
-    panel.hidden = true;
-    panel.innerHTML = "";
-    return;
-  }
-  const request = message.humanLoop;
-  const confirmationRejected = request.responseSchema?.type === "confirm"
-    && humanLoopConfirmation(message, request.id) === "reject";
-  const submitLabel = confirmationRejected
-    ? (request.responseSchema.rejectLabel || "拒绝并停止")
-    : (request.responseSchema?.acceptLabel || "确认并继续");
-  const submitHint = confirmationRejected
-    ? "提交后，AgentLoop 会停止本次任务"
-    : "提交后，AgentLoop 会继续执行";
-  panel.hidden = false;
-  panel.innerHTML = `<header class="human-loop-panel-head"><div><span class="human-loop-panel-kicker">需要你的决策</span><strong>${escapeHtml(request.title)}</strong></div><span class="human-loop-panel-badge">等待你的输入</span></header><div class="human-loop-panel-body">${renderHumanLoopCard(message)}</div><footer class="human-loop-panel-actions"><span>${escapeHtml(submitHint)}</span><button type="button" class="human-loop-submit" data-human-loop-submit="${escapeHtml(message.id)}">${escapeHtml(submitLabel)}</button></footer>`;
-}
-
-/** Preserve an unfinished HIL answer across unrelated live-state renders. */
-function humanLoopSelections(message, requestId) {
-  const values = message?.humanLoopDrafts?.[requestId];
-  return new Set(Array.isArray(values) ? values.filter((value) => typeof value === "string") : []);
-}
-
-function rememberHumanLoopSelection(messageId, requestId, optionId, checked, maxSelections) {
-  const assistant = (activeConversation()?.messages || []).find((message) => message.id === messageId && message.role === "assistant");
-  if (!assistant || assistant.humanLoop?.id !== requestId) return;
-  const current = humanLoopSelections(assistant, requestId);
-  if (maxSelections === 1) {
-    if (checked) current.clear();
-    if (checked) current.add(optionId);
-  } else if (checked) current.add(optionId);
-  else current.delete(optionId);
-  assistant.humanLoopDrafts = { ...(assistant.humanLoopDrafts || {}), [requestId]: [...current] };
-  saveSessions();
-}
-
-function humanLoopFormValue(message, requestId, fieldId) {
-  const value = message?.humanLoopFormDrafts?.[requestId]?.[fieldId];
-  return typeof value === "string" ? value : "";
-}
-
-function rememberHumanLoopFormValue(messageId, requestId, fieldId, value) {
-  const assistant = (activeConversation()?.messages || []).find((message) => message.id === messageId && message.role === "assistant");
-  if (!assistant || assistant.humanLoop?.id !== requestId || !fieldId) return;
-  assistant.humanLoopFormDrafts = { ...(assistant.humanLoopFormDrafts || {}), [requestId]: { ...(assistant.humanLoopFormDrafts?.[requestId] || {}), [fieldId]: value } };
-  saveSessions();
-}
-
-function humanLoopConfirmation(message, requestId) {
-  return message?.humanLoopConfirmationDrafts?.[requestId] === "reject" ? "reject" : "accept";
-}
-
-function rememberHumanLoopConfirmation(messageId, requestId, value) {
-  const assistant = (activeConversation()?.messages || []).find((message) => message.id === messageId && message.role === "assistant");
-  if (!assistant || assistant.humanLoop?.id !== requestId || (value !== "accept" && value !== "reject")) return;
-  assistant.humanLoopConfirmationDrafts = { ...(assistant.humanLoopConfirmationDrafts || {}), [requestId]: value };
-  saveSessions();
-  render();
-}
 
 function renderRecovery(message) {
   const checkpoint = message.checkpoint;
@@ -3144,25 +2926,27 @@ async function startFromCheckpoint(messageId) {
   }
 }
 
-async function submitHumanLoop(messageId) {
-  const assistant = [...(activeConversation()?.messages || [])].find((message) => message.id === messageId);
-  const request = assistant?.humanLoop; const card = document.querySelector(`[data-human-loop="${CSS.escape(request?.id || "")}"]`);
-  if (!assistant?.assignmentId || !request || !card) return;
-  const schema = request.responseSchema || {}; let value;
-  if (schema.type === "select") value = [...card.querySelectorAll("input:checked")].map((input) => input.value);
-  else if (schema.type === "form") { value = {}; card.querySelectorAll("[data-human-field]").forEach((field) => { value[field.dataset.humanField] = field.value; }); }
-  else value = card.querySelector("input:checked")?.value === "reject" ? { accepted: false } : true;
-  const error = card.querySelector(".human-loop-error");
-  try {
-    const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/human-loop/${encodeURIComponent(request.id)}/respond`, { method: "POST", headers: { "content-type": "application/json", "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() }, body: JSON.stringify({ value, expectedRevision: request.revision }) });
-    const body = await response.json(); if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
-    assistant.humanLoopHistory = [...(Array.isArray(assistant.humanLoopHistory) ? assistant.humanLoopHistory : []), { request, value, respondedAt: Date.now() }];
-    assistant.humanLoop = undefined;
-    if (assistant.humanLoopDrafts) delete assistant.humanLoopDrafts[request.id];
-    if (assistant.humanLoopFormDrafts) delete assistant.humanLoopFormDrafts[request.id];
-    if (assistant.humanLoopConfirmationDrafts) delete assistant.humanLoopConfirmationDrafts[request.id];
-    saveSessions(); render(); setStatus("已收到你的回答，继续执行", "running");
-  } catch (cause) { if (error) error.textContent = `提交失败：${cause instanceof Error ? cause.message : String(cause)}`; }
+async function submitHumanLoop(messageId, request, value) {
+  const conversation = activeConversation();
+  const assistant = (conversation?.messages || []).find(message => message.id === messageId);
+  if (!assistant || assistant.humanLoop?.id !== request.id || assistant.humanLoop?.revision !== request.revision) throw new Error("这个问题已发生变化，请等待同步。");
+  const path = assistant.executionLocation === "strict_local"
+    ? `/v1/strict-local-runs/${encodeURIComponent(assistant.localRuntimeId)}/${encodeURIComponent(assistant.localRunId)}/human-loop/${encodeURIComponent(request.id)}/respond`
+    : `/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/human-loop/${encodeURIComponent(request.id)}/respond`;
+  const init = { method: "POST", headers: { "content-type": "application/json", "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() }, body: JSON.stringify({ value, expectedRevision: request.revision }) };
+  const response = assistant.executionLocation === "strict_local" ? await localAgentFetch(path, init) : await fetch(`${api}${path}`, init);
+  const body = await response.json();
+  if (!response.ok) {
+    const error = new Error(body.error || `HTTP ${response.status}`); error.status = response.status;
+    if (response.status === 409) {
+      const sync = assistant.executionLocation === "strict_local" ? refreshStrictLocalHumanLoop(assistant) : refreshHumanLoop(assistant.assignmentId, assistant, $("tenant-id").value.trim(), $("user-id").value.trim());
+      void sync.then(() => render()).catch(() => {});
+    }
+    throw error;
+  }
+  assistant.humanLoopHistory = [...(assistant.humanLoopHistory || []), { request, value, respondedAt: Date.now() }];
+  if (assistant.humanLoop?.id === request.id && assistant.humanLoop.revision === request.revision) assistant.humanLoop = undefined;
+  saveSessions(); render(); setStatus("已收到你的回答，继续执行", "running");
 }
 
 function completeAssistantMessage(assistant, event) {
@@ -3318,60 +3102,7 @@ async function fetchStructuredPreview(endpoint, headers) {
   return await response.json();
 }
 
-function renderToolActivity(tool) {
-  return `<span class="detail-tag tool-tag ${tool.status}"><span class="tool-status-dot"></span>${escapeHtml(tool.name)}<small>${toolOutcomeLabel(tool)}</small></span>`;
-}
 
-function renderSkillActivity(skill) {
-  return `<span class="detail-tag tool-tag ${skill.status}"><span class="tool-status-dot"></span>${escapeHtml(skill.name)}<small>${skill.status === "completed" ? "已加载" : skill.status === "bound" ? "已绑定" : skill.status === "selected" ? "已选择" : skill.status === "failed" ? "加载失败" : skill.status === "rejected" ? "被拒绝" : "加载中"}</small></span>`;
-}
-
-function renderCommandActivity(command) {
-  const label = command.status === "running" ? "执行中" : command.status === "completed" ? "已完成" : command.status === "failed" ? "失败" : command.status === "rejected" ? "被拒绝" : "已提交";
-  const title = stringValue(command.arguments?.command) || "computer_run_command";
-  const summary = command.status === "running" ? "已派发，等待命令返回" : command.status === "failed" || command.status === "rejected" ? (command.error || "命令未执行") : command.status === "completed" ? [command.exitCode === undefined ? "" : `退出码 ${command.exitCode}`, command.stdout ? "stdout 已返回" : "", command.stderr ? "stderr 已返回" : ""].filter(Boolean).join(" · ") || "命令执行完成" : "等待执行";
-  return `<div class="command-card ${command.status}" data-command-detail="${escapeHtml(command.id)}" role="button" tabindex="0" aria-label="查看命令详情：${escapeHtml(title)}"><div class="command-card-head"><span class="command-state ${command.status}">${label}</span><span class="command-title">${escapeHtml(title)}</span><span class="command-open-hint">查看详情</span></div><dl class="command-meta"><dt>step</dt><dd>${escapeHtml(command.step ?? "-")}</dd><dt>duration</dt><dd>${formatDuration(command.durationMs) || "-"}</dd><dt>call</dt><dd>${escapeHtml(command.id)}</dd></dl><div class="command-summary">${escapeHtml(summary)}</div></div>`;
-}
-
-function openCommandDetail(command, assistantId) {
-  if (!command || !assistantId) return;
-  commandDetailSelection = { assistantId, commandId: command.id };
-  renderCommandDetailModal([command]);
-}
-
-function closeCommandDetail() {
-  commandDetailSelection = undefined;
-  renderCommandDetailModal([]);
-}
-
-function renderCommandDetailModal(commands) {
-  const host = $("command-detail-modal");
-  if (!host) return;
-  if (!commandDetailSelection) {
-    host.innerHTML = "";
-    return;
-  }
-  const command = commands.find((item) => item.id === commandDetailSelection.commandId);
-  if (!command) {
-    closeCommandDetail();
-    return;
-  }
-  const argumentsText = JSON.stringify(command.arguments || {}, null, 2);
-  const outputBlock = (title, value, error = false) => `<section class="command-detail-section"><h4>${title}</h4><pre class="command-full-output${error ? " error" : ""}">${escapeHtml(value || "(empty)")}</pre></section>`;
-  host.innerHTML = `<div class="preview-backdrop maximized command-detail-backdrop" role="dialog" aria-modal="true" aria-label="命令完整详情"><div class="preview-dialog maximized command-detail-dialog"><div class="preview-head"><div class="preview-title"><strong>命令详情</strong><span>${escapeHtml(command.id)}</span></div><button type="button" class="preview-close" data-command-detail-close aria-label="关闭命令详情">×</button></div><div class="preview-body command-detail-body"><section class="command-detail-section"><h4>完整命令</h4><pre class="command-full-output">${escapeHtml([command.arguments?.command || "?", ...(Array.isArray(command.arguments?.args) ? command.arguments.args : [])].join(" "))}</pre></section><section class="command-detail-section"><h4>调用参数</h4><pre class="command-full-output">${escapeHtml(argumentsText)}</pre></section><section class="command-detail-section"><h4>执行信息</h4><dl class="command-detail-meta-grid"><dt>状态</dt><dd>${escapeHtml(command.status)}</dd><dt>step</dt><dd>${escapeHtml(command.step ?? "-")}</dd><dt>duration</dt><dd>${formatDuration(command.durationMs) || "-"}</dd><dt>call</dt><dd>${escapeHtml(command.id)}</dd></dl></section>${outputBlock("stdout", command.stdout)}${outputBlock("stderr", command.stderr, true)}</div></div></div>`;
-  host.querySelector("[data-command-detail-close]")?.addEventListener("click", closeCommandDetail);
-  host.querySelector(".command-detail-backdrop")?.addEventListener("click", (event) => {
-    if (event.target === event.currentTarget) closeCommandDetail();
-  });
-}
-function toolOutcomeLabel(tool) {
-  const parts = [];
-  if (tool.completedCalls) parts.push(`${tool.completedCalls} 次完成`);
-  if (tool.rejectedCalls) parts.push(`${tool.rejectedCalls} 次被拒绝`);
-  if (tool.failedCalls) parts.push(`${tool.failedCalls} 次失败`);
-  if (tool.runningCalls) parts.push(`${tool.runningCalls} 次执行中`);
-  return parts.length ? parts.join(" · ") : "已提交";
-}
 function planStepLabel(status) { return status === "completed" ? "已完成" : status === "running" ? "执行中" : status === "failed" ? "失败" : status === "cancelled" ? "已取消" : "等待执行"; }
 function recordValue(value) { return value && typeof value === "object" && !Array.isArray(value) ? value : undefined; }
 function stringValue(value) { return typeof value === "string" && value.trim() ? value : undefined; }
@@ -3388,11 +3119,10 @@ function formatConversationDuration(startedAt, completedAt) {
   const start = numberValue(startedAt);
   const end = numberValue(completedAt);
   if (start === undefined || end === undefined) return "";
-  const elapsedMs = Math.max(0, end - start);
-  if (elapsedMs < 1000) return `${Math.round(elapsedMs)} 毫秒`;
-  const totalSeconds = Math.round(elapsedMs / 1000);
-  if (totalSeconds < 60) return `${totalSeconds} 秒`;
-  return `${Math.floor(totalSeconds / 60)} 分 ${totalSeconds % 60} 秒`;
+  const seconds = Math.max(0, end - start) / 1000;
+  if (seconds <= 60) return `${seconds.toFixed(1)} 秒`;
+  const tenths = Math.round(seconds * 10);
+  return `${Math.floor(tenths / 600)} 分 ${((tenths % 600) / 10).toFixed(1)} 秒`;
 }
 function formatDuration(ms) { if (typeof ms !== "number") return ""; if (ms < 1000) return `${Math.round(ms)} ms`; const seconds = ms / 1000; return seconds < 60 ? `${seconds.toFixed(seconds < 10 ? 1 : 0)} s` : `${Math.floor(seconds / 60)} min ${Math.round(seconds % 60)} s`; }
 function formatBytes(bytes) { if (typeof bytes !== "number") return "大小未知"; if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / (1024 * 1024)).toFixed(1)} MB`; }

@@ -16,6 +16,7 @@ const MAX_PERSISTED_EVENT_TEXT = 8_000;
 export function projectAssistantEvent(assistant, event) {
   if (!assistant || !event || typeof event.type !== "string") return false;
   const data = event.data && typeof event.data === "object" ? event.data : {};
+  if (data.responseVisibility === "internal") return false;
   if (["run.input.accepted", "run.input.decided"].includes(event.type) && data.message) {
     assistant.inputMessages = [...(assistant.inputMessages || []).filter(item => item.id !== data.message.id), data.message].sort((a, b) => a.seq - b.seq);
   }
