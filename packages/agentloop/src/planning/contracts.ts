@@ -98,6 +98,8 @@ export interface PlanningCapability {
 
 export interface StepExecutionBinding {
   readonly schema: "agentloop.stepExecutionBinding/v1";
+  /** Explicit committed Results selected for this leaf and validated by Runtime. */
+  readonly inputResultRefs?: readonly RuntimeResultRef[];
   readonly requiredCapabilities: readonly string[];
   readonly resolvedToolNames: readonly string[];
   readonly evidenceProducers: readonly StepEvidenceProducerBinding[];
@@ -529,6 +531,8 @@ export interface RequiredFact {
 
 export interface PlanStepProposal {
   readonly id: string;
+  /** Select existing Results; this declaration cannot create read authority. */
+  readonly inputResultRefs?: readonly RuntimeResultRef[];
   readonly kind?: PlanStepKind;
   readonly parentId?: string;
   readonly objective: string;

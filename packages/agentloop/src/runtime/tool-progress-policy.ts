@@ -1310,8 +1310,8 @@ function instructionForStepState(input: {
       lines.push("Acquire only the missing source evidence required by the current evidence contract.");
       break;
     case "submit_completion_candidate":
-      lines.push("All tool-producible prerequisites are satisfied.");
-      lines.push("Submit a truthful user-visible completion candidate now; include the delivery receipt and any required caveats for Assessment.");
+      lines.push("Required tool receipts are present. This permits candidate assessment, not semantic completion or coverage of the requested facts.");
+      lines.push("If the current Step's requested facts and delivery are covered, submit a truthful completion candidate with required receipts and honest caveats for Assessment. Otherwise use the available tools to address missing facts within this Step's scope.");
       break;
     case "repair_artifact_source":
       lines.push("Repair the artifact source or rerun the named command based on the failed evidence.");

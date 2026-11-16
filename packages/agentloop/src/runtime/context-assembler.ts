@@ -590,7 +590,12 @@ export class ContextAssembler {
   private isCurrentReferenceWindow(messages: readonly ModelMessage[], index: number): boolean {
     const message = messages[index];
     if (message?.role === "tool" && this.retainedContentReferenceWindowToolCallIds.has(message.toolCallId)) return true;
-    return isTrailingReferenceWindow(messages, index);
+    // A complementary tool call does not make a recently acquired value
+    // obsolete. Use the existing recent-token budget, not a second cache or
+    // an unbounded exemption from compaction.
+    return isBoundedReferenceWindow(message)
+      && (messages.slice(index + 1).every(message => message.role === "tool")
+        || index >= recentProtectionStart(messages, this.firstKeptMessageIndex, this.policy.pruneProtectTokens));
   }
 
   private buildProjectionFrom(canonicalMessages: readonly ModelMessage[], startIndex: number): ModelMessage[] {
@@ -1225,6 +1230,7 @@ export class ContextAssembler {
       ].join("\n")),
     ].join("\n");
     const snapshot: RuntimeContextSnapshot = {
+      ...this.runtimeContextBase,
       id,
       phase: this.runtimeContextBase.phase,
       content,
@@ -1552,17 +1558,13 @@ function commandOutputReferences(value: Record<string, unknown>): unknown {
   });
 }
 
-function isTrailingReferenceWindow(messages: readonly ModelMessage[], index: number): boolean {
-  // Only the last tool batch is an unconsumed working set. Older reads return
-  // to a ref/summary, including after recovery reconstructs the transcript.
-  if (messages.slice(index + 1).some((message) => message.role !== "tool")) return false;
-  const message = messages[index];
-  if (message.role !== "tool" || message.isError) return false;
+function isBoundedReferenceWindow(message: ModelMessage | undefined): boolean {
+  if (message?.role !== "tool" || message.isError) return false;
   const value = parseJsonRecord(message.content);
   if (message.name === "computer_read_file") {
     // A requested workspace line window is an observation just like a Result
-    // or content-reference window. Keep its body until the next model turn
-    // consumes it; metadata alone cannot support an edit or interpretation.
+    // or content-reference window. Its bounded body remains usable within
+    // the recent protection budget, including after a complementary call.
     if (typeof value?.content === "string") {
       return value.content.length <= CONTENT_REFERENCE_WINDOW_CHARACTERS;
     }
@@ -1793,17 +1795,15 @@ function structuredToolResultProjection(toolName: string, content: string): stri
     }));
   }
   if (toolName === "computer_read_json" && schema === "agentloop.jsonRead/v1") {
+    const queries = projectJsonReadQueries(value.queries);
     return JSON.stringify(omitUndefinedDeep({
       schema: "agentloop.contextJsonRead/v1",
       resultRef: resultRefProjection(value.resultRef),
       bytes: value.bytes, root: value.root,
-      queries: Array.isArray(value.queries) ? value.queries.map((query) => {
-        const record = recordValue(query);
-        return record === undefined ? undefined : { ...record, value: undefined, values: undefined };
-      }) : undefined,
+      queries,
       caveats: value.caveats,
-      valuesOmitted: true,
-      instruction: "JSON values are omitted only from this prompt projection, not from Runtime storage. For agentloop.jsonRead/v1, use each query's resultPointer (for example /queries/0/value) with read_result and its resultRef.resultId; the query's sourcePointer is for computer_read_json and must not be passed to read_result. Do not replay a path or hash and do not rerun source extraction solely to recover them.",
+      valuesOmitted: queries?.some(query => query?.valueOmitted === true) ?? false,
+      instruction: "Query values with valueOmitted=false are retained complete; use them directly. Omitted values remain in Runtime storage. Read only needed omitted values with read_result, the same resultRef.resultId and the query's resultPointer (for example /queries/0/value). sourcePointer and nextOffset address the original file through computer_read_json, not the stored Result slice. Do not rerun source extraction solely to recover omitted values. Cross-step input Results still require formal read_result consumption.",
     }));
   }
   if (schema === "agentloop.artifactAcceptance/v1") {
@@ -1814,6 +1814,33 @@ function structuredToolResultProjection(toolName: string, content: string): stri
   }
   if (toolName === "visible_list_directory") return visibleListDirectoryProjection(value);
   return undefined;
+}
+
+function projectJsonReadQueries(queries: unknown): Array<Record<string, unknown> | undefined> | undefined {
+  if (!Array.isArray(queries)) return undefined;
+  const records = queries.map(recordValue);
+  const candidates = records.flatMap((record, index) => {
+    if (record === undefined || (!Object.hasOwn(record, "value") && !Object.hasOwn(record, "values"))) return [];
+    return [{ index, characters: JSON.stringify({ value: record.value, values: record.values }).length }];
+  });
+  // Allocate complete values from smallest to largest so a bulky query cannot
+  // evict all the small facts returned alongside it. Keep source order and
+  // pointers; the canonical Result is never rewritten or sliced here.
+  let remainingCharacters = 12_000;
+  const retained = new Set<number>();
+  for (const candidate of candidates.sort((left, right) => left.characters - right.characters || left.index - right.index)) {
+    if (candidate.characters > remainingCharacters) continue;
+    retained.add(candidate.index);
+    remainingCharacters -= candidate.characters;
+  }
+  return records.map((record, index) => record === undefined ? undefined : {
+    ...record,
+    ...(Object.hasOwn(record, "value") || Object.hasOwn(record, "values") ? {
+      value: retained.has(index) ? record.value : undefined,
+      values: retained.has(index) ? record.values : undefined,
+      valueOmitted: !retained.has(index),
+    } : {}),
+  });
 }
 
 function hasArtifactEvidenceBoundary(

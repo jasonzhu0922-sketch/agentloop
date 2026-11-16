@@ -41,6 +41,7 @@ import type {
   SkillComplianceAssessment,
   StepAssessor,
   StepEvidence,
+  SuccessCriterion,
   TaskSpec,
   ToolEvidence,
 } from "../planning/contracts.ts";
@@ -133,7 +134,7 @@ import { CompletionFailure, partialOutputForFailure } from "./completion-failure
 import { RuntimeActionRepository, type RuntimeActionRecord } from "./runtime-action-repository.ts";
 import { RuntimeResultRepository } from "./runtime-result-repository.ts";
 import { toolNamesForConversationMode } from "./conversation-tool-policy.ts";
-import { createRuntimeResult, type RuntimeResultRef } from "./runtime-result.ts";
+import { createRuntimeResult, runtimeResultBindingsForStep, unreadRuntimeResultRefs, type RuntimeResultRef, type RuntimeResultRecord } from "./runtime-result.ts";
 import { RunCheckpointRepository, type RunCheckpointRecord } from "./run-checkpoint-repository.ts";
 import { RunRoundRepository } from "./run-round-repository.ts";
 import { PlanningBudgetRepository } from "./planning-budget-repository.ts";
@@ -142,6 +143,7 @@ import { HumanLoopRepository, type HumanLoopRequest, type HumanLoopResponse, typ
 import {
   ModelPlanRevisionAssessor,
   ModelRecoveryPlanner,
+  recoveryContinuationStepIds,
   type RecoveryDecisionProposal,
   type RecoveryPlanner,
 } from "./recovery-planning.ts";
@@ -153,10 +155,10 @@ import {
   type RecoveryUserResponse,
   type RunRecoveryState,
 } from "./recovery-repository.ts";
-import { reconstructRecoveryTranscript } from "./recovery-transcript.ts";
+import { reconstructRecoveryTranscript, selectRecoveryExchanges } from "./recovery-transcript.ts";
 import { parseOutputBudgetState } from "./tool-content-budget.ts";
 import { assessDecisionBindings, decisionCommitsFromEvents, type RuntimeDecisionCommit } from "./decision-ledger.ts";
-import { buildUserAuthorityContext, type RuntimeUserAuthorityContext } from "./user-authority.ts";
+import { buildUserAuthorityContext, USER_AUTHORITY_INSTRUCTION, USER_DELIVERY_SCOPE_INSTRUCTION, type RuntimeUserAuthorityContext } from "./user-authority.ts";
 import {
   requiredSkillWorkflowEvidenceBindings,
   resolveOperationBindings,
@@ -1340,11 +1342,14 @@ export class RunService {
     const canonicalState = await this.canonicalStates.get(runId);
     const failedBoundary = failedBoundaryFromRecoveryAction(action, canonicalState);
     const unresolvedActionEffects = await this.unresolvedUnsafeEffects(runId, currentPlan?.id, action.stepId);
+    const recoveryResults = currentPlan === undefined ? [] : await this.results.listPlanResults({ runId, planId: currentPlan.id, actorUserId });
     const proposedDecision = failedBoundaryRecoveryDecision(
       action,
       currentPlan,
       failedBoundary,
       observedReceiptShapes(events, failedBoundary?.reusableEvidenceRefs ?? []),
+      recoveryResults,
+      canonicalState,
     )
       ?? await this.recoveryPlannerFactory(model).decide({
         runId,
@@ -1355,6 +1360,7 @@ export class RunService {
         ...(currentPlan === undefined ? {} : { plan: currentPlan }),
         ...(failedBoundary === undefined ? {} : { failedBoundary }),
         unresolvedActionEffects,
+        availableResults: recoveryResultCards(recoveryResults),
         events,
         userResponses: userResponses.map((item) => ({
           actionId: item.actionId,
@@ -1526,11 +1532,8 @@ export class RunService {
           ? {}
           : { conversationHistory: await this.conversationHistory(run.conversationId) }),
         initialRecovery: {
-          stepIds: [targetStep.id],
           resumeStepId: targetStep.id,
-          messages: transcript.messages,
-          toolEvidence: transcript.toolEvidence,
-          facts: transcript.facts,
+          steps: new Map([[targetStep.id, transcript]]),
         },
         onStepChanged: (stepId) => { actionScope.stepId = stepId; },
       });
@@ -3332,26 +3335,36 @@ export class RunService {
   }
 
   private async executePlanSteps(input: Parameters<RunService["executePlanStepsOnce"]>[0]): Promise<ExecutionPlan> {
-    let current = input;
-    for (;;) {
-      try {
-        await new RunInputRepository(this.database).checkpoint(input.runId);
-        return await this.executePlanStepsOnce(current);
-      } catch (error) {
-        if (!(error instanceof AppError) || error.code !== "STEER_PENDING") throw error;
-        const result = await this.processRunInputs({ ...current, plan: await this.plans.get(current.plan.id) });
-        const events = await this.resolveToolArgumentReferences(await this.runtimeEvents(input.runId));
-        const transcripts = result.plan!.steps.filter(step => step.retiredAt !== undefined || step.status === "running").map(step =>
-          reconstructRecoveryTranscript({ userInput: result.state.intent.userInput, stepId: step.id, events }));
-        const toolEvidence = [...new Map(transcripts.flatMap(item => item.toolEvidence).map(item => [item.toolCallId, item])).values()];
-        current = { ...current, plan: result.plan!, canonicalState: result.state,
-          initialRecovery: {
-            stepIds: result.plan!.steps.filter(step => step.retiredAt === undefined && step.status !== "completed").map(step => step.id),
-            ...(result.plan!.steps.find(step => step.retiredAt === undefined && step.status === "running") === undefined ? {} : { resumeStepId: result.plan!.steps.find(step => step.retiredAt === undefined && step.status === "running")!.id }),
-            messages: [{ role: "user" as const, content: result.state.intent.userInput }, ...transcripts.flatMap(item => item.messages.slice(1))],
-            toolEvidence, facts: { inputRevision: result.state.intent.revision },
-          },
-        };
+    const existingController = this.activeRunControllers.get(input.runId);
+    const controller = existingController ?? new AbortController();
+    if (existingController === undefined) this.activeRunControllers.set(input.runId, controller);
+    let current = { ...input, signal: input.signal === undefined ? controller.signal : AbortSignal.any([input.signal, controller.signal]) };
+    try {
+      for (;;) {
+        try {
+          await new RunInputRepository(this.database).checkpoint(input.runId);
+          return await this.executePlanStepsOnce(current);
+        } catch (error) {
+          if (!(error instanceof AppError) || error.code !== "STEER_PENDING") throw error;
+          const result = await this.processRunInputs({ ...current, plan: await this.plans.get(current.plan.id) });
+          const events = await this.resolveToolArgumentReferences(await this.runtimeEvents(input.runId));
+          const transcripts = result.plan!.steps.filter(step => step.retiredAt !== undefined || step.status === "running").map(step =>
+            reconstructRecoveryTranscript({ userInput: result.state.intent.userInput, stepId: step.id, events }));
+          const toolEvidence = [...new Map(transcripts.flatMap(item => item.toolEvidence).map(item => [item.toolCallId, item])).values()];
+          current = { ...current, plan: result.plan!, canonicalState: result.state,
+            initialRecovery: {
+              ...(result.plan!.steps.find(step => step.retiredAt === undefined && step.status === "running") === undefined ? {} : { resumeStepId: result.plan!.steps.find(step => step.retiredAt === undefined && step.status === "running")!.id }),
+              steps: new Map(result.plan!.steps.filter(step => step.retiredAt === undefined && step.status !== "completed").map(step => [step.id, {
+                messages: [{ role: "user" as const, content: result.state.intent.userInput }, ...transcripts.flatMap(item => item.messages.slice(1))],
+                toolEvidence, facts: { inputRevision: result.state.intent.revision },
+              }])),
+            },
+          };
+        }
+      }
+    } finally {
+      if (existingController === undefined && this.activeRunControllers.get(input.runId) === controller) {
+        this.activeRunControllers.delete(input.runId);
       }
     }
   }
@@ -3384,14 +3397,16 @@ export class RunService {
       readonly availability: "available" | "not_provided";
     };
     initialRecovery?: Readonly<{
-      stepIds: readonly string[];
       resumeStepId?: string;
-      messages: readonly ModelMessage[];
-      toolEvidence: readonly AgentLoopToolEvidence[];
-      facts: Readonly<{
-        candidateRejections?: readonly { readonly output: string; readonly feedback: string }[];
-        [key: string]: unknown;
-      }>;
+      steps: ReadonlyMap<string, Readonly<{
+        messages: readonly ModelMessage[];
+        toolEvidence: readonly AgentLoopToolEvidence[];
+        toolCallUsage?: readonly Pick<AgentLoopToolEvidence, "toolCallId" | "toolName">[];
+        facts: Readonly<{
+          candidateRejections?: readonly { readonly output: string; readonly feedback: string }[];
+          [key: string]: unknown;
+        }>;
+      }>>;
     }>;
     onStepChanged: (stepId: string | undefined) => void;
     signal?: AbortSignal;
@@ -3437,7 +3452,7 @@ export class RunService {
       });
       const stepSkillIds = stepSkills.map((skill) => skill.id);
       const skillExecutionRoots = skillExecutionRootsForSkills(stepSkills);
-      const recovery = input.initialRecovery?.stepIds.includes(activeStep.id) ? input.initialRecovery : undefined;
+      const recovery = input.initialRecovery?.steps.get(activeStep.id);
       const userAuthority = await this.userAuthority(input.runId, canonicalState);
       const decisionLedger = userAuthority.decisionLedger;
       const skillManifests = new Map<string, Awaited<ReturnType<typeof readSkillExecutionManifest>>>();
@@ -3509,7 +3524,7 @@ export class RunService {
               cwd: root.cwd,
             })),
           }),
-          ...(input.initialRecovery?.stepIds.includes(activeStep.id) ? { recovered: true } : {}),
+          ...(recovery === undefined ? {} : { recovered: true }),
         },
       });
       let assessmentAttempt = (await this.plans.assessments(plan.id))
@@ -3577,10 +3592,10 @@ export class RunService {
       const discoveredSourceKinds = new Set<string>(canonicalState.intent.understanding.evidence.sourceKinds);
       const selectedPracticeProfileIds = new Set<string>((stepTaskProfile.practices ?? []).map((profile) => profile.id));
       const persistedDeliveryBindingKeys = new Set<string>();
-      // A source provider's projection is evidence, not the final response,
-      // for a source-backed conversation delivery. This also applies when
-      // the source is an API/database and no web research was requested.
-      const requiresSourceBackedConversationSynthesis = activeStep.requiredCapabilities.includes("conversation_delivery")
+      // A provider's rendering is an observation. The Agent decides whether
+      // it covers its owned fact result or the user's requested answer.
+      const requiresSourceBackedSynthesis = (activeStep.role === "fact_acquisition"
+        || activeStep.requiredCapabilities.includes("conversation_delivery"))
         && !fileOutputStep
         && (stepNeedsReusableSourceEvidence(activeStep)
           || stepSkills.some((skill) => hasSkillSourceContract(skill.agentLoop)));
@@ -3670,7 +3685,7 @@ export class RunService {
           !activeLeafSteps(plan).some((step) => step.dependencies.includes(activeStep.id)),
         ),
         stepSemanticFrame,
-        ...(requiresSourceBackedConversationSynthesis ? { requireStructuredCandidateSynthesis: true } : {}),
+        ...(requiresSourceBackedSynthesis ? { requireStructuredCandidateSynthesis: true } : {}),
         ...(stepTaskProfile.artifactAction === "modify"
           ? { artifactWritePolicy: "overwrite_observed_existing" as const }
           : {}),
@@ -3716,6 +3731,7 @@ export class RunService {
           initialOutputBudgetState: parseOutputBudgetState(recovery.facts.outputBudgetState),
         }),
         ...(initialToolEvidence.length === 0 ? {} : { initialToolEvidence }),
+        ...(recovery?.toolCallUsage === undefined ? {} : { initialToolCallUsage: recovery.toolCallUsage }),
         ...(input.initialRuntimePromptAugmentations === undefined ? {} : {
           initialRuntimePromptAugmentations: input.initialRuntimePromptAugmentations,
         }),
@@ -3793,7 +3809,7 @@ export class RunService {
         ...(fileOutputStep
           ? { convergenceGraceSteps: DEFAULT_FILE_OUTPUT_CONVERGENCE_GRACE_STEPS }
           : {}),
-        ...(requiresSourceBackedConversationSynthesis ? {
+        ...(requiresSourceBackedSynthesis && activeStep.role !== "fact_acquisition" ? {
           convergencePrompt: SOURCE_EVIDENCE_DELIVERY_CONVERGENCE_PROMPT,
         } : lookupEvidenceStep && stepAllowsSourceSummaryCandidateConvergence(activeStep) ? {
           convergencePrompt: SOURCE_SUMMARY_CONVERGENCE_PROMPT,
@@ -3806,7 +3822,7 @@ export class RunService {
           } : {}),
         ...(fileOutputStep ? {
           shouldUseFinalConvergence: (context) => shouldUseFinalFileConvergence(activeStep, context),
-        } : lookupEvidenceStep && !requiresSourceBackedConversationSynthesis ? {
+        } : lookupEvidenceStep && !requiresSourceBackedSynthesis ? {
           shouldConvergeAfterToolStep: (context) => shouldConvergeAfterLookupEvidence(activeStep, context, input.sources),
         } : {}),
         emit: input.emit,
@@ -3862,8 +3878,9 @@ export class RunService {
             modelSteps: candidate.modelSteps,
           };
           const turn = canonicalState.intent.turnResolution;
-          const unreadDependencyResultIds = unreadDependencyResultIdsForCandidate(activeStep, plan, candidate.toolEvidence,
-            turn?.mode === "reply" && turn.targetResult !== undefined ? [turn.targetResult] : []);
+          const unreadDependencyResultIds = unreadRuntimeResultRefs(runtimeResultBindingsForStep(plan, activeStep), candidate.toolEvidence,
+            turn?.mode === "reply" && turn.targetResult !== undefined ? [turn.targetResult] : [])
+            .map(ref => ref.resultId);
           if (unreadDependencyResultIds.length > 0) {
             const feedback = [
               "This Step has bound input Results that it did not consume.",
@@ -4161,6 +4178,7 @@ export class RunService {
       runId: input.run.id,
       proposal: planRevision,
       currentPlan: input.currentPlan,
+      availableResultRefs: (await this.results.listPlanResults({ runId: input.run.id, planId: input.currentPlan.id, actorUserId: input.actorUserId })).map(result => result.ref),
       availableSkills: privateSkills,
       availableToolNames,
       availableTools: availableToolSummaries,
@@ -4223,9 +4241,7 @@ export class RunService {
     if (!assessment.approved) {
       throw new AppError("ASSESSMENT_ERROR", "Plan Revision Assessor did not approve the recovery revision", 422);
     }
-    const continuationIds = repairGap === undefined ? [] : admitted.steps.filter((step) => step.kind === "leaf"
-      && (!input.currentPlan!.steps.some((old) => old.id === step.id) || repairGap.repairScopeStepIds?.includes(step.id)))
-      .map((step) => step.id);
+    const continuationIds = repairGap === undefined ? [] : recoveryContinuationStepIds(input.currentPlan, admitted, repairGap);
     if (repairGap !== undefined && (!retiredStepIds.includes(repairGap.stepId!) || continuationIds.length === 0)) {
       throw new AppError("PLAN_NOT_ADMITTED", "A GoalGap revision must replace its failed Step and bind an admitted continuation", 422);
     }
@@ -4252,6 +4268,9 @@ export class RunService {
         retainedStepIds: planRevision.retainedStepIds ?? [],
         createdStepIds: planRevision.steps.map(step => step.id),
         retiredStepIds,
+        ...(repairGap === undefined ? {} : { canonicalGapId: repairGap.id, repairScopeStepIds: continuationIds }),
+        inputResultBindings: revised.steps.filter(step => step.retiredAt === undefined && (step.executionBinding.inputResultRefs?.length ?? 0) > 0)
+          .map(step => ({ stepId: step.id, resultRefs: step.executionBinding.inputResultRefs })),
         preservedTargetIds: Object.values(revisedCanonicalState.targets).filter((target) => acceptedCanonicalDelivery(target) !== undefined).map((target) => target.targetId),
       },
     });
@@ -4312,18 +4331,29 @@ export class RunService {
     const recoveryEvents = repairGap === undefined ? [] : await this.runtimeEvents(input.run.id);
     const transcripts = repairGap === undefined ? [] : (repairGap!.repairStepIds ?? [repairGap!.stepId!]).map((stepId) =>
       reconstructRecoveryTranscript({ userInput: input.run.input, stepId, events: recoveryEvents }));
-    const repairToolEvidence = [...new Map(transcripts.flatMap((transcript) => transcript.toolEvidence)
-      .map((item) => [item.toolCallId, item])).values()];
-    const repairMessages: ModelMessage[] = [
-      { role: "user", content: input.run.input },
-      ...transcripts.flatMap((transcript) => transcript.messages.slice(1)),
-      { role: "user", content: [
-        "Continue the same unresolved canonical GoalGap using the committed source Results above. Do not repeat completed retrievals or load an already activated Skill merely because the Step id changed.",
-        `Remaining result problems: ${JSON.stringify(repairGap?.unmetCriteria ?? [])}. Missing observations: ${repairGap?.missingEvidenceKinds.join(", ") ?? ""}.`,
-        `Assessment feedback: ${stringField(input.action.metadata, "feedback") ?? ""}`,
-        "Prior rejected drafts are unverified and must not supply facts or names for a new search. Read existing content references for omitted evidence; change source only when the recorded source cannot support the requested facts.",
-      ].join("\n") },
-    ];
+    const toolCallUsage = [...new Map(transcripts.flatMap(transcript => transcript.toolEvidence)
+      .map(({ toolCallId, toolName }) => [toolCallId, { toolCallId, toolName }])).values()];
+    const recoverySteps = new Map(continuationSteps.map(step => {
+      const selectedRefs = new Set((step.executionBinding.inputResultRefs ?? []).map(ref => ref.resultId));
+      const selectedCalls = new Set(transcripts.flatMap(transcript => transcript.toolEvidence)
+        .filter(item => item.resultRef !== undefined && selectedRefs.has(item.resultRef.resultId)).map(item => item.toolCallId));
+      for (const transcript of transcripts) for (const message of transcript.messages) {
+        if (message.role !== "assistant") continue;
+        for (const call of message.toolCalls ?? []) {
+          const args = call.arguments as { skillId?: string } | null;
+          if (call.name === "load_skill" && args?.skillId !== undefined && step.skillIds.includes(args.skillId)) selectedCalls.add(call.id);
+        }
+      }
+      const exchanges = selectRecoveryExchanges({ transcripts, toolCallIds: selectedCalls, userInput: input.run.input });
+      return [step.id, { ...exchanges,
+        toolCallUsage,
+        facts: { canonicalGapId: repairGap!.id,
+          // Historical rejection belongs to the shared Gap, not the prerequisite's
+          // completion contract. The current decision view supplies that contract.
+          requiredEvidenceKinds: step.evidenceContract?.requiredKinds ?? [],
+        }, messages: [...exchanges.messages, { role: "user" as const, content:
+          "Continue only the current admitted Step's objective and completionBoundary. Consume its bound Results with read_result; reuse observations for the properties they support. The shared GoalGap remains open until its replacement scope is assessed. Historical rejected drafts are not facts or extra current-step obligations." }] }] as const;
+    }));
     let runningStepId: string | undefined;
     try {
       const completed = await this.executePlanSteps({
@@ -4334,14 +4364,7 @@ export class RunService {
         plan: revised,
         canonicalState: revisedCanonicalState,
         ...(repairGap === undefined ? {} : { initialRecovery: {
-          stepIds: continuationSteps.map((step) => step.id),
-          messages: repairMessages,
-          toolEvidence: repairToolEvidence,
-          facts: {
-            canonicalGapId: repairGap!.id,
-            missingEvidenceKinds: repairGap!.missingEvidenceKinds,
-            candidateRejections: transcripts.flatMap((transcript) => transcript.facts.candidateRejections),
-          },
+          steps: recoverySteps,
         } }),
         model: input.model,
         assessor,
@@ -4589,9 +4612,13 @@ export class RunService {
       const toolNames = new Set(allTools.map((tool) => tool.name)
         .filter((name) => input.run.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)));
       const unresolvedActionEffects = await this.unresolvedUnsafeEffects(input.run.id, input.currentPlan.id, input.stepId);
+      const recoveryResults = await this.results.listPlanResults({ runId: input.run.id, planId: input.currentPlan.id, actorUserId: input.actorUserId });
       const direct = failedBoundaryRecoveryDecision(action, input.currentPlan, failedBoundary,
-        observedReceiptShapes(events, failedBoundary.reusableEvidenceRefs));
+        observedReceiptShapes(events, failedBoundary.reusableEvidenceRefs), recoveryResults, canonicalState);
       const guardedDirect = direct;
+      const narrowsDeliveryScope = direct?.decision === "revise_plan"
+        && (input.currentPlan.steps.find(step => step.id === failedBoundary.stepId)?.executionBinding.targetIds ?? [])
+          .some(id => acceptedCanonicalDelivery(canonicalState.targets[id]!) !== undefined);
       const proposedDecision = canonicalGapRepairAttempts(canonicalGap) >= MAX_AUTOMATIC_REPAIRS_PER_GAP
         ? {
           actionId: action.id,
@@ -4601,7 +4628,7 @@ export class RunService {
           evidenceRefs: canonicalGap.evidenceRefs,
         }
         : (guardedDirect?.decision === "ask_user" ? guardedDirect
-          : input.localRepairExhausted && failedBoundary.suggestedRepairShape === "repair_leaf" ? undefined : guardedDirect)
+          : input.localRepairExhausted && failedBoundary.suggestedRepairShape === "repair_leaf" && !narrowsDeliveryScope ? undefined : guardedDirect)
         ?? await this.recoveryPlannerFactory(model).decide({
           runId: input.run.id,
           userInput: input.run.input,
@@ -4617,6 +4644,7 @@ export class RunService {
             ...planningCapabilitiesFromSkills(privateSkills)],
           availableTools: toolSummaries(allTools, toolNames),
           availableSkills: privateSkills.map(({ id, name, description }) => ({ id, name, description })),
+          availableResults: recoveryResultCards(recoveryResults),
           unresolvedActionEffects,
         });
       const assessmentBoundDecision = preventAssessmentAcceptancePause({
@@ -5777,11 +5805,19 @@ function isRejectedRecoveryConfirmation(value: unknown): boolean {
     && (value as Record<string, unknown>).accepted === false;
 }
 
+function recoveryResultCards(results: readonly RuntimeResultRecord[]) {
+  return results.map(result => ({ result: result.ref, producer: result.producer, kind: result.kind,
+    summary: result.payload.content.slice(0, 600), summaryTruncated: result.payload.characters > 600,
+    characters: result.payload.characters }));
+}
+
 function failedBoundaryRecoveryDecision(
   action: RuntimeActionRecord,
   plan: ExecutionPlan | undefined,
   failedBoundary: FailedBoundary | undefined,
   observedShapes: ReadonlySet<ReceiptShape>,
+  availableResults: readonly RuntimeResultRecord[] = [],
+  canonicalState?: CanonicalRunState,
 ): RecoveryDecisionProposal | undefined {
   if (failedBoundary === undefined) return undefined;
   const evidenceRefs = failedBoundary.reusableEvidenceRefs;
@@ -5822,7 +5858,35 @@ function failedBoundaryRecoveryDecision(
   if (planContractMismatchRequiresRevision(target, failedBoundary, observedShapes)) {
     return undefined;
   }
-  const repairStep = repairLeafForFailedBoundary(target, failedBoundary, plan.version);
+  const selected = new Set([
+    ...failedBoundary.reusableEvidenceRefs,
+    ...(failedBoundary.unmetCriteria ?? []).flatMap(criterion => criterion.evidenceRefs),
+    ...(failedBoundary.evidenceConcerns ?? []).flatMap(concern => [...concern.evidenceRefs, ...concern.affectedEvidenceRefs]),
+  ]);
+  const inputResultRefs = [...new Map([
+    ...(target.executionBinding.inputResultRefs ?? []),
+    ...availableResults.filter(result => selected.has(result.ref.resultId)
+      || result.producer.toolCallId !== undefined && selected.has(result.producer.toolCallId)).map(result => result.ref),
+  ].map(ref => [ref.resultId, ref])).values()];
+  const preservedTargetIds = new Set(Object.values(canonicalState?.targets ?? {}).filter(item => acceptedCanonicalDelivery(item) !== undefined).map(item => item.targetId));
+  const originalRepair = repairLeafForFailedBoundary(target, failedBoundary, plan.version);
+  const pendingTargetIds = (originalRepair.targetIds ?? []).filter(id => !preservedTargetIds.has(id));
+  const fileDeliveryPreserved = (originalRepair.targetIds ?? []).some(id => preservedTargetIds.has(id)
+    && canonicalState?.targets[id]?.surface === "workspace_artifact")
+    && !pendingTargetIds.some(id => canonicalState?.targets[id]?.surface === "workspace_artifact");
+  const remainingKinds = originalRepair.evidenceContract?.requiredKinds.filter(kind => !fileDeliveryPreserved || !ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(kind));
+  const concernsRemainingTarget = (condition: { basis?: SuccessCriterion["basis"] }) =>
+    (condition.basis?.targetIds.length ?? 0) === 0 || condition.basis!.targetIds.some(id => !preservedTargetIds.has(id));
+  const narrowBasis = <T extends { basis?: SuccessCriterion["basis"] }>(condition: T): T => condition.basis === undefined ? condition
+    : { ...condition, basis: { ...condition.basis, targetIds: condition.basis.targetIds.filter(id => !preservedTargetIds.has(id)) } };
+  const repairStep = { ...originalRepair,
+    targetIds: pendingTargetIds,
+    evidenceContract: remainingKinds === undefined || remainingKinds.length === 0 ? undefined
+      : { ...originalRepair.evidenceContract!, requiredKinds: remainingKinds },
+    requiredFacts: originalRepair.requiredFacts?.filter(concernsRemainingTarget).map(narrowBasis),
+    successCriteria: originalRepair.successCriteria.filter(criterion => (criterion.targetId === undefined || !preservedTargetIds.has(criterion.targetId))
+      && (!fileDeliveryPreserved || !ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(criterion.id)) && concernsRemainingTarget(criterion)).map(narrowBasis),
+    ...(inputResultRefs.length === 0 ? {} : { inputResultRefs }) };
   const activeSteps = plan.steps.filter(step => step.retiredAt === undefined);
   // A dependent's scheduling definition changes too; give it a replacement
   // identity rather than claiming it was retained unchanged.
@@ -5852,6 +5916,7 @@ function failedBoundaryRecoveryDecision(
           kind: step.kind,
           ...(step.parentId === undefined ? {} : { parentId: step.parentId }),
           objective: step.objective,
+          ...(step.executionBinding.inputResultRefs === undefined ? {} : { inputResultRefs: step.executionBinding.inputResultRefs }),
           dependencies: step.dependencies.map(dependency => replacedIds.get(dependency) ?? dependency),
           ...(step.role === undefined ? {} : { role: step.role }),
           refinementState: step.refinementState,
@@ -6074,6 +6139,7 @@ export function repairLeafForFailedBoundary(
     : failedBoundary.missingEvidenceKinds.join(", ");
   return {
     id: repairId,
+    ...(target.executionBinding.inputResultRefs === undefined ? {} : { inputResultRefs: target.executionBinding.inputResultRefs }),
     kind: "leaf",
     // A failed assessment does not replace the Step's output contract. The
     // repair leaf must still own the original work product and its sources;
@@ -7196,7 +7262,7 @@ const SOURCE_SUMMARY_CONVERGENCE_MAX_OUTPUT_TOKENS = 4_096;
 const SOURCE_SUMMARY_CONVERGENCE_PROMPT = [
   "<runtime_source_summary_convergence>",
   "This is the final model step for a source/fact acquisition leaf.",
-  "No execution tools are available on this turn.",
+  "Prepare a completion candidate from existing evidence. The exposed Run-authorized tools remain available for a targeted missing fact or an exact Result read; receipt readiness does not establish factual coverage.",
   "Use only the canonical tool evidence already present in the conversation.",
   "Return one concise JSON object with schema agentloop.sourceSummaryCandidate/v1.",
   "Required keys: schema, coveredTopics, facts, missingOrUnverified, recommendedNextStep.",
@@ -7207,13 +7273,13 @@ const SOURCE_SUMMARY_CONVERGENCE_PROMPT = [
   "Structured projections preserve source windows and content references. Preserved evidence does not mean omitted facts were read or verified. Never infer absent or contradicted facts from memory, search snippets, or a rejected draft.",
   "Do not wrap the JSON in markdown fences.",
   "Do not write the final user-facing report here; produce a bounded source summary for the next Plan leaf.",
-  "Do not request or emit tool calls.",
+  "Avoid repeating complete reads. When the current facts are sufficient, submit the candidate instead of doing later-step work.",
   "</runtime_source_summary_convergence>",
 ].join("\n");
 const SOURCE_EVIDENCE_DELIVERY_CONVERGENCE_PROMPT = [
   "<runtime_source_evidence_convergence>",
-  "No execution tools are available on this turn.",
-  "The retrieval phase has ended. Its receipts establish acquisition, not factual correctness or complete coverage.",
+  "Prepare the requested answer from existing evidence. The exposed Run-authorized tools remain available for a targeted missing fact or exact Result read.",
+  "Receipts establish acquisition, not factual correctness or complete coverage.",
   "Use only the canonical tool evidence already present in the conversation.",
   "Use actual readable source text for exact or current facts. Do not invent absent names, dates, or values, and do not treat search snippets or rejected drafts as verification. State any missing or conflicting facts explicitly.",
   "Produce the requested user-facing answer for the current Plan step, with explicit caveats for any missing or unverified facts.",
@@ -7802,27 +7868,6 @@ function directDependencyToolEvidence(
   });
 }
 
-/** A dependency edge transports one unified Result identity; a downstream candidate must read that identity, not infer its content. */
-function unreadDependencyResultIdsForCandidate(
-  step: ExecutionPlan["steps"][number],
-  plan: ExecutionPlan,
-  toolCalls: readonly ToolEvidence[],
-  boundInputs: readonly RuntimeResultRef[] = [],
-): readonly string[] {
-  const required = new Set([...boundInputs.map(ref => ref.resultId), ...step.dependencies.flatMap((dependencyId) => {
-    const result = plan.steps.find((candidate) => candidate.id === dependencyId)?.evidence?.publishedResult;
-    return result === undefined ? [] : [result.ref.resultId];
-  })]);
-  if (required.size === 0) return [];
-  const consumed = new Set(toolCalls.flatMap((toolCall) => {
-    if (toolCall.isError || toolCall.toolName !== "read_result") return [];
-    const sourceResultRef = parseJsonRecord(toolCall.result)?.sourceResultRef;
-    const resultId = parseRuntimeResultRef(sourceResultRef)?.resultId;
-    return resultId === undefined ? [] : [resultId];
-  }));
-  return [...required].filter((resultId) => !consumed.has(resultId));
-}
-
 /**
  * A resolved continuation edge is the semantic authorization to reuse source
  * evidence from a prior Run.  Bind only summaries owned by that target Run;
@@ -8290,6 +8335,9 @@ export function buildStepSystemPrompt(
     baseInstructions: [systemPrompt.trim()],
     contractLines: [
       "Work only on the current admitted Plan step.",
+      USER_AUTHORITY_INSTRUCTION,
+      USER_DELIVERY_SCOPE_INSTRUCTION,
+      "The admitted step bounds authorized work; it does not make inferred presentation requirements into user requests. Use userAuthority.originalUserInput, accepted amendments and answered HIL choices to determine the final answer's scope. Do not continue querying merely to supply an unrequested caveat, comparison or audit appendix once the requested answer is supported.",
       "The runtime owns authorization, persistence, assessment, Plan progression, and terminal completion.",
       "An answered Human-in-the-Loop selection recorded in decisionLedger is the user's final decision for its scope. Follow it exactly in subsequent reasoning and tool calls; do not reinterpret, replace, or silently broaden it. If it must change, request a new Human-in-the-Loop decision.",
       "Unless the user explicitly requests another language, all user-facing natural-language output must be in Simplified Chinese. Preserve code, commands, paths, API fields, and proper nouns in their original form.",
@@ -8299,7 +8347,7 @@ export function buildStepSystemPrompt(
       "For research and analysis, use relevant available source material to answer within its supported scope. Separate source statements from your inference and disclose material limitations. Search further for a consequential missing fact, contradiction, freshness need, or explicit source/verification constraint, not merely to independently verify every source statement or fill optional background fields.",
       "Your response without tool calls is only a completion candidate and may be rejected with repair feedback.",
       ...(finalDelivery && !clarificationOnly ? [
-        "This step produces the final user-facing summary. Its completion candidate must be non-empty, self-contained, and fulfill the user's requested content and scope. Consider richer Markdown expression (tables or charts) only in that final completion candidate, when useful for the user's needs; keep tool-call commentary and progress updates concise. Do not force a chart for every answer or reduce a substantive answer to a 2-4 sentence status summary. For a workspace artifact, a concise delivery summary is sufficient. Cite the concrete evidence or tool results used.",
+        "This step produces the final user-facing summary. Its completion candidate must be non-empty, self-contained, and fulfill the user's requested content and scope. Lead with the answer and scale detail to the question; a simple factual lookup normally needs one or two sentences. Consider richer Markdown expression (tables or charts) only in that final completion candidate, when useful for the user's needs; keep tool-call commentary and progress updates concise. Give complex analyses the depth requested and do not replace their substance with an execution-status summary. For a workspace artifact, a concise delivery summary is sufficient. Keep claims grounded in concrete evidence or tool results, with concise user-meaningful source attribution where needed. Internal traceability does not require displaying execution receipts, internal identifiers, hashes, SQL, or an audit narrative; provide those details when the user requests provenance, audit, or debugging. State limitations that materially affect the answer, without adding boilerplate caveat sections.",
         'Conversation Markdown supports inline charts using a fenced chart block containing JSON: {"type":"line|bar|pie","title":"...","xLabel":"...","yLabel":"...","labels":["..."],"series":[{"name":"...","values":[1]}]}. Use one actual type value. Every series must align with labels; line values may be null for missing observations. Pie requires one series of nonnegative values with a positive total. Supported limits: 48 labels, 6 series, 120 characters per label or axis/series name, 160 per title. Use only observed or reproducibly computed data and retain units, scope, missing values, and source references in accompanying text. Put the chart block directly in the final completion candidate; describing a chart or linking a JSON file does not display it. Do not use Mermaid, HTML, or JavaScript for these statistical charts.',
       ] : [
         "A completion candidate must be non-empty: summarize the current step's completed work concisely and cite the concrete evidence or tool results used. Preserve reusable facts for downstream steps. Do not add presentation charts or elaborate formatting to intermediate step summaries; richer expression is considered only in the final user-facing summary.",
@@ -8784,7 +8832,7 @@ function conversationTurnTool(context: ConversationIntentExternalContext): Model
           ],
         },
         ...priorCandidateProperties,
-        effectiveGoal: { type: "string", minLength: 1, maxLength: 2_000 },
+        effectiveGoal: { type: "string", minLength: 1, maxLength: 2_000, description: "Self-contained requested outcome. Preserve the user's scope; do not add methodology, source metadata, audit or comparison requirements inferred from professional practice." },
         taskIntent: {
           type: "object",
           additionalProperties: false,
@@ -8840,6 +8888,7 @@ function conversationTurnTool(context: ConversationIntentExternalContext): Model
         },
         userConstraints: {
           type: "array",
+          description: "Only constraints established by user messages or accepted HIL choices. Do not add professional recommendations, internal verification steps or optional presentation details as user requirements.",
           maxItems: 8,
           items: { type: "string", minLength: 1, maxLength: 240 },
         },
@@ -9626,6 +9675,7 @@ function strongerConversationEvidenceDemand(
 function conversationTurnResolverPrompt(repairFeedback: string | undefined): string {
   return [
       "Resolve the latest user turn against the full conversation transcript and canonical prior-Run metadata.",
+      USER_DELIVERY_SCOPE_INSTRUCTION,
       "Do not interpret an elliptical follow-up in isolation. Rebind corrections, challenges, refinements, and continuations to the concrete prior goal they modify.",
       "An acknowledgement, thanks, or statement that the user will handle the next action is reply-only: naming prior work does not by itself authorize Runtime to execute that work again.",
       "effectiveGoal must be a self-contained description of the outcome Runtime should now deliver; preserve the latest user constraints without requiring imperative wording.",

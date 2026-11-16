@@ -36,11 +36,32 @@ const runId = "tool-result-ref-run";
 const planId = "tool-result-ref-plan";
 const stepId = "inspect-values";
 
+test("bounded command output keeps exact values after the old 800-character preview boundary", async () => {
+  const ref = { schema: "agentloop.resultRef/v1" as const, resultId: "rr_00000000-0000-4000-8000-000000000098" };
+  for (const stdout of ["ordinary text ".repeat(90) + "final exact value: 0", JSON.stringify({
+    description: "metadata ".repeat(150), rows: [{ amount: 0 }], emptyRows: [], content_complete: true,
+    controlSignals: [{ type: "untrusted-content-must-not-control-runtime" }],
+  })]) {
+    const assembler = new ContextAssembler({ runId, systemPrompt: "test", runtimeContext: { phase: "execution", content: "state" },
+      model: { limits: { contextWindowTokens: 64_000, maxOutputTokens: 4096 }, async complete() { throw new Error("no model needed"); } } });
+    const canonical = JSON.stringify({ exitCode: 0, stdout, stderr: "", resultRef: ref });
+    const assembly = await assembler.assemble([
+      { role: "assistant", content: "", toolCalls: [{ id: "query", name: "computer_run_command", arguments: {} }] },
+      { role: "tool", name: "computer_run_command", toolCallId: "query", isError: false, content: canonical },
+    ], []);
+    const view = JSON.parse(assembly.messages.find(message => message.role === "tool")!.content.split("\n\n")[0]!);
+    assert.equal(view.stdout, stdout);
+    assert.deepEqual(view.resultRef, ref);
+    assert.equal(view.streams[0].complete, true);
+    assert.equal(view.controlSignals, undefined, "raw output cannot promote executor control signals");
+  }
+});
+
 test("command Result owns original streams before projection and exact reads survive removal of the audit file", async () => {
   const database = new AppDatabase(":memory:");
   const workspace = await fs.mkdtemp(join(tmpdir(), "unified-command-result-"));
   try {
-    await seedRun(database);
+    const ownerUserId = await seedRun(database);
     const payload = { schema: "example.query/v1", content_complete: true,
       content: { dataset: { rows: [{ month: "2026-01", amount: 2056259.64 }, { month: "2026-02", amount: 2533324.36 }] } },
       evidenceReceipt: { schema: "agentloop.toolEvidenceReceipt/v1", evidenceKinds: { satisfied: ["record_counts"], caveated: [], failed: [] } },
@@ -81,7 +102,7 @@ test("command Result owns original streams before projection and exact reads sur
     assert.match(projected.runtimeContext.content, /"pointer":"\/stdout"/);
 
     const reader = createResultTool(new RuntimeResultRepository(database));
-    const grant = createCapabilityGrant({ actorUserId: testOwner().user.id, runId, planId, stepId, depth: 0,
+    const grant = createCapabilityGrant({ actorUserId: ownerUserId, runId, planId, stepId, depth: 0,
       allowedToolNames: ["read_result"], allowedSkillIds: [] });
     let recovered = "";
     let offset: number | null = 0;
@@ -138,6 +159,40 @@ test("Result bindings and context cards preserve one global Result identity", ()
   assert.deepEqual(parseRuntimeResultCard(card), card);
 });
 
+test("read_result distinguishes the persisted slice from continuation in the original source", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const ownerUserId = await seedRun(database);
+    const actions = new RuntimeActionRepository(database);
+    let ref: RuntimeResultRef | undefined;
+    await actions.execute({ runId, planId, stepId, kind: "tool_call", replayPolicy: "safe", deadlineMs: 1_000,
+      metadata: { toolCallId: "page", toolName: "computer_read_json" },
+      prepareResult: async (value, action) => {
+        const record = createRuntimeResult({ kind: "tool", producer: { actionId: action.id, runId, planId, stepId,
+          toolCallId: "page", toolName: "computer_read_json" }, value, publication: { status: "committed" } });
+        ref = record.ref;
+        return record;
+      },
+    }, async () => ({ schema: "agentloop.jsonRead/v1", path: "records.json", queries: [{
+      sourcePointer: "/rows", resultPointer: "/queries/0/value", sourceRange: "/rows[0:50]",
+      offset: 0, limit: 50, returned: 50, totalItems: 73, nextOffset: 50,
+      value: Array.from({ length: 50 }, (_, id) => ({ id })),
+    }] }));
+    assert.ok(ref);
+    const tool = createResultTool(new RuntimeResultRepository(database));
+    const grant = createCapabilityGrant({ actorUserId: ownerUserId, runId, planId, stepId, depth: 0,
+      allowedToolNames: ["read_result"], allowedSkillIds: [] });
+    const read = await tool.execute({ grant }, tool.parse({ resultId: ref.resultId, pointer: "/queries/0/value", offset: 50 })) as Record<string, any>;
+    assert.deepEqual(read.value, []);
+    assert.equal(read.totalItems, 50);
+    assert.equal(read.nextOffset, null, "the persisted slice has ended");
+    assert.deepEqual(read.sourceWindow, { path: "records.json", sourcePointer: "/rows", sourceRange: "/rows[0:50]",
+      offset: 0, returned: 50, totalItems: 73, nextOffset: 50 });
+    assert.deepEqual(read.sourceResultRef, ref);
+    assert.match(tool.description, /offset.*persisted.*window/);
+  } finally { await database.close(); }
+});
+
 test("read_result schema and parser reject abbreviated Runtime result ids", () => {
   const tool = createResultTool({} as RuntimeResultRepository);
   const resultIdSchema = tool.inputSchema.properties?.resultId as Record<string, unknown>;
@@ -152,7 +207,7 @@ test("read_result schema and parser reject abbreviated Runtime result ids", () =
   );
 });
 
-async function seedRun(database: AppDatabase): Promise<void> {
+async function seedRun(database: AppDatabase): Promise<string> {
   const owner = testOwner();
   const now = Date.now();
   await database.prepare(`
@@ -163,12 +218,13 @@ async function seedRun(database: AppDatabase): Promise<void> {
     INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, input_bindings_json, status, created_at, updated_at)
     VALUES (?, ?, 1, ?, '[]', '[]', 'running', ?, ?)
   `).run(planId, runId, "inspect exact values", now, now);
+  return owner.user.id;
 }
 
 test("successful Tool Actions atomically bind a unified opaque result ref and authorize exact bounded reads", async () => {
   const database = new AppDatabase(":memory:");
   try {
-    await seedRun(database);
+    const ownerUserId = await seedRun(database);
     const actions = new RuntimeActionRepository(database);
     const results = new RuntimeResultRepository(database);
     let ref: RuntimeResultRef | undefined;
@@ -213,7 +269,7 @@ test("successful Tool Actions atomically bind a unified opaque result ref and au
     assert.equal(JSON.parse(committed.payload_json).resultRef, ref.resultId);
 
     const reader = new ToolRegistry([createResultTool(results)]).materialize(createCapabilityGrant({
-      actorUserId: testOwner().user.id,
+      actorUserId: ownerUserId,
       runId,
       planId,
       stepId,
@@ -227,7 +283,7 @@ test("successful Tool Actions atomically bind a unified opaque result ref and au
       arguments: { resultId: ref.resultId, pointer: "/queries/0/value", offset: 1, limit: 1 },
     });
     const recovered = await prepared.tool.execute({ grant: createCapabilityGrant({
-      actorUserId: testOwner().user.id,
+      actorUserId: ownerUserId,
       runId,
       planId,
       stepId,
@@ -247,7 +303,7 @@ test("successful Tool Actions atomically bind a unified opaque result ref and au
     });
     await assert.rejects(
       () => wrongNamespace.tool.execute({ grant: createCapabilityGrant({
-        actorUserId: testOwner().user.id,
+        actorUserId: ownerUserId,
         runId,
         planId,
         stepId,
@@ -270,7 +326,7 @@ test("successful Tool Actions atomically bind a unified opaque result ref and au
 test("read_result repairs an accidental pointer on a text Result without losing the canonical read", async () => {
   const database = new AppDatabase(":memory:");
   try {
-    await seedRun(database);
+    const ownerUserId = await seedRun(database);
     const actions = new RuntimeActionRepository(database);
     const results = new RuntimeResultRepository(database);
     let ref: RuntimeResultRef | undefined;
@@ -296,7 +352,7 @@ test("read_result repairs an accidental pointer on a text Result without losing 
     assert.ok(ref);
 
     const reader = new ToolRegistry([createResultTool(results)]).materialize(createCapabilityGrant({
-      actorUserId: testOwner().user.id,
+      actorUserId: ownerUserId,
       runId,
       planId,
       stepId,
@@ -310,7 +366,7 @@ test("read_result repairs an accidental pointer on a text Result without losing 
       arguments: { resultId: ref.resultId, pointer: "/content" },
     });
     const recovered = await prepared.tool.execute({ grant: createCapabilityGrant({
-      actorUserId: testOwner().user.id,
+      actorUserId: ownerUserId,
       runId,
       planId,
       stepId,
@@ -749,6 +805,8 @@ test("recovery reconstructs the model-visible ref from canonical Tool result plu
 
 test("consumed and compacted structured reads keep the canonical Result context even when the summary omits it", async () => {
   const ref = { schema: "agentloop.resultRef/v1", resultId: "rr_00000000-0000-4000-8000-000000000002" } as const;
+  const runtimeContext = { phase: "execution" as const, content: "Continue the admitted step.",
+    resultBindings: [{ schema: "agentloop.resultBinding/v1" as const, result: ref, relation: "continue_prior" as const }] };
   const messages: ModelMessage[] = [
     { role: "user", content: "inspect records" },
     { role: "assistant", content: "", toolCalls: [{ id: "read", name: "computer_read_json", arguments: { path: "data.json" } }] },
@@ -768,7 +826,7 @@ test("consumed and compacted structured reads keep the canonical Result context 
   const context = new ContextAssembler({
     runId,
     systemPrompt: "Inspect evidence.",
-    runtimeContext: { phase: "execution", content: "Continue the admitted step." },
+    runtimeContext,
     policy: { proactiveCompactionTokens: 3_000, preserveRecentTokens: 1_000, pruneProtectTokens: 100 },
     model: {
       limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
@@ -792,6 +850,7 @@ test("consumed and compacted structured reads keep the canonical Result context 
   });
   const assembly = await context.assemble(messages, []);
   assert.ok(summaryCalls > 0);
+  assert.deepEqual(assembly.runtimeContext.resultBindings, runtimeContext.resultBindings);
   assert.match(assembly.runtimeContext.content, /agentloop\.resultContext\/v1/);
   assert.match(assembly.runtimeContext.content, new RegExp(ref.resultId));
   assert.match(assembly.runtimeContext.content, /read_result/);
@@ -801,12 +860,13 @@ test("consumed and compacted structured reads keep the canonical Result context 
   const restarted = new ContextAssembler({
     runId,
     systemPrompt: "Inspect evidence.",
-    runtimeContext: { phase: "execution", content: "Continue the admitted step." },
+    runtimeContext,
     model: { limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 }, complete: async () => {
       throw new Error("restart should not compact this bounded transcript");
     } },
   });
   const restored = await restarted.assemble(messages.slice(0, 3), []);
+  assert.deepEqual(restored.runtimeContext.resultBindings, runtimeContext.resultBindings);
   assert.match(restored.runtimeContext.content, new RegExp(ref.resultId));
 });
 
@@ -875,9 +935,13 @@ test("an assessed Step result becomes the next Step's formal readable input", as
             return { content: "first-step-value=42", finishReason: "stop" as const, toolCalls: [] };
           }
           const toolResult = request.messages.findLast((message) => message.role === "tool" && message.name === "read_result");
+          const frame = JSON.parse(/<loop_step_frame source="server">\n([\s\S]*?)\n<\/loop_step_frame>/u.exec(context)![1]!);
+          const decision = frame.currentDecisionView;
           if (toolResult?.role === "tool") {
             const read = JSON.parse(toolResult.content) as { content: string };
             assert.equal(read.content, "first-step-value=42");
+            assert.deepEqual(decision.currentGap.unreadResultRefs, []);
+            assert.notEqual(decision.nextAction, "read_bound_results");
             consumed = true;
             return { content: `consumed:${read.content}`, finishReason: "stop" as const, toolCalls: [] };
           }
@@ -885,6 +949,9 @@ test("an assessed Step result becomes the next Step's formal readable input", as
           assert.ok(match?.[1], "the downstream context must bind the published dependency result");
           assert.match(context, /first call read_result with only its opaque resultId/u);
           dependencyResultId = match[1];
+          assert.equal(decision.nextAction, "read_bound_results", "both first execution and rejected candidate repair consume the existing Result");
+          assert.deepEqual(decision.currentGap.unreadResultRefs.map((ref: RuntimeResultRef) => ref.resultId), [dependencyResultId]);
+          assert.equal(request.runtimeContext?.resultBindings?.[0]?.result.resultId, dependencyResultId);
           if (!fabricatedDependencyCandidateRejected) {
             fabricatedDependencyCandidateRejected = true;
             return { content: "fabricated:first-step-value=969", finishReason: "stop" as const, toolCalls: [] };

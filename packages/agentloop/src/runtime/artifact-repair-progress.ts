@@ -32,10 +32,10 @@ export class ArtifactRepairProgress {
     readonly toolCall?: (id: string) => ModelToolCall | undefined;
   }): ArtifactRepairCheckpoint | undefined {
     const { policy, view, latestEvidence } = input;
-    const ownsDelivery = policy?.artifactDeliveryRequired === true || policy?.expectedArtifactKind !== undefined
-      || policy?.expectedArtifactFormat !== undefined || (policy?.artifactTargets?.length ?? 0) > 0;
+    const ownsDelivery = policy?.artifactDeliveryRequired === true || (policy?.artifactTargets?.length ?? 0) > 0;
     if (!ownsDelivery || view.evidence === undefined || latestEvidence.length === 0) return undefined;
-    if (view.evidence.workProduct.status === "accepted" && view.evidence.missingToolEvidenceKinds.length === 0) {
+    if (view.evidence.workProduct.status === "accepted" && view.candidateReadiness.readyForAssessment
+      && view.currentGap.assessmentGaps.length === 0) {
       this.turns = 0; this.failed.clear(); this.observed.clear();
       return undefined;
     }
@@ -46,7 +46,8 @@ export class ArtifactRepairProgress {
       // This is an operation transition, not an assertion about stdout or
       // artifact correctness. Unrelated exit-0 commands and successful file
       // patches cannot discharge an earlier failed executable invocation.
-      if (item.toolName !== "computer_run_command" || !call) continue;
+      if (item.toolName !== "computer_run_command" || !call || item.failurePhase === "prepare"
+        || item.invocationStatus === "rejected") continue;
       const args = call.arguments as Record<string, unknown> | null;
       if (!args || typeof args.command !== "string" || !Array.isArray(args.args)) continue;
       const key = JSON.stringify([args.command, args.cwd ?? ".", args.args]);
@@ -72,7 +73,10 @@ export class ArtifactRepairProgress {
     for (const key of current) this.milestones.add(key);
     if (progressed) { this.turns = 0; this.failed.clear(); this.observed.clear(); }
     for (const item of latestEvidence) {
-      if (input.toolEffect(item.toolName) === "write" && (item.isError || item.operationStatus === "failed")) this.failed.add(item.toolCallId);
+      // Rejected arguments never executed the artifact operation. They belong
+      // to the tool contract loop, not evidence of a defective work product.
+      if (item.failurePhase !== "prepare" && item.invocationStatus !== "rejected"
+        && input.toolEffect(item.toolName) === "write" && (item.isError || item.operationStatus === "failed")) this.failed.add(item.toolCallId);
     }
     if (this.failed.size === 0) return undefined;
     for (const item of latestEvidence) this.observed.add(item.toolCallId);

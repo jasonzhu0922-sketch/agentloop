@@ -84,13 +84,13 @@ test("artifact repair stagnation creates one canonical Gap and Recovery complete
 });
 
 for (const finish of ["complete", "stop"] as const) {
-  test(`revised prerequisites converge, unread Result rejection persists the shared Gap, and recovery can ${finish}`, async () => {
+  test(`revised prerequisites permit Assessment, unread Result rejection persists the shared Gap, and recovery can ${finish}`, async () => {
     const database = new AppDatabase(":memory:");
     let gapId = "";
     let recoveries = 0;
     let observations = 0;
     let candidates = 0;
-    let factCompletionFenced = false;
+    let factCandidateReady = false;
     let dependencyResultId = "";
     let reports = 0;
     try {
@@ -165,12 +165,14 @@ for (const finish of ["complete", "stop"] as const) {
             assert.notEqual(frame.currentDecisionView.nextAction, "revise_plan");
             assert.deepEqual(frame.currentDecisionView.currentGap.assessmentGaps[0].missingEvidenceKinds, ["explicit_caveats"]);
             if (observations === 0) {
-              assert.match(context, /Historical rejection feedback \(audit context, not additional current-step obligations\)/);
-              assert.match(context, /leave downstream production and delivery to their owning steps/);
+              assert.match(JSON.stringify(request.messages), /Continue only the current admitted Step's objective/);
+              assert.doesNotMatch(JSON.stringify(request.messages), /Initial incomplete result/);
+              assert.deepEqual(frame.currentDecisionView.candidateReadiness.blockedBy, ["missing_tool_evidence"]);
               return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "observe", name: "observe_total", arguments: {} }] };
             }
-            assert.equal(frame.mode, "terminal_candidate", "the source stage must converge before performing downstream work");
-            factCompletionFenced = true;
+            assert.equal(frame.mode, "current_to_next", "receipt readiness must not force source-stage convergence");
+            assert.equal(frame.currentDecisionView.candidateReadiness.readyForAssessment, true);
+            factCandidateReady = true;
             return { content: "facts-total=42", finishReason: "stop", toolCalls: [] };
           }
           dependencyResultId = context.match(/"resultId":"(rr_[0-9a-f-]{36})"/)![1]!;
@@ -187,7 +189,7 @@ for (const finish of ["complete", "stop"] as const) {
       assert.equal(run.status, finish === "complete" ? "completed" : "failed", diagnostic);
       assert.equal(observations, 1, diagnostic);
       assert.equal(recoveries, 2);
-      assert.equal(factCompletionFenced, true);
+      assert.equal(factCandidateReady, true);
       assert.equal(reports, finish === "stop" ? 1 : 0);
       const state = await new CanonicalRunStateRepository(database).get(run.id);
       const gaps = state.gaps.filter(gap => gap.stepId !== undefined);
@@ -237,7 +239,8 @@ test("a recovery exception reports later committed receipts rather than the orig
           assert.match(JSON.stringify(request.messages), /143656/);
           return { content: "图片已生成且检查通过，后续处理失败，尚未完成交付。", finishReason: "stop", toolCalls: [] };
         }
-        const repairing = request.messages.some(message => message.role === "user" && message.content.includes("Continue the same unresolved canonical GoalGap"));
+        const frame = JSON.parse(context.match(/<loop_step_frame source="server">\n([^\n]+)\n/)![1]!);
+        const repairing = frame.currentDecisionView.currentGap.repairInProgressGapIds.length > 0;
         if (!repairing) return { content: "Old incomplete draft", finishReason: "stop", toolCalls: [] };
         if (observations === 0) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "latest", name: "observe_artifact", arguments: {} }] };
         throw new AppError("MODEL_ERROR", "Recovery provider failed after the committed observation", 502);

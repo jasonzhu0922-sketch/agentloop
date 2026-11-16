@@ -12,7 +12,7 @@ import {
   type CanonicalRunState,
 } from "../runtime/canonical-run-state.ts";
 import type { ArtifactTarget, ConversationTurnResolution, ConversationWorkingSet, EvidenceContract, EvidenceKind, ExecutionPlan, PlanProposal, PlanStep, PlanningCapability, PlanningToolSummary, RefinementState, RequiredFact, StepExecutionBinding, SuccessCriterion } from "./contracts.ts";
-import { mergeRuntimeResultBindings, parseRuntimeResultBinding, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
+import { mergeRuntimeResultBindings, parseRuntimeResultBinding, parseRuntimeResultRef, type RuntimeResultBinding, type RuntimeResultRef } from "../runtime/runtime-result.ts";
 import { admitCriterionBasis, assertCriterionBasis } from "./criterion-basis.ts";
 import { validateRoundScope } from "./round-scope.ts";
 import {
@@ -97,6 +97,8 @@ export function admitPlan(input: {
   reusableToolSourceIds?: readonly string[];
   /** Server-validated Runtime Result inputs for this new Plan. */
   resultBindings?: readonly RuntimeResultBinding[];
+  /** Persisted Results verified by the caller, from which new leaves may select inputs. */
+  availableResultRefs?: readonly RuntimeResultRef[];
   /** Delivery targets owned by this Round. Omit for the initial whole-goal Plan. */
   targetScopeIds?: readonly string[];
   /** The Run-owned state is the only task-semantics authority at Admission. */
@@ -155,6 +157,21 @@ export function admitPlan(input: {
   // model's replacement Plan (whose schema intentionally cannot grant inputs).
   const resultBindings = mergeRuntimeResultBindings(input.currentPlan?.resultBindings ?? [], input.resultBindings ?? []);
   assertRuntimeResultBindings(resultBindings);
+  const availableResultIds = new Set([
+    ...(input.availableResultRefs ?? []),
+    ...resultBindings.map(binding => binding.result),
+    ...(input.currentPlan?.steps ?? []).flatMap(step => step.evidence?.publishedResult === undefined ? [] : [step.evidence.publishedResult.ref]),
+    ...(input.currentPlan?.steps ?? []).flatMap(step => step.executionBinding.inputResultRefs ?? []),
+  ].map(ref => ref.resultId));
+  for (const step of input.proposal.steps) {
+    const seen = new Set<string>();
+    for (const ref of step.inputResultRefs ?? []) {
+      const parsed = parseRuntimeResultRef(ref);
+      if (parsed === undefined || !availableResultIds.has(parsed.resultId)) reject(`Step ${step.id} selects an unavailable Runtime Result`);
+      if (seen.has(parsed.resultId)) reject(`Step ${step.id} selects a duplicate Runtime Result`);
+      seen.add(parsed.resultId);
+    }
+  }
   if (proposal.steps.length === 0 || proposal.steps.length > 100) {
     reject("Plan must contain between 1 and 100 steps");
   }

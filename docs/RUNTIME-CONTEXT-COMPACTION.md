@@ -24,6 +24,12 @@ Run、Plan、Step、权限、用户决策、原始工具事件、Result、文件
 
 正文不在模型工作集中，不代表数据已删除。需要精确值时读取原有 Result 或文件版本，不依据摘要重造结果。
 
+命令的 stdout 与 stderr 合计不超过 12000 字符时，同一 Result 的模型视图保留完整原文；超过时保留有界预览、流长度及 `complete` 标记，通过同一 `resultRef` 续读。这里的完整性只说明投影是否省略了已存储文本，不代表外部数据或命令执行没有截断。
+
+有界 `computer_read_file`、`computer_read_json` 和 `read_result` 读取沿用最近 token 保护区，不能仅因为 Agent 执行了一次补充工具调用就移除实际值。离开保护区后仍按现有预算投影、裁剪或压缩；不增设结果缓存。跨步骤及恢复继承的输入仍须正式调用 `read_result` 消费。
+
+大 `computer_read_json` 结果按查询项分配合计 12000 字符的值预算，优先保留完整小值，输出仍保持原查询顺序。未保留项显式标记 `valueOmitted=true`，保留 `resultPointer`、原文件 `sourcePointer` 和分页信息；不得截断值后冒充完整值，也不因某项过大而抹去其他项的零值、空数组或定义。顶层 `valuesOmitted` 只说明是否有项被省略。按需用原 Result ID 与 `resultPointer` 补读；原文件分页位置不能用于读取 Result 切片。原始 Result、跨步骤消费与授权契约保持不变。
+
 ## 3. 压缩流程
 
 1. **先做确定性投影。** 结构化证据、写入回执和大结果引用先减少重复内容；普通执行和空响应恢复共用此流程。

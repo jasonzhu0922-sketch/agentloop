@@ -645,7 +645,7 @@ for (const humanPause of [false, true]) {
           if (gaps.length > 0) {
             // The admitted replacement follows its own completion boundary;
             // the original unmet fact remains visible until Assessment accepts it.
-            assert.equal(view.nextAction, repairing ? "submit_completion_candidate" : "resolve_evidence_gap");
+            assert.equal(view.nextAction, repairing ? view.currentGap.unreadResultRefs.length > 0 ? "read_bound_results" : "submit_completion_candidate" : "resolve_evidence_gap");
             assert.deepEqual(view.currentGap.repairInProgressGapIds, repairing ? [gapId] : []);
             assert.equal(gaps[0].id, gapId);
             assert.equal(gaps[0].unmetCriteria[0].criterionId, "second-total");
@@ -654,6 +654,9 @@ for (const humanPause of [false, true]) {
             assert.doesNotMatch(request.runtimeContext!.content, /Return a complete standalone replacement now/);
           }
           if (repairing) sawRepairView = true;
+          if (repairing && view.currentGap.unreadResultRefs.length > 0) return { content: "", finishReason: "tool_calls", toolCalls: [{
+            id: "consume-existing-records", name: "read_result", arguments: { resultId: view.currentGap.unreadResultRefs[0].resultId },
+          }] };
           if (sourceReads === 0 || (repairing && sourceReads === 1)) {
             return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `read-${sourceReads}`, name: "read_records", arguments: {} }] };
           }
@@ -681,6 +684,7 @@ for (const humanPause of [false, true]) {
             rationale: "Read the missing second total, preserving existing observations.", evidenceRefs: input.canonicalGap!.evidenceRefs,
             planRevision: { retainedStepIds: [], goal: input.plan!.goal, shape: "recovery_patch" as const, selectedSkillIds: [],
               steps: [{ id: "complete-records", objective: failed.objective, role: "repair" as const, dependencies: [], skillIds: [],
+                inputResultRefs: input.availableResults!.filter(result => result.producer.toolName === "read_records").map(result => result.result),
                 targetIds: failed.executionBinding.targetIds, requiredCapabilities: failed.requiredCapabilities, sourceConstraint: null,
                 evidenceContract: failed.evidenceContract, successCriteria: recoveryModelCriteria(failed.successCriteria) }] } },
           }, input.canonicalState!);

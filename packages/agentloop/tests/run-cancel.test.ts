@@ -47,6 +47,51 @@ test("RunService cancels an active async model turn", async () => {
   }
 });
 
+test("a HIL continuation retains the same Run cancellation authority for its resumed model turn", { timeout: 5000 }, async () => {
+  const database = new AppDatabase(":memory:");
+  let release!: () => void;
+  let started!: () => void;
+  let finished!: () => void;
+  const resumed = new Promise<void>(resolve => { started = resolve; });
+  const done = new Promise<void>(resolve => { finished = resolve; });
+  let calls = 0, abortObserved = false;
+  const owner = testOwner();
+  try {
+    const runs = new RunService({ database, skills: new SkillService(database),
+      plannerFactory: singleStepTestPlanner, assessorFactory: approvingTestAssessor,
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (_request, signal) => {
+        if (++calls === 1) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "ask", name: "request_human_loop", arguments: {
+          kind: "confirmation", title: "Confirm scope", prompt: "Continue this scope?", rationale: "User choice required", evidenceRefs: [],
+          responseSchema: { type: "confirm", acceptLabel: "Continue", rejectLabel: "Stop" }, resume: { mode: "continue_step" },
+        } }] };
+        return await new Promise<ModelResponse>(resolve => {
+          const complete = () => { signal?.removeEventListener("abort", onAbort); resolve({ content: "late resumed candidate", finishReason: "stop", toolCalls: [] }); finished(); };
+          const onAbort = () => { abortObserved = true; complete(); };
+          release = complete;
+          signal?.addEventListener("abort", onAbort, { once: true });
+          started();
+        });
+      } }),
+    });
+    const run = await runs.execute(owner.user.id, "Confirm the scope and answer the question.");
+    const request = await runs.currentHumanLoop(owner.user.id, run.id);
+    assert.ok(request);
+    await runs.respondHumanLoop(owner.user.id, run.id, request.id, true, request.revision);
+    await resumed;
+    const cancelled = await runs.cancel(owner.user.id, run.id);
+    // Release even a broken, unregistered continuation so the assertion cannot hang.
+    release();
+    await done;
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(abortObserved, true);
+    const events = await runs.events(owner.user.id, run.id);
+    assert.equal(events.find(event => event.type === "run.cancellation_requested")?.data.abortedActiveExecution, true);
+    await waitForEvent(runs, owner.user.id, run.id, "model.request.failed");
+    await waitForEvent(runs, owner.user.id, run.id, "human_loop.resume_failed");
+    assert.ok(!(await runs.events(owner.user.id, run.id)).some(event => event.type === "run.completed"));
+  } finally { release?.(); await database.close(); }
+});
+
 class AbortAwareBlockingModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
   abortObserved = false;

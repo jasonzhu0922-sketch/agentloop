@@ -15,7 +15,7 @@ import type {
 } from "./contracts.ts";
 import type { RuntimeDecisionCommit } from "./decision-ledger.ts";
 import type { ResolvedOperationBinding } from "./decision-binding.ts";
-import type { RuntimeResultBinding } from "./runtime-result.ts";
+import { runtimeResultBindingsForStep, type RuntimeResultBinding } from "./runtime-result.ts";
 import type { RuntimeUserAuthorityContext } from "./user-authority.ts";
 
 export function buildStepRuntimeContextSnapshot(input: {
@@ -53,7 +53,7 @@ export function buildStepRuntimeContextSnapshot(input: {
     conversationWorkingSet: input.conversationWorkingSet,
   });
   const stepDependencyContexts = buildStepDependencyContexts(input.step, input.plan, stepSemanticFrame);
-  const resultBindings = collectResultBindings(input.plan.resultBindings ?? [], stepDependencyContexts);
+  const resultBindings = runtimeResultBindingsForStep(input.plan, input.step);
   const hasStructuredJsonArtifactDependencies = hasStructuredJsonArtifacts(stepDependencyContexts);
   const conversationReuseContext = buildConversationReuseContext(input.conversationWorkingSet);
   const boundOutcomeConversion = boundOutcomeConversionDirective(input);
@@ -66,6 +66,7 @@ export function buildStepRuntimeContextSnapshot(input: {
   });
   return {
     phase: "execution",
+    resultBindings,
     ...(input.userAuthority === undefined ? {} : { userAuthority: input.userAuthority }),
     ...(input.decisionLedger === undefined || input.decisionLedger.length === 0 ? {} : { decisionLedger: input.decisionLedger }),
     ...(input.resolvedOperationBindings === undefined || input.resolvedOperationBindings.length === 0 ? {} : { resolvedOperationBindings: input.resolvedOperationBindings }),
@@ -491,10 +492,11 @@ export function buildStepToolProgressPolicy(input: {
 }): RuntimeToolProgressPolicy | undefined {
   const requiredKinds = input.step.evidenceContract?.requiredKinds ?? [];
   if (!input.requiresFileOutput && !stepRequiresRuntimeEvidenceProgress(requiredKinds) && input.step.executionBinding.targetIds.length === 0) return undefined;
+  const ownsArtifactDelivery = input.requiresFileOutput || (input.artifactTargets?.length ?? 0) > 0;
   return runtimeStepToolProgressPolicy(requiredKinds, {
     targetIds: input.step.executionBinding.targetIds,
-    expectedArtifactKind: input.taskProfile?.artifactKind === "none" ? undefined : input.taskProfile?.artifactKind,
-    ...(input.expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat: input.expectedArtifactFormat }),
+    expectedArtifactKind: !ownsArtifactDelivery || input.taskProfile?.artifactKind === "none" ? undefined : input.taskProfile?.artifactKind,
+    ...(!ownsArtifactDelivery || input.expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat: input.expectedArtifactFormat }),
     ...(input.artifactTargets === undefined || input.artifactTargets.length === 0 ? {} : { artifactTargets: input.artifactTargets }),
     artifactDeliveryRequired: input.requiresFileOutput,
     workflowEvidenceActions: input.workflowEvidenceActions,
@@ -657,25 +659,6 @@ function candidateArtifactsFromDependencies(
       "These artifacts were materialized while an upstream fact-acquisition step was completing its primary evidence boundary. They are candidate work products, not already accepted final delivery. Before recreating or overwriting an equivalent artifact, inspect the dependency ResultRef and candidate receipt, then reuse, refine, or replace it only when the current step's requirements or acceptance evidence justify that choice.",
     artifacts,
   };
-}
-
-function collectResultBindings(
-  planBindings: readonly RuntimeResultBinding[],
-  stepDependencyContexts: ReturnType<typeof buildStepDependencyContexts>,
-): readonly RuntimeResultBinding[] {
-  const bindings = [
-    ...planBindings,
-    ...(stepDependencyContexts?.dependencies.flatMap((dependency) =>
-      dependency.resultBinding === undefined ? [] : [dependency.resultBinding]
-    ) ?? []),
-  ];
-  const seen = new Set<string>();
-  return bindings.filter((binding) => {
-    const key = `${binding.relation}:${binding.result.resultId}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
 }
 
 interface ProjectedEvidenceMetadata {

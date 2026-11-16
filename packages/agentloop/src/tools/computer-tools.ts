@@ -245,7 +245,7 @@ export function createComputerTools(
         "Read structured data from a JSON file under the configured workspace root or an authorized read-only @skills/<skill-name> root.",
         "Use this for durable JSON artifacts such as .agentloop/table-extractions/*.json before falling back to computer_search_text or line-window computer_read_file.",
         "queries are source JSON Pointer selectors; omit queries to get a compact profile without values. Use pointer=\"\" to select the root value with the same content bounds and caveats as other selectors. Each returned query also includes a resultPointer rooted in this persisted result envelope for follow-up read_result calls. For array targets, offset is 0-indexed and limit returns a bounded window.",
-        "The result includes schema, path, sha256, root profile, selected values, source pointers, counts, and caveats without interpreting business semantics.",
+        "The result includes schema, path, sha256, root profile, selected values, source pointers, counts, and caveats without interpreting business semantics. Each array query's nextOffset continues the original source array with computer_read_json using the same path and sourcePointer; null means no later source items. read_result only reads the already persisted window, whose offsets start at zero.",
       ].join(" "),
       inputSchema: objectSchema(["path"], {
         path: { type: "string" },
@@ -866,6 +866,7 @@ function readJsonPointer(document: unknown, query: JsonReadQuery, caveats: strin
   readonly limit?: number;
   readonly returned?: number;
   readonly totalItems?: number;
+  readonly nextOffset?: number | null;
   readonly sourceRange?: string;
 } {
   const selected = selectJsonPointer(document, query.pointer);
@@ -881,8 +882,11 @@ function readJsonPointer(document: unknown, query: JsonReadQuery, caveats: strin
     const offset = query.offset ?? 0;
     const limit = query.limit ?? 50;
     const window = value.slice(offset, offset + limit);
+    const nextOffset = offset + window.length < value.length ? offset + window.length : null;
     if (window.length < value.length) {
-      caveats.push(`Query ${query.pointer || "/"} returned ${window.length} of ${value.length} array items; request another offset for more.`);
+      caveats.push(`Query ${query.pointer || "/"} returned ${window.length} of ${value.length} array items at offset ${offset}; ${nextOffset === null
+        ? "no later source items remain. Earlier items are outside this window."
+        : `continue the source with computer_read_json at the same path and sourcePointer, offset ${nextOffset}.`}`);
     }
     return {
       pointer: query.pointer,
@@ -895,6 +899,7 @@ function readJsonPointer(document: unknown, query: JsonReadQuery, caveats: strin
       limit,
       returned: window.length,
       totalItems: value.length,
+      nextOffset,
       sourceRange: `${query.pointer || "/"}[${offset}:${offset + window.length}]`,
     };
   }

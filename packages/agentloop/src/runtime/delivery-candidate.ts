@@ -78,7 +78,6 @@ export function buildRuntimeDeliveryCandidate(input: {
 }): RuntimeDeliveryCandidate {
   const evidenceKinds = collectEvidenceKinds(
     input.toolEvidence,
-    input.stepSemanticFrame,
     input.expectedArtifactKind,
     input.expectedArtifactFormat,
   );
@@ -87,14 +86,12 @@ export function buildRuntimeDeliveryCandidate(input: {
     input.expectedArtifactKind,
     input.expectedArtifactFormat,
   );
-  const caveats = uniqueStrings([
-    ...(input.caveats ?? []),
-    ...semanticCaveats(input.stepSemanticFrame, input.caveats),
-  ]);
   return appendDeliveryCandidateCaveats(normalizeDeliveryCandidate({
     output: input.output,
     evidenceKinds,
-    caveats,
+    // A completion requirement names evidence to assess, not a limitation
+    // observed in this result. Only actual caveat content belongs in output.
+    caveats: input.caveats ?? [],
     sourceToolCallIds: input.sourceToolCallIds ?? input.toolEvidence.map((item) => item.toolCallId),
     // A claim names the presented result; it does not approve its meaning.
     // Both surfaces enumerate the same canonical inventory. Only a file claim
@@ -144,7 +141,6 @@ function escapeRegExp(value: string): string {
 
 function collectEvidenceKinds(
   evidence: readonly AgentLoopToolEvidence[],
-  stepSemanticFrame?: Pick<StepSemanticFrame, "completionBoundary" | "evidenceMode" | "phaseRole">,
   expectedArtifactKind?: string,
   expectedArtifactFormat?: string,
 ): RuntimeDeliveryCandidateEvidenceKinds {
@@ -178,9 +174,6 @@ function collectEvidenceKinds(
     }
   }
   if (hasDeliveryReceipt) satisfied.add("delivery_receipt");
-  if (stepSemanticFrame !== undefined && shouldMarkSemanticCaveats(stepSemanticFrame)) {
-    caveated.add("explicit_caveats");
-  }
   return {
     satisfied: [...satisfied].sort(),
     caveated: [...caveated].sort(),
@@ -235,21 +228,6 @@ function deliveryReceiptFromRecord(record: Record<string, unknown>, toolCallId: 
     caveats,
     sourceToolCallId: toolCallId,
   };
-}
-
-function shouldMarkSemanticCaveats(
-  frame: Pick<StepSemanticFrame, "completionBoundary" | "evidenceMode" | "phaseRole">,
-): boolean {
-  return frame.completionBoundary.includes("explicit_caveats");
-}
-
-function semanticCaveats(
-  frame: Pick<StepSemanticFrame, "completionBoundary" | "evidenceMode" | "phaseRole"> | undefined,
-  existing: readonly string[] | undefined,
-): string[] {
-  if (frame === undefined || !shouldMarkSemanticCaveats(frame)) return [];
-  if ((existing?.length ?? 0) > 0) return [];
-  return ["explicit_caveats"];
 }
 
 function collectStrings(value: unknown, output: Set<string>): void {

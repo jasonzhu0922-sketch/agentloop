@@ -4,6 +4,50 @@ import { deriveCurrentDecisionView, projectCurrentDecisionView } from "../src/ru
 import { createCanonicalRunState, type CanonicalGoalGap } from "../src/runtime/canonical-run-state.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
 import { deriveRuntimeStepEvidenceState, runtimeStepToolProgressPolicy } from "../src/runtime/tool-progress-policy.ts";
+import type { AgentLoopToolEvidence } from "../src/runtime/contracts.ts";
+import type { RuntimeResultBinding } from "../src/runtime/runtime-result.ts";
+
+test("bound Result consumption drives the same current decision before and after rejection or recovery", () => {
+  const data = input();
+  data.evidence = { ...data.evidence, nextAction: "submit_completion_candidate", missingToolEvidenceKinds: [] };
+  data.context.canonicalState.gaps = [gap({ missingEvidenceKinds: [] })];
+  const binding: RuntimeResultBinding = { schema: "agentloop.resultBinding/v1", relation: "dependency",
+    result: { schema: "agentloop.resultRef/v1", resultId: "rr_11111111-1111-4111-8111-111111111111" } };
+  const other = { ...binding.result, resultId: "rr_22222222-2222-4222-8222-222222222222" };
+  const observe = (ref = binding.result, isError = false): AgentLoopToolEvidence => ({ toolCallId: "read", toolName: "read_result", isError,
+    result: JSON.stringify({ schema: "agentloop.resultRead/v1", sourceResultRef: ref, content: "published facts with explicit caveats" }) });
+  for (const relation of ["dependency", "continue_prior", "refine_prior"] as const) {
+    const resultBindings = [{ ...binding, relation }];
+    if (relation !== "dependency") {
+      data.context.canonicalState.intent = { ...data.context.canonicalState.intent,
+        turnResolution: { mode: "reply", targetResult: binding.result } };
+    }
+    for (const toolEvidence of [[], [observe(other)], [observe(binding.result, true)]]) {
+      const view = deriveCurrentDecisionView({ ...data, resultBindings, toolEvidence });
+      assert.equal(view.nextAction, "read_bound_results");
+      assert.deepEqual(view.currentGap.unreadResultRefs, [binding.result]);
+      assert.deepEqual(projectCurrentDecisionView(view).contract.resultBindings, resultBindings);
+    }
+    const read = deriveCurrentDecisionView({ ...data, resultBindings, toolEvidence: [observe()] });
+    assert.deepEqual(read.currentGap.unreadResultRefs, []);
+    assert.equal(read.nextAction, "revise_completion_candidate", "consumption does not close a semantic assessment gap");
+    assert.equal(read.currentGap.assessmentGaps[0].status, "open");
+    data.context.canonicalState.revision++;
+    const resumed = deriveCurrentDecisionView({ ...data, resultBindings, toolEvidence: [observe()] });
+    assert.deepEqual(resumed.currentGap.unreadResultRefs, []);
+    assert.equal(resumed.identity.decisionBasisDigest, read.identity.decisionBasisDigest);
+  }
+});
+
+test("available prior Plan Results do not manufacture a dependency for an independent Step", () => {
+  const data = input();
+  const resultBindings: readonly RuntimeResultBinding[] = [{ schema: "agentloop.resultBinding/v1", relation: "continue_prior",
+    result: { schema: "agentloop.resultRef/v1", resultId: "rr_11111111-1111-4111-8111-111111111111" } }];
+  const view = deriveCurrentDecisionView({ ...data, resultBindings });
+  assert.deepEqual(view.contract.resultBindings, resultBindings);
+  assert.deepEqual(view.currentGap.unreadResultRefs, []);
+  assert.equal(view.nextAction, "produce_artifact");
+});
 
 function evidence(nextAction: string): any {
   return {
@@ -168,7 +212,10 @@ test("an admitted repair follows its current stage while the shared Gap stays op
   assert.equal(producing.currentGap.assessmentGaps[0].status, "open");
   assert.deepEqual(producing.currentGap.assessmentGaps[0].missingEvidenceKinds, ["source_summary"]);
   data.evidence = { ...data.evidence, nextAction: "submit_completion_candidate", missingToolEvidenceKinds: [] };
-  assert.equal(deriveCurrentDecisionView(data).nextAction, "submit_completion_candidate");
+  const ready = deriveCurrentDecisionView(data);
+  assert.equal(ready.nextAction, "submit_completion_candidate");
+  assert.deepEqual(ready.candidateReadiness, { readyForAssessment: true, blockedBy: [] });
+  assert.equal(ready.currentGap.assessmentGaps[0].status, "open", "readiness never closes the assessed GoalGap");
   for (const suggestedAction of ["ask_user", "fail", "repair_leaf"] as const) {
     data.context.canonicalState.gaps = [{ ...data.context.canonicalState.gaps[0], suggestedAction }];
     assert.equal(deriveCurrentDecisionView(data).nextAction, "submit_completion_candidate");

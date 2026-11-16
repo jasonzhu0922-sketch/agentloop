@@ -76,6 +76,8 @@ export interface AgentLoopOptions {
   /** Complete, persisted exchanges from a prior interrupted execution. */
   readonly initialMessages?: readonly ModelMessage[];
   readonly initialToolEvidence?: readonly AgentLoopToolEvidence[];
+  /** Prior attempts retain their quotas even when their content is outside this leaf's input scope. */
+  readonly initialToolCallUsage?: readonly Pick<AgentLoopToolEvidence, "toolCallId" | "toolName">[];
   readonly initialOutputBudgetState?: OutputBudgetState;
   readonly contentBudgetPolicy?: ToolContentBudgetPolicy;
   /** Server-authored guidance already applicable before the first model turn. */
@@ -118,7 +120,7 @@ export interface AgentLoopOptions {
   readonly maxParallelToolCalls?: number;
   readonly contextPolicy?: ContextPolicy;
   readonly stepSemanticFrame?: Pick<StepSemanticFrame, "completionBoundary" | "evidenceMode" | "phaseRole">;
-  /** Source-backed conversation delivery requires an answer to the user goal. */
+  /** Source-backed facts and delivery require Agent synthesis within their owned scope. */
   readonly requireStructuredCandidateSynthesis?: boolean;
   /** Durable rejection decisions for this same Step, restored on recovery. */
   readonly initialCandidateRejections?: readonly { readonly output: string; readonly feedback: string }[];
@@ -697,6 +699,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const decisionContext = options.currentDecisionContext?.();
     const currentDecisionView = projectCurrentDecisionView(deriveCurrentDecisionView({
       runId: options.runId,
+      resultBindings: options.runtimeContext?.resultBindings,
       ...(decisionContext === undefined ? {} : { context: decisionContext }),
       stepSemanticFrame: options.stepSemanticFrame,
       evidence: deriveRuntimeStepEvidenceState({ policy: options.progressPolicy, evidence: context.toolEvidence }),
@@ -995,6 +998,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const decisionContext = options.currentDecisionContext?.();
     const currentDecisionView = deriveCurrentDecisionView({
       runId: options.runId,
+      resultBindings: options.runtimeContext?.resultBindings,
       ...(decisionContext === undefined ? {} : { context: decisionContext }),
       stepSemanticFrame: options.stepSemanticFrame,
       evidence: stepEvidenceState,
@@ -1028,17 +1032,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       contextAssembler.setRuntimeDirective(feedback);
     }
     const missingToolEvidenceKinds = stepEvidenceState?.missingToolEvidenceKinds ?? [];
-    const canConvergeFromCurrentEvidence = missingToolEvidenceKinds.length === 0
-      && stepEvidenceState?.pendingComputation === undefined
-      && currentDecisionView.currentGap.assessmentGaps.every((gap) =>
-        currentDecisionView.currentGap.repairInProgressGapIds.includes(gap.id)
-        || gap.suggestedAction === "repair_leaf" && gap.missingEvidenceKinds.length === 0);
-    // A source receipt proves acquisition, not coverage of the user's facts.
-    // Conversation synthesis must retain complementary acquisition tools.
+    const canConvergeFromCurrentEvidence = currentDecisionView.candidateReadiness.readyForAssessment;
+    // Receipt readiness permits Assessment; it does not establish that the
+    // Agent has collected the requested facts. Only physical artifact
+    // acceptance can request this early candidate-preparation boundary.
     const completionFenceReady = options.requireStructuredCandidateSynthesis !== true
       && completionFencePending
       && stepEvidenceState?.nextAction === "submit_completion_candidate"
-      && hasSuccessfulStepEvidence(toolEvidence);
+      && stepEvidenceState.workProduct.status === "accepted";
     const finalConvergenceAllowed = requestedConvergenceReason !== undefined
       || step !== hardLimit
       || await shouldUseFinalConvergence(options.shouldUseFinalConvergence, {
@@ -1317,7 +1318,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           progressPolicy: options.progressPolicy,
         }));
       }
-      if (!outcome.isError && (acceptanceState?.missingToolEvidenceKinds.length ?? 0) === 0) {
+      const acceptanceView = deriveCurrentDecisionView({ runId: options.runId,
+        resultBindings: options.runtimeContext?.resultBindings,
+        context: options.currentDecisionContext?.(), stepSemanticFrame: options.stepSemanticFrame,
+        evidence: acceptanceState, toolEvidence });
+      if (!outcome.isError && acceptanceView.candidateReadiness.readyForAssessment) {
         if (
           (acceptanceState?.requiredEvidenceKinds.length ?? 0) > 0
           && acceptanceState?.nextAction === "submit_completion_candidate"
@@ -1416,7 +1421,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         maxParallelToolCalls,
         actionTracker: options.actionTracker,
         toolCallLimits,
-        priorToolCallCounts: countToolCallsByName(toolEvidence),
+        priorToolCallCounts: countToolCallsByName([...(options.initialToolCallUsage ?? []), ...toolEvidence]),
         // Each ready call is admitted against the same per-Tool ceiling as a
         // completed response. Later calls beyond that ceiling are rejected;
         // they never roll back a valid, already-dispatched earlier call.
@@ -1811,7 +1816,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       const admittedToolCalls = countEarlyAdmittedToolCalls(earlyOutcomes);
       for (const call of remainingCalls) {
         const limit = toolCallLimits.get(call.name);
-        const priorCalls = toolEvidence.filter((item) => item.toolName === call.name).length;
+        const priorCalls = countToolCallsByName([...(options.initialToolCallUsage ?? []), ...toolEvidence]).get(call.name) ?? 0;
         const admittedCalls = admittedToolCalls.get(call.name) ?? 0;
         if (limit !== undefined && priorCalls + admittedCalls >= limit) {
           const message = `Tool call limit reached for ${call.name}: at most ${limit} call(s) are allowed for this Plan step`;
@@ -2102,7 +2107,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
     const successfulCompletionObservation = convergenceOnly
       && outcomes.some((outcome) => !outcome.isError
-        && completionPreparationDefinitions.some((tool) => tool.name === outcome.call.name));
+        && (completionPreparationDefinitions.some((tool) => tool.name === outcome.call.name)
+          || options.tools.effectOf(outcome.call.name) === "read"));
     if (
       successfulCompletionObservation
       && step === currentLimit()
@@ -2480,9 +2486,9 @@ function normalizeToolCallLimits(
   return normalized;
 }
 
-function countToolCallsByName(evidence: readonly AgentLoopToolEvidence[]): ReadonlyMap<string, number> {
+function countToolCallsByName(evidence: readonly Pick<AgentLoopToolEvidence, "toolCallId" | "toolName">[]): ReadonlyMap<string, number> {
   const counts = new Map<string, number>();
-  for (const item of evidence) counts.set(item.toolName, (counts.get(item.toolName) ?? 0) + 1);
+  for (const item of new Map(evidence.map(item => [item.toolCallId, item])).values()) counts.set(item.toolName, (counts.get(item.toolName) ?? 0) + 1);
   return counts;
 }
 
@@ -2596,10 +2602,6 @@ function isInternalEvidenceMarkupCandidate(value: string): boolean {
     // unaffected.
     || /<\/?think\b[^>]*>/i.test(trimmed)
     || /\btoolResultsOverride\b/i.test(trimmed);
-}
-
-function hasSuccessfulStepEvidence(evidence: readonly AgentLoopToolEvidence[]): boolean {
-  return evidence.some((item) => !item.isError && item.toolName !== "load_skill");
 }
 
 /**

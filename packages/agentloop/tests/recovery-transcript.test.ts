@@ -1,12 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { reconstructRecoveryTranscript } from "../src/runtime/recovery-transcript.ts";
+import { reconstructRecoveryTranscript, selectRecoveryExchanges } from "../src/runtime/recovery-transcript.ts";
 import type { RecoveryEvent } from "../src/runtime/recovery-transcript.ts";
 import { createDecisionCommit } from "../src/runtime/decision-ledger.ts";
 
 function events(...items: Array<[string, Record<string, unknown>]>): RecoveryEvent[] {
   return items.map(([type, data], index) => ({ seq: index + 1, type, data }));
 }
+
+test("a replacement leaf receives only selected native exchanges from a mixed prior batch", () => {
+  const transcript = reconstructRecoveryTranscript({ userInput: "Compare totals", stepId: "original", events: events(
+    ["plan.step.started", { stepId: "original" }],
+    ["assistant.committed", { content: "Narration includes excluded data", privateReasoningContent: "Reasoning includes excluded data", toolCalls: [
+      { id: "keep", name: "query", arguments: { source: "total" } },
+      { id: "exclude", name: "query", arguments: { source: "unrelated" } },
+    ] }],
+    ["tool.completed", { toolCallId: "keep", result: '{"total":42}' }],
+    ["tool.completed", { toolCallId: "exclude", result: '{"unrelated":"private source"}' }],
+    ["candidate.rejected", { output: "Rejected draft", feedback: "Do all downstream work" }],
+  ) });
+  const selected = selectRecoveryExchanges({ transcripts: [transcript, transcript], toolCallIds: new Set(["keep"]), userInput: "Compare totals" });
+  assert.deepEqual(selected.toolEvidence.map(item => item.toolCallId), ["keep"]);
+  assert.deepEqual(selected.messages.map(message => message.role), ["user", "assistant", "tool"]);
+  assert.doesNotMatch(JSON.stringify(selected), /unrelated|excluded data|Rejected draft|downstream/);
+  assert.match(JSON.stringify(selected), /42/);
+});
 
 test("repair ancestry replays disjoint Step exchanges with the exact committed Result identity", () => {
   const resultRef = { schema: "agentloop.resultRef/v1", resultId: "rr_11111111-1111-4111-8111-111111111111" };

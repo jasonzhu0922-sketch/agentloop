@@ -82,6 +82,7 @@ export function createStepExecutionBinding(input: {
   const targetIds = uniqueStrings(input.step.targetIds ?? []);
   return {
     schema: "agentloop.stepExecutionBinding/v1",
+    ...((input.step.inputResultRefs?.length ?? 0) === 0 ? {} : { inputResultRefs: input.step.inputResultRefs }),
     requiredCapabilities,
     resolvedToolNames,
     evidenceProducers,

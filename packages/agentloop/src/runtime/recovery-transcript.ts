@@ -28,6 +28,36 @@ export interface RecoveryTranscript {
   }>;
 }
 
+/** Project whole native exchanges into a new leaf's admitted input scope. */
+export function selectRecoveryExchanges(input: {
+  readonly transcripts: readonly RecoveryTranscript[];
+  readonly toolCallIds: ReadonlySet<string>;
+  readonly userInput: string;
+}): Pick<RecoveryTranscript, "messages" | "toolEvidence"> {
+  const messages: ModelMessage[] = [{ role: "user", content: input.userInput }];
+  const selected = new Set<string>();
+  const observed = new Set<string>();
+  const evidence = new Map<string, AgentLoopToolEvidence>();
+  for (const transcript of input.transcripts) {
+    for (const message of transcript.messages) {
+      if (message.role === "assistant") {
+        const calls = (message.toolCalls ?? []).filter(call => input.toolCallIds.has(call.id) && !selected.has(call.id));
+        if (calls.length === 0) continue;
+        calls.forEach(call => selected.add(call.id));
+        // Reasoning and narration for a mixed batch may depend on excluded
+        // inputs. Keep only the selected native calls in that case.
+        messages.push(calls.length === message.toolCalls?.length ? { ...message, toolCalls: calls }
+          : { role: "assistant", content: "", toolCalls: calls });
+      } else if (message.role === "tool" && selected.has(message.toolCallId) && !observed.has(message.toolCallId)) {
+        observed.add(message.toolCallId);
+        messages.push(message);
+      }
+    }
+    for (const item of transcript.toolEvidence) if (input.toolCallIds.has(item.toolCallId)) evidence.set(item.toolCallId, item);
+  }
+  return { messages, toolEvidence: [...evidence.values()] };
+}
+
 interface AssistantCheckpoint {
   readonly event: RecoveryEvent;
   readonly content: string;

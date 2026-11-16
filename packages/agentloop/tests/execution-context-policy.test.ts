@@ -102,9 +102,14 @@ test("fact-acquisition progress policy keeps observable source evidence obligati
   const policy = buildStepToolProgressPolicy({
     step,
     requiresFileOutput: false,
+    taskProfile: buildTaskProfile({ phase: "execution", intent: "execute", artifactKind: "document" }),
+    expectedArtifactFormat: "markdown",
   });
 
   assert.notEqual(policy, undefined);
+  assert.notEqual(policy?.artifactDeliveryRequired, true);
+  assert.equal(policy?.expectedArtifactKind, undefined, "global artifact hints do not assign file delivery to this Step");
+  assert.equal(policy?.expectedArtifactFormat, undefined);
   assert.deepEqual(policy?.requiredEvidenceKinds, ["source_summary", "record_counts", "structured_extraction_artifact", "delivery_receipt"]);
   assert.equal(policy?.maxExploratoryPrimarySteps, 8);
   assert.equal(policy?.exploratoryToolNames.includes("read_source"), true);

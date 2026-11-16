@@ -1,5 +1,5 @@
 import type { SqlConnection } from "../storage/connection.ts";
-import { parseRuntimeResult, parseRuntimeResultBinding, parseRuntimeResultJson, type RuntimeResultRecord } from "./runtime-result.ts";
+import { parseRuntimeResult, parseRuntimeResultBinding, parseRuntimeResultJson, parseRuntimeResultRef, type RuntimeResultRecord } from "./runtime-result.ts";
 import type { RuntimeDeliveryReceipt } from "./contracts.ts";
 
 interface ActionResultRow {
@@ -29,6 +29,35 @@ export class RuntimeResultRepository {
 
   constructor(database: SqlConnection) {
     this.database = database;
+  }
+
+  /** Enumerate canonical producer records, without granting any leaf a read. */
+  async listPlanResults(input: { runId: string; planId: string; actorUserId?: string; resultId?: string }): Promise<readonly RuntimeResultRecord[]> {
+    const plan = await this.database.prepare(`SELECT plans.id FROM plans JOIN runs ON runs.id = plans.run_id
+      WHERE plans.id = ? AND plans.run_id = ? ${input.actorUserId === undefined ? "" : "AND runs.owner_user_id = ?"}`)
+      .get(...(input.actorUserId === undefined ? [input.planId, input.runId] : [input.planId, input.runId, input.actorUserId]));
+    if (plan === undefined) return [];
+    const actions = await this.database.prepare(`SELECT id, step_id, result_ref, metadata_json FROM runtime_actions
+      WHERE run_id = ? AND plan_id = ? AND state = 'succeeded' AND result_ref IS NOT NULL
+        ${input.resultId === undefined ? "" : "AND result_ref = ?"} ORDER BY created_at, id`)
+      .all<{ id: string; step_id: string; result_ref: string; metadata_json: string }>(...(input.resultId === undefined
+        ? [input.runId, input.planId] : [input.runId, input.planId, input.resultId]));
+    const results: RuntimeResultRecord[] = [];
+    for (const action of actions) {
+      const result = resultFromMetadata(action.metadata_json);
+      if (result?.kind === "tool" && result.ref.resultId === action.result_ref && result.producer.actionId === action.id
+        && result.producer.runId === input.runId && result.producer.planId === input.planId && result.producer.stepId === action.step_id) results.push(result);
+    }
+    if (input.resultId !== undefined && results.length > 0) return results;
+    const steps = await this.database.prepare("SELECT step_id, evidence_json FROM plan_steps WHERE plan_id = ? AND status = 'completed' ORDER BY position")
+      .all<StepResultRow>(input.planId);
+    for (const step of steps) {
+      const result = resultFromEvidence(step.evidence_json);
+      if (result?.kind === "step" && (input.resultId === undefined || result.ref.resultId === input.resultId)
+        && result.producer.runId === input.runId && result.producer.planId === input.planId
+        && result.producer.stepId === step.step_id) results.push(result);
+    }
+    return results;
   }
 
   /** Read a completed Run's delivery receipt through its canonical Result refs. */
@@ -79,6 +108,11 @@ export class RuntimeResultRepository {
     readonly actorUserId?: string;
     readonly conversationId?: string;
   }): Promise<RuntimeResultRecord | undefined> {
+    if (input.actorUserId !== undefined) {
+      const owner = await this.database.prepare("SELECT id FROM runs WHERE id = ? AND owner_user_id = ?")
+        .get(input.runId, input.actorUserId);
+      if (owner === undefined) return undefined;
+    }
     const action = await this.database.prepare(`
       SELECT metadata_json
       FROM runtime_actions
@@ -92,12 +126,18 @@ export class RuntimeResultRepository {
     if (actionResult?.ref.resultId === input.resultId && actionResult.kind === "tool") return actionResult;
 
     const currentStep = await this.database.prepare(`
-      SELECT steps.dependencies_json
+      SELECT steps.dependencies_json, steps.execution_binding_json
       FROM plan_steps AS steps
       JOIN plans ON plans.id = steps.plan_id
       WHERE steps.plan_id = ? AND steps.step_id = ? AND plans.run_id = ?
-    `).get(input.planId, input.stepId, input.runId) as { dependencies_json: string } | undefined;
+    `).get(input.planId, input.stepId, input.runId) as { dependencies_json: string; execution_binding_json: string | null } | undefined;
     if (currentStep === undefined) return undefined;
+    const binding = parseRecord(currentStep.execution_binding_json);
+    if (binding?.schema === "agentloop.stepExecutionBinding/v1" && Array.isArray(binding.inputResultRefs)
+      && binding.inputResultRefs.some(ref => parseRuntimeResultRef(ref)?.resultId === input.resultId)) {
+      const result = (await this.listPlanResults(input)).find(result => result.ref.resultId === input.resultId);
+      if (result !== undefined) return result;
+    }
     const dependencies = parseStringArray(currentStep.dependencies_json);
     if (dependencies.length > 0) {
       const candidates = await this.database.prepare(`

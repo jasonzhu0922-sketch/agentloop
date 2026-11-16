@@ -71,9 +71,9 @@ for (const mode of ["complete", "stream"] as const) {
         input: "列出客户和金额",
         grant,
         tools: new ToolRegistry([source, ...createComputerTools(new ComputerExecutor(root))]),
-        // Receipt readiness triggers completion preparation on turn two. The
-        // file must be read then, leaving turn three for independent Assessment.
-        maxSteps: 3,
+        // The normal execution budget requests preparation on turn two.
+        // Its exact read still executes, with one observation-consumption turn.
+        maxSteps: 2,
         progressPolicy: runtimeStepToolProgressPolicy(["source_summary"], { scope: "artifact" }),
         model: {
           limits: TEST_MODEL_LIMITS,
@@ -99,12 +99,38 @@ for (const mode of ["complete", "stream"] as const) {
       assert.equal(modelCalls, 3);
       assert.equal(assessments, 1);
       assert.equal(events.filter((event) => event.type === "tool.completed" && event.data.toolCallId === "read-json").length, 1);
+      assert.equal(events.filter(event => event.type === "loop.final_convergence_grace_granted"
+        && event.data.reason === "completion_observation_consumed").length, 1);
       assert.equal(events.some((event) => event.type === "loop.convergence_reopened" || event.type === "tool.rejected"), false);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
 }
+
+test("repeated read observations cannot repeatedly extend the execution budget", async () => {
+  let reads = 0;
+  const events: RuntimeEvent[] = [];
+  const read: RuntimeTool<unknown> = {
+    name: "read_values", effect: "read", description: "Read bounded values", inputSchema: { type: "object" },
+    executionMode: "parallel", replaySafe: true, parse: value => value,
+    execute: async () => { reads += 1; return { values: [0], evidenceReceipt: {
+      schema: "agentloop.toolEvidenceReceipt/v1", evidenceKinds: { satisfied: ["source_summary"], caveated: [], failed: [] },
+    } }; },
+  };
+  const grant: CapabilityGrant = { actorUserId: "user-1", runId: "bounded-read-continuation", depth: 0,
+    allowedToolNames: new Set([read.name]), allowedSkillIds: new Set(), visibleDirectories: [], uploadedSources: [], skillExecutionRoots: [] };
+  await assert.rejects(runAgentLoop({ runId: grant.runId, systemPrompt: "Answer from the read values.", input: "Read values", grant,
+    tools: new ToolRegistry([read]), maxSteps: 2,
+    progressPolicy: runtimeStepToolProgressPolicy(["source_summary"], { scope: "artifact" }),
+    model: { limits: TEST_MODEL_LIMITS, complete: async () => ({ content: "", finishReason: "tool_calls",
+      toolCalls: [{ id: `read-${reads}`, name: read.name, arguments: {} }] }) },
+    emit: event => { events.push(event); },
+  }), (error: any) => error.code === "RUN_LIMIT_EXCEEDED");
+  assert.equal(reads, 3, "two budgeted turns plus one observation-consumption turn");
+  assert.equal(events.filter(event => event.type === "loop.final_convergence_grace_granted"
+    && event.data.reason === "completion_observation_consumed").length, 1);
+});
 
 test("completion preparation rejects an ungranted tool instead of executing or silently discarding it", async () => {
   let modelCalls = 0;

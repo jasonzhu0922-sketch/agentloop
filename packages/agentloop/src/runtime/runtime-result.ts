@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { ExecutionPlan, PlanStep } from "../planning/contracts.ts";
+import type { AgentLoopToolEvidence } from "./contracts.ts";
 
 export type RuntimeResultKind = "tool" | "step" | "run";
 
@@ -26,6 +28,45 @@ export interface RuntimeResultBinding {
   readonly schema: "agentloop.resultBinding/v1";
   readonly result: RuntimeResultRef;
   readonly relation: RuntimeResultBindingRelation;
+}
+
+/** The same admitted inputs are used by Context, execution and Result publication. */
+export function runtimeResultBindingsForStep(
+  plan: Pick<ExecutionPlan, "resultBindings" | "steps">,
+  step: Pick<PlanStep, "dependencies"> & Partial<Pick<PlanStep, "executionBinding">>,
+): readonly RuntimeResultBinding[] {
+  const bindings: RuntimeResultBinding[] = [...(plan.resultBindings ?? []),
+    ...(step.executionBinding?.inputResultRefs ?? []).map(result => ({ schema: "agentloop.resultBinding/v1" as const, result, relation: "dependency" as const })),
+    ...step.dependencies.flatMap(id => {
+    const result = plan.steps.find(candidate => candidate.id === id)?.evidence?.publishedResult;
+    return result === undefined ? [] : [{ schema: "agentloop.resultBinding/v1" as const, result: result.ref, relation: "dependency" as const }];
+  })];
+  const seen = new Set<string>();
+  return bindings.filter(binding => {
+    const identity = `${binding.relation}:${binding.result.resultId}`;
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
+/** Step dependencies and explicitly selected inputs must be observed. Other Plan bindings remain available context. */
+export function unreadRuntimeResultRefs(
+  bindings: readonly RuntimeResultBinding[],
+  evidence: readonly AgentLoopToolEvidence[],
+  selectedInputs: readonly RuntimeResultRef[] = [],
+): readonly RuntimeResultRef[] {
+  const consumed = new Set(evidence.flatMap(call => {
+    if (call.isError || call.operationStatus === "failed" || call.invocationStatus === "failed"
+      || call.invocationStatus === "rejected" || call.toolName !== "read_result") return [];
+    let value: unknown;
+    try { value = JSON.parse(call.result); } catch { return []; }
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return [];
+    const ref = parseRuntimeResultRef((value as Record<string, unknown>).sourceResultRef);
+    return ref === undefined ? [] : [ref.resultId];
+  }));
+  const required = [...selectedInputs, ...bindings.filter(binding => binding.relation === "dependency").map(binding => binding.result)];
+  return [...new Map(required.filter(ref => !consumed.has(ref.resultId)).map(ref => [ref.resultId, ref])).values()];
 }
 
 export function parseRuntimeResultBinding(value: unknown): RuntimeResultBinding | undefined {

@@ -4,15 +4,15 @@ import { admitPlan } from "../src/planning/admission.ts";
 import { goalCriterionBasis } from "../src/planning/criterion-basis.ts";
 import { PlanRepository } from "../src/planning/plan-repository.ts";
 import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
-import { ModelRecoveryPlanner, parseRecoveryDecision } from "../src/runtime/recovery-planning.ts";
+import { ModelRecoveryPlanner, parseRecoveryDecision, recoveryContinuationStepIds } from "../src/runtime/recovery-planning.ts";
 import { RunService } from "../src/runtime/run-service.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
-import { createRuntimeResult, type RuntimeResultBinding } from "../src/runtime/runtime-result.ts";
+import { createRuntimeResult, runtimeResultBindingsForStep, type RuntimeResultBinding } from "../src/runtime/runtime-result.ts";
 import { RuntimeResultRepository } from "../src/runtime/runtime-result-repository.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
-import { approvingTestAssessor, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
+import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
 
 function fixture() {
   const userInput = "Read the two recorded totals once and explain their difference.";
@@ -46,6 +46,17 @@ function call(planRevision: unknown) {
   return { id: "decision", name: "submit_recovery_decision", arguments: { actionId: "review", expectedActionRevision: 1,
     decision: "revise_plan", rationale: "Preserve facts and repair only the answer.", evidenceRefs: [], planRevision } };
 }
+
+test("a delivery Gap excludes independent and downstream replacement leaves from its repair scope", () => {
+  const { plan } = fixture();
+  const answer = plan.steps.find(step => step.id === "answer")!;
+  const scoped = { ...answer, id: "answer-repair", dependencies: ["new-facts"] };
+  const prerequisite = { ...answer, id: "new-facts", executionBinding: { ...answer.executionBinding, targetIds: [] }, dependencies: [] };
+  const unrelated = { ...answer, id: "other-target", executionBinding: { ...answer.executionBinding, targetIds: ["other"] }, dependencies: [] };
+  const downstream = { ...unrelated, id: "downstream", dependencies: [scoped.id] };
+  const revised = { ...plan, steps: [prerequisite, scoped, unrelated, downstream] };
+  assert.deepEqual(recoveryContinuationStepIds(plan, revised, { stepId: answer.id }), [prerequisite.id, scoped.id]);
+});
 
 test("recovery preserves authorized prior-round Result reads through two persisted revisions", async () => {
   const { state, plan } = fixture();
@@ -106,6 +117,119 @@ test("Recovery cannot inherit a different Run's Plan or accept model-authored Re
   assert.throws(() => admitPlan({ runId: state.runId, canonicalState: state, currentPlan: { ...plan, runId: "foreign-run", resultBindings: [binding] },
     proposal, availableSkills: [], availableToolNames: new Set() }), /Current Plan belongs to another Run/);
 });
+
+test("repair selects a committed tool Result without granting sibling leaves or another owner access", async () => {
+  const { state, plan } = fixture();
+  const database = new AppDatabase(":memory:");
+  try {
+    await database.prepare("INSERT INTO runs(id, owner_user_id, depth, allow_dangerous_tools, status, input, created_at) VALUES (?, 'owner', 0, 0, 'running', ?, 1)")
+      .run(state.runId, state.intent.userInput);
+    const repository = new PlanRepository(database);
+    await repository.create(plan);
+    const actions = new RuntimeActionRepository(database);
+    let result = createRuntimeResult({ kind: "tool", producer: { runId: state.runId }, value: {}, publication: { status: "committed" } });
+    await actions.execute({ runId: state.runId, planId: plan.id, stepId: "answer", kind: "tool_call", replayPolicy: "safe", deadlineMs: 1000,
+      metadata: { toolCallId: "query", toolName: "query_totals" }, prepareResult: async (value, action) => {
+        result = createRuntimeResult({ kind: "tool", producer: { runId: state.runId, planId: plan.id, stepId: "answer",
+          actionId: action.id, toolCallId: "query", toolName: "query_totals" }, value, publication: { status: "committed" } });
+        return result;
+      } }, async () => ({ totals: [80, 60] }));
+    const results = new RuntimeResultRepository(database);
+    assert.deepEqual(await results.listPlanResults({ runId: state.runId, planId: plan.id, actorUserId: "foreign" }), []);
+    const available = await results.listPlanResults({ runId: state.runId, planId: plan.id, actorUserId: "owner" });
+    assert.deepEqual(available.map(item => item.ref), [result.ref]);
+    const proposal = revision(plan.goal);
+    const selected = { ...proposal, steps: [{ ...proposal.steps[0], inputResultRefs: [result.ref] }] };
+    assert.throws(() => admitPlan({ runId: state.runId, canonicalState: state, currentPlan: plan, proposal: selected,
+      availableSkills: [], availableToolNames: new Set() }), /unavailable Runtime Result/);
+    const decision = parseRecoveryDecision(call(selected), state, plan);
+    const admitted = admitPlan({ runId: state.runId, canonicalState: state, currentPlan: plan, proposal: decision.planRevision!,
+      availableResultRefs: available.map(item => item.ref), availableSkills: [], availableToolNames: new Set() });
+    const action = await actions.dispatch({ runId: state.runId, planId: plan.id, stepId: "answer", kind: "planning", replayPolicy: "safe", deadlineMs: 1000 });
+    await repository.revise({ planId: plan.id, proposal: admitted, retiredStepIds: ["answer"], reason: "Reuse query", actionId: action.id });
+    // A fresh reader and hydrated Plan exercise restart, rather than in-memory authority.
+    const reloaded = await repository.get(plan.id);
+    const repair = reloaded.steps.find(step => step.id === "answer.repair.2")!;
+    assert.deepEqual(repair.executionBinding.inputResultRefs, [result.ref]);
+    assert.ok(runtimeResultBindingsForStep(reloaded, repair).some(binding => binding.result.resultId === result.ref.resultId && binding.relation === "dependency"));
+    const reader = new RuntimeResultRepository(database);
+    assert.deepEqual(await reader.readAuthorized({ resultId: result.ref.resultId, runId: state.runId, planId: plan.id,
+      stepId: repair.id, actorUserId: "owner" }), result);
+    for (const [stepId, actorUserId] of [["facts", "owner"], [repair.id, "foreign"]]) {
+      assert.equal(await reader.readAuthorized({ resultId: result.ref.resultId, runId: state.runId, planId: plan.id, stepId, actorUserId }), undefined);
+    }
+    const nextProposal = { ...proposal, steps: [{ ...proposal.steps[0], id: "answer.repair.3", inputResultRefs: repair.inputResultRefs }] };
+    const next = admitPlan({ runId: state.runId, canonicalState: state, currentPlan: reloaded, proposal: nextProposal,
+      availableSkills: [], availableToolNames: new Set() });
+    assert.deepEqual(next.steps.find(step => step.id === "answer.repair.3")!.executionBinding.inputResultRefs, [result.ref]);
+  } finally { database.close(); }
+});
+
+for (const recoveryMode of ["direct", "planned"] as const) {
+  test(`${recoveryMode} recovery reads the original query Result and delivers without querying again`, async () => {
+    const database = new AppDatabase(":memory:");
+    let queries = 0;
+    let resultId = "";
+    let reads = 0;
+    try {
+      const runs = new RunService({ database, skills: new SkillService(database), maxSteps: 5, plannerFactory: singleStepTestPlanner,
+        tools: [{ name: "observe_total", description: "Observe a total", inputSchema: { type: "object" }, executionMode: "parallel", replaySafe: true,
+          parse: value => value, execute: async () => ({ total: 42, queries: ++queries }) }],
+        assessorFactory: () => ({ assess: async input => {
+          const base = await approvingTestAssessor().assess(input);
+          if (input.step.id !== "test-step") return base;
+          return { ...base, approved: false, criteria: base.criteria.map(item => ({ ...item, satisfied: false })), feedback: "Reuse the observed total and correct the answer.",
+            failedBoundary: { stepId: input.step.id, missingEvidenceKinds: [], violatedSkillRequirements: [],
+              reusableEvidenceRefs: ["original-query"], suggestedRepairShape: recoveryMode === "direct" ? "repair_leaf" as const : "revise_plan" as const } };
+        } }),
+        planRevisionAssessorFactory: () => ({ assess: async input => {
+          const repair = input.proposal.steps.find(step => step.id !== "test-step")!;
+          assert.deepEqual(repair.inputResultRefs, [{ schema: "agentloop.resultRef/v1", resultId }]);
+          return { approved: true, feedback: "", evidenceRefs: [resultId] };
+        } }),
+        modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+          if (request.tools[0]?.name === "submit_recovery_decision") {
+            const context = JSON.parse(request.runtimeContext!.content);
+            const result = context.availableResults.find((result: any) => result.producer.toolCallId === "original-query");
+            assert.equal(result.result.resultId, resultId);
+            const failed = context.currentPlan.steps.find((step: any) => step.id === "test-step");
+            return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "plan-repair", name: "submit_recovery_decision", arguments: {
+              actionId: context.recoveryAction.id, expectedActionRevision: context.recoveryAction.revision, decision: "revise_plan", rationale: "Correct the answer using the existing observation.", evidenceRefs: [resultId],
+              planRevision: { goal: context.currentPlan.goal, selectedSkillIds: [], retainedStepIds: [], steps: [{ id: "answer-repair", objective: failed.objective,
+                dependencies: [], inputResultRefs: [result.result], requiredCapabilities: ["conversation_delivery"], skillIds: [], targetIds: failed.executionBinding.targetIds,
+                successCriteria: [{ id: "answer", description: "State the observed total.", source: "task" }] }] },
+            } }] };
+          }
+          const context = request.runtimeContext!.content;
+          const frame = JSON.parse(context.match(/<loop_step_frame source="server">\n([^\n]+)\n/)![1]);
+          const stepId = frame.currentDecisionView.identity.stepId;
+          if (queries === 0) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "original-query", name: "observe_total", arguments: {} }] };
+          resultId ||= context.match(/"resultId":"(rr_[0-9a-f-]{36})"/)?.[1]
+            ?? JSON.parse(request.messages.find(message => message.role === "tool" && message.name === "observe_total")!.content as string).resultRef.resultId;
+          if (stepId === "test-step") return { content: "The total is incorrect.", finishReason: "stop", toolCalls: [] };
+          if (reads === 0) {
+            assert.equal(frame.currentDecisionView.nextAction, "read_bound_results");
+            reads += 1;
+            return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "consume-original", name: "read_result", arguments: { resultId } }] };
+          }
+          assert.ok(request.messages.some(message => message.role === "tool" && message.name === "read_result" && String(message.content).includes('42')));
+          return { content: "The observed total is 42.", finishReason: "stop", toolCalls: [] };
+        } }),
+      });
+      const run = await runs.execute("owner", "Read the total once and report it.");
+      const events = await runs.events("owner", run.id);
+      assert.equal(run.status, "completed", JSON.stringify(events.filter(event => /failed|rejected/.test(event.type))));
+      assert.equal(queries, 1);
+      assert.equal(reads, 1);
+      const applied = events.find(event => event.type === "recovery.plan_revision_applied")!;
+      assert.deepEqual((applied.data.inputResultBindings as any[])[0].resultRefs, [{ schema: "agentloop.resultRef/v1", resultId }]);
+      const plan = await new PlanRepository(database).getByRun(run.id);
+      const published = plan.steps.find(step => step.retiredAt === undefined)!.evidence!.publishedResult!;
+      assert.ok(published.inputs.some(ref => ref.resultId === resultId));
+      assert.equal(events.filter(event => event.type === "run.completed").length, 1);
+    } finally { database.close(); }
+  });
+}
 
 test("recovery retains the exact persisted definition, criteria, provenance and completed evidence", async () => {
   const { state, plan } = fixture();

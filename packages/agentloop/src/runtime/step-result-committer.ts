@@ -1,7 +1,7 @@
 import { AppError } from "../shared/errors.ts";
 import type { ExecutionPlan, PlanStep, SkillComplianceAssessment, StepEvidence } from "../planning/contracts.ts";
 import type { PlanRepository } from "../planning/plan-repository.ts";
-import { createRuntimeResult, parseRuntimeResultRef, type RuntimeResultRecord, type RuntimeResultRef } from "./runtime-result.ts";
+import { createRuntimeResult, parseRuntimeResultRef, runtimeResultBindingsForStep, unreadRuntimeResultRefs, type RuntimeResultRecord, type RuntimeResultRef } from "./runtime-result.ts";
 
 /** The only boundary allowed to publish a formal Step result. */
 export class StepResultCommitter {
@@ -38,7 +38,12 @@ export class StepResultCommitter {
         409,
       );
     }
-    assertDependencyResultsWereRead(persistedPlan, step, input.evidence.toolCalls);
+    const resultBindings = runtimeResultBindingsForStep(persistedPlan, step);
+    const unread = unreadRuntimeResultRefs(resultBindings, input.evidence.toolCalls);
+    if (unread.length > 0) {
+      throw new AppError("ASSESSMENT_ERROR",
+        `Step result publication requires read_result consumption of bound Results: ${unread.map(ref => ref.resultId).join(", ")}`, 409);
+    }
     const result = createRuntimeResult({
       kind: "step",
       producer: {
@@ -48,7 +53,7 @@ export class StepResultCommitter {
       },
       value: input.evidence.candidateOutput,
       inputs: uniqueResultRefs([
-        ...dependencyResultRefs(persistedPlan, step),
+        ...resultBindings.filter(binding => binding.relation === "dependency").map(binding => binding.result),
         ...input.evidence.toolCalls.flatMap((toolCall) => toolCall.resultRef === undefined ? [] : [toolCall.resultRef]),
         // A Result observation does not publish another Result, but its
         // original identity remains an input of the answer it supports.
@@ -123,37 +128,6 @@ export function isCaveatedStepResult(
       && criterion.satisfied !== true
       && criterion.blocking === false
     );
-}
-
-function dependencyResultRefs(plan: ExecutionPlan, step: PlanStep): RuntimeResultRef[] {
-  return step.dependencies.flatMap((dependencyId) => {
-    const result = plan.steps.find((candidate) => candidate.id === dependencyId)?.evidence?.publishedResult;
-    return result === undefined ? [] : [result.ref];
-  });
-}
-
-/** Final publication fence: a dependency Result can contribute only after the current Step read that same opaque identity. */
-function assertDependencyResultsWereRead(
-  plan: ExecutionPlan,
-  step: PlanStep,
-  toolCalls: StepEvidence["toolCalls"],
-): void {
-  const required = dependencyResultRefs(plan, step);
-  if (required.length === 0) return;
-  const consumed = new Set(toolCalls.flatMap((toolCall) => {
-    if (toolCall.isError || toolCall.toolName !== "read_result") return [];
-    const value = parseRecord(toolCall.result);
-    const sourceResultRef = parseRecord(value?.sourceResultRef);
-    const resultId = typeof sourceResultRef?.resultId === "string" ? sourceResultRef.resultId : undefined;
-    return resultId === undefined ? [] : [resultId];
-  }));
-  const unread = required.filter((ref) => !consumed.has(ref.resultId));
-  if (unread.length === 0) return;
-  throw new AppError(
-    "ASSESSMENT_ERROR",
-    `Step result publication requires read_result consumption of dependency Results: ${unread.map((ref) => ref.resultId).join(", ")}`,
-    409,
-  );
 }
 
 function parseRecord(value: unknown): Record<string, unknown> | undefined {

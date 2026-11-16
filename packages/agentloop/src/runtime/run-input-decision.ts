@@ -25,8 +25,8 @@ export async function decideRunInput(input: {
     phase: "planning",
     systemPrompt: [
       "Interpret one user message steering an active plan-first Run. Return exactly one submit_run_input_decision call.",
-      "answer: answer a progress/question using only the supplied persisted facts; unknowns remain unknown. The original goal continues.",
-      "amend: the user clearly changes or supplements the goal. Preserve every prior obligation unless the user explicitly supersedes it. Provide the full effectiveGoal, full userConstraints and full taskIntent inventory, retaining stable targetIds for unchanged deliveries. The Runtime will revise and re-admit the Plan before acting.",
+      "answer: answer a progress/question using only the supplied persisted facts; unknowns remain unknown. The original goal continues. Use this only when the message asks for information and does not direct subsequent execution.",
+      "amend: the user changes or supplements the goal, scope, or execution constraints. Requests to finish, summarize now using existing evidence, or stop further acquisition change subsequent execution even when the delivery goal stays the same. Preserve every prior obligation unless the user explicitly supersedes it; retain missing facts as explicit caveats without claiming them verified. Provide the full effectiveGoal, full userConstraints and full taskIntent inventory, retaining stable targetIds for unchanged deliveries. The Runtime will revise and re-admit the Plan before acting, reusing existing bound Results.",
       "clarify: the message is ambiguous, contradicts an open HIL request, or requires a new attachment, source, permission, account or Runtime. Explain the precise missing decision. Never treat ordinary input as approval or an answer to a structured HIL request.",
       "cancel: only an explicit request to stop the current Run.",
       "Input does not grant new Tool, filesystem, model, Runtime or account authority. Source IDs and permissions remain bound.",

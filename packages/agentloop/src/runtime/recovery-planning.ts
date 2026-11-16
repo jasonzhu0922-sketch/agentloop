@@ -4,6 +4,7 @@ import { requireRecord, requireString, requireStringArray } from "../shared/vali
 import { MODEL_CRITERION_BASIS_SCHEMA, parseModelCriterionBasis } from "../planning/criterion-basis.ts";
 import type {
   EvidenceContract,
+  ExecutionPlan,
   FailedBoundary,
   OutcomeLeafRole,
   PlanProposal,
@@ -22,6 +23,7 @@ import { canonicalDeliveryPlanScope, type CanonicalGoalGap, type CanonicalRunSta
 import type { ModelAdapter, ModelInvocation, ModelToolCall, RuntimeContextSnapshot } from "./contracts.ts";
 import type { RuntimeActionRecord } from "./runtime-action-repository.ts";
 import { buildUserAuthorityContext, USER_AUTHORITY_INSTRUCTION, type RuntimeUserAuthorityContext } from "./user-authority.ts";
+import { parseRuntimeResultRef, RUNTIME_RESULT_ID_PATTERN, type RuntimeResultCard } from "./runtime-result.ts";
 
 export type RecoveryDecisionKind = "resume_step" | "revise_plan" | "ask_user" | "fail";
 
@@ -49,6 +51,8 @@ export interface RecoveryPlannerInput {
   readonly availableTools?: readonly PlanningToolSummary[];
   readonly availableSkills?: readonly { readonly id: string; readonly name: string; readonly description: string }[];
   readonly availableCapabilities?: readonly PlanningCapability[];
+  /** Readable producer records offered for explicit input selection, not acceptance evidence. */
+  readonly availableResults?: readonly Pick<RuntimeResultCard, "result" | "producer" | "kind" | "summary" | "summaryTruncated" | "characters">[];
   /** Unsafe Actions whose effect remains unknown at this Recovery boundary. */
   readonly unresolvedActionEffects?: readonly Readonly<{
     readonly actionId: string;
@@ -61,6 +65,29 @@ export interface RecoveryPlannerInput {
 
 export interface RecoveryPlanner {
   decide(input: RecoveryPlannerInput, signal?: AbortSignal): Promise<RecoveryDecisionProposal>;
+}
+
+/** A Gap follows the replacement producers and their prerequisites, not every new leaf. */
+export function recoveryContinuationStepIds(current: ExecutionPlan, revised: ExecutionPlan, gap: Pick<CanonicalGoalGap, "stepId" | "repairScopeStepIds">): readonly string[] {
+  const priorScope = new Set(gap.repairScopeStepIds ?? (gap.stepId === undefined ? [] : [gap.stepId]));
+  const candidates = revised.steps.filter(step => step.kind === "leaf" && step.retiredAt === undefined
+    && (!current.steps.some(old => old.id === step.id) || priorScope.has(step.id)));
+  const affectedTargets = new Set(current.steps.filter(step => priorScope.has(step.id)).flatMap(step => step.executionBinding.targetIds));
+  // Acquisition-only boundaries have no delivery ownership. Their replacement
+  // graph is the local continuation and must be assessed as a whole.
+  if (affectedTargets.size === 0) return candidates.map(step => step.id);
+  const seeds = candidates.filter(step => step.executionBinding.targetIds.some(id => affectedTargets.has(id)));
+  if (seeds.length === 0) return [];
+  const scope = new Set(seeds.map(step => step.id));
+  const byId = new Map(candidates.map(step => [step.id, step]));
+  const visit = (id: string) => {
+    for (const dependency of byId.get(id)?.dependencies ?? []) {
+      if (!byId.has(dependency) || scope.has(dependency)) continue;
+      scope.add(dependency); visit(dependency);
+    }
+  };
+  seeds.forEach(step => visit(step.id));
+  return candidates.filter(step => scope.has(step.id)).map(step => step.id);
 }
 
 const SUBMIT_RECOVERY_DECISION_TOOL = {
@@ -104,6 +131,7 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
       "If the failed boundary shows the current Plan's evidence contract is wrong for the evidence that actually exists, prefer revise_plan and repair the Plan boundary rather than resubmitting the same step.",
       "Preserve unchanged Steps only by listing their ids in retainedStepIds; Runtime loads their exact persisted definitions, criteria, provenance and bindings. Never copy or rewrite an existing Step into steps. All completed active Steps must be retained. To change an unfinished Step or its dependencies, omit its id from retainedStepIds and create a new Step id. Every new step must explicitly declare targetIds, dependencies, skillIds, requiredCapabilities and successCriteria. Current bindings are in currentPlan.steps[].executionBinding.targetIds. Schedule every outstanding canonical delivery target exactly once on its producing or adopting leaf. deliveryPlanScope.acceptedTargets already have assessed Run-owned realizations; preserve them without assigning them to a new Step or reproducing their artifacts, even when their original mixed-delivery Step is retired; use targetIds: [] for a prerequisite that owns no user-visible target. Do not infer ownership from criteria or requiredFacts[].basis.targetIds. Runtime regenerates delivery_target criteria for new Steps; omit those derived criteria from new definitions.",
       "Execution-method criteria must never be blocking. Reuse collected evidence; do not add an extra search or verification step unless it can resolve a material gap or contradiction, or is needed for an explicit user constraint.",
+      "Bind reusable Results explicitly in each new Step's inputResultRefs, choosing exact Result refs from availableResults or currentPlan's persisted input bindings. A tool call id, path, rationale or evidenceRefs citation does not grant read_result access. New leaves must consume selected inputs with read_result; a committed observation is not proof of an approved result. Bind only inputs relevant to that leaf, and preserve required inputs when replacing a dependent leaf.",
       "Submit basis metadata (kind, targetIds, rationale) only. Omit basis.intentId and basis.requirement, including when copying currentPlan criteria or facts: Runtime binds both from canonicalState.intent. A rationale must justify the condition; binding provenance does not prove that a derived condition is necessary.",
       "Within every revised Step, each success criterion id must appear exactly once. Copy each existing criterion at most once; do not duplicate a criterion while adding or preserving a delivery condition. Runtime derives delivery_target:<targetId> criteria from targetIds, so never submit those criteria in successCriteria.",
       "currentPlan is read-only context. Its projected successCriteria and requiredFacts help design new replacement Steps; they are not a lossless representation for resubmitting an existing Step. runtimeDerivedSuccessCriteria preserves observed Runtime obligations for review; never copy that field or its entries into planRevision. Retained Step definitions are loaded by Runtime; canonical targets and targetIds regenerate delivery obligations only for new Steps.",
@@ -257,6 +285,7 @@ function recoveryRuntimeContext(input: RecoveryPlannerInput): RuntimeContextSnap
       availableTools: input.availableTools,
       availableSkills: input.availableSkills,
       availableCapabilities: input.availableCapabilities,
+      availableResults: input.availableResults,
       unresolvedActionEffects: input.unresolvedActionEffects,
       userResponses: input.userResponses,
       referencedEvidenceEvents,
@@ -372,6 +401,7 @@ function parseStep(value: unknown, index: number, canonicalState: CanonicalRunSt
   }
   return {
     id: requireString(record.id, `planRevision.steps[${index}].id`, { max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }),
+    ...(record.inputResultRefs === undefined ? {} : { inputResultRefs: parseInputResultRefs(record.inputResultRefs) }),
     ...(record.kind === undefined ? {} : { kind: parseStepKind(record.kind, index) }),
     ...(record.parentId === undefined ? {} : { parentId: requireString(record.parentId, `planRevision.steps[${index}].parentId`, { max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }) }),
     objective: requireString(record.objective, `planRevision.steps[${index}].objective`, { max: 20_000 }),
@@ -386,6 +416,15 @@ function parseStep(value: unknown, index: number, canonicalState: CanonicalRunSt
     ...(record.evidenceContract === undefined ? {} : { evidenceContract: parseEvidenceContract(record.evidenceContract, index) }),
     successCriteria,
   };
+}
+
+function parseInputResultRefs(value: unknown) {
+  if (!Array.isArray(value) || value.length > 100) throw badRequest("inputResultRefs must be an array of at most 100 Result refs");
+  return value.map(ref => {
+    const parsed = parseRuntimeResultRef(ref);
+    if (parsed === undefined) throw badRequest("inputResultRefs contains an invalid Runtime Result ref");
+    return parsed;
+  });
 }
 
 function parseRecoveryRequiredFacts(value: unknown, canonicalState: CanonicalRunState): NonNullable<PlanStepProposal["requiredFacts"]> {
@@ -496,6 +535,11 @@ function planProposalSchema(): Record<string, unknown> {
     required: ["id", "objective", "dependencies", "skillIds", "requiredCapabilities", "targetIds", "successCriteria"],
     properties: {
       id: { type: "string" }, kind: { type: "string", enum: ["leaf", "milestone"] }, parentId: { type: "string" },
+      inputResultRefs: { type: "array", maxItems: 100, description: "Existing Runtime Result inputs selected from availableResults; Runtime validates and binds them to this Step.", items: {
+        type: "object", additionalProperties: false, required: ["schema", "resultId"], properties: {
+          schema: { const: "agentloop.resultRef/v1" }, resultId: { type: "string", pattern: RUNTIME_RESULT_ID_PATTERN },
+        },
+      } },
       objective: { type: "string" }, dependencies: { type: "array", items: { type: "string" } },
       role: { type: "string", enum: ["fact_acquisition", "produce", "deliver", "repair"] },
       refinementState: { type: "string", enum: ["not_refinable", "pending_facts", "ready_to_refine", "refining", "refined"] },

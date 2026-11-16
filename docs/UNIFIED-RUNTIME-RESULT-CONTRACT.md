@@ -228,6 +228,8 @@ JSON Result 支持 JSON Pointer 与数组窗口；文本或完整序列化内容
 
 当 JSON Pointer 选中字符串（例如命令 Result 的 `/stdout`）时，`characterOffset` / `characterLimit` 作用于该原始字符串，返回 `content`、`nextCharacterOffset` 和同一 `sourceResultRef`。字符串可以按窗口读完整，不因超过单次上限而改走文件路径协议。
 
+`computer_read_json` 的数组查询返回原文件范围及 `nextOffset`，末页为 `null`。`read_result` 的数组分页只针对已持久化的切片，从零开始；例如原文件 73 行的前 50 行切片，在 `read_result(offset=50)` 下返回空数组及 `nextOffset=null`，不会自动访问原文件后 23 行。选中该查询的 `resultPointer` 时，响应中的 `sourceWindow` 保留原文件路径、`sourcePointer`、原范围、总项数和原文件续页位置；原文件后续页继续由 `computer_read_json` 读取。两种范围不混用，也不创建新 Result 身份。
+
 ## 6. 完整性与恢复
 
 RuntimeResult 读取时重新验证：

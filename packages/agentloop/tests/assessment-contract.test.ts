@@ -117,6 +117,34 @@ for (const scope of ["fact_result", "user_delivery"] as const) {
   }
 }
 
+for (const scenario of [
+  { role: "fact_acquisition", candidate: "Only A=0 was obtained. B is unresolved; no comparison has been established.", approved: true },
+  { role: "deliver", candidate: "Only A=0 was obtained. B is unresolved; therefore the requested A/B comparison is unchanged.", approved: false },
+  { role: "deliver", candidate: "The requested A/B query returned no matching records. A comparison cannot be calculated from this empty result.", approved: true },
+] as const) {
+  test(`assessment separates honest source gaps, unanswered delivery, and real empty results: ${scenario.role}, approved=${scenario.approved}`, async () => {
+    const base = assessmentInput();
+    const question = "Compare A and B in the specified source.";
+    const input: StepAssessmentInput = { ...base,
+      canonicalState: createCanonicalRunState({ runId: base.runId, userInput: question,
+        understanding: understandTask({ objective: question }), now: 1 }),
+      step: { ...base.step, role: scenario.role, objective: scenario.role === "fact_acquisition" ? "Publish acquired facts and unresolved gaps." : question },
+      evidence: { ...base.evidence, candidateOutput: scenario.candidate },
+    };
+    const assessment = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, complete: async request => {
+      assert.match(request.systemPrompt, /An honest gap in a fact_result does not establish that the final user question has been answered/);
+      assert.match(request.systemPrompt, /A genuine empty result may answer/);
+      const context = JSON.parse(request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+      assert.equal(context.assessmentPolicy.scope, scenario.role === "fact_acquisition" ? "fact_result" : "user_delivery");
+      assert.equal(context.evidence.candidateOutput, scenario.candidate);
+      const result = submission(input);
+      result.toolCalls[0]!.arguments.criteria[0]!.satisfied = scenario.approved;
+      return result;
+    } }).assess(input);
+    assert.equal(assessment.approved, scenario.approved);
+  });
+}
+
 test("assessment uses one strict explicit-state schema, including nullable failure and an exact current step ID", async () => {
   const input = assessmentInput();
   await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {

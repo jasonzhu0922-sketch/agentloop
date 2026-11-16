@@ -26,6 +26,7 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
       "Pass resultId from agentloop.resultRef/v1; never supply a filesystem path or digest.",
       "For JSON results, use a pointer rooted in the persisted result envelope and optional array offset/limit. For agentloop.jsonRead/v1, use the returned resultPointer such as /queries/0/value; the displayed sourcePointer belongs to the original file and must not be passed to read_result. Omit pointer for a bounded serialized character window. If a pointer is accidentally sent for a text result, Runtime returns the exact text window with pointerApplied=false and a repair diagnostic; do not retry another pointer.",
       "For command output, pointer /stdout or /stderr selects the original stream in this same Result. String selections support characterOffset/characterLimit and nextCharacterOffset; no file path or digest is needed.",
+      "Array offset and nextOffset address only the selected persisted Result window, starting at zero. A sourceWindow describes the original computer_read_json source range: use computer_read_json with its path, sourcePointer and nextOffset for later original-file items; read_result cannot fetch items outside the stored window.",
     ].join(" "),
     inputSchema: {
       type: "object",
@@ -134,6 +135,7 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
         sourceResultRef: record.ref,
         source,
         pointer: input.pointer,
+        ...jsonReadSourceWindow(document, input.pointer),
         ...(array ? {
           offset: input.offset,
           limit: input.limit,
@@ -147,6 +149,23 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
       };
     },
   };
+}
+
+/** Provenance of an exact stored JSON read window, never a redirected read. */
+function jsonReadSourceWindow(document: unknown, pointer: string): Record<string, unknown> {
+  if (!isRecord(document) || document.schema !== "agentloop.jsonRead/v1" || !Array.isArray(document.queries)) return {};
+  const index = document.queries.findIndex((_, index) => pointer === `/queries/${index}/value`);
+  const query = document.queries[index];
+  if (!isRecord(query) || !Array.isArray(query.value)) return {};
+  return { sourceWindow: {
+    path: document.path,
+    sourcePointer: query.sourcePointer,
+    sourceRange: query.sourceRange,
+    offset: query.offset,
+    returned: query.returned,
+    totalItems: query.totalItems,
+    nextOffset: query.nextOffset,
+  } };
 }
 
 function readTextWindow(

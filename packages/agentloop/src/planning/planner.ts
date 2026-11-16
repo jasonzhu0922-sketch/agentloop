@@ -4,7 +4,7 @@ import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 import { requireRecord, requireString, requireStringArray } from "../shared/validation.ts";
 import type { ModelAdapter, ModelInvocation, ModelToolCall, RuntimeContextSnapshot, RuntimeEventSink } from "../runtime/contracts.ts";
 import { completeWithStreaming } from "../runtime/model-streaming.ts";
-import { buildUserAuthorityContext, USER_AUTHORITY_INSTRUCTION } from "../runtime/user-authority.ts";
+import { buildUserAuthorityContext, USER_AUTHORITY_INSTRUCTION, USER_DELIVERY_SCOPE_INSTRUCTION } from "../runtime/user-authority.ts";
 import { operationProfileCatalogForPlanning, operationProfilesForTaskUnderstanding } from "../runtime/operation-profiles.ts";
 import { taskEvidencePolicyForTaskUnderstanding, uploadedSourcePlanningContext, type TaskEvidencePolicy, type TaskIntentClassification } from "../runtime/task-intent.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext, type PlanTopologyRequirement, type TaskProfile } from "../runtime/dynamic-prompt.ts";
@@ -344,6 +344,7 @@ export class ModelPlanner implements Planner {
       ],
       contractLines: [
         USER_AUTHORITY_INSTRUCTION,
+        USER_DELIVERY_SCOPE_INSTRUCTION,
         "Fill the smallest Outcome Plan using agentloop.outcomePlan/v2 so Runtime can start useful work.",
         "Use the supplied TaskProfile shape as the default. When further planning depends on source facts not yet available, explicitly scope a prerequisite Round with purpose, supported canonical targetIds, completionBoundary and continuation. Plan only assessable source work for this Round; later Rounds will plan from its committed results. Otherwise use roundScope=null or an explicit delivery scope. A required planTopology applies within delivery Rounds.",
         "Use one leaf for ordinary answers/artifacts; split only for reusable source facts.",
@@ -353,6 +354,7 @@ export class ModelPlanner implements Planner {
         "For an open-ended analysis, distinguish the requested analysis from possible research leads. Do not promote inferred background fields, examples, complete inventories, dates, legal identity or corroboration into explicitly requested facts merely because they might enrich the answer. Base a bounded conclusion on relevant available materials; pursue further sources only for a material gap, contradiction, source constraint, freshness, or an explicit verification request.",
         "Every requiredFact must carry basis metadata with related canonical targetIds and a rationale. intentId and requirement are Runtime-owned: do not submit them; Runtime binds them from canonicalRunState.intent after parsing. Resolver userConstraints, Plan paraphrases, and Skill instructions cannot provide provenance.",
         "Use user_requirement for explicitly requested answers; necessary_condition must explain why the requested result would be invalid without it. Research references, implementation preferences, Skill workflow steps, and receipt labels are execution methods, not new factual answer obligations. They must not expand the user's acceptance conditions.",
+        "For a factual lookup, keep only the requested fact and genuinely indispensable qualifications as answer obligations. Internal checks of object identity, record dates, units and source traceability belong inside acquisition; they do not each require a separate user-facing section or source-metadata inventory. Do not label resolver-added methodology or disclosure wording as explicitly requested by the user.",
         "Distinguish a fact that must be true for the answer from a particular record, example, field, or verification method that might establish it. Do not label an inferred evidence format or example as a user_requirement merely because it could support a requested conclusion; retain it only if explicitly requested or demonstrably indispensable.",
         REQUIRED_FACT_TARGET_GUIDANCE,
         "Preserve every fact, role, measure, scope and time requested by the user. Source-provider fields and related concepts are not substitutes for the requested concepts. If a provider does not cover one requested fact, plan the complementary acquisition needed for that fact instead of redefining the deliverable to fit the provider; mark genuinely unavailable facts as gaps without claiming they were answered.",

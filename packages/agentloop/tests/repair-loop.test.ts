@@ -13,6 +13,50 @@ import { ArtifactRepairProgress } from "../src/runtime/artifact-repair-progress.
 import { deriveCurrentDecisionView } from "../src/runtime/current-decision-view.ts";
 import type { AgentLoopToolEvidence } from "../src/runtime/contracts.ts";
 
+test("artifact hints alone do not start repair checkpoints for source work", () => {
+  for (const ownership of [undefined, "required", "target"]) {
+    const policy = { ...runtimeStepToolProgressPolicy(["source_summary"]),
+      expectedArtifactKind: "document" as const, expectedArtifactFormat: "markdown",
+      ...(ownership === "required" ? { artifactDeliveryRequired: true } : {}),
+      ...(ownership === "target" ? { artifactTargets: [{ id: "report", kind: "document" as const, format: "markdown", terminalRequired: true }] } : {}),
+    };
+    const monitor = new ArtifactRepairProgress();
+    const evidence: AgentLoopToolEvidence[] = [];
+    for (let turn = 1; turn <= 12; turn += 1) {
+      const item: AgentLoopToolEvidence = { toolCallId: `failure-${turn}`, toolName: "computer_run_command",
+        isError: true, failurePhase: "operation", operationStatus: "failed", result: "Computation failed" };
+      evidence.push(item);
+      const checkpoint = monitor.observe({ policy, latestEvidence: [item], toolEffect: () => "write",
+        view: deriveCurrentDecisionView({ runId: "source", evidence: deriveRuntimeStepEvidenceState({ policy, evidence }), toolEvidence: evidence }) });
+      if (ownership === undefined) assert.equal(checkpoint, undefined);
+      else {
+        assert.equal(checkpoint?.turnsWithoutDeliveryProgress, turn);
+        assert.equal(checkpoint?.warning, turn >= 6);
+        assert.equal(checkpoint?.assessmentRequired, turn >= 10);
+      }
+    }
+  }
+});
+
+test("argument preparation failures never start an artifact repair episode", () => {
+  const policy = { ...runtimeStepToolProgressPolicy(["artifact_path", "artifact_acceptance"]), artifactDeliveryRequired: true };
+  const monitor = new ArtifactRepairProgress();
+  const evidence: AgentLoopToolEvidence[] = [];
+  for (let n = 0; n < 15; n += 1) {
+    const item: AgentLoopToolEvidence = { toolCallId: `prepare-${n}`, toolName: "computer_run_command", isError: true,
+      failurePhase: "prepare", invocationStatus: "rejected", operationStatus: "not_started", result: "Arguments rejected before execution" };
+    evidence.push(item);
+    assert.equal(monitor.observe({ policy, latestEvidence: [item], toolEffect: () => "write",
+      toolCall: () => ({ id: item.toolCallId, name: item.toolName, arguments: { command: "node", args: ["build.cjs"] } }),
+      view: deriveCurrentDecisionView({ runId: "prepare", evidence: deriveRuntimeStepEvidenceState({ policy, evidence }), toolEvidence: evidence }) }), undefined);
+  }
+  const failed: AgentLoopToolEvidence = { toolCallId: "executed", toolName: "computer_run_command", isError: true,
+    failurePhase: "operation", operationStatus: "failed", result: "Build actually failed" };
+  evidence.push(failed);
+  assert.equal(monitor.observe({ policy, latestEvidence: [failed], toolEffect: () => "write",
+    view: deriveCurrentDecisionView({ runId: "prepare", evidence: deriveRuntimeStepEvidenceState({ policy, evidence }), toolEvidence: evidence }) })?.turnsWithoutDeliveryProgress, 1);
+});
+
 test("artifact repair tracks delivery milestones rather than changing file hashes, tool IDs, or error text", () => {
   const policy = { ...runtimeStepToolProgressPolicy(["artifact_path", "artifact_non_empty", "artifact_acceptance"]),
     artifactDeliveryRequired: true, expectedArtifactKind: "presentation", expectedArtifactFormat: "pptx" };

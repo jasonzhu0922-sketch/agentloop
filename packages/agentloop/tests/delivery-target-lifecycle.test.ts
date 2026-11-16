@@ -49,11 +49,12 @@ test("candidate claims enumerate the canonical surfaces without letting prose re
     .deliveryClaims.map((claim) => claim.targetId), ["findings"]);
 });
 
-for (const { repair, sequential } of [
-  { repair: undefined, sequential: false }, { repair: "figure", sequential: false },
-  { repair: "findings", sequential: false }, { repair: undefined, sequential: true },
+for (const { repair, sequential, direct } of [
+  { repair: undefined, sequential: false, direct: false }, { repair: "figure", sequential: false, direct: false },
+  { repair: "findings", sequential: false, direct: false }, { repair: undefined, sequential: true, direct: false },
+  { repair: "findings", sequential: false, direct: true }, { repair: "figure", sequential: false, direct: true },
 ] as const) {
-  test(`Run delivery persists every target and repairs only the unresolved surface (${sequential ? "separate sequential producers" : repair ?? "no repair"})`, async () => {
+  test(`Run delivery persists every target and repairs only the unresolved surface (${sequential ? "separate sequential producers" : `${repair ?? "no repair"}${direct ? ", direct recovery" : ""}`})`, async () => {
     const root = await mkdtemp(join(tmpdir(), "agentloop-delivery-lifecycle-"));
     const database = new AppDatabase(":memory:");
     let recoveries = 0;
@@ -80,10 +81,11 @@ for (const { repair, sequential } of [
             ? { ...criterion, satisfied: false, rationale: "The requested meaning is incomplete." } : criterion),
             feedback: "Repair only the unresolved result, keeping the independently accepted delivery.",
             failedBoundary: { stepId: "mixed", missingEvidenceKinds: [], violatedSkillRequirements: [], reusableEvidenceRefs: [],
-              suggestedRepairShape: "revise_plan" as const, unmetCriteria: [{ criterionId: `delivery_target:${repair}`, targetId: repair,
+              suggestedRepairShape: direct ? "repair_leaf" as const : "revise_plan" as const, unmetCriteria: [{ criterionId: `delivery_target:${repair}`, targetId: repair,
                 status: "unverified" as const, rationale: "The requested meaning is incomplete.", evidenceRefs: [] }] } };
         } }),
         recoveryPlannerFactory: () => ({ decide: async input => {
+          assert.equal(direct, false, "An exact local repair needs no recovery planning model call");
           recoveries += 1;
           const scope = canonicalDeliveryPlanScope(input.canonicalState);
           assert.deepEqual(scope.outstandingTargets.map((target) => target.targetId), [repair]);
@@ -104,7 +106,9 @@ for (const { repair, sequential } of [
             rationale: "The accepted delivery is Run-owned; repair only the open target.", evidenceRefs: [], planRevision: proposal };
         } }),
         planRevisionAssessorFactory: () => ({ assess: async input => {
-          assert.deepEqual(input.proposal.steps.map((step) => step.id), ["repair"]);
+          if (direct) acceptedBefore = canonicalDeliveryPlanScope(input.canonicalState!).acceptedTargets[0];
+          assert.deepEqual(input.proposal.steps.map((step) => step.id), [direct ? "mixed.repair.2" : "repair"]);
+          assert.deepEqual(input.proposal.steps[0].executionBinding.targetIds, [repair]);
           assert.deepEqual(input.canonicalState!.targets[acceptedBefore!.targetId], acceptedBefore);
           return { approved: true, feedback: "", evidenceRefs: [] };
         } }),
@@ -140,7 +144,7 @@ for (const { repair, sequential } of [
       });
       const events = await runs.events("owner", run.id);
       assert.equal(run.status, "completed", JSON.stringify(events.filter((event) => /failed|rejected/.test(event.type))));
-      assert.equal(recoveries, repair === undefined ? 0 : 1);
+      assert.equal(recoveries, repair === undefined || direct ? 0 : 1);
       assert.equal(writes, repair === "figure" ? 2 : 1, "accepted files are not regenerated");
       const state = await new CanonicalRunStateRepository(database).get(run.id);
       assert.equal(state.phase, "completed");

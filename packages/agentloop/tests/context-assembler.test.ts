@@ -74,6 +74,87 @@ test("ContextAssembler projects structured Tool evidence instead of raw read con
   assert.equal(events.some((event) => event.type === "context.tool_outputs_projected" && event.data.reason === "structured_evidence"), true);
 });
 
+test("ContextAssembler retains bounded JSON and Result reads across complementary tool calls", async () => {
+  for (const toolName of ["computer_read_json", "read_result"]) {
+    const ref = { schema: "agentloop.resultRef/v1", resultId: "rr_11111111-1111-4111-8111-111111111111" };
+    const rows = [{ label: "observed-empty", rows: [] }, { label: "observed-zero", amount: 0 }];
+    const content = JSON.stringify(toolName === "computer_read_json"
+      ? { schema: "agentloop.jsonRead/v1", resultRef: ref, queries: [{ sourcePointer: "/records", resultPointer: "/queries/0/value", value: rows }] }
+      : { schema: "agentloop.resultRead/v1", sourceResultRef: ref, pointer: "/records", value: rows });
+    const assembler = new ContextAssembler({
+      runId: "recent-bounded-reads", systemPrompt: "system", runtimeContext: { phase: "execution", content: "state" },
+      model: { limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
+        complete: async () => { throw new Error("no compaction needed"); } },
+    });
+    assembler.setPromptProjectionPolicy({ schema: "agentloop.promptProjectionPolicy/v1", policyId: "bounded-reads",
+      mode: "custom", instruction: "Bound older outputs.", adaptive: false,
+      largeToolResultProjectionCharacters: 128, largeToolResultPreviewCharacters: 32 });
+    const messages: ModelMessage[] = [
+      { role: "assistant", content: "", toolCalls: [{ id: "values", name: toolName, arguments: {} }] },
+      { role: "tool", name: toolName, toolCallId: "values", isError: false, content },
+    ];
+    await assembler.assemble(messages, []);
+    messages.push(
+      { role: "assistant", content: "Check the definition before answering.", toolCalls: [{ id: "definition", name: "inspect_definition", arguments: {} }] },
+      { role: "tool", name: "inspect_definition", toolCallId: "definition", isError: false, content: "Definition verified." },
+    );
+    const assembly = await assembler.assemble(messages, []);
+    assert.equal(assembly.messages.find(message => message.role === "tool" && message.toolCallId === "values")?.content, content);
+    assert.equal(messages[1]?.content, content, "the canonical Result exchange stays unchanged");
+  }
+});
+
+test("large JSON projections retain complete small query values within one shared budget", async () => {
+  for (const { values, expectOmitted, expectedRetained } of [
+    { values: ["large-source ".repeat(2_000), { unit: "元", project: { field: "item", value: "cash_flow" } }, 0, false, null, []],
+      expectOmitted: true, expectedRetained: 5 },
+    { values: ["a".repeat(6_500), "b".repeat(6_500), { total: 0 }], expectOmitted: true, expectedRetained: 2 },
+    { values: ["a".repeat(4_500), "b".repeat(4_500), { total: 0 }], expectOmitted: false, expectedRetained: 3 },
+  ]) {
+    const resultRef = { schema: "agentloop.resultRef/v1", resultId: "rr_11111111-1111-4111-8111-111111111111" };
+    const queries = values.map((value, index) => ({ sourcePointer: `/sections/${index}`,
+      resultPointer: `/queries/${index}/value`, value,
+      offset: 0, returned: 1, totalItems: 1, nextOffset: null }));
+    const content = JSON.stringify({ schema: "agentloop.jsonRead/v1", resultRef, queries,
+      root: { summary: "field metadata ".repeat(300) } });
+    const messages: ModelMessage[] = [
+      { role: "assistant", content: "", toolCalls: [{ id: "sections", name: "computer_read_json", arguments: {} }] },
+      { role: "tool", name: "computer_read_json", toolCallId: "sections", isError: false, content },
+      { role: "assistant", content: "Check a complementary definition.", toolCalls: [{ id: "definition", name: "inspect_definition", arguments: {} }] },
+      { role: "tool", name: "inspect_definition", toolCallId: "definition", isError: false, content: "Verified." },
+    ];
+    const assembler = new ContextAssembler({ runId: "large-json", systemPrompt: "system",
+      runtimeContext: { phase: "execution", content: "state" },
+      model: { limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
+        complete: async () => { throw new Error("no compaction needed"); } } });
+    const assembly = await assembler.assemble(messages, []);
+    const projected = assembly.messages.find(message => message.role === "tool" && message.toolCallId === "sections")!;
+    const projection = JSON.parse(projected.content.split("\n\n")[0]);
+    assert.equal(projection.schema, "agentloop.contextJsonRead/v1");
+    assert.deepEqual(projection.resultRef, resultRef);
+    assert.equal(projection.valuesOmitted, expectOmitted);
+    let retainedCharacters = 0;
+    for (const [index, query] of projection.queries.entries()) {
+      const { value, ...navigation } = queries[index]!;
+      assert.deepEqual({ ...query, value: undefined, valueOmitted: undefined },
+        { ...navigation, value: undefined, valueOmitted: undefined });
+      if (query.valueOmitted) assert.equal(Object.hasOwn(query, "value"), false, "no partial values masquerade as complete");
+      else {
+        assert.deepEqual(query.value, value);
+        retainedCharacters += JSON.stringify({ value: query.value }).length;
+      }
+    }
+    assert.ok(retainedCharacters <= 12_000);
+    assert.equal(projection.queries.at(-1).valueOmitted, false, "a large earlier query cannot evict a small later fact");
+    if (values.length === 6) {
+      assert.equal(projection.queries[0].valueOmitted, true);
+      assert.ok(projection.queries.slice(1).every((query: { valueOmitted: boolean }) => !query.valueOmitted));
+    }
+    assert.equal(projection.queries.filter((query: { valueOmitted: boolean }) => !query.valueOmitted).length, expectedRetained);
+    assert.equal(messages[1]?.content, content, "canonical Tool Result remains complete and unchanged");
+  }
+});
+
 test("ContextAssembler keeps the latest bounded read_result window exact for completion preparation", async () => {
   const exactContent = "distribution-row ".repeat(650);
   const toolResult = JSON.stringify({

@@ -938,7 +938,7 @@ test("the final budgeted turn retains tools and submits existing evidence for as
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
 });
 
-test("current-step evidence completion requests a candidate while keeping authorized tools available", async () => {
+test("receipt readiness leaves complementary acquisition to the Agent before candidate submission", async () => {
   let modelCalls = 0;
   const source = receiptTool("collect_source", ["source_summary"]);
   const grant = makeGrant(["collect_source"]);
@@ -956,6 +956,9 @@ test("current-step evidence completion requests a candidate while keeping author
           return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "source", name: "collect_source", arguments: {} }] };
         }
         assert.ok(request.tools.length > 0);
+        assert.doesNotMatch(request.runtimeContext?.content ?? "", /<runtime_convergence/);
+        assert.match(request.runtimeContext?.content ?? "", /permits candidate assessment, not semantic completion/);
+        if (modelCalls === 2) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "source-detail", name: "collect_source", arguments: {} }] };
         return { content: "current source step complete", finishReason: "stop", toolCalls: [] };
       },
     },
@@ -968,11 +971,11 @@ test("current-step evidence completion requests a candidate while keeping author
   });
 
   assert.equal(result.output, "current source step complete");
-  assert.equal(modelCalls, 2);
+  assert.equal(modelCalls, 3);
   assert.equal(events.some((event) =>
     event.type === "loop.convergence_requested"
     && event.data.reason === "current_step_evidence_complete"
-  ), true);
+  ), false);
 });
 
 test("completion preparation retains the Run catalog and assesses after the exact observation", async () => {
@@ -1998,7 +2001,7 @@ test("source-only evidence receipts do not replace a produce step delivery candi
   assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
 });
 
-test("conversation produce candidates carry explicit caveats as structured delivery evidence", async () => {
+test("a caveat completion requirement does not fabricate limitations or evidence", async () => {
   let modelCalls = 0;
   const model: ModelAdapter = {
     limits: TEST_MODEL_LIMITS,
@@ -2030,9 +2033,10 @@ test("conversation produce candidates carry explicit caveats as structured deliv
     evaluateCandidate: async (candidate) => {
       assert.ok(candidate.deliveryCandidate);
       assert.equal(candidate.deliveryCandidate.schema, "agentloop.runtimeDeliveryCandidate/v1");
-      assert.equal(candidate.deliveryCandidate.caveats.length > 0, true);
+      assert.deepEqual(candidate.deliveryCandidate.caveats, []);
+      assert.deepEqual(candidate.deliveryCandidate.evidenceKinds.caveated, []);
       assert.equal(candidate.stepSemanticFrame?.completionBoundary.includes("explicit_caveats"), true);
-      assert.match(candidate.deliveryCandidate.output, /## (?:限制说明|Limitations)/);
+      assert.equal(candidate.deliveryCandidate.output, "已完成汇总分析，团队整体表现较好。");
       return { approved: true, feedback: "" };
     },
   });
@@ -2040,8 +2044,9 @@ test("conversation produce candidates carry explicit caveats as structured deliv
   assert.equal(modelCalls, 1);
   assert.ok(result.deliveryCandidate);
   assert.equal(result.deliveryCandidate.schema, "agentloop.runtimeDeliveryCandidate/v1");
-  assert.equal(result.deliveryCandidate.caveats.length > 0, true);
-  assert.match(result.deliveryCandidate.output, /## (?:限制说明|Limitations)/);
+  assert.deepEqual(result.deliveryCandidate.caveats, []);
+  assert.deepEqual(result.deliveryCandidate.evidenceKinds.caveated, []);
+  assert.equal(result.deliveryCandidate.output, "已完成汇总分析，团队整体表现较好。");
   assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
 });
 
@@ -2120,7 +2125,8 @@ test("conversation delivery does not turn a helper script into an artifact-accep
     emit: (event) => { events.push(event); },
     evaluateCandidate: async (candidate) => {
       assert.ok(candidate.deliveryCandidate);
-      assert.match(candidate.deliveryCandidate.output, /## (?:限制说明|Limitations)/);
+      assert.deepEqual(candidate.deliveryCandidate.caveats, []);
+      assert.equal(candidate.deliveryCandidate.output, "研发组共 18 人，已完成绩效汇总。");
       return { approved: true, feedback: "" };
     },
   });

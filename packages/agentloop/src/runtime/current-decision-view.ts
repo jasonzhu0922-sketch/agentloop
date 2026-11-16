@@ -8,6 +8,7 @@ import type { WorkProductObservationState } from "./work-product-observations.ts
 import type { WorkProductSemantics } from "./work-product-semantics.ts";
 import type { WorkProductDeliveryTarget } from "./work-product-semantics.ts";
 import { parseJsonRecord } from "./tool-result-evidence.ts";
+import { unreadRuntimeResultRefs, type RuntimeResultBinding, type RuntimeResultRef } from "./runtime-result.ts";
 
 /**
  * A snapshot of the authoritative Run at a decision boundary. The caller
@@ -35,6 +36,12 @@ export interface CurrentDecisionWorkProductFacts {
 
 export type CurrentDiagnosticApplicability = "current" | "historical" | "unknown";
 
+export interface CandidateReadiness {
+  /** Ready to ask Assessment, never authority to publish or finish a Run. */
+  readonly readyForAssessment: boolean;
+  readonly blockedBy: readonly ("unread_results" | "missing_tool_evidence" | "pending_computation" | "recovery_decision")[];
+}
+
 export interface CurrentDecisionView {
   readonly schema: "agentloop.currentDecisionView/v1";
   readonly identity: {
@@ -51,6 +58,7 @@ export interface CurrentDecisionView {
     readonly decisionBasisDigest: string;
   };
   readonly contract: {
+    readonly resultBindings: readonly RuntimeResultBinding[];
     readonly phaseRole?: StepSemanticFrame["phaseRole"];
     readonly evidenceMode?: StepSemanticFrame["evidenceMode"];
     readonly completionBoundary: readonly string[];
@@ -97,6 +105,7 @@ export interface CurrentDecisionView {
     readonly fullStateRef?: ContentReference;
   };
   readonly currentGap: {
+    readonly unreadResultRefs: readonly RuntimeResultRef[];
     /** Open assessed gaps owned by this Step or its canonical repair scope. */
     readonly assessmentGaps: readonly CanonicalGoalGap[];
     /** These gaps already have an admitted replacement scope executing this Step. */
@@ -109,6 +118,7 @@ export interface CurrentDecisionView {
   };
   /** Semantic direction only; it never narrows the Run capability grant. */
   readonly nextAction: string;
+  readonly candidateReadiness: CandidateReadiness;
 }
 
 /** Model-safe projection. Its truncation never changes the full view or basis digest. */
@@ -144,11 +154,13 @@ export interface CurrentDecisionViewProjection {
   };
   readonly currentGap: CurrentDecisionView["currentGap"];
   readonly nextAction: string;
+  readonly candidateReadiness: CandidateReadiness;
   readonly instruction: string;
 }
 
 export function deriveCurrentDecisionView(input: {
   readonly runId: string;
+  readonly resultBindings?: readonly RuntimeResultBinding[];
   readonly context?: CurrentDecisionContext;
   readonly stepSemanticFrame?: Pick<StepSemanticFrame, "phaseRole" | "evidenceMode" | "completionBoundary">;
   readonly evidence?: RuntimeStepEvidenceState;
@@ -175,6 +187,7 @@ export function deriveCurrentDecisionView(input: {
     };
   });
   const contract = {
+    resultBindings: input.resultBindings ?? [],
     ...(input.stepSemanticFrame?.phaseRole === undefined ? {} : { phaseRole: input.stepSemanticFrame.phaseRole }),
     ...(input.stepSemanticFrame?.evidenceMode === undefined ? {} : { evidenceMode: input.stepSemanticFrame.evidenceMode }),
     completionBoundary: input.stepSemanticFrame?.completionBoundary ?? [],
@@ -216,13 +229,22 @@ export function deriveCurrentDecisionView(input: {
     && gap.repairScopeStepIds?.includes(basis.stepId)
     && (stepStatus === "pending" || stepStatus === "running")).map((gap) => gap.id);
   const awaitingDecision = assessmentGaps.filter((gap) => !repairInProgressGapIds.includes(gap.id));
+  const turn = state?.intent.turnResolution;
+  const unreadResultRefs = unreadRuntimeResultRefs(contract.resultBindings, input.toolEvidence ?? [],
+    turn?.mode === "reply" && turn.targetResult !== undefined ? [turn.targetResult] : []);
   const nextAction = awaitingDecision.some((gap) => gap.suggestedAction === "fail") ? "stop"
     : awaitingDecision.some((gap) => gap.suggestedAction === "ask_user") ? "request_input"
     : awaitingDecision.some((gap) => gap.suggestedAction === "revise_plan") ? "revise_plan"
+    : unreadResultRefs.length > 0 ? "read_bound_results"
     : evidence?.pendingComputation !== undefined && (evidence.nextAction === "execute_repaired_computation" || evidence.nextAction === "repair_computation_binding") ? evidence.nextAction
     : awaitingDecision.some((gap) => gap.missingEvidenceKinds.length > 0) ? "resolve_evidence_gap"
     : awaitingDecision.length > 0 ? "revise_completion_candidate"
     : evidence?.nextAction ?? input.stepSemanticFrame?.phaseRole ?? "inspect_current_state";
+  const blockedBy: CandidateReadiness["blockedBy"][number][] = [];
+  if (unreadResultRefs.length > 0) blockedBy.push("unread_results");
+  if ((evidence?.missingToolEvidenceKinds.length ?? 0) > 0) blockedBy.push("missing_tool_evidence");
+  if (evidence?.pendingComputation !== undefined) blockedBy.push("pending_computation");
+  if (awaitingDecision.some(gap => gap.suggestedAction !== "repair_leaf" || gap.missingEvidenceKinds.length > 0)) blockedBy.push("recovery_decision");
   return {
     schema: "agentloop.currentDecisionView/v1",
     identity,
@@ -239,6 +261,7 @@ export function deriveCurrentDecisionView(input: {
       ...(input.workProducts?.fullStateRef === undefined ? {} : { fullStateRef: input.workProducts.fullStateRef }),
     },
     currentGap: {
+      unreadResultRefs,
       assessmentGaps,
       repairInProgressGapIds,
       receipts: {
@@ -248,6 +271,7 @@ export function deriveCurrentDecisionView(input: {
       },
     },
     nextAction,
+    candidateReadiness: { readyForAssessment: blockedBy.length === 0, blockedBy },
   };
 }
 
@@ -291,7 +315,8 @@ export function projectCurrentDecisionView(view: CurrentDecisionView): CurrentDe
     },
     currentGap: view.currentGap,
     nextAction: view.nextAction,
-    instruction: "Use nextAction and currentGap from this committed canonical Run revision. Receipt readiness proves observed operations, not coverage of the requested facts. Open assessmentGaps remain unresolved until Assessment accepts the relevant result; a successful source receipt or a rewritten disclaimer cannot close them. repairInProgressGapIds identify admitted repair scopes: execute and assess the current Plan step's completionBoundary, rather than repeating the already admitted plan revision or performing a downstream step's work. The shared gap closes only after its replacement scope is satisfied. Inspect existing observations or acquire missing evidence when needed; correct interpretation or delivery from existing evidence when sufficient. Tool choice remains within the Run grant. Historical diagnostics are audit material, not current blockers; an unbound diagnostic is not proof that the current object version is faulty.",
+    candidateReadiness: view.candidateReadiness,
+    instruction: "Use nextAction and currentGap from this committed canonical Run revision. For currentGap.unreadResultRefs, consume the original bound Result with read_result using only resultId before synthesizing or reacquiring its facts. Binding metadata and prior drafts are not the Result content. Receipt readiness proves observed operations, not coverage of the requested facts. Open assessmentGaps remain unresolved until Assessment accepts the relevant result; a successful source receipt or a rewritten disclaimer cannot close them. repairInProgressGapIds identify admitted repair scopes: execute and assess the current Plan step's completionBoundary, rather than repeating the already admitted plan revision or performing a downstream step's work. The shared gap closes only after its replacement scope is satisfied. Inspect existing observations or acquire missing evidence when needed; correct interpretation or delivery from existing evidence when sufficient. Tool choice remains within the Run grant. Historical diagnostics are audit material, not current blockers; an unbound diagnostic is not proof that the current object version is faulty.",
   };
 }
 

@@ -13,6 +13,13 @@ import { ToolRegistry } from "../src/tools/tool-registry.ts";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ModelInvocation } from "../src/runtime/contracts.ts";
+
+function currentRepairView(request: ModelInvocation) {
+  const frame = request.runtimeContext?.content.match(/<loop_step_frame source="server">\n([^\n]+)\n/)?.[1];
+  const view = frame === undefined ? undefined : JSON.parse(frame).currentDecisionView;
+  return view?.currentGap.repairInProgressGapIds.length > 0 ? view : undefined;
+}
 
 test("same-Run recovery preserves an evidence conflict until a repaired observation resolves it", async () => {
   const database = new AppDatabase(":memory:");
@@ -25,7 +32,7 @@ test("same-Run recovery preserves an evidence conflict until a repaired observat
         executionMode: "parallel", replaySafe: true, parse: (value) => value,
         execute: async () => ({ predicate: ++reads === 1 ? "time >= 00 OR time <= 06" : "time >= 00 AND time <= 06" }) }],
       modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
-        const repair = request.messages.some((message) => message.role === "user" && message.content.includes("Continue the same unresolved canonical GoalGap"));
+        const repair = currentRepairView(request);
         if (repair) {
           sawRepairContext ||= (request.runtimeContext?.content ?? "").includes("daytime observation conflicts");
           if (reads < 2) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "corrected", name: "inspect_filter", arguments: {} }] };
@@ -244,6 +251,72 @@ test("partial source observations keep complementary acquisition available until
   } finally { database.close(); }
 });
 
+test("fact acquisition synthesizes its owned facts before a delivery Step consumes the assessed Result", async () => {
+  const database = new AppDatabase(":memory:");
+  const goal = "比较甲仓和乙仓的库存。";
+  const facts = "甲仓80箱，乙仓60箱。";
+  const answer = "甲仓比乙仓多20箱（80−60）。";
+  let turns = 0;
+  let fetches = 0;
+  let consumedResultId = "";
+  const scopes: string[] = [];
+  try {
+    const runs = new RunService({ database, skills: new SkillService(database), maxSteps: 6,
+      plannerFactory: () => ({ plan: async () => ({
+        schema: "agentloop.outcomePlan/v2", shape: "fact_then_produce", goal, selectedSkillIds: [], selectedSkillRoles: [], steps: [
+          { id: "acquire", role: "fact_acquisition", objective: "取得两个仓库的库存事实。", dependencies: [], skillIds: [],
+            requiredCapabilities: ["web_research"], evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "mark_unverified_facts" },
+            successCriteria: [{ id: "stocks", description: "发布取得的库存事实及缺口。", source: "planner" }] },
+          { id: "deliver", role: "deliver", objective: "比较两个仓库的库存。", dependencies: ["acquire"], skillIds: [],
+            requiredCapabilities: ["conversation_delivery"],
+            successCriteria: [{ id: "comparison", description: "回答用户的库存比较问题。", source: "task" }] },
+        ],
+      }) }),
+      tools: [{ name: "webfetch", description: "Read warehouse inventory", inputSchema: { type: "object" },
+        executionMode: "parallel", replaySafe: true, parse: value => value,
+        execute: async () => {
+          fetches += 1;
+          return { schema: "agentloop.webFetch/v1", content: fetches === 1 ? "甲仓80箱。乙仓未读取。" : facts,
+            deliveryCandidate: { output: fetches === 1 ? "甲仓80箱。乙仓未读取。" : facts },
+            evidenceReceipt: { schema: "agentloop.toolEvidenceReceipt/v1", evidenceKinds: { satisfied: ["source_summary"], caveated: [], failed: [] } } };
+        } }],
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+        turns += 1;
+        if (turns <= 2) {
+          assert.doesNotMatch(request.runtimeContext?.content ?? "", /<runtime_convergence/);
+          assert.ok(request.tools.some(tool => tool.name === "webfetch"));
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `source-${turns}`, name: "webfetch", arguments: {} }] };
+        }
+        if (turns === 3) return { content: facts, finishReason: "stop", toolCalls: [] };
+        if (turns === 4) {
+          const match = /"resultId":"(rr_[0-9a-f-]{36})"/.exec(request.runtimeContext?.content ?? "");
+          assert.ok(match);
+          consumedResultId = match[1]!;
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "consume-facts", name: "read_result", arguments: { resultId: consumedResultId } }] };
+        }
+        assert.ok(request.messages.some(message => message.role === "tool" && message.name === "read_result" && message.content.includes(facts)));
+        return { content: answer, finishReason: "stop", toolCalls: [] };
+      } }),
+      assessorFactory: () => ({ assess: async input => {
+        scopes.push(input.step.role!);
+        assert.equal(input.evidence.candidateOutput, input.step.role === "fact_acquisition" ? facts : answer);
+        return approvingTestAssessor().assess(input);
+      } }),
+    });
+    const run = await runs.execute("owner", goal);
+    assert.equal(run.status, "completed", run.output);
+    assert.equal(run.output, answer);
+    assert.equal(fetches, 2);
+    assert.equal(turns, 5);
+    assert.deepEqual(scopes, ["fact_acquisition", "deliver"]);
+    assert.ok(consumedResultId);
+    const events = await runs.events("owner", run.id);
+    assert.equal(events.some(event => event.type === "candidate.structured_tool_detected"), false);
+    assert.equal(events.some(event => event.type === "loop.convergence_requested"), false);
+    assert.equal(events.some(event => event.type === "terminal.delivery_committed"), true);
+  } finally { await database.close(); }
+});
+
 test("source receipts and non-empty fabricated claims cannot bypass semantic assessment or restart repair indefinitely", async () => {
   const database = new AppDatabase(":memory:");
   let assessments = 0;
@@ -366,7 +439,7 @@ for (const approveRepair of [true, false]) {
           if ((request.runtimeContext?.content ?? "").includes("<runtime_failure_report>")) {
             return { content: "来源访问受限，尚未核实姓名。", finishReason: "stop", toolCalls: [] };
           }
-          const repair = request.messages.some((message) => message.role === "user" && message.content.includes("Continue the same unresolved canonical GoalGap"));
+          const repair = currentRepairView(request);
           if ((repair && fetches < 3) || fetches === 0 || (fetches === 1 && assessments === 1)) {
             return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `lookup-${fetches + 1}`, name: "webfetch", arguments: { url: `https://example.test/leadership/${fetches + 1}` } }] };
           }
@@ -424,13 +497,13 @@ for (const approveRepair of [true, false]) {
           return { actionId: input.action.id, expectedActionRevision: input.action.revision, decision: "revise_plan" as const,
             rationale: "Reconcile the result against already committed evidence.", evidenceRefs: ["read-1"],
             planRevision: { schema: "agentloop.outcomePlan/v2" as const, shape: "recovery_patch" as const, goal: input.plan!.goal, selectedSkillIds: input.plan!.selectedSkillIds,
-              steps: [repair] } };
+              steps: [{ ...repair, inputResultRefs: input.availableResults!.filter(result => result.producer.toolCallId === "read-1").map(result => result.result) }] } };
         } }),
         tools: [{ name: "read_probe", description: "Read immutable evidence", inputSchema: { type: "object" }, executionMode: "parallel", replaySafe: true,
           parse: (value) => value, execute: async () => { reads += 1; return { observedValue: "SOURCE_VALUE" }; } }],
         planRevisionAssessorFactory: () => ({ assess: async () => ({ approved: true, feedback: "", evidenceRefs: [] }) }),
         modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async (request) => {
-          const repair = request.messages.some((message) => message.role === "user" && message.content.includes("Continue the same unresolved canonical GoalGap"));
+          const repair = currentRepairView(request);
           if (repair) {
             repairTurns += 1;
             const result = request.messages.find((message) => message.role === "tool" && message.name === "read_probe");
@@ -440,7 +513,9 @@ for (const approveRepair of [true, false]) {
             assert.equal(value.resultRef.resultId, sourceResultId);
             assert.doesNotMatch(JSON.stringify(request.messages), /REJECTED_DRAFT/);
             assert.doesNotMatch(request.runtimeContext?.content ?? "", /REJECTED_DRAFT/);
-            assert.match(request.runtimeContext?.content ?? "", /unverified_draft/);
+            if (repair.currentGap.unreadResultRefs.length > 0) return { content: "", finishReason: "tool_calls", toolCalls: [{
+              id: `consume-${repairTurns}`, name: "read_result", arguments: { resultId: repair.currentGap.unreadResultRefs[0].resultId },
+            }] };
             return { content: "Repair using SOURCE_VALUE", finishReason: "stop", toolCalls: [] };
           }
           const result = request.messages.find((message) => message.role === "tool" && message.name === "read_probe");
@@ -474,7 +549,7 @@ for (const approveRepair of [true, false]) {
   });
 }
 
-test("restored retrieval evidence consumes the same search and fetch budgets", async () => {
+for (const scoped of [false, true]) test(`restored retrieval attempts consume the same budgets when content is scoped=${scoped}`, async () => {
   let executions = 0;
   let turns = 0;
   const grant = createCapabilityGrant({ runId: "restored-budget", actorUserId: "owner", depth: 0,
@@ -483,8 +558,9 @@ test("restored retrieval evidence consumes the same search and fetch budgets", a
     runId: grant.runId, grant, input: "Continue from existing evidence", systemPrompt: "Use existing sources", maxSteps: 3,
     initialToolEvidence: [
       { toolCallId: "prior-search", toolName: "websearch", result: '{"results":[{"url":"https://example.test"}]}', isError: false },
-      { toolCallId: "prior-fetch", toolName: "webfetch", result: '{"content":"source already read"}', isError: false },
+      ...(scoped ? [] : [{ toolCallId: "prior-fetch", toolName: "webfetch", result: '{"content":"source already read"}', isError: false }]),
     ],
+    initialToolCallUsage: [{ toolCallId: "prior-search", toolName: "websearch" }, { toolCallId: "prior-fetch", toolName: "webfetch" }],
     toolCallLimits: { websearch: 1, webfetch: 1 },
     tools: new ToolRegistry(["websearch", "webfetch"].map((name) => ({ name, description: "Retrieve", inputSchema: { type: "object" },
       executionMode: "parallel" as const, replaySafe: true, parse: (value: unknown) => value,

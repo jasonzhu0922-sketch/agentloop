@@ -224,6 +224,11 @@ test("Steer replans a follow-up with its existing prior Result exactly once", as
           await runs.submitInput("owner", request.runId, { requestId: "steer", text: "Include all records" });
           return { content: "Stale answer", finishReason: "stop", toolCalls: [] };
         }
+        if (followup && !request.messages.some(message => message.role === "tool" && message.name === "read_result")) {
+          const binding = request.runtimeContext?.resultBindings?.[0];
+          assert.ok(binding, "Steer must preserve the original Result binding in the unified Context");
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "read-prior", name: "read_result", arguments: { resultId: binding.result.resultId } }] };
+        }
         return { content: followup ? "All records are included." : "Prior result.", finishReason: "stop", toolCalls: [] };
       } }),
     });

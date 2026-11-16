@@ -12,7 +12,7 @@ import type {
   SkillComplianceAssessment,
   StepEvidence,
 } from "./contracts.ts";
-import { parseRuntimeResult, parseRuntimeResultBinding } from "../runtime/runtime-result.ts";
+import { parseRuntimeResult, parseRuntimeResultBinding, parseRuntimeResultRef } from "../runtime/runtime-result.ts";
 import type { RuntimeResultBinding } from "../runtime/runtime-result.ts";
 import type { CanonicalRunStateRef } from "../runtime/canonical-run-state.ts";
 import { parseRoundScope } from "./round-scope.ts";
@@ -494,6 +494,8 @@ function toStep(row: StepRow): PlanStep {
     || !Array.isArray(executionBinding.targetIds)
     || !Array.isArray(executionBinding.evidenceProducers)
     || !executionBinding.evidenceProducers.every(isValidEvidenceProducerBinding)
+    || (executionBinding.inputResultRefs !== undefined && (!Array.isArray(executionBinding.inputResultRefs)
+      || !executionBinding.inputResultRefs.every((ref: unknown) => parseRuntimeResultRef(ref) !== undefined)))
   ) {
     throw new Error(`Plan step ${row.step_id} has invalid execution binding; replan required`);
   }
@@ -510,6 +512,7 @@ function toStep(row: StepRow): PlanStep {
     skillIds: JSON.parse(row.skill_ids_json),
     requiredCapabilities: executionBinding.requiredCapabilities,
     executionBinding,
+    ...(executionBinding.inputResultRefs === undefined ? {} : { inputResultRefs: executionBinding.inputResultRefs }),
     ...(evidenceContract === undefined ? {} : { evidenceContract }),
     successCriteria: JSON.parse(row.success_criteria_json),
     status: row.status,

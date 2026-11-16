@@ -1,4 +1,4 @@
-import type { RuntimeResultRef } from "./runtime-result.ts";
+import type { RuntimeResultBinding, RuntimeResultRef } from "./runtime-result.ts";
 import type { FailedBoundary } from "../planning/contracts.ts";
 
 export type JsonSchema = Readonly<Record<string, unknown>>;
@@ -12,6 +12,8 @@ export interface RuntimeContextSnapshot {
   readonly id: string;
   readonly phase: "planning" | "execution" | "assessment" | "compaction";
   readonly content: string;
+  /** The Result bindings serialized in this same server-authored Context. */
+  readonly resultBindings?: readonly RuntimeResultBinding[];
   readonly supersedesId?: string;
   /** Server-authored user decisions; exact/required commitments constrain execution and assessment records explicit conflicts. */
   readonly decisionLedger?: readonly import("./decision-ledger.ts").RuntimeDecisionCommit[];

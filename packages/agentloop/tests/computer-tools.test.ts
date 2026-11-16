@@ -172,6 +172,36 @@ test("computer_read_json returns structured pointer windows for durable artifact
   }
 });
 
+test("computer_read_json reports continuation in the source array and stops at its last page", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-json-pagination-"));
+  try {
+    const rows = Array.from({ length: 73 }, (_, id) => ({ id, amount: 0 }));
+    await fs.writeFile(join(root, "records.json"), JSON.stringify({ rows, empty: [] }));
+    const allowed = new ToolRegistry(createComputerTools(new ComputerExecutor(root))).materialize(grant(["computer_read_json"]));
+    const read = async (pointer: string, offset: number) => {
+      const prepared = allowed.prepare({ id: "page", name: "computer_read_json", arguments: {
+        path: "records.json", queries: [{ pointer, offset, limit: 50 }],
+      } });
+      return await prepared.tool.execute(grantContext(["computer_read_json"]), prepared.input) as {
+        queries: Array<{ value: unknown[]; sourceRange: string; nextOffset: number | null }>;
+        caveats: string[];
+      };
+    };
+    const first = await read("/rows", 0);
+    assert.equal(first.queries[0]?.nextOffset, 50);
+    assert.match(first.caveats.join("\n"), /computer_read_json.*offset 50/);
+    const last = await read("/rows", 50);
+    assert.equal(last.queries[0]?.nextOffset, null);
+    assert.equal(last.queries[0]?.sourceRange, "/rows[50:73]");
+    assert.doesNotMatch(last.caveats.join("\n"), /request another|offset 73/);
+    assert.deepEqual([...(first.queries[0]?.value ?? []), ...(last.queries[0]?.value ?? [])], rows);
+    const empty = await read("/empty", 0);
+    assert.deepEqual(empty.queries[0]?.value, []);
+    assert.equal(empty.queries[0]?.nextOffset, null);
+    assert.deepEqual(empty.caveats, []);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
 test("computer_read_json distinguishes root values from profiles and preserves bounded root windows", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-json-root-"));
   try {
