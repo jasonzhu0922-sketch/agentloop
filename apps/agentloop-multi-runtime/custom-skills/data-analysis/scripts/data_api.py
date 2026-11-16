@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from data_access import load_gateway
+from entity_binding import EntityBindingError
 
 
 class SqlRequest(BaseModel):
@@ -20,6 +21,17 @@ class SqlRequest(BaseModel):
     scenario_id: str = Field(min_length=1, max_length=200, pattern=r"^\S+$")
     sql: str = Field(min_length=1, max_length=65536)
     params: list[str | int | float | bool | None] = Field(default_factory=list, max_length=1000)
+    query_plan: dict | None = None
+
+
+class EntityRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    scenario_id: str = Field(min_length=1, max_length=200, pattern=r'^\S+$')
+    mention: str = Field(min_length=1, max_length=1000)
+    matched_term: str | None = None
+    canonical_name: str = Field(min_length=1, max_length=1000)
+    source_id: str = Field(min_length=1, max_length=200)
+    entity_id: str = Field(min_length=1, max_length=200)
 
 
 def create_app(*, gateway=None):
@@ -36,6 +48,8 @@ def create_app(*, gateway=None):
     def call(operation, *args):
         try:
             return operation(*args)
+        except EntityBindingError as exc:
+            raise HTTPException(400, {'code': exc.code, 'message': str(exc)}) from None
         except ValueError:
             raise HTTPException(400, "Unknown scenario/source or invalid catalog") from None
         except Exception:
@@ -47,12 +61,17 @@ def create_app(*, gateway=None):
 
     @app.get("/api/data/catalog")
     def catalog(scenario_id: Annotated[str, Query(min_length=1, max_length=200, pattern=r"^\S+$")],
-                source_id: Annotated[list[str] | None, Query()] = None):
-        return call(gateway.catalog, scenario_id, source_id)
+                source_id: Annotated[list[str] | None, Query()] = None,
+                question: Annotated[str | None, Query(min_length=1, max_length=4000)] = None):
+        return call(gateway.catalog, scenario_id, source_id, question)
 
     @app.post("/api/data/execute")
     def execute(payload: SqlRequest):
-        return call(gateway.execute_sql, payload.scenario_id, payload.sql, payload.params)
+        return call(gateway.execute_sql, payload.scenario_id, payload.sql, payload.params, payload.query_plan)
+
+    @app.post('/api/data/resolve-entity')
+    def resolve_entity(payload: EntityRequest):
+        return call(gateway.resolve_entity, payload.scenario_id, payload.model_dump(exclude={'scenario_id'}))
 
     return app
 

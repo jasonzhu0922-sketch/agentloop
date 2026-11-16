@@ -7,6 +7,7 @@ import json
 from .tidb_connection import connect
 
 from .scenarios import scenario_id
+from catalog_knowledge import catalog_config
 
 
 class CatalogStore:
@@ -50,8 +51,7 @@ class CatalogStore:
             raise ValueError("Unknown scenario")
         config = json.loads(row["config"]) if isinstance(row["config"], (str, bytes)) else row["config"]
         # Project business metadata before returning it to the query workflow.
-        return {key: deepcopy(config.get(key, [])) for key in
-                ("tables", "metrics", "terms", "relationships", "skills", "dimensions", "time_policies")}
+        return catalog_config(config)
 
     def record_query_audit(self, event):
         # The only database write in this Skill: the existing audit sink.

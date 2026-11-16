@@ -14,6 +14,7 @@ sys.dont_write_bytecode = True
 from data_access import load_gateway
 from runtime_config import ConnectionConfigurationError
 from scenario_selection import selection_requirement
+from entity_binding import EntityBindingError
 
 
 def text_arg(value):
@@ -41,16 +42,44 @@ def save_result(value, output):
     receipt = {"schema": "nl2sql.data-file/v1", "path": str(path), "bytes": len(content),
                "sha256": hashlib.sha256(content).hexdigest()}
     if isinstance(value, dict):
+        pointers = {key: '/' + key.replace('~', '~0').replace('/', '~1') for key in value}
+        if isinstance(value.get('dataset'), dict):
+            pointers.update({'rows': '/dataset/rows', 'columns': '/dataset/columns',
+                             'row_count': '/dataset/row_count'})
+        receipt['read_contract'] = {'file_root': 'original_response', 'file_pointers': pointers,
+                                    'inline_root': '/content',
+                                    'instruction': 'File pointers address the saved JSON root; /content exists only in this stdout receipt.'}
+        if isinstance(value.get('tables'), list):
+            receipt['read_contract']['source_columns'] = {
+                table['name']: '/tables/' + str(index) + '/columns'
+                for index, table in enumerate(value['tables']) if 'columns' in table}
+            receipt['read_contract']['source_fields'] = {
+                table['name']: {column['name']: f'/tables/{index}/columns/{column_index}'
+                                for column_index, column in enumerate(table['columns'])}
+                for index, table in enumerate(value['tables']) if 'columns' in table}
         receipt.update({k: value[k] for k in ("scenario_id", "query_id", "catalog_revision", "status") if k in value})
         if isinstance(value.get("dataset"), dict):
             receipt["row_count"] = value["dataset"]["row_count"]
             receipt["columns"] = value["dataset"]["columns"]
+        if 'plan_verification' in value:
+            receipt['plan_verification'] = value['plan_verification']
+        if 'matched_terms' in value:
+            receipt['matched_terms_pointer'] = '/matched_terms'
+            if len(json.dumps(value['matched_terms'], ensure_ascii=False)) <= 4000:
+                receipt['matched_terms'] = value['matched_terms']
     # Small facts must reach the calling model in the same tool result as the
     # file receipt. Large datasets stay intact in the referenced file, with no
     # partial list that could be mistaken for complete source coverage.
     receipt["content_complete"] = len(content.decode("utf-8")) <= 6000
     if receipt["content_complete"]:
         receipt["content"] = value
+    elif isinstance(value, dict) and isinstance(value.get('dataset'), dict):
+        # A small answer must not require another read just because its plan
+        # evidence is large. Only inline whole datasets, never truncated rows.
+        if len(json.dumps(value['dataset'], ensure_ascii=False)) <= 3000:
+            receipt['dataset_complete'] = True
+            receipt['dataset'] = value['dataset']
+            receipt['read_contract']['inline_dataset_root'] = '/dataset'
     if isinstance(value, dict) and value.get("schema") == "agentloop.humanLoopRequirement/v1":
         # Runtime consumes this native control structure from registered,
         # immutable Skill command roots and persists a blocking HIL request.
@@ -70,29 +99,51 @@ def main(argv=None):
     scenarios.add_argument("--output")
     selection = actions.add_parser("select-scenario")
     selection.add_argument("--output", required=True)
-    for name in ("catalog", "execute"):
+    for name in ("catalog", "execute", "resolve-entity"):
         command = actions.add_parser(name)
         command.add_argument("--scenario-id", required=True, type=text_arg)
-        command.add_argument("--output", required=name == "execute")
+        command.add_argument("--output", required=name in ('execute', 'resolve-entity'))
         if name == "catalog":
             command.add_argument("--source-id", action="append", type=text_arg)
+            command.add_argument("--question", type=text_arg, help="Rank authorized sources using business knowledge")
         else:
             command.add_argument("--request-json", required=True)
+        if name == 'execute':
+            command.add_argument('--query-plan', help='Workspace entity-resolution result or entity/metric/time query-plan JSON file')
     args = parser.parse_args(argv)
     body = None
+    if args.action == 'resolve-entity':
+        try:
+            body = json.loads(args.request_json)
+            if not isinstance(body, dict):
+                raise ValueError('expected an entity lookup object')
+        except ValueError as exc:
+            parser.error('invalid entity request JSON: ' + str(exc))
     if args.action == "execute":
         try:
             body = json.loads(args.request_json)
-            if (not isinstance(body, dict) or set(body) - {"sql", "params"}
+            if not isinstance(body, dict):
+                raise ValueError('expected a SQL request object')
+            if args.query_plan:
+                if 'query_plan' in body:
+                    raise ValueError('supply query_plan inline or by file, not both')
+                with open(args.query_plan, encoding='utf-8') as stream:
+                    plan = json.load(stream)
+                if not isinstance(plan, dict):
+                    raise ValueError('query plan file must contain an object')
+                body['query_plan'] = plan['query_plan'] if plan.get('schema') == 'nl2sql.entity-resolution/v1' else plan
+            if (not isinstance(body, dict) or set(body) - {"sql", "params", "query_plan"}
                     or not isinstance(body.get("sql"), str) or not body["sql"].strip()
                     or len(body["sql"].encode("utf-8")) > 65536
                     or not isinstance(body.get("params", []), list)
                     or len(body.get("params", [])) > 1000):
-                raise ValueError("expected SQL and a parameter array only")
+                raise ValueError("expected SQL, a parameter array and an optional query_plan")
+            if 'query_plan' in body and not isinstance(body['query_plan'], dict):
+                raise ValueError('query_plan must be an object')
             if any(not (v is None or type(v) in (str, int, float, bool))
                    or (type(v) is float and not math.isfinite(v)) for v in body.get("params", [])):
                 raise ValueError("parameters must be finite JSON scalars")
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, KeyError) as exc:
             parser.error("invalid SQL request JSON: " + str(exc))
     exit_code = 0
     phase = "gateway.initialize"
@@ -106,10 +157,16 @@ def main(argv=None):
             result = selection_requirement(gateway.scenarios(), str(Path(args.output).resolve()))
         elif args.action == "catalog":
             phase = "catalog.read"
-            result = gateway.catalog(args.scenario_id, args.source_id)
+            result = gateway.catalog(args.scenario_id, args.source_id, args.question)
+        elif args.action == 'resolve-entity':
+            phase = 'entity.resolve'
+            result = gateway.resolve_entity(args.scenario_id, body)
+            if result.get('status') == 'failed':
+                exit_code = 1
         else:
             phase = "query.dispatch"
-            result = gateway.execute_sql(args.scenario_id, body["sql"], body.get("params", []))
+            extra = [body['query_plan']] if 'query_plan' in body else []
+            result = gateway.execute_sql(args.scenario_id, body["sql"], body.get("params", []), *extra)
     except Exception as exc:
         # Import, catalog, network and driver failures can embed local paths,
         # credentials or values. Retain a failure, never an empty success.
@@ -118,6 +175,9 @@ def main(argv=None):
         if isinstance(exc, ConnectionConfigurationError):
             diagnostic.update(phase="configuration.read", code=exc.code)
             message = str(exc)  # Only fixed, credential-free configuration messages.
+        elif isinstance(exc, EntityBindingError):
+            diagnostic.update(phase='query.entity_binding', code=exc.code)
+            message = str(exc)
         elif isinstance(exc, ImportError):
             diagnostic["code"] = "dependency_unavailable"
             if exc.name in ("pymysql", "sqlglot"):

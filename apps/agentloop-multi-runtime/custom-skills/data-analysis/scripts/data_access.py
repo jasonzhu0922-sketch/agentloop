@@ -6,15 +6,18 @@ import json
 from time import monotonic
 from uuid import uuid4
 from query_errors import QueryParameterError, query_diagnostic
+from catalog_knowledge import catalog_config, prepare_knowledge, project_sources
+from entity_binding import EntityBindingError, lookup_spec, resolution_result, validate_plan
 
 
 def catalog_projection(config, scenario_id):
+    knowledge = catalog_config(config)
     value = {"schema": "nl2sql.data-catalog/v1", "scenario_id": scenario_id,
              "database_engine": "tidb", "sql_dialect": "mysql",
-             **{key: config.get(key, []) for key in
-                ("tables", "metrics", "terms", "relationships", "skills", "dimensions", "time_policies")}}
+             **knowledge}
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     value["catalog_revision"] = hashlib.sha256(encoded).hexdigest()
+    value.update(prepare_knowledge(knowledge))
     return value
 
 
@@ -28,41 +31,49 @@ class Gateway:
         return [{key: row[key] for key in ("id", "name", "description")}
                 for row in self.store.list_scenarios()]
 
-    def catalog(self, scenario_id, source_ids=None):
+    def catalog(self, scenario_id, source_ids=None, question=None):
+        if question is not None and (not isinstance(question, str) or not question.strip() or len(question) > 4000):
+            raise ValueError("Catalog question must contain 1..4000 characters")
         with self.scope(self.store.get_scenario(scenario_id)):
             value = catalog_projection(self.physical_catalog(self.store.load_config()), scenario_id)
         requested = set(source_ids or [])
         tables = value["tables"]
         if requested - {table["name"] for table in tables}:
             raise ValueError("Source is absent from the selected scenario")
-        if requested:
-            value["projection"] = "source_details"
-            value["tables"] = [table for table in tables if table["name"] in requested]
-            value["metrics"] = [m for m in value["metrics"] if m.get("table") in requested]
-            value["relationships"] = [r for r in value["relationships"]
-                                      if any(r.get(side, {}).get("source_id") in requested
-                                             for side in ("left", "right"))]
-        else:
-            value["projection"] = "source_index"
-            value["tables"] = [{key: table[key] for key in
-                                ("name", "schema", "label", "description", "relation_type") if key in table}
-                               for table in tables]
-            value["skills"] = [{k: v for k, v in skill.items()
-                                if k in ("id", "name", "description", "tags")}
-                               for skill in value["skills"]]
-        return value
+        return project_sources(value, requested, question)
 
-    def execute_sql(self, scenario_id, sql, params):
+    def resolve_entity(self, scenario_id, request):
+        catalog = self.catalog(scenario_id, [request.get('source_id')], question=request.get('mention'))
+        spec = lookup_spec(catalog, request)
+        lookup = self.execute_sql(scenario_id, spec['sql'], spec['params'])
+        return resolution_result(catalog, spec, lookup)
+
+    def execute_sql(self, scenario_id, sql, params, query_plan=None):
         started = monotonic()
         result = {"schema": "nl2sql.query-result/v1", "scenario_id": scenario_id,
                   "query_id": "query_" + uuid4().hex, "sql": sql, "params": params}
         with self.scope(self.store.get_scenario(scenario_id)):
             config = self.physical_catalog(self.store.load_config())
-            result["catalog_revision"] = catalog_projection(config, scenario_id)["catalog_revision"]
+            catalog = catalog_projection(config, scenario_id)
+            result["catalog_revision"] = catalog["catalog_revision"]
+            if query_plan is not None:
+                result['query_plan'] = query_plan
             config["_run_id"] = result["query_id"]
             config["_query_audit"] = self.store.record_query_audit
             try:
+                if query_plan is not None:
+                    result['plan_verification'] = validate_plan(catalog, sql, params, query_plan)
                 dataset = self.execute(sql, params, config)
+            except EntityBindingError as exc:
+                entity_error = exc.code.startswith(('entity_', 'term_', 'canonical_', 'matched_term_'))
+                result.update(status='rejected', plan_verification={'status': 'rejected', 'code': exc.code},
+                              error={'code': 'entity_binding_rejected' if entity_error else 'query_plan_rejected',
+                                     'message': str(exc), 'diagnostic': {
+                                         'phase': 'query.entity_binding' if entity_error else 'query.plan', 'code': exc.code}})
+                self.store.record_query_audit({'run_id': result['query_id'],
+                    'query_hash': hashlib.sha256(sql.encode()).hexdigest(),
+                    'params_hash': hashlib.sha256(json.dumps(params, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
+                    'decision': 'rejected', 'reason': exc.code})
             except QueryParameterError as exc:
                 result.update(status="rejected", error={"code": "query_parameter_invalid", "message": str(exc),
                                                        "diagnostic": query_diagnostic(exc)})

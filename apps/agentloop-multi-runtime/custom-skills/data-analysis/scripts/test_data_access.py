@@ -129,6 +129,33 @@ class GatewayTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.gateway.catalog("group", ["not_authorized"])
 
+    def test_catalog_receipt_navigates_exact_fields_without_reading_all_columns(self):
+        original = self.store.load_config
+        def config():
+            value = original()
+            value['tables'][0]['columns'].extend([
+                {'name': 'period/~code', 'description': '期间存储编码', 'format': 'YYYYMM'},
+                *({'name': f'unrelated_{i}', 'description': '不相关字段说明' * 100} for i in range(48))])
+            return value
+        self.store.load_config = config
+        catalog = self.gateway.catalog('group', ['staff'])
+        with tempfile.TemporaryDirectory() as temporary, redirect_stdout(io.StringIO()) as stream:
+            output = Path(temporary)/'catalog.json'
+            data_client.save_result(catalog, output)
+            receipt = json.loads(stream.getvalue())
+            saved = json.loads(output.read_text())
+        self.assertEqual(saved, catalog)
+        self.assertEqual(receipt['catalog_revision'], saved['catalog_revision'])
+        fields = receipt['read_contract']['source_fields']['staff']
+        for name in ('amount', 'period/~code'):
+            node = saved
+            for token in fields[name].split('/')[1:]:
+                token = token.replace('~1', '/').replace('~0', '~')
+                node = node[int(token)] if isinstance(node, list) else node[token]
+            self.assertEqual(node, next(c for c in saved['tables'][0]['columns'] if c['name'] == name))
+            self.assertLess(len(json.dumps(node)), len(json.dumps(saved['tables'][0]['columns'])) // 10)
+        self.assertNotIn('SECRET', json.dumps(receipt))
+
     def test_exact_sql_params_scope_and_audit_link_are_preserved(self):
         result = self.gateway.execute_sql("group", "SELECT amount FROM group.staff WHERE period=%s", ["202503"])
         self.assertEqual(self.calls, [("SELECT amount FROM group.staff WHERE period=%s", ["202503"], "group")])
@@ -195,12 +222,24 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(receipt["content"], saved)
         self.assertTrue(receipt["content_complete"])
+        self.assertEqual(receipt['read_contract']['inline_root'], '/content')
+        self.assertEqual(receipt['read_contract']['file_pointers']['rows'], '/dataset/rows')
+        self.assertNotIn('/content', receipt['read_contract']['file_pointers'].values())
         large = {**saved, "dataset": {"columns": ["amount"], "rows": [{"amount": i} for i in range(700)], "row_count": 700}}
         code, saved, receipt = self.invoke(large)
         self.assertEqual(code, 0)
         self.assertEqual(len(saved["dataset"]["rows"]), 700)
         self.assertFalse(receipt["content_complete"])
         self.assertNotIn("content", receipt)
+        self.assertNotIn('dataset_complete', receipt)
+        # Large plan evidence must not force another read for a small answer.
+        code, saved, receipt = self.invoke({**saved, 'query_plan': {'evidence': 'x' * 7000},
+                                           'dataset': {'columns': ['amount'], 'rows': [{'amount': 23}], 'row_count': 1}})
+        self.assertEqual(code, 0)
+        self.assertFalse(receipt['content_complete'])
+        self.assertTrue(receipt['dataset_complete'])
+        self.assertEqual(receipt['dataset'], saved['dataset'])
+        self.assertEqual(receipt['read_contract']['inline_dataset_root'], '/dataset')
 
     def test_cli_fails_closed_on_partial_or_mismatched_evidence(self):
         valid = self.gateway.execute_sql("group", "SELECT amount FROM group.staff", [])

@@ -3,6 +3,7 @@
 DATA_ANALYSIS_TIDB_LIVE=1 python3 -B scripts/test_tidb_live.py
 Business data is read-only; ordinary query audit rows are written by the Skill.
 """
+import json
 import os
 import sys
 import unittest
@@ -29,12 +30,50 @@ class TiDBLiveTest(unittest.TestCase):
                 names = {table["schema"] + "." + table["name"] for table in catalog["tables"]}
                 self.assertEqual(names, set(self.config["query_databases"][row["id"]]["allowed_relations"]))
                 self.assertEqual(catalog["sql_dialect"], "mysql")
-                self.assertTrue(catalog["metrics"])
-                self.assertTrue(catalog["terms"])
+                self.assertTrue(catalog["metric_index"])
+                self.assertTrue(catalog["term_index"])
                 self.assertTrue(catalog["relationships"])
                 detail = self.gateway.catalog(row["id"], [catalog["tables"][0]["name"]])
                 self.assertTrue(detail["tables"][0]["columns"])
                 self.assertEqual(catalog["catalog_revision"], detail["catalog_revision"])
+
+    def test_persisted_knowledge_reaches_the_real_catalog_and_selected_source(self):
+        with self.gateway.store.connect() as cursor:
+            cursor.execute("SELECT id, config FROM scenarios ORDER BY id")
+            rows = cursor.fetchall()
+        for row in rows:
+            if row['id'] not in self.config['query_databases']:
+                continue
+            with self.subTest(scenario=row['id']):
+                raw = json.loads(row['config']) if isinstance(row['config'], (str, bytes)) else row['config']
+                catalog = self.gateway.catalog(row['id'], question='业务指标与期间')
+                sources = {t['name'] for t in catalog['tables']}
+                self.assertEqual(catalog['metric_index'], [
+                    {k: m[k] for k in ('name', 'label', 'table') if k in m}
+                    for m in raw.get('metrics', []) if m.get('table') in sources])
+                self.assertEqual(catalog['term_index'], [
+                    {k: t[k] for k in ('term', 'aliases') if k in t}
+                    for t in raw.get('terms', [])])
+                self.assertEqual(len(catalog['retrieval']), len(sources))
+                for key in ('entities', 'period_formats'):
+                    self.assertEqual(len(catalog[key]), sum(d['source_id'] in sources for d in raw.get(key, [])))
+                if 'timezone' in raw:
+                    self.assertEqual(catalog['timezone'], raw['timezone'])
+                for source in sorted(sources):
+                    detail = self.gateway.catalog(row['id'], [source])
+                    self.assertEqual(catalog['catalog_revision'], detail['catalog_revision'])
+                    self.assertEqual(detail['metrics'], [m for m in raw.get('metrics', []) if m.get('table') == source])
+                    for key in ('entities', 'period_formats'):
+                        self.assertEqual(
+                            [{k: v for k, v in d.items() if k != 'definition_status'} for d in detail[key]],
+                            [d for d in raw.get(key, []) if d['source_id'] == source])
+                    expected = [s for s in raw.get('table_summaries', []) if s['source_id'] == source
+                                and next(t for t in catalog['tables'] if t['name'] == source)['understanding_status'] == 'current']
+                    self.assertEqual(detail['table_summaries'], expected)
+                for term in raw.get('terms', []):
+                    expanded = self.gateway.catalog(row['id'], question=term['term'])
+                    self.assertIn(term, expanded['terms'])
+                    self.assertEqual(catalog['catalog_revision'], expanded['catalog_revision'])
 
     def test_parameterized_dates_and_join_match_migrated_demo(self):
         sql = """SELECT o.region, COUNT(DISTINCT o.sales_order_id) AS orders,

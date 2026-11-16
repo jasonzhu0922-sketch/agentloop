@@ -43,7 +43,7 @@
         },
         {
           "id": "catalog",
-          "description": "Read the business source index for one explicit scenario.",
+          "description": "Read all authorized source identities and compact metric/term identities for one explicitly selected scenario. Full definitions are retrieved by question or selected source.",
           "inputs": [
             {
               "name": "scenario-id",
@@ -66,8 +66,39 @@
           "result": "Business metadata only; no model settings or connection credentials."
         },
         {
+          "id": "search-sources",
+          "description": "Rank all authorized sources for the user's question using stored summaries, metrics and business terms. Ranking never selects a scenario or excludes tables.",
+          "inputs": [
+            {
+              "name": "scenario-id",
+              "description": "Explicitly selected scenario id.",
+              "required": true
+            },
+            {
+              "name": "question",
+              "description": "User question, up to 4000 characters.",
+              "required": true
+            },
+            {
+              "name": "output",
+              "description": "Workspace JSON result path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "catalog",
+            "--scenario-id",
+            "{{scenario-id}}",
+            "--question",
+            "{{question}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "All source identities and rankings, compact metric/term identities, and full question-matching definitions with provenance. Fetch selected source details; low rank never excludes a source."
+        },
+        {
           "id": "source-details",
-          "description": "Read current fields, value domains and business rules for one catalog source.",
+          "description": "Read complete selected-source fields, summaries, metric definitions, entity and period contracts, plus terms referenced by the source or matched by the current question.",
           "inputs": [
             {
               "name": "scenario-id",
@@ -77,6 +108,11 @@
             {
               "name": "source-id",
               "description": "Table name from the source index.",
+              "required": true
+            },
+            {
+              "name": "question",
+              "description": "Current user question, including entity mentions, for relevant business-term definitions.",
               "required": true
             },
             {
@@ -91,14 +127,90 @@
             "{{scenario-id}}",
             "--source-id",
             "{{source-id}}",
+            "--question",
+            "{{question}}",
             "--output",
             "{{output}}"
           ],
-          "result": "Complete selected table metadata and business evidence."
+          "result": "Complete source definitions and evidence, question/source-relevant terms, explicit term definition pointers and related source identities; use the scenario index for other definition identities."
+        },
+        {
+          "id": "resolve-entity",
+          "description": "Bind a matched business term and its interpreted canonical name to a source-specific entity definition. Query the exact canonical name and return all candidate codes, lookup evidence and an entity query_plan. Do not retry with the original short-name LIKE.",
+          "inputs": [
+            {
+              "name": "scenario-id",
+              "description": "Explicitly selected scenario id.",
+              "required": true
+            },
+            {
+              "name": "request-json",
+              "description": "JSON with mention, matched_term, canonical_name, source_id and entity_id from current catalog definitions.",
+              "required": true
+            },
+            {
+              "name": "output",
+              "description": "Workspace entity-resolution JSON path; reuse this file as the query plan.",
+              "required": true
+            }
+          ],
+          "args": [
+            "resolve-entity",
+            "--scenario-id",
+            "{{scenario-id}}",
+            "--request-json",
+            "{{request-json}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "resolved, ambiguous or unmatched; complete candidates and lookup query evidence. Ambiguous plans have no selected codes and require an explicit selection."
+        },
+        {
+          "id": "execute-entity-sql",
+          "description": "Execute SQL with a saved combined entity/metric/time query plan. Verify exact entity codes, metric project values and declared time ranges in each physical source WHERE before execution.",
+          "inputs": [
+            {
+              "name": "scenario-id",
+              "description": "Explicitly selected scenario id.",
+              "required": true
+            },
+            {
+              "name": "request-json",
+              "description": "JSON with SQL and separate params generated by the current Agent.",
+              "required": true
+            },
+            {
+              "name": "query-plan",
+              "description": "Workspace entity-resolution or combined query-plan JSON preserving all applicable entity, metric and time bindings.",
+              "required": true,
+              "evidenceInput": "immutable_workspace_artifact"
+            },
+            {
+              "name": "output",
+              "description": "Workspace query result JSON path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "execute",
+            "--scenario-id",
+            "{{scenario-id}}",
+            "--request-json",
+            "{{request-json}}",
+            "--query-plan",
+            "{{query-plan}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "Complete query evidence with query_plan and plan_verification. Binding mismatches are rejected before data SQL execution and identify the failed association.",
+          "producesEvidenceKinds": [
+            "source_summary",
+            "record_counts"
+          ]
         },
         {
           "id": "execute-sql",
-          "description": "Execute exactly the SQL and parameters supplied by the current Agent. SQL remains visible in the Runtime tool call.",
+          "description": "Execute caller SQL with inline query_plan binding selected metric names, source time ranges and resolved entities. Combine plan and SQL in this call; do not omit existing bindings. Definition probes may run without a plan.",
           "inputs": [
             {
               "name": "scenario-id",
@@ -107,7 +219,7 @@
             },
             {
               "name": "request-json",
-              "description": "JSON string with sql and params generated by the current Agent.",
+              "description": "JSON with sql, separate params, and query_plan (schema, scenario_id, catalog_revision, metric_bindings, time_bindings, entity_bindings as applicable). See references/input-contract.md.",
               "required": true
             },
             {
@@ -125,7 +237,7 @@
             "--output",
             "{{output}}"
           ],
-          "result": "Query status, SQL, parameters, dataset, audit query id and persisted file receipt; complete small responses are also inline.",
+          "result": "Complete query file, status and audit identity, explicit file-root pointers, plan verification, and complete small answers inline. Consume the Runtime Result and reuse it; do not requery to read saved data.",
           "producesEvidenceKinds": [
             "source_summary",
             "record_counts"
