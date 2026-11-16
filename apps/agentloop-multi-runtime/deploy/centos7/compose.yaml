@@ -27,7 +27,7 @@ x-app-image: &app_image ${MULTI_RUNTIME_IMAGE:?set in deployment .env}
 
 services:
   account-service:
-    image: *app_image
+    image: ${ACCOUNT_SERVICE_IMAGE:-${MULTI_RUNTIME_IMAGE:?set in deployment .env}}
     command: npm run start --workspace agentloop-account-service
     restart: unless-stopped
     environment:
@@ -35,9 +35,11 @@ services:
       ACCOUNT_SERVICE_PORT: 8795
       # Shared production readiness probe reads PORT for HTTP services.
       PORT: 8795
-      ACCOUNT_SERVICE_DATABASE_PATH: /var/lib/agentloop-account/accounts.db
-    volumes:
-      - ${ACCOUNT_SERVICE_DATA_PATH:-${DEPLOY_ROOT:-/opt/agentloop}/data/accounts}:/var/lib/agentloop-account
+      ACCOUNT_SERVICE_DATABASE_DRIVER: postgres
+      ACCOUNT_SERVICE_DATABASE_URL: ${ACCOUNT_SERVICE_DATABASE_URL:?set the independent account PostgreSQL URL}
+      ACCOUNT_SERVICE_DATABASE_POOL_SIZE: ${ACCOUNT_SERVICE_DATABASE_POOL_SIZE:-5}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8795/healthz').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 5s

@@ -1,0 +1,11 @@
+# Scoped Account Service release, built on the verified immutable serving image.
+# The context contains only reviewed Account Service and identity package files.
+ARG ACCOUNT_SERVICE_BASE_IMAGE
+FROM ${ACCOUNT_SERVICE_BASE_IMAGE}
+WORKDIR /app
+COPY packages/agentloop-identity/ ./packages/agentloop-identity/
+COPY apps/agentloop-account-service/ ./apps/agentloop-account-service/
+RUN npm run build --workspace @zhujun/agentloop-identity \
+  && npm run build --workspace agentloop-account-service
+WORKDIR /app/apps/agentloop-account-service
+CMD ["npm", "run", "start"]

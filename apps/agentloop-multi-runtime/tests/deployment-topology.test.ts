@@ -17,6 +17,7 @@ async function fixture(settings: string) {
 PUBLIC_WEB_ORIGIN=http://example:3001
 PUBLIC_ROUTER_URL=http://example:5001
 IDENTITY_SERVICE_URL=http://accounts.example:8795
+ACCOUNT_SERVICE_DATABASE_URL=postgresql://fixture:fixture@host.docker.internal:5432/agentloop_accounts
 RUNTIME_DISPATCH_TOKEN=fixture-dispatch-secret
 RUNTIME_ATTACHMENT_TOKEN=fixture-attachment-secret
 DEPLOY_ROOT=${root}
@@ -42,6 +43,9 @@ for (const [settings, count, capacity] of [["",2,20], ["RUNTIME_COUNT=1",1,20], 
     assert.equal(Object.keys(services).length,count+3);
     assert.ok(services["account-service"]);
     assert.equal(services["account-service"].environment.ACCOUNT_SERVICE_PORT,"8795");
+    assert.equal(services["account-service"].environment.ACCOUNT_SERVICE_DATABASE_DRIVER,"postgres");
+    assert.equal(services["account-service"].environment.ACCOUNT_SERVICE_DATABASE_URL,"postgresql://fixture:fixture@host.docker.internal:5432/agentloop_accounts");
+    assert.equal(services["account-service"].volumes,undefined, "production accounts do not use a SQLite volume");
     assert.equal(services.router.depends_on["account-service"].condition,"service_healthy");
     assert.equal(catalog.runtimes.length,count);
     const ids = new Set();

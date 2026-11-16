@@ -1,6 +1,6 @@
 {
   "name": "agentloop-account-service", "version": "0.1.0", "private": true, "type": "module",
-  "scripts": { "start": "node --env-file-if-exists=.env src/main.ts", "migrate:router-identity": "node --env-file-if-exists=.env src/migrate-router-identity.ts", "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "node --test tests/*.test.ts" },
-  "dependencies": { "@zhujun/agentloop": "*", "@zhujun/agentloop-identity": "*" },
+  "scripts": { "start": "node --env-file-if-exists=.env src/main.ts", "migrate:router-identity": "node --env-file-if-exists=.env src/migrate-router-identity.ts", "migrate:postgres": "node --env-file-if-exists=.env src/migrate-sqlite-postgres.ts", "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "node --test tests/*.test.ts" },
+  "dependencies": { "@zhujun/agentloop": "*", "@zhujun/agentloop-identity": "*", "pg": "^8.16.0" },
   "devDependencies": { "@types/node": "^26.3.0", "typescript": "^7.0.2" }
 }

@@ -19,7 +19,10 @@ npm run start:accounts
 | --- | --- | --- |
 | `ACCOUNT_SERVICE_HOST` | `127.0.0.1` | 监听地址；默认只允许同机代理访问 |
 | `ACCOUNT_SERVICE_PORT` | `8795` | 端口 |
-| `ACCOUNT_SERVICE_DATABASE_PATH` | `data/accounts.db` | SQLite 持久化文件；生产必须使用独立绝对路径与受限目录 |
+| `ACCOUNT_SERVICE_DATABASE_DRIVER` | `sqlite` | 开发可用 SQLite；生产部署固定为 `postgres`，连接失败不回退 |
+| `ACCOUNT_SERVICE_DATABASE_PATH` | `data/accounts.db` | 仅 SQLite 开发模式使用的本地文件路径 |
+| `ACCOUNT_SERVICE_DATABASE_URL` | 无 | PostgreSQL 连接串；使用独立账号数据库和专用角色 |
+| `ACCOUNT_SERVICE_DATABASE_POOL_SIZE` | `5` | 每个账号服务进程的 PG 连接池上限，1 至 50 |
 
 另一个终端启动 Desktop（根目录脚本已固定指向 `127.0.0.1:8795`）：
 
@@ -59,7 +62,17 @@ npm run migrate:router-identity --workspace agentloop-account-service -- \
 
 ## 云端部署边界
 
-目前提供单进程 SQLite 服务，可在云服务器上从同一仓库构建并由进程管理器运行 `npm run start:accounts`，监听 loopback，由同机 HTTPS ingress 转发；公开接口只能走 TLS。生产数据库应放持久卷/受限目录，不用临时目录、NFS 或共享 RWX，不把运行数据打进镜像。限制服务账号权限，安排备份、恢复演练、监控与日志脱敏。
+生产使用 PostgreSQL：在现有生产 PG 实例中创建独立的 `agentloop_accounts` 数据库和专用角色，不复用 Router/Runtime 的业务库。生产 Compose 要求显式提供连接串，账号容器不挂载 SQLite 数据目录；开发仍可显式选择 SQLite。公开接口通过 HTTPS ingress；数据库连接串和密码只保存在服务器权限受限的配置中。
+
+SQLite 到 PG 的切换必须先停止账号服务写入并制作一致快照，再在空目标库执行下列命令。迁移支持四表的原账号 schema 和增加 profiles 的五表 schema，逐值保留身份、密码哈希、租户、成员关系和会话；拒绝合并账号或重映射 ID。目标非空、约束失败或指纹不一致均失败并回滚；源库只读。切换完成后仅 PG 接受新写入，SQLite 快照只作归档。
+
+```sh
+ACCOUNT_SERVICE_DATABASE_DRIVER=postgres npm run migrate:postgres --workspace agentloop-account-service -- --source /absolute/path/to/frozen-accounts.db
+# 在服务开始接收新写入前，可重复执行严格验证
+ACCOUNT_SERVICE_DATABASE_DRIVER=postgres npm run migrate:postgres --workspace agentloop-account-service -- --source /absolute/path/to/frozen-accounts.db --verify-only
+```
+
+连接串通过服务器私有 env 提供，不写入命令行。迁移验收包括逐表数量和全部字段指纹、切换前 token 在切换后仍可验证、密码登录、重复注册、退出和重启后会话连续性。PG 开始接受新写入后，不得回退到旧 SQLite 快照，否则会丢失切换后的账号和会话。
 
 服务有请求体、超时、连接数、并发及进程级认证总量限制；这不是按账号/IP 的完整防滥用体系。正式开放注册前必须在 ingress 配置共享限流、请求体/连接超时、TLS 与滥用防护；当前不宣称多副本/HA、密码找回、邮箱验证或生产安全验收已完成。不要为联调把明文账号接口暴露到公网。
 

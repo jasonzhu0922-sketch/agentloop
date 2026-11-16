@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSa
 import { promisify } from "node:util";
 import { type SqlConnection } from "@zhujun/agentloop";
 import { TIDB_IDENTITY_SCHEMA_SQL } from "./tidb-schema.ts";
+import { POSTGRES_IDENTITY_SCHEMA_SQL } from "./postgres-schema.ts";
 
 const scrypt = promisify(scryptCallback);
 const PASSWORD_KEY_LENGTH = 64;
@@ -99,7 +100,12 @@ export class IdentityService {
           .run(tenantId, userId, now);
       });
     } catch (error) {
-      if (String(error).includes("UNIQUE constraint failed")) throw new IdentityError(409, "email_registered", "Email is already registered");
+      const failure = error as { code?: string; constraint?: string; errno?: number };
+      if (String(error).includes("UNIQUE constraint failed: mr_identity_users.email")
+        || (failure.code === "23505" && failure.constraint === "mr_identity_users_email_key")
+        || (failure.code === "ER_DUP_ENTRY" && String(error).includes("email"))) {
+        throw new IdentityError(409, "email_registered", "Email is already registered");
+      }
       throw error;
     }
     return this.issueSession({ userId, tenantId, email, ...(displayName === undefined ? {} : { displayName }) });
@@ -162,7 +168,8 @@ export class IdentityService {
 
 /** Account-only schema. Router invokes this from its versioned migration registry. */
 export async function installIdentitySchema(database: SqlConnection): Promise<void> {
-  await database.exec(database.dialect === "tidb" ? TIDB_IDENTITY_SCHEMA_SQL : IDENTITY_SCHEMA_SQL);
+  await database.exec(database.dialect === "tidb" ? TIDB_IDENTITY_SCHEMA_SQL
+    : database.dialect === "postgres" ? POSTGRES_IDENTITY_SCHEMA_SQL : IDENTITY_SCHEMA_SQL);
 }
 
 function normalizeEmail(value: unknown): string {

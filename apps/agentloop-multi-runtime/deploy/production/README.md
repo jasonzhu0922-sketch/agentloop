@@ -16,7 +16,7 @@ bash apps/agentloop-multi-runtime/deploy/production/release-cloud.sh --ref HEAD 
 
 脚本使用 `git archive` 导出完整源码，在服务器复用上一版 manifest 的固定 Node 镜像摘要、依赖源、BuildKit builder 和缓存；增量指 Docker 层缓存，并非二进制差分。首次安装不适用此脚本，必须先有有效部署和固定基础镜像的发布记录。
 
-Router 的账号权威已独立为 `agentloop-account-service`。发布前必须在 `/opt/agentloop/.env` 设置 `IDENTITY_SERVICE_URL`（生产 Compose 默认使用内部 `http://account-service:8795`）；发布镜像会以独立 Compose 服务启动账号进程，账号库保存在 `/opt/agentloop/data/accounts/accounts.db`，并在切换前迁移旧 Router 账号数据。账号服务仍有独立的持久数据、健康检查和回滚备份。
+Router 的账号权威是独立的 `agentloop-account-service`。`/opt/agentloop/.env` 必须设置 `IDENTITY_SERVICE_URL` 和 `ACCOUNT_SERVICE_DATABASE_URL`；生产账号使用独立 PostgreSQL 数据库 `agentloop_accounts`，专用角色不拥有 Router/Runtime 数据库。账号服务可通过 `ACCOUNT_SERVICE_IMAGE` 独立发布，其他服务继续使用 `MULTI_RUNTIME_IMAGE`。常规云端发布只校验已有 PG 账号库，不再从旧 SQLite/Router 重新导入账号；首次切换须先按账号服务 README 完成停止写入、快照、事务迁移和登录验收。旧 SQLite 仅作归档，不是自动回退源。
 
 镜像构建完成后检查非终态 Run 数量；有任务时停止，待任务结束后重新执行。没有活动任务时备份部署配置、LLM 配置及两个 PostgreSQL 库，切换镜像，并等待 Router、Web、所有已部署 Runtime **各自**就绪。失败恢复旧镜像选择。该单机流程会重建服务，操作期间应暂停新任务提交；活动任务检查本身不提供流量排空或跨库原子快照。
 
