@@ -709,6 +709,16 @@ body:has(.auth-card[data-mode=register]) .auth-card-wrap {
   width:56%;
   height:auto;
   filter:drop-shadow(0 17px 17px #71518b38);
+  animation:mascot-float 5s ease-in-out infinite;
+  transform-origin:50% 65%;
+}
+@keyframes mascot-float {
+  0%,100% {
+    transform:translate(-50%,-50%) rotate(-.8deg);
+  }
+  50% {
+    transform:translate(-50%,calc(-50% - 8px)) rotate(.8deg) scale(1.015);
+  }
 }
 .goal-caption i {
   width:4px;
@@ -792,6 +802,20 @@ body:has(.auth-card[data-mode=register]) .auth-card-wrap {
   height:100%;
   overflow:visible;
   pointer-events:none;
+}
+
+/* The traveler stays above both orbit halves, the mascot and the stage labels. */
+.loop-traveler {
+  position:absolute;
+  inset:0;
+  z-index:5;
+  width:100%;
+  height:100%;
+  overflow:visible;
+  pointer-events:none;
+}
+.orbit-spark {
+  filter:drop-shadow(0 0 4px var(--orbit-front-glow));
 }
 
 @media(max-width:900px) {
