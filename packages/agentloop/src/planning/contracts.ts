@@ -558,6 +558,8 @@ export interface PlanProposal {
   readonly steps: readonly PlanStepProposal[];
   /** Recovery-only references to persisted immutable Steps, never model-authored copies. */
   readonly retainedStepIds?: readonly string[];
+  /** Explicit recovery replacements authorize deterministic dependent rewiring. */
+  readonly stepReplacements?: readonly { readonly stepId: string; readonly replacementStepId: string }[];
   /** Explicit current-Round boundary; omission means the full requested target scope. */
   readonly roundScope?: RoundScope;
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { buildRecoveryRevision } from "../src/planning/recovery-revision.ts";
 import { admitPlan } from "../src/planning/admission.ts";
 import { goalCriterionBasis } from "../src/planning/criterion-basis.ts";
 import { PlanRepository } from "../src/planning/plan-repository.ts";
@@ -12,6 +13,7 @@ import { RuntimeResultRepository } from "../src/runtime/runtime-result-repositor
 import { understandTask } from "../src/runtime/task-intent.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
+import { AppError } from "../src/shared/errors.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
 
 function fixture() {
@@ -272,22 +274,21 @@ test("a preservation claim cannot rewrite or omit completed Steps, reference for
     availableSkills: [], availableToolNames: new Set() }), /persisted current Plan/);
 });
 
-test("the model receives the exact preservation-contract rejection and corrects its structured decision", async () => {
+test("the model exposes the rejected preservation proposal to the Runtime coordinator without hidden retries", async () => {
   const { state, plan } = fixture();
   let attempts = 0;
-  const decision = await new ModelRecoveryPlanner({ limits: TEST_MODEL_LIMITS, complete: async request => {
-    attempts += 1;
-    if (attempts === 2) assert.match(request.systemPrompt, /Existing Step facts must be referenced in retainedStepIds/);
+  const planner = new ModelRecoveryPlanner({ limits: TEST_MODEL_LIMITS, complete: async () => {
+    attempts++;
     const proposed = revision(plan.goal);
-    // Same failure as 46f2632a: rationale claims preservation, definition changes.
-    if (attempts === 1) proposed.steps.unshift({ ...proposed.steps[0], id: "facts", objective: "Rewritten prerequisite.", dependencies: [] });
+    proposed.steps.unshift({ ...proposed.steps[0], id: "facts", objective: "Rewritten prerequisite.", dependencies: [] });
     return { content: "", finishReason: "tool_calls", toolCalls: [call(proposed)] };
-  } }).decide({ runId: state.runId, userInput: state.intent.userInput, canonicalState: state, plan, events: [], userResponses: [],
+  } });
+  await assert.rejects(planner.decide({ runId: state.runId, userInput: state.intent.userInput, canonicalState: state, plan, events: [], userResponses: [],
     action: { id: "review", runId: state.runId, kind: "recovery_review", state: "recovery_required", replayPolicy: "safe", effectState: "not_started",
-      attempt: 1, maxAttempts: 3, revision: 1, fence: 1, metadata: {}, createdAt: 1, updatedAt: 1 } });
-  assert.equal(attempts, 2);
-  assert.deepEqual(decision.planRevision!.retainedStepIds, ["facts"]);
-  assert.deepEqual(decision.planRevision!.steps.map(step => step.id), ["answer.repair.2"]);
+      attempt: 1, maxAttempts: 3, revision: 1, fence: 1, metadata: {}, createdAt: 1, updatedAt: 1 } }),
+    (error: unknown) => error instanceof AppError && /Existing Step facts must be referenced/.test(error.message)
+      && error.details?.recoveryStage === "parse" && error.details?.rejectedProposal !== undefined);
+  assert.equal(attempts, 1);
 });
 
 test("revised production recovers to completion without rerunning its accepted prerequisite", async () => {
@@ -373,4 +374,32 @@ test("revised production recovers to completion without rerunning its accepted p
     assert.deepEqual(applied.data.retiredStepIds, ["answer"]);
     assert.equal(events.some(event => event.type === "run.failed"), false);
   } finally { database.close(); }
+});
+
+test("explicit replacements rewire unfinished dependents while preserving contracts and immutable completed facts", () => {
+  const { state, plan } = fixture();
+  const old = { ...plan, steps: plan.steps.map(step => ({ ...step,
+    status: step.id === "facts" ? "failed" as const : "pending" as const })) };
+  const facts = old.steps[0]!;
+  const proposal = {
+    goal: plan.goal, shape: "recovery_patch" as const, selectedSkillIds: [], retainedStepIds: ["answer"],
+    stepReplacements: [{ stepId: "facts", replacementStepId: "facts-fixed" }],
+    steps: [{ id: "facts-fixed", objective: facts.objective, dependencies: [], skillIds: [], requiredCapabilities: [],
+      targetIds: [], successCriteria: [{ id: "facts", description: "Publish the supplied totals.", source: "task" as const }] }],
+  };
+  const expanded = buildRecoveryRevision(proposal, old);
+  assert.deepEqual(expanded.retainedStepIds, []);
+  const dependent = expanded.steps.find(step => step.id === "answer.revision.2")!;
+  assert.deepEqual(dependent.dependencies, ["facts-fixed"]);
+  assert.equal(dependent.objective, plan.steps[1]!.objective);
+  assert.deepEqual(dependent.targetIds, plan.steps[1]!.executionBinding.targetIds);
+  assert.deepEqual(dependent.successCriteria.map(c => c.id), ["comparison"]);
+  const admitted = admitPlan({ runId: state.runId, canonicalState: state, currentPlan: old,
+    proposal: expanded, availableSkills: [], availableToolNames: new Set() });
+  assert.ok(admitted.steps.some(step => step.id === dependent.id));
+  assert.throws(() => buildRecoveryRevision(proposal, plan), /Cannot replace completed/);
+  assert.throws(() => buildRecoveryRevision({ ...proposal, stepReplacements: [proposal.stepReplacements[0]!, proposal.stepReplacements[0]!] }, old), /must be unique/);
+  assert.throws(() => buildRecoveryRevision({ ...proposal, retainedStepIds: ["answer", "answer"] }, old), /must be unique/);
+  // Without an explicit replacement declaration, Runtime never silently renames or rewrites a retained Step.
+  assert.deepEqual(buildRecoveryRevision({ ...proposal, stepReplacements: [] }, old).retainedStepIds, ["answer"]);
 });

@@ -128,6 +128,7 @@ import {
 import type { ToolExecutionPlugin } from "../tools/tool-execution-plugin.ts";
 import { TerminalCommitter } from "./terminal-committer.ts";
 import { failedResultEffectState } from "./action-effect.ts";
+import { buildRecoveryRevision } from "../planning/recovery-revision.ts";
 import { StepResultCommitter } from "./step-result-committer.ts";
 import { RunOutcomeRepository } from "../storage/repositories/outcome-repository.ts";
 import { CompletionFailure, partialOutputForFailure } from "./completion-failure.ts";
@@ -146,6 +147,8 @@ import {
   recoveryContinuationStepIds,
   type RecoveryDecisionProposal,
   type RecoveryPlanner,
+  type RecoveryPlannerInput,
+  type RecoveryRevisionFeedback,
 } from "./recovery-planning.ts";
 import {
   RecoveryRepository,
@@ -321,6 +324,8 @@ const MAX_UPLOADED_SOURCE_FULL_COVERAGE_CONVERGENCE_CHUNKS = 10;
 const TOOL_ACTION_COMMIT_GRACE_MS = 15_000;
 /** One unresolved canonical gap cannot acquire a fresh budget by changing Step ids. */
 const MAX_AUTOMATIC_REPAIRS_PER_GAP = 2;
+/** Candidate corrections share one durable budget, including parser failures. */
+const MAX_RECOVERY_PROPOSALS = 3;
 
 export interface RunRecord {
   readonly id: string;
@@ -1310,6 +1315,21 @@ export class RunService {
   }
 
   async advanceRecovery(actorUserId: string, runId: string): Promise<RecoveryDetail> {
+    if (this.isRunExecuting(runId)) throw new AppError("CONFLICT", "Run is already executing", 409);
+    const controller = new AbortController();
+    this.activeRunControllers.set(runId, controller);
+    let release!: () => void;
+    this.executionIdle.set(runId, new Promise<void>(resolve => { release = resolve; }));
+    try {
+      return await this.advanceRecoveryOnce(actorUserId, runId);
+    } finally {
+      if (this.activeRunControllers.get(runId) === controller) this.activeRunControllers.delete(runId);
+      this.executionIdle.delete(runId);
+      release();
+    }
+  }
+
+  private async advanceRecoveryOnce(actorUserId: string, runId: string): Promise<RecoveryDetail> {
     const run = await this.get(actorUserId, runId);
     if (run.status !== "running") throw new AppError("CONFLICT", "Only a running Run can advance recovery", 409);
     const state = await this.recovery.state(runId);
@@ -1341,41 +1361,18 @@ export class RunService {
     const userResponses = await this.recovery.userResponses(runId);
     const canonicalState = await this.canonicalStates.get(runId);
     const failedBoundary = failedBoundaryFromRecoveryAction(action, canonicalState);
-    const unresolvedActionEffects = await this.unresolvedUnsafeEffects(runId, currentPlan?.id, action.stepId);
     const recoveryResults = currentPlan === undefined ? [] : await this.results.listPlanResults({ runId, planId: currentPlan.id, actorUserId });
-    const proposedDecision = failedBoundaryRecoveryDecision(
+    const initialProposal = failedBoundaryRecoveryDecision(
       action,
       currentPlan,
       failedBoundary,
       observedReceiptShapes(events, failedBoundary?.reusableEvidenceRefs ?? []),
       recoveryResults,
       canonicalState,
-    )
-      ?? await this.recoveryPlannerFactory(model).decide({
-        runId,
-        canonicalState,
-        userAuthority: await this.userAuthority(runId, canonicalState),
-        userInput: run.input,
-        action,
-        ...(currentPlan === undefined ? {} : { plan: currentPlan }),
-        ...(failedBoundary === undefined ? {} : { failedBoundary }),
-        unresolvedActionEffects,
-        availableResults: recoveryResultCards(recoveryResults),
-        events,
-        userResponses: userResponses.map((item) => ({
-          actionId: item.actionId,
-          response: item.response,
-          createdAt: item.createdAt,
-        })),
-      });
-    const proposal = await this.guardRecoveryPlanRetirement({
-      runId,
-      action,
-      plan: currentPlan,
-      proposal: proposedDecision,
-      userResponses,
+    );
+    const { decision, prepared } = await this.coordinateRecoveryDecision({
+      actorUserId, run, action, currentPlan, model, failedBoundary, initialProposal, userResponses,
     });
-    const decision = await this.recovery.submit(runId, proposal);
     try {
       switch (decision.decision) {
         case "resume_step":
@@ -1408,14 +1405,8 @@ export class RunService {
           break;
         case "revise_plan":
           await this.applyPlanRevisionRecovery({
-            actorUserId,
-            run,
-            action,
-            decision,
-            currentPlan,
-            model,
-            userResponses,
-            setActionStep: (stepId) => { actionScope.stepId = stepId; },
+            actorUserId, run, action, decision, currentPlan: currentPlan!, model, prepared: prepared!,
+            setActionStep: stepId => { actionScope.stepId = stepId; },
           });
           break;
       }
@@ -4128,22 +4119,101 @@ export class RunService {
     return plan;
   }
 
-  private async applyPlanRevisionRecovery(input: {
+  /** One candidate budget and feedback path for automatic and interrupted recovery. */
+  private async coordinateRecoveryDecision(input: {
     actorUserId: string;
     run: RunRecord;
     action: RuntimeActionRecord;
-    decision: RecoveryDecisionRecord;
     currentPlan?: ExecutionPlan;
     model: ModelAdapter;
+    failedBoundary?: FailedBoundary;
+    canonicalGap?: CanonicalGoalGap;
+    initialProposal?: RecoveryDecisionProposal;
     userResponses?: readonly RecoveryUserResponse[];
-    setActionStep?: (stepId: string | undefined) => void;
-  }): Promise<void> {
-    if (input.currentPlan === undefined || input.decision.planRevision === undefined) {
-      throw new AppError("PLAN_NOT_ADMITTED", "Plan revision requires the persisted current Plan", 422);
+  }) {
+    const catalog = await this.recoveryExecutionCatalog(input.actorUserId, input.run);
+    const events = await this.events(input.actorUserId, input.run.id);
+    const belongs = (event: { data: Readonly<Record<string, unknown>> }) =>
+      event.data.actionId === input.action.id && event.data.expectedActionRevision === input.action.revision;
+    const feedback = events.filter(event => event.type === "recovery.proposal_rejected" && belongs(event))
+      .map(event => event.data as unknown as RecoveryRevisionFeedback);
+    const started = events.filter(event => event.type === "recovery.proposal_attempt_started" && belongs(event)).length;
+    // A submitted candidate surviving an interruption is revalidated, not regenerated.
+    const pending = (await this.recovery.list(input.run.id)).find(decision => decision.actionId === input.action.id
+      && decision.expectedActionRevision === input.action.revision && decision.state === "submitted");
+    const results = input.currentPlan === undefined ? [] : await this.results.listPlanResults({
+      runId: input.run.id, planId: input.currentPlan.id, actorUserId: input.actorUserId,
+    });
+    const context: RecoveryPlannerInput = {
+      runId: input.run.id, userInput: input.run.input, action: input.action, plan: input.currentPlan,
+      canonicalState: catalog.canonicalState, canonicalGap: input.canonicalGap,
+      failedBoundary: input.failedBoundary, events,
+      userAuthority: await this.userAuthority(input.run.id, catalog.canonicalState),
+      availableTools: catalog.availableToolSummaries,
+      availableCapabilities: [...planningCapabilitiesFromTools(catalog.availableToolSummaries, catalog.sources),
+        ...planningCapabilitiesFromSkills(catalog.privateSkills)],
+      availableSkills: catalog.privateSkills.map(({ id, name, description }) => ({ id, name, description })),
+      availableResults: recoveryResultCards(results),
+      unresolvedActionEffects: await this.unresolvedUnsafeEffects(input.run.id, input.currentPlan?.id),
+      userResponses: (input.userResponses ?? []).map(({ actionId, response, createdAt }) => ({ actionId, response, createdAt })),
+    };
+    for (let attempt = pending === undefined ? started + 1 : started; attempt <= MAX_RECOVERY_PROPOSALS; attempt++) {
+      const revalidatePending = pending !== undefined && attempt === started;
+      if ((await this.runs.get(input.run.id))?.status !== "running") {
+        throw new AppError("CANCELLED", "Run stopped before recovery proposal", 409);
+      }
+      if (!revalidatePending) attempt = await this.recovery.beginProposalAttempt(
+        input.run.id, input.action.id, input.action.revision, MAX_RECOVERY_PROPOSALS,
+      );
+      let proposal: RecoveryDecisionProposal | undefined;
+      let decision: RecoveryDecisionRecord | undefined;
+      let stage = "parse";
+      try {
+        proposal = revalidatePending ? pending : attempt === 1 && input.initialProposal !== undefined
+          ? input.initialProposal : await this.recoveryPlannerFactory(input.model).decide({ ...context, revisionFeedback: feedback }, this.activeRunControllers.get(input.run.id)?.signal);
+        if (input.failedBoundary !== undefined) proposal = preventAssessmentAcceptancePause({
+          action: input.action, failedBoundary: input.failedBoundary, proposal,
+        });
+        proposal = await this.guardRecoveryPlanRetirement({
+          runId: input.run.id, action: input.action, plan: input.currentPlan, proposal, userResponses: input.userResponses,
+        });
+        decision = revalidatePending ? pending : await this.recovery.submit(input.run.id, proposal);
+        if (decision.decision === "resume_step" && (input.action.replayPolicy === "unsafe" || input.failedBoundary !== undefined)) {
+          throw new AppError("PLANNING_ERROR", "resume_step requires a replay-safe interrupted Action, not an assessed result", 422);
+        }
+        stage = "admission";
+        const prepared = decision.decision === "revise_plan" ? await this.preparePlanRevisionRecovery({
+          actorUserId: input.actorUserId, run: input.run, action: input.action, decision,
+          currentPlan: input.currentPlan, model: input.model, catalog,
+        }) : undefined;
+        return { decision, prepared };
+      } catch (error) {
+        if (decision !== undefined) await this.rejectRecoveryDecision(decision.id, error);
+        if (!(error instanceof AppError) || !["PLANNING_ERROR", "PLAN_NOT_ADMITTED", "ASSESSMENT_ERROR"].includes(error.code)) throw error;
+        const diagnostic: RecoveryRevisionFeedback = {
+          attempt, stage: stringField(error.details, "recoveryStage") ?? stage, code: error.code,
+          feedback: stringField(error.details, "feedback") ?? error.message,
+          evidenceRefs: Array.isArray(error.details?.evidenceRefs) ? error.details.evidenceRefs as string[] : [],
+          proposal: proposal ?? error.details?.rejectedProposal,
+        };
+        feedback.push(diagnostic);
+        await this.appendRunEvent(input.run.id, { type: "recovery.proposal_rejected", data: {
+          actionId: input.action.id, expectedActionRevision: input.action.revision,
+          ...(decision === undefined ? {} : { decisionId: decision.id }), ...diagnostic,
+        } });
+        if (attempt === MAX_RECOVERY_PROPOSALS) throw new AppError(error.code, error.message, error.status, {
+          ...error.details, recoveryProposalBudgetExhausted: true,
+        });
+      }
     }
-    const privateSkills = await this.skills.resolveForConversation(input.run.ownerUserId);
-    const visibleDirectories = await this.runs.visibleDirectoriesForRun(input.run.id);
-    const sources = (await this.sources.listByRun(input.run.id)).map(sourceSummary);
+    throw new AppError("PLANNING_ERROR", "Recovery proposal budget exhausted for this Action revision", 422,
+      { recoveryProposalBudgetExhausted: true });
+  }
+
+  private async recoveryExecutionCatalog(actorUserId: string, run: RunRecord) {
+    const privateSkills = await this.skills.resolveForConversation(run.ownerUserId);
+    const visibleDirectories = await this.runs.visibleDirectoriesForRun(run.id);
+    const sources = (await this.sources.listByRun(run.id)).map(sourceSummary);
     const allTools = composeRunTools({
       coreTools: this.coreTools,
       sourceRepository: this.sources,
@@ -4151,19 +4221,35 @@ export class RunService {
       visibleDirectories,
       uploadedSources: sources,
       additionalTools: await this.connectorToolsForRun({
-        runId: input.run.id,
-        actorUserId: input.actorUserId,
-        conversationId: input.run.conversationId,
-        connectionIds: this.connectorConnectionIdsByRunId.get(input.run.id) ?? [],
+        runId: run.id,
+        actorUserId: actorUserId,
+        conversationId: run.conversationId,
+        connectionIds: this.connectorConnectionIdsByRunId.get(run.id) ?? [],
       }),
     });
     assertNoDuplicateTools(allTools);
-    const canonicalState = await this.canonicalStates.get(input.run.id);
+    const canonicalState = await this.canonicalStates.get(run.id);
     const availableToolNames = new Set(toolNamesForConversationMode(canonicalState.intent.turnResolution?.mode, allTools
       .map((tool) => tool.name)
-      .filter((name) => input.run.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name))));
+      .filter((name) => run.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name))));
     const availableToolSummaries = toolSummaries(allTools, availableToolNames);
-    const normalizedRevision = input.decision.planRevision;
+    return { privateSkills, visibleDirectories, sources, allTools, canonicalState, availableToolNames, availableToolSummaries };
+  }
+
+  private async preparePlanRevisionRecovery(input: {
+    actorUserId: string;
+    run: RunRecord;
+    action: RuntimeActionRecord;
+    decision: RecoveryDecisionRecord;
+    currentPlan?: ExecutionPlan;
+    model: ModelAdapter;
+    catalog: Awaited<ReturnType<RunService["recoveryExecutionCatalog"]>>;
+  }) {
+    if (input.currentPlan === undefined || input.decision.planRevision === undefined) {
+      throw new AppError("PLAN_NOT_ADMITTED", "Plan revision requires the persisted current Plan", 422);
+    }
+    const { privateSkills, visibleDirectories, sources, canonicalState, availableToolNames, availableToolSummaries } = input.catalog;
+    const normalizedRevision = buildRecoveryRevision(input.decision.planRevision, input.currentPlan);
     const planRevision = { ...normalizedRevision, ...(normalizedRevision.roundScope !== undefined ? {} : input.currentPlan.roundScope === undefined ? {} : { roundScope: input.currentPlan.roundScope }) };
     const gapId = stringField(input.action.metadata, "canonicalGapId");
     const repairGap = canonicalState.gaps.find((gap) => gap.id === gapId && gap.status === "open");
@@ -4210,6 +4296,10 @@ export class RunService {
       reason: input.decision.rationale,
       actionId: input.action.id,
     });
+    const continuationIds = repairGap === undefined ? [] : recoveryContinuationStepIds(input.currentPlan, admitted, repairGap);
+    if (repairGap !== undefined && (!retiredStepIds.includes(repairGap.stepId!) || continuationIds.length === 0)) {
+      throw new AppError("PLAN_NOT_ADMITTED", "A GoalGap revision must replace its failed Step and bind an admitted continuation", 422);
+    }
     const assessment = await this.planRevisionAssessorFactory(input.model).assess({
       runId: input.run.id,
       userInput: input.run.input,
@@ -4229,20 +4319,43 @@ export class RunService {
           ...(unresolvedRetiredActionEffects.length === 0 ? {} : { unresolvedRetiredActionEffects }),
         },
       },
-    });
+    }, this.activeRunControllers.get(input.run.id)?.signal);
     await this.recovery.savePlanRevisionAssessment({
       decisionId: input.decision.id,
       planId: input.currentPlan.id,
       assessment,
     });
     if (!assessment.approved) {
-      throw new AppError("ASSESSMENT_ERROR", "Plan Revision Assessor did not approve the recovery revision", 422);
+      throw new AppError("ASSESSMENT_ERROR", "Plan Revision Assessor did not approve the recovery revision", 422, {
+        recoveryStage: "assessment", feedback: assessment.feedback, evidenceRefs: assessment.evidenceRefs,
+      });
     }
-    const continuationIds = repairGap === undefined ? [] : recoveryContinuationStepIds(input.currentPlan, admitted, repairGap);
-    if (repairGap !== undefined && (!retiredStepIds.includes(repairGap.stepId!) || continuationIds.length === 0)) {
-      throw new AppError("PLAN_NOT_ADMITTED", "A GoalGap revision must replace its failed Step and bind an admitted continuation", 422);
-    }
+    return { ...input.catalog, planRevision, repairGap, admitted, retiredStepIds, continuationIds };
+  }
+
+  private async applyPlanRevisionRecovery(input: {
+    actorUserId: string;
+    run: RunRecord;
+    action: RuntimeActionRecord;
+    decision: RecoveryDecisionRecord;
+    currentPlan: ExecutionPlan;
+    model: ModelAdapter;
+    prepared: Awaited<ReturnType<RunService["preparePlanRevisionRecovery"]>>;
+    setActionStep?: (stepId: string | undefined) => void;
+  }): Promise<void> {
+    const { privateSkills, visibleDirectories, sources, allTools, canonicalState, availableToolNames,
+      planRevision, repairGap, admitted, retiredStepIds, continuationIds } = input.prepared;
+    const committedEvents: { seq: number; event: RuntimeEvent; createdAt: number }[] = [];
+    const recordEvent = async (event: RuntimeEvent) => {
+      const createdAt = Date.now();
+      const seq = await this.runs.appendEvent(input.run.id, { ...event, createdAt });
+      committedEvents.push({ seq, event, createdAt });
+    };
     const { revised, revisedCanonicalState } = await this.database.transaction(async () => {
+      const run = await this.runs.get(input.run.id);
+      if (run?.status !== "running") throw new AppError("CANCELLED", "Run stopped before revision commit", 409);
+      const current = await this.plans.get(input.currentPlan.id);
+      if (current.version !== input.currentPlan.version) throw new AppError("CONFLICT", "Plan version changed before revision commit", 409);
       const revised = await this.plans.revise({
         planId: input.currentPlan!.id, proposal: admitted, retiredStepIds,
         reason: input.decision.rationale, actionId: input.action.id,
@@ -4253,42 +4366,46 @@ export class RunService {
           : [{ gapId: repairGap.id, replacementStepIds: continuationIds }]),
         reason: "plan_revised",
       });
-      return { revised, revisedCanonicalState };
-    });
-    await this.appendRunEvent(input.run.id, {
-      type: "recovery.plan_revision_applied",
-      data: {
-        decisionId: input.decision.id,
-        planId: revised.id,
-        fromVersion: input.currentPlan.version,
-        toVersion: revised.version,
-        retainedStepIds: planRevision.retainedStepIds ?? [],
-        createdStepIds: planRevision.steps.map(step => step.id),
-        retiredStepIds,
-        ...(repairGap === undefined ? {} : { canonicalGapId: repairGap.id, repairScopeStepIds: continuationIds }),
-        inputResultBindings: revised.steps.filter(step => step.retiredAt === undefined && (step.executionBinding.inputResultRefs?.length ?? 0) > 0)
-          .map(step => ({ stepId: step.id, resultRefs: step.executionBinding.inputResultRefs })),
-        preservedTargetIds: Object.values(revisedCanonicalState.targets).filter((target) => acceptedCanonicalDelivery(target) !== undefined).map((target) => target.targetId),
-      },
-    });
-    const repairLeaves = revised.steps.filter((step) => step.retiredAt === undefined && step.role === "repair"
-      && !input.currentPlan!.steps.some((existing) => existing.id === step.id));
-    const continuationSteps = revised.steps.filter((step) => continuationIds.includes(step.id));
-    for (const step of repairLeaves) {
-      await this.appendRunEvent(input.run.id, {
-        type: "recovery.repair_leaf_created",
+      await recordEvent({
+        type: "recovery.plan_revision_applied",
         data: {
+          decisionId: input.decision.id,
           planId: revised.id,
-          stepId: step.id,
-          dependencies: step.dependencies,
-          evidenceContract: step.evidenceContract,
-          sourceActionId: input.action.id,
-          ...(continuationIds.includes(step.id) ? { canonicalGapId: repairGap!.id } : {}),
+          fromVersion: input.currentPlan.version,
+          toVersion: revised.version,
+          retainedStepIds: planRevision.retainedStepIds ?? [],
+          createdStepIds: planRevision.steps.map(step => step.id),
+          retiredStepIds,
+          ...(repairGap === undefined ? {} : { canonicalGapId: repairGap.id, repairScopeStepIds: continuationIds }),
+          inputResultBindings: revised.steps.filter(step => step.retiredAt === undefined && (step.executionBinding.inputResultRefs?.length ?? 0) > 0)
+            .map(step => ({ stepId: step.id, resultRefs: step.executionBinding.inputResultRefs })),
+          preservedTargetIds: Object.values(revisedCanonicalState.targets).filter((target) => acceptedCanonicalDelivery(target) !== undefined).map((target) => target.targetId),
         },
       });
+      const repairLeaves = revised.steps.filter((step) => step.retiredAt === undefined && step.role === "repair"
+        && !input.currentPlan!.steps.some((existing) => existing.id === step.id));
+      for (const step of repairLeaves) {
+        await recordEvent({
+          type: "recovery.repair_leaf_created",
+          data: {
+            planId: revised.id,
+            stepId: step.id,
+            dependencies: step.dependencies,
+            evidenceContract: step.evidenceContract,
+            sourceActionId: input.action.id,
+            ...(continuationIds.includes(step.id) ? { canonicalGapId: repairGap!.id } : {}),
+          },
+        });
+      }
+      await this.recovery.admit(input.decision.id);
+      if (input.action.kind === "recovery_review") await this.actions.resolveRecoveryReview(input.action.id);
+      return { revised, revisedCanonicalState };
+    });
+    for (const { seq, event, createdAt } of committedEvents) {
+      this.eventHub.publish(input.run.id, publicRunEvent({ seq, type: event.type, data: event.data, createdAt }));
+      this.logRunEvent(input.run.id, seq, event, createdAt);
     }
-    await this.recovery.admit(input.decision.id);
-    if (input.action.kind === "recovery_review") await this.actions.resolveRecoveryReview(input.action.id);
+    const continuationSteps = revised.steps.filter(step => continuationIds.includes(step.id));
     if (isEffectivelyComplete(revised)) {
       const completion = await this.finishPlanAfterInputs(input.actorUserId, input.run.id, revised, event => this.appendRunEvent(input.run.id, event));
       if (completion.nextRound) return;
@@ -4593,21 +4710,6 @@ export class RunService {
     let decision: RecoveryDecisionRecord | undefined;
     try {
       const events = await this.events(input.actorUserId, input.run.id);
-      const privateSkills = await this.skills.resolveForConversation(input.run.ownerUserId);
-      const visibleDirectories = await this.runs.visibleDirectoriesForRun(input.run.id);
-      const sources = (await this.sources.listByRun(input.run.id)).map(sourceSummary);
-      const allTools = composeRunTools({ coreTools: this.coreTools, sourceRepository: this.sources,
-        privateSkills, visibleDirectories, uploadedSources: sources,
-        additionalTools: await this.connectorToolsForRun({
-          runId: input.run.id,
-          actorUserId: input.actorUserId,
-          conversationId: input.run.conversationId,
-          connectionIds: this.connectorConnectionIdsByRunId.get(input.run.id) ?? [],
-        }),
-      });
-      const toolNames = new Set(allTools.map((tool) => tool.name)
-        .filter((name) => input.run.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)));
-      const unresolvedActionEffects = await this.unresolvedUnsafeEffects(input.run.id, input.currentPlan.id, input.stepId);
       const recoveryResults = await this.results.listPlanResults({ runId: input.run.id, planId: input.currentPlan.id, actorUserId: input.actorUserId });
       const direct = failedBoundaryRecoveryDecision(action, input.currentPlan, failedBoundary,
         observedReceiptShapes(events, failedBoundary.reusableEvidenceRefs), recoveryResults, canonicalState);
@@ -4615,7 +4717,7 @@ export class RunService {
       const narrowsDeliveryScope = direct?.decision === "revise_plan"
         && (input.currentPlan.steps.find(step => step.id === failedBoundary.stepId)?.executionBinding.targetIds ?? [])
           .some(id => acceptedCanonicalDelivery(canonicalState.targets[id]!) !== undefined);
-      const proposedDecision = canonicalGapRepairAttempts(canonicalGap) >= MAX_AUTOMATIC_REPAIRS_PER_GAP
+      const initialProposal = canonicalGapRepairAttempts(canonicalGap) >= MAX_AUTOMATIC_REPAIRS_PER_GAP
         ? {
           actionId: action.id,
           expectedActionRevision: action.revision,
@@ -4624,37 +4726,12 @@ export class RunService {
           evidenceRefs: canonicalGap.evidenceRefs,
         }
         : (guardedDirect?.decision === "ask_user" ? guardedDirect
-          : input.localRepairExhausted && failedBoundary.suggestedRepairShape === "repair_leaf" && !narrowsDeliveryScope ? undefined : guardedDirect)
-        ?? await this.recoveryPlannerFactory(model).decide({
-          runId: input.run.id,
-          userInput: input.run.input,
-          action,
-          plan: input.currentPlan,
-          failedBoundary,
-          events,
-          userResponses: [],
-          canonicalGap,
-          canonicalState,
-          userAuthority: await this.userAuthority(input.run.id, canonicalState),
-          availableCapabilities: [...planningCapabilitiesFromTools(toolSummaries(allTools, toolNames), sources),
-            ...planningCapabilitiesFromSkills(privateSkills)],
-          availableTools: toolSummaries(allTools, toolNames),
-          availableSkills: privateSkills.map(({ id, name, description }) => ({ id, name, description })),
-          availableResults: recoveryResultCards(recoveryResults),
-          unresolvedActionEffects,
-        });
-      const assessmentBoundDecision = preventAssessmentAcceptancePause({
-        action,
-        failedBoundary,
-        proposal: proposedDecision,
+          : input.localRepairExhausted && failedBoundary.suggestedRepairShape === "repair_leaf" && !narrowsDeliveryScope ? undefined : guardedDirect);
+      const coordinated = await this.coordinateRecoveryDecision({
+        actorUserId: input.actorUserId, run: input.run, action, currentPlan: input.currentPlan, model,
+        failedBoundary, canonicalGap, initialProposal,
       });
-      const proposal = await this.guardRecoveryPlanRetirement({
-        runId: input.run.id,
-        action,
-        plan: input.currentPlan,
-        proposal: assessmentBoundDecision,
-      });
-      decision = await this.recovery.submit(input.run.id, proposal);
+      decision = coordinated.decision;
       if (decision.decision === "resume_step") {
         throw new AppError("PLANNING_ERROR", "An assessed result requires a revised continuation; resume_step is reserved for interrupted execution", 422);
       }
@@ -4665,6 +4742,7 @@ export class RunService {
           action,
           decision,
           currentPlan: input.currentPlan,
+          prepared: coordinated.prepared!,
           model,
           setActionStep: (stepId) => { actionScope.stepId = stepId; },
         });

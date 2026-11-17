@@ -1,7 +1,7 @@
 import { RunInputRepository } from "../runtime/run-input-repository.ts";
 import type { SqlConnection } from "../storage/connection.ts";
 import { insertIgnoreConflictsSql } from "../storage/dialect-sql.ts";
-import { notFound } from "../shared/errors.ts";
+import { AppError, notFound } from "../shared/errors.ts";
 import type {
   AssessmentMethod,
   AssessmentProfileId,
@@ -260,10 +260,10 @@ export class PlanRepository {
   async validateRevision(input: PlanRevisionInput): Promise<ExecutionPlan> {
     const current = await this.get(input.planId);
     const next = input.proposal;
-    if (next.runId !== current.runId) throw new Error("Plan revision must remain in the same Run");
+    if (next.runId !== current.runId) throw invalidRevision("Plan revision must remain in the same Run");
     if (input.steerMessageId !== undefined) {
       const message = await this.database.prepare("SELECT id FROM run_input_messages WHERE id = ? AND run_id = ? AND status = 'processing'").get(input.steerMessageId, current.runId);
-      if (message === undefined) throw new Error("Steer revision requires the current durable input decision");
+      if (message === undefined) throw invalidRevision("Steer revision requires the current durable input decision");
     }
     const currentById = new Map(current.steps.map((step) => [step.id, step]));
     const proposedById = new Map(next.steps.map((step) => [step.id, step]));
@@ -274,25 +274,25 @@ export class PlanRepository {
         && !samePlanStepDefinition(step, proposed)
         && !isSafeRecoveryDependencyRewire(step, proposed, currentById, input.retiredStepIds)
       ) {
-        throw new Error(`Plan revision cannot alter existing step ${step.id}`);
+        throw invalidRevision(`Plan revision cannot alter existing step ${step.id}`);
       }
       if (step.status === "completed" && proposed === undefined && input.steerMessageId === undefined) {
-        throw new Error(`Plan revision cannot remove completed step ${step.id}`);
+        throw invalidRevision(`Plan revision cannot remove completed step ${step.id}`);
       }
     }
     for (const step of current.steps) {
       if (proposedById.has(step.id) || step.retiredAt !== undefined) continue;
       if (!input.retiredStepIds.includes(step.id)) {
-        throw new Error(`Plan revision must explicitly retire omitted step ${step.id}`);
+        throw invalidRevision(`Plan revision must explicitly retire omitted step ${step.id}`);
       }
-      if (step.status === "completed" && input.steerMessageId === undefined) throw new Error(`Plan revision cannot retire completed step ${step.id}`);
+      if (step.status === "completed" && input.steerMessageId === undefined) throw invalidRevision(`Plan revision cannot retire completed step ${step.id}`);
     }
     for (const stepId of input.retiredStepIds) {
       const step = currentById.get(stepId);
       if (step === undefined || (step.status === "completed" && input.steerMessageId === undefined) || step.retiredAt !== undefined) {
-        throw new Error(`Plan revision cannot retire step ${stepId}`);
+        throw invalidRevision(`Plan revision cannot retire step ${stepId}`);
       }
-      if (proposedById.has(stepId)) throw new Error(`Retired step ${stepId} is still in the revised Plan`);
+      if (proposedById.has(stepId)) throw invalidRevision(`Retired step ${stepId} is still in the revised Plan`);
     }
     return current;
   }
@@ -585,4 +585,8 @@ function isSafeRecoveryDependencyRewire(
     && removed.length === added.length
     && removed.every((dependency) => retiredStepIds.includes(dependency))
     && added.every((dependency) => !currentById.has(dependency));
+}
+
+function invalidRevision(message: string): AppError {
+  return new AppError("PLAN_NOT_ADMITTED", message, 422, { recoveryStage: "definition" });
 }

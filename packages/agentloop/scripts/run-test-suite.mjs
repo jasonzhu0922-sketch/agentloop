@@ -66,6 +66,7 @@ const suites = Object.freeze({
     "tests/source-evidence-recovery.test.ts",
     "tests/candidate-recovery-chain.test.ts",
     "tests/recovery-retained-steps.test.ts",
+    "tests/recovery-revision-workflow.test.ts",
     "tests/delivery-target-lifecycle.test.ts",
     "tests/failure-report.test.ts",
     "tests/run-cancel.test.ts",

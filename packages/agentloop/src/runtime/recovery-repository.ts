@@ -95,6 +95,28 @@ export class RecoveryRepository {
     return rows.map(toDecisionRecord);
   }
 
+  /** Serialize durable candidate reservations on the owning Action across Runtime workers. */
+  async beginProposalAttempt(runId: string, actionId: string, revision: number, limit: number): Promise<number> {
+    return this.database.transaction(async () => {
+      const action = await this.database.prepare(`SELECT state, revision FROM runtime_actions WHERE id = ? AND run_id = ?${
+        this.database.dialect === "sqlite" ? "" : " FOR UPDATE"
+      }`).get<{ state: string; revision: number }>(actionId, runId);
+      if (action?.state !== "recovery_required" || action.revision !== revision) {
+        throw new AppError("CONFLICT", "Recovery Action changed before proposal reservation", 409);
+      }
+      const rows = await this.database.prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND type = 'recovery.proposal_attempt_started'")
+        .all<{ payload_json: string }>(runId);
+      const attempt = rows.map(row => JSON.parse(row.payload_json) as { actionId: string; expectedActionRevision: number })
+        .filter(data => data.actionId === actionId && data.expectedActionRevision === revision).length + 1;
+      if (attempt > limit) throw new AppError("PLANNING_ERROR", "Recovery proposal budget exhausted for this Action revision", 422,
+        { recoveryProposalBudgetExhausted: true });
+      await this.appendEvent(runId, "recovery.proposal_attempt_started", {
+        actionId, expectedActionRevision: revision, attempt, limit,
+      }, Date.now());
+      return attempt;
+    });
+  }
+
   async submit(runId: string, proposal: RecoveryDecisionProposal): Promise<RecoveryDecisionRecord> {
     const now = Date.now();
     const id = randomUUID();

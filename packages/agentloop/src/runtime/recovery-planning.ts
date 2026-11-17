@@ -20,7 +20,7 @@ import type {
   PlanningToolSummary,
 } from "../planning/contracts.ts";
 import { canonicalDeliveryPlanScope, type CanonicalGoalGap, type CanonicalRunState } from "./canonical-run-state.ts";
-import type { ModelAdapter, ModelInvocation, ModelToolCall, RuntimeContextSnapshot } from "./contracts.ts";
+import type { ModelAdapter, ModelToolCall, RuntimeContextSnapshot } from "./contracts.ts";
 import type { RuntimeActionRecord } from "./runtime-action-repository.ts";
 import { buildUserAuthorityContext, USER_AUTHORITY_INSTRUCTION, type RuntimeUserAuthorityContext } from "./user-authority.ts";
 import { parseRuntimeResultRef, RUNTIME_RESULT_ID_PATTERN, type RuntimeResultCard } from "./runtime-result.ts";
@@ -51,6 +51,8 @@ export interface RecoveryPlannerInput {
   readonly availableTools?: readonly PlanningToolSummary[];
   readonly availableSkills?: readonly { readonly id: string; readonly name: string; readonly description: string }[];
   readonly availableCapabilities?: readonly PlanningCapability[];
+  /** Complete prior candidates and diagnostics from the shared Runtime coordinator. */
+  readonly revisionFeedback?: readonly RecoveryRevisionFeedback[];
   /** Readable producer records offered for explicit input selection, not acceptance evidence. */
   readonly availableResults?: readonly Pick<RuntimeResultCard, "result" | "producer" | "kind" | "summary" | "summaryTruncated" | "characters">[];
   /** Unsafe Actions whose effect remains unknown at this Recovery boundary. */
@@ -61,6 +63,15 @@ export interface RecoveryPlannerInput {
     readonly toolName?: string;
     readonly effectState: "unknown";
   }>[];
+}
+
+export interface RecoveryRevisionFeedback {
+  readonly attempt: number;
+  readonly stage: string;
+  readonly code: string;
+  readonly feedback: string;
+  readonly evidenceRefs: readonly string[];
+  readonly proposal?: unknown;
 }
 
 export interface RecoveryPlanner {
@@ -127,9 +138,10 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
       "Choose exactly one structured recovery decision. replayPolicy=unsafe never permits resume_step.",
       "When choosing revise_plan, submit a complete planRevision in the same decision: retainedStepIds references unchanged persisted Steps, and steps contains only new Step definitions. If you cannot produce a complete valid replacement Plan, choose fail instead.",
       "Existing Step definitions are immutable. When replacing the failed boundary, never reuse its Step id with a changed objective, dependencies, bindings, criteria or ownership: create a new repair leaf id (for example <failedStepId>.repair.<version>), omit the old failed Step so Runtime retires it, and rewire dependents to the new id. Unchanged Steps may keep their ids.",
+      "For a local replacement, declare stepReplacements: [{stepId: oldId, replacementStepId: newId}], submit the new Step definition and reference its unchanged dependents in retainedStepIds. Runtime creates new identities for affected unfinished dependents and rewires their dependencies and parent links while preserving their contracts and Result/source bindings. Never rewrite completed Steps. Omit stepReplacements when explicitly authoring the entire replacement graph.",
       "A Plan revision retires a Step from future scheduling only. It never erases, authorizes, compensates for, or replays an Action already recorded for that Step. If a retired Action has an unknown external effect, preserve that fact and choose a continuation that neither relies on nor repeats that effect, or fail when no such continuation exists.",
       "If the failed boundary shows the current Plan's evidence contract is wrong for the evidence that actually exists, prefer revise_plan and repair the Plan boundary rather than resubmitting the same step.",
-      "Preserve unchanged Steps only by listing their ids in retainedStepIds; Runtime loads their exact persisted definitions, criteria, provenance and bindings. Never copy or rewrite an existing Step into steps. All completed active Steps must be retained. To change an unfinished Step or its dependencies, omit its id from retainedStepIds and create a new Step id. Every new step must explicitly declare targetIds, dependencies, skillIds, requiredCapabilities and successCriteria. Current bindings are in currentPlan.steps[].executionBinding.targetIds. Schedule every outstanding canonical delivery target exactly once on its producing or adopting leaf. deliveryPlanScope.acceptedTargets already have assessed Run-owned realizations; preserve them without assigning them to a new Step or reproducing their artifacts, even when their original mixed-delivery Step is retired; use targetIds: [] for a prerequisite that owns no user-visible target. Do not infer ownership from criteria or requiredFacts[].basis.targetIds. Runtime regenerates delivery_target criteria for new Steps; omit those derived criteria from new definitions.",
+      "Preserve unchanged Steps only by listing their ids in retainedStepIds; Runtime loads their exact persisted definitions, criteria, provenance and bindings. Never copy or rewrite an existing Step into steps. All completed active Steps must be retained. To change an unfinished Step or its dependencies, omit its id from retainedStepIds and create a new Step id, except for affected dependents explicitly retained under stepReplacements as described above. Every new step must explicitly declare targetIds, dependencies, skillIds, requiredCapabilities and successCriteria. Current bindings are in currentPlan.steps[].executionBinding.targetIds. Schedule every outstanding canonical delivery target exactly once on its producing or adopting leaf. deliveryPlanScope.acceptedTargets already have assessed Run-owned realizations; preserve them without assigning them to a new Step or reproducing their artifacts, even when their original mixed-delivery Step is retired; use targetIds: [] for a prerequisite that owns no user-visible target. Do not infer ownership from criteria or requiredFacts[].basis.targetIds. Runtime regenerates delivery_target criteria for new Steps; omit those derived criteria from new definitions.",
       "Execution-method criteria must never be blocking. Reuse collected evidence; do not add an extra search or verification step unless it can resolve a material gap or contradiction, or is needed for an explicit user constraint.",
       "Bind reusable Results explicitly in each new Step's inputResultRefs, choosing exact Result refs from availableResults or currentPlan's persisted input bindings. A tool call id, path, rationale or evidenceRefs citation does not grant read_result access. New leaves must consume selected inputs with read_result; a committed observation is not proof of an approved result. Bind only inputs relevant to that leaf, and preserve required inputs when replacing a dependent leaf.",
       "Submit basis metadata (kind, targetIds, rationale) only. Omit basis.intentId and basis.requirement, including when copying currentPlan criteria or facts: Runtime binds both from canonicalState.intent. A rationale must justify the condition; binding provenance does not prove that a derived condition is necessary.",
@@ -139,35 +151,28 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
       "Evidence concerns distinguish observations from unverified hypotheses. Do not elevate a suggested explanation or action into a proven cause. Reuse references only for the properties they support; a contradiction can affect several results sharing a premise, and repeated results do not independently verify that premise. Bind the relevant evidence for inspection in the repair instead of assuming it proves the requested result.",
       "Do not ask the user to authorize a Plan revision, confirm whether a recorded Action had an effect, or accept a candidate as evidence that it meets a result criterion. Those are Runtime recovery and assessment obligations. Use ask_user only for a concrete, missing input that only the user can supply and that an execution continuation will consume; a missing capability to observe or verify the requested result is not such an input. When the available capabilities cannot change or verify a remaining result gap, choose fail and retain the stage artifact and its evidence.",
     ].join("\n");
-    const messages: ModelInvocation["messages"] = [{ role: "user", content: input.userInput }];
-    let validationError: AppError | undefined;
-    // A malformed recovery proposal must not be silently repaired by Runtime,
-    // because criteria are semantic obligations. Give the model one bounded
-    // contract-repair turn with the exact parser/admission feedback instead.
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      const systemPrompt = validationError === undefined
-        ? baseSystemPrompt
-        : `${baseSystemPrompt}\nThe previous recovery decision was rejected by Runtime validation: ${validationError.message}\nSubmit a corrected decision now. Preserve all valid obligations and remove only the malformed fields.`;
-      const response = await this.model.complete({
-        runId: input.runId,
-        phase: "planning",
-        systemPrompt,
-        runtimeContext: recoveryRuntimeContext(input),
-        messages,
-        tools: [SUBMIT_RECOVERY_DECISION_TOOL],
-        toolChoice: { name: SUBMIT_RECOVERY_DECISION_TOOL.name },
-      }, signal);
-      try {
-        if (response.finishReason === "length" || response.toolCalls.length !== 1 || response.toolCalls[0].name !== SUBMIT_RECOVERY_DECISION_TOOL.name) {
-          throw new AppError("PLANNING_ERROR", "Recovery Planner must submit exactly one structured recovery decision", 422);
-        }
-        return parseRecoveryDecision(response.toolCalls[0], input.canonicalState, input.plan);
-      } catch (error) {
-        if (!(error instanceof AppError) || error.code !== "PLANNING_ERROR" || attempt === 2) throw error;
-        validationError = error;
+    const response = await this.model.complete({
+      runId: input.runId,
+      phase: "planning",
+      systemPrompt: baseSystemPrompt + (input.revisionFeedback?.length
+        ? "\nCorrect the prior candidates using revisionFeedback, including the exact rejected proposal, validation stage, feedback and evidence refs. Preserve valid obligations. Do not repeat an unchanged rejected candidate."
+        : ""),
+      runtimeContext: recoveryRuntimeContext(input),
+      messages: [{ role: "user", content: input.userInput }],
+      tools: [SUBMIT_RECOVERY_DECISION_TOOL],
+      toolChoice: { name: SUBMIT_RECOVERY_DECISION_TOOL.name },
+    }, signal);
+    try {
+      if (response.finishReason === "length" || response.toolCalls.length !== 1 || response.toolCalls[0].name !== SUBMIT_RECOVERY_DECISION_TOOL.name) {
+        throw new AppError("PLANNING_ERROR", "Recovery Planner must submit exactly one structured recovery decision", 422);
       }
+      return parseRecoveryDecision(response.toolCalls[0], input.canonicalState, input.plan);
+    } catch (error) {
+      if (!(error instanceof AppError)) throw error;
+      throw new AppError("PLANNING_ERROR", error.message, 422, {
+        ...error.details, recoveryStage: "parse", rejectedProposal: response.toolCalls[0]?.arguments,
+      });
     }
-    throw validationError ?? new AppError("PLANNING_ERROR", "Recovery Planner did not produce a valid recovery decision", 422);
   }
 }
 
@@ -198,15 +203,20 @@ export class ModelPlanRevisionAssessor implements PlanRevisionAssessor {
       toolChoice: { name: SUBMIT_PLAN_REVISION_ASSESSMENT_TOOL.name },
     }, signal);
     if (response.finishReason === "length" || response.toolCalls.length !== 1 || response.toolCalls[0].name !== SUBMIT_PLAN_REVISION_ASSESSMENT_TOOL.name) {
-      throw new AppError("ASSESSMENT_ERROR", "Plan Revision Assessor must submit exactly one structured assessment", 422);
+      throw new AppError("ASSESSMENT_ERROR", "Plan Revision Assessor must submit exactly one structured assessment", 422, { recoveryStage: "assessment" });
     }
-    const value = requireRecord(response.toolCalls[0].arguments, "submit_plan_revision_assessment arguments");
-    if (typeof value.approved !== "boolean") throw badRequest("approved must be boolean");
-    return {
-      approved: value.approved,
-      feedback: typeof value.feedback === "string" ? value.feedback.trim().slice(0, 8_000) : "",
-      evidenceRefs: requireStringArray(value.evidenceRefs, "evidenceRefs", 100),
-    };
+    try {
+      const value = requireRecord(response.toolCalls[0].arguments, "submit_plan_revision_assessment arguments");
+      if (typeof value.approved !== "boolean") throw badRequest("approved must be boolean");
+      return {
+        approved: value.approved,
+        feedback: typeof value.feedback === "string" ? value.feedback.trim().slice(0, 8_000) : "",
+        evidenceRefs: requireStringArray(value.evidenceRefs, "evidenceRefs", 100),
+      };
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== "BAD_REQUEST") throw error;
+      throw new AppError("ASSESSMENT_ERROR", error.message, 422, { recoveryStage: "assessment" });
+    }
   }
 }
 
@@ -286,6 +296,7 @@ function recoveryRuntimeContext(input: RecoveryPlannerInput): RuntimeContextSnap
       availableSkills: input.availableSkills,
       availableCapabilities: input.availableCapabilities,
       availableResults: input.availableResults,
+      revisionFeedback: input.revisionFeedback,
       unresolvedActionEffects: input.unresolvedActionEffects,
       userResponses: input.userResponses,
       referencedEvidenceEvents,
@@ -362,8 +373,18 @@ function parsePlanProposal(value: unknown, canonicalState: CanonicalRunState, cu
     selectedSkillIds: requireStringArray(record.selectedSkillIds, "planRevision.selectedSkillIds", 100),
     ...(record.selectedSkillRoles === undefined ? {} : { selectedSkillRoles: parseSelectedSkillRoles(record.selectedSkillRoles) }),
     retainedStepIds,
+    ...(record.stepReplacements === undefined ? {} : { stepReplacements: parseStepReplacements(record.stepReplacements) }),
     steps,
   };
+}
+
+function parseStepReplacements(value: unknown): NonNullable<PlanProposal["stepReplacements"]> {
+  if (!Array.isArray(value) || value.length > 100) throw badRequest("stepReplacements must be an array of at most 100 replacements");
+  return value.map(item => {
+    const row = requireRecord(item, "step replacement");
+    return { stepId: requireString(row.stepId, "replacement stepId", { max: 128 }),
+      replacementStepId: requireString(row.replacementStepId, "replacementStepId", { max: 128 }) };
+  });
 }
 
 function parseStep(value: unknown, index: number, canonicalState: CanonicalRunState): PlanStepProposal {
@@ -558,6 +579,10 @@ function planProposalSchema(): Record<string, unknown> {
       goal: { type: "string" },
       shape: { enum: ["single_leaf", "fact_then_produce", "multi_deliverable", "pipeline", "recovery_patch"] },
       selectedSkillIds: { type: "array", items: { type: "string" } },
+      stepReplacements: { type: "array", maxItems: 100, items: {
+        type: "object", additionalProperties: false, required: ["stepId", "replacementStepId"],
+        properties: { stepId: { type: "string" }, replacementStepId: { type: "string" } },
+      } },
       selectedSkillRoles: { type: "array", items: {
         type: "object", additionalProperties: false, required: ["skillId", "role", "reason"],
         properties: { skillId: { type: "string" }, role: { type: "string", enum: ["primary_builder", "source_provider", "support", "qa"] }, reason: { type: "string" } },

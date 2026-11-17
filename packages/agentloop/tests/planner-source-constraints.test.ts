@@ -866,7 +866,7 @@ function webpageSummaryPlanningFixture() {
   };
 }
 
-test("Recovery Planner retries a duplicate-criterion proposal with parser feedback", async () => {
+test("Recovery Planner rejects duplicate criteria for the shared Runtime correction loop", async () => {
   const fixture = webpageSummaryPlanningFixture();
   let calls = 0;
   const model: ModelAdapter = {
@@ -911,9 +911,8 @@ test("Recovery Planner retries a duplicate-criterion proposal with parser feedba
     canonicalState: fixture.task.canonicalState,
     events: [], userResponses: [],
   };
-  const decision = await new ModelRecoveryPlanner(model).decide(input);
-  assert.equal(decision.decision, "fail");
-  assert.equal(calls, 2);
+  await assert.rejects(new ModelRecoveryPlanner(model).decide(input), /duplicate ids/);
+  assert.equal(calls, 1);
 });
 
 test("Recovery Planner retains referenced evidence outside the recent event window", async () => {
@@ -943,7 +942,7 @@ test("Recovery Planner retains referenced evidence outside the recent event wind
   } }).decide(input);
 });
 
-test("Recovery Planner retries a blocking execution method before submitting a revision", async () => {
+test("Recovery Planner rejects a blocking execution method for the shared Runtime correction loop", async () => {
   const fixture = webpageSummaryPlanningFixture();
   let calls = 0;
   const model: ModelAdapter = {
@@ -967,8 +966,8 @@ test("Recovery Planner retries a blocking execution method before submitting a r
     action: { id: "recovery-action", runId: fixture.task.runId, kind: "recovery_review", state: "recovery_required",
       attempt: 1, maxAttempts: 3, replayPolicy: "safe", fence: 1, revision: 1, metadata: {}, effectState: "not_started", createdAt: 1, updatedAt: 1 },
     canonicalState: fixture.task.canonicalState, events: [], userResponses: [] };
-  assert.equal((await new ModelRecoveryPlanner(model).decide(input)).decision, "fail");
-  assert.equal(calls, 2);
+  await assert.rejects(new ModelRecoveryPlanner(model).decide(input), /cannot become a blocking user obligation/);
+  assert.equal(calls, 1);
 });
 
 test("Recovery Planner requires a complete plan revision for revise_plan", async () => {
@@ -1016,9 +1015,8 @@ test("Recovery Planner requires a complete plan revision for revise_plan", async
     canonicalState: fixture.task.canonicalState,
     events: [], userResponses: [],
   };
-  const decision = await new ModelRecoveryPlanner(model).decide(input);
-  assert.equal(decision.decision, "fail");
-  assert.equal(calls, 2);
+  await assert.rejects(new ModelRecoveryPlanner(model).decide(input), /planRevision is required/);
+  assert.equal(calls, 1);
 });
 
 test("webpage summary provenance is Runtime-bound and both live paraphrases are rejected as model fields", async (t) => {
