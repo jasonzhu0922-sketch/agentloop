@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { cp, lstat, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 
 // These execute from the installation, even when backend modules are replaced.
 export const bootstrapFiles = ['module-supervisor.mjs', 'module-release.mjs', 'module-update-client.mjs', 'module-staging.mjs', 'module-state.mjs', 'native-update.mjs'];
@@ -14,10 +14,16 @@ async function unsignedExecutable(path) {
   // so neither the reference installation nor the new package is modified.
   const temporary = await mkdtemp(join(tmpdir(), 'agentloop-native-identity-'));
   try {
+    const signature = spawnSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', '--verbose=4', path]);
+    if (signature.error) throw signature.error;
+    if (signature.status !== 0 && !signature.stderr.toString().includes('code object is not signed at all')) throw new Error('desktop_native_signature_invalid');
+    const flags = Number.parseInt(signature.stderr.toString().match(/flags=0x([a-f0-9]+)/i)?.[1] ?? '0', 16);
     const copy = join(temporary, 'executable');
     await cp(path, copy);
     execFileSync('/usr/bin/codesign', ['--remove-signature', copy], { stdio: 'pipe' });
-    return await readFile(copy);
+    // Entitlements and hardened-runtime flags change host behavior. Ad-hoc and
+    // linker-signing flags only describe how otherwise identical code was signed.
+    return JSON.stringify({ code: digest(await readFile(copy)), entitlements: digest(signature.stdout), flags: flags & ~(0x2 | 0x20000) });
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
 

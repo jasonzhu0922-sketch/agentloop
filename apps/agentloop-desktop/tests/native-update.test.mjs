@@ -69,6 +69,11 @@ test('macOS resource signing and bundle versions do not change the installed nat
   const proof = await nativeHostIdentity(next, { ...f.config, version: '0.1.9' }, f.application);
   assert.equal(proof.reusedBaseline, true);
   assert.equal(proof.nativeHostSha256, f.config.update.nativeHostSha256);
+  const entitlements = join(f.root, 'entitlements.plist');
+  await writeFile(entitlements, '<?xml version="1.0"?><plist version="1.0"><dict><key>com.apple.security.app-sandbox</key><true/></dict></plist>');
+  execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', '--entitlements', entitlements, next], { stdio: 'pipe' });
+  const changed = await nativeHostIdentity(next, f.config, f.application);
+  assert.equal(changed.reusedBaseline, false, 'native entitlement changes require installation');
 });
 
 test('a resource-only packaged upgrade selects modules with an unchanged installed supervisor', { skip: process.platform !== 'darwin' }, async t => {
