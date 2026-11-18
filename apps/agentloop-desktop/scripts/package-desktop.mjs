@@ -21,6 +21,9 @@ const nodeVersion = '26.0.0';
 const pythonSourceRoot = await requiredPythonRoot();
 const searchDefaults = await packagedSearchDefaults(join(appRoot, '.env'));
 const update = await packagedUpdateConfig();
+const nativeBaseline = process.env.AGENTLOOP_DESKTOP_NATIVE_BASELINE_APP;
+if (update?.sequence > 1 && !nativeBaseline) throw new Error('Desktop updates require AGENTLOOP_DESKTOP_NATIVE_BASELINE_APP pointing to the verified native baseline application');
+if (nativeBaseline && !isAbsolute(nativeBaseline)) throw new Error('Desktop native baseline must be an absolute application path');
 // macOS must distinguish two native installs with the same product version.
 const buildVersion = String(update?.sequence ?? manifest.version);
 const pythonRequirements = join(repositoryRoot, 'apps/agentloop-multi-runtime/requirements.local-agent.txt');
@@ -107,10 +110,16 @@ try {
     if (swift.status !== 0 || sdk.status !== 0) throw new Error('Unable to identify native build toolchain');
     config.nativeToolchain = { swift: swift.stdout.trim(), sdk: sdk.stdout.trim() };
   }
-  if (config.update) config.update.nativeHostSha256 = await nativeHostIdentity(appRoot, config);
   await writeFile(join(backend, 'desktop-config.json'), `${JSON.stringify(config, null, 2)}\n`);
   await verifyPackagedPython(backend, config, await packagedToolEnvironment(backend, config));
   const artifactName = `AgentLoop-Desktop-${manifest.version}-${options.channel}-${options.platform}-${options.arch}`;
+  async function identifyNativeHost(application, resources) {
+    if (!config.update) return;
+    const proof = await nativeHostIdentity(application, config, nativeBaseline);
+    config.update.nativeHostSha256 = proof.nativeHostSha256;
+    await writeFile(join(resources, 'desktop-config.json'), `${JSON.stringify(config, null, 2)}\n`);
+    await writeFile(join(output, 'native-host-verification.json'), `${JSON.stringify(proof, null, 2)}\n`);
+  }
   if (options.platform === 'mac') {
     const application = join(staging, `${options.productName}.app`);
     const contents = join(application, 'Contents');
@@ -141,6 +150,7 @@ try {
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>\n`);
     run('/usr/bin/codesign', ['--force', '--sign', '-', join(contents, 'Resources/runtime/bin/node')]);
+    await identifyNativeHost(application, join(contents, 'Resources'));
     // The Node signature changes executable bytes; capture the baseline only
     // after signing Node and before signing the outer bundle.
     await writeFile(join(contents, 'Resources/desktop-modules.json'), `${JSON.stringify(await inventoryDesktopModules(join(contents, 'Resources')))}\n`);
@@ -168,6 +178,7 @@ try {
     await cp(join(appRoot, 'distribution/windows'), source, { recursive: true });
     run('dotnet', ['publish', join(source, 'DesktopTray.csproj'), '-c', 'Release', '-r', `win-${options.arch}`, '--self-contained', 'true', '-p:PublishSingleFile=true', '-p:DebugType=None', '-o', payload]);
     await cp(backend, join(payload, 'Resources'), { recursive: true });
+    await identifyNativeHost(payload, join(payload, 'Resources'));
     const finalPayload = join(output, options.productName);
     await rm(finalPayload, { recursive: true, force: true });
     await cp(payload, finalPayload, { recursive: true });

@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { downloadNativeInstaller, nativeUpdateRequired, verifyNativeInstaller } from '../distribution/native-update.mjs';
 import { startModuleSupervisor } from '../distribution/module-supervisor.mjs';
 import { inventoryDesktopModules } from '../scripts/desktop-modules.mjs';
-import { nativeHostIdentity, nativeHostInputFiles } from '../scripts/native-host-identity.mjs';
+import { bootstrapFiles, nativeHostIdentity } from '../scripts/native-host-identity.mjs';
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const pkg = Buffer.from('xar!native-tray-and-supervisor-v2');
@@ -17,43 +18,74 @@ const installer = { url: 'https://updates.example/downloads/desktop/production-a
 const waitFor = async predicate => { for (let i = 0; i < 300; i++) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 10)); } throw new Error('update event timeout'); };
 async function temp(t) { const root = await mkdtemp(join(tmpdir(), 'desktop-native-update-')); t.after(() => rm(root, { recursive: true, force: true })); return root; }
 
-test('native identity changes for the tray, trusted supervisor and toolchain, independently of backend code and sequence', async t => {
-  const root = await temp(t), config = { version: '1.0.0', node: { version: '26.0.0' }, nativeToolchain: { swift: '6.2', sdk: '26' }, update: { sequence: 1 } };
-  for (const path of nativeHostInputFiles) {
-    const target = join(root, path); await mkdir(dirname(target), { recursive: true });
-    await copyFile(new URL('../' + path, import.meta.url), target);
+async function hostFixture(t, platform = 'win') {
+  const root = await temp(t), application = join(root, 'native-app');
+  const resources = join(application, ...(platform === 'mac' ? ['Contents', 'Resources'] : ['Resources']));
+  const config = { platform, arch: 'arm64', channel: 'production', version: '0.1.8', update: { sequence: 1, nativeHostSha256: 'a'.repeat(64) } };
+  const write = async (path, bytes) => { await mkdir(dirname(path), { recursive: true }); await writeFile(path, bytes); };
+  for (const name of ['package.json', ...bootstrapFiles, platform === 'mac' ? 'runtime/bin/node' : 'runtime/bin/node.exe']) await write(join(resources, name), name);
+  await write(join(resources, 'desktop-config.json'), JSON.stringify(config));
+  if (platform === 'mac') {
+    for (const name of ['icon.png', 'icon.icns', 'status-icon.png', 'en.lproj/InfoPlist.strings']) await write(join(resources, name), name);
+    await mkdir(join(application, 'Contents/MacOS'));
+    await copyFile('/usr/bin/true', join(application, 'Contents/MacOS/Host'));
+    await chmod(join(application, 'Contents/MacOS/Host'), 0o755);
+    await write(join(application, 'Contents/Info.plist'), '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.host</string><key>CFBundleExecutable</key><string>Host</string><key>CFBundleVersion</key><string>1</string></dict></plist>');
+  } else await write(join(application, 'Host.exe'), 'native tray');
+  return { root, application, resources, config };
+}
+
+test('module resources, packaging scripts and version changes retain the verified installed identity', async t => {
+  const f = await hostFixture(t), next = join(f.root, 'next'); await cp(f.application, next, { recursive: true });
+  await mkdir(join(f.root, 'scripts')); await writeFile(join(f.root, 'scripts/package-desktop.mjs'), 'copy conversation assets');
+  await writeFile(join(next, 'Resources/backend.mjs'), 'new backend and conversation assets');
+  const config = { ...f.config, version: '0.1.9', nativeToolchain: { sdk: 'new build toolchain' }, update: { ...f.config.update, sequence: 2 } };
+  const proof = await nativeHostIdentity(next, config, f.application);
+  assert.equal(proof.reusedBaseline, true);
+  assert.equal(proof.nativeHostSha256, f.config.update.nativeHostSha256, 'existing installed clients must retain their actual identity');
+  assert.equal(nativeUpdateRequired(f.config, { nativeHostSha256: proof.nativeHostSha256, minimumBootstrap: 3 }), false);
+  assert.equal(nativeUpdateRequired(f.config, { nativeHostSha256: proof.nativeHostSha256, minimumBootstrap: 4 }), true);
+  for (const path of ['Host.exe', 'Resources/module-supervisor.mjs', 'Resources/runtime/bin/node.exe']) {
+    const bytes = await readFile(join(next, path)); await writeFile(join(next, path), 'new native content');
+    const changed = await nativeHostIdentity(next, config, f.application);
+    assert.equal(changed.reusedBaseline, false, path);
+    assert.equal(nativeUpdateRequired(f.config, { nativeHostSha256: changed.nativeHostSha256, minimumBootstrap: 3 }), true, path);
+    await writeFile(join(next, path), bytes);
   }
-  const first = await nativeHostIdentity(root, config);
-  await writeFile(join(root, 'distribution/backend.mjs'), 'new backend'); config.update.sequence = 2;
-  assert.equal(await nativeHostIdentity(root, config), first);
-  const tray = join(root, 'distribution/macos/DesktopTray.swift'); await writeFile(tray, 'new version menu');
-  const second = await nativeHostIdentity(root, config); assert.notEqual(second, first);
-  await writeFile(join(root, 'distribution/module-supervisor.mjs'), 'new bootstrap');
-  const third = await nativeHostIdentity(root, config); assert.notEqual(third, second);
-  config.nativeToolchain.sdk = '27'; assert.notEqual(await nativeHostIdentity(root, config), third);
-  assert.equal(nativeUpdateRequired({ update: { nativeHostSha256: first } }, { nativeHostSha256: first, minimumBootstrap: 3 }), false);
-  assert.equal(nativeUpdateRequired({ update: { nativeHostSha256: first } }, { nativeHostSha256: first, minimumBootstrap: 4 }), true);
+  const changedTrust = await nativeHostIdentity(next, { ...config, update: { ...config.update, publicKey: 'replacement trust root' } }, f.application);
+  assert.equal(changedTrust.reusedBaseline, false);
+  await writeFile(join(f.resources, 'desktop-config.json'), '{}');
+  await assert.rejects(nativeHostIdentity(next, config, f.application), /desktop_native_baseline_invalid/);
 });
 
-test('a product version upgrade preserves native identity and selects module updates', async t => {
-  const f = await supervisorFixture(t), buildRoot = join(f.root, 'native-build');
-  for (const path of nativeHostInputFiles) {
-    const target = join(buildRoot, path); await mkdir(dirname(target), { recursive: true });
-    await copyFile(new URL('../' + path, import.meta.url), target);
-  }
-  f.config.version = '0.1.8';
-  f.config.update.nativeHostSha256 = await nativeHostIdentity(buildRoot, f.config);
-  f.release.version = '0.1.9';
-  f.release.nativeHostSha256 = await nativeHostIdentity(buildRoot, { ...f.config, version: f.release.version });
-  assert.equal(f.release.nativeHostSha256, f.config.update.nativeHostSha256);
+test('macOS resource signing and bundle versions do not change the installed native identity', { skip: process.platform !== 'darwin' }, async t => {
+  const f = await hostFixture(t, 'mac'), next = join(f.root, 'next.app');
+  execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', f.application], { stdio: 'pipe' });
+  await cp(f.application, next, { recursive: true });
+  await writeFile(join(next, 'Contents/Resources/backend.mjs'), 'new module');
+  execFileSync('/usr/bin/plutil', ['-replace', 'CFBundleVersion', '-string', '2', join(next, 'Contents/Info.plist')]);
+  execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', next], { stdio: 'pipe' });
+  assert.notDeepEqual(await readFile(join(next, 'Contents/MacOS/Host')), await readFile(join(f.application, 'Contents/MacOS/Host')));
+  const proof = await nativeHostIdentity(next, { ...f.config, version: '0.1.9' }, f.application);
+  assert.equal(proof.reusedBaseline, true);
+  assert.equal(proof.nativeHostSha256, f.config.update.nativeHostSha256);
+});
+
+test('a resource-only packaged upgrade selects modules with an unchanged installed supervisor', { skip: process.platform !== 'darwin' }, async t => {
+  const f = await supervisorFixture(t), host = await hostFixture(t, 'mac'), next = join(host.root, 'next.app');
+  // Model an older installed host whose identity included packaging bookkeeping.
+  await cp(host.application, next, { recursive: true });
+  await writeFile(join(next, 'Contents/Resources/backend.mjs'), 'new conversation resources');
+  const proof = await nativeHostIdentity(next, { ...host.config, version: '0.1.9' }, host.application);
+  f.config.version = '0.1.8'; f.config.update.nativeHostSha256 = host.config.update.nativeHostSha256;
+  f.release.version = '0.1.9'; f.release.nativeHostSha256 = proof.nativeHostSha256;
   await writeFile(f.configPath, JSON.stringify(f.config));
   const s = await f.start(); t.after(() => s.close());
-  await waitFor(() => f.events.some(e => e.type === 'ready'));
-  await s.check();
+  await waitFor(() => f.events.some(e => e.type === 'ready')); await s.check();
   assert.equal(f.events.at(-1).type, 'update-available');
-  assert.equal(f.events.at(-1).version, '0.1.9');
-  assert.equal(f.events.at(-1).mode, 'module');
-  assert.equal(f.opened.length, 0);
+  assert.equal(f.events.at(-1).version, '0.1.9'); assert.equal(f.events.at(-1).mode, 'module');
+  await s.download(); assert.equal(f.events.at(-1).type, 'update-staged');
+  assert.equal(f.events.at(-1).mode, 'module'); assert.equal(f.opened.length, 0);
   s.close(); await waitFor(() => f.events.some(e => e.type === 'supervisor-closed'));
 });
 
