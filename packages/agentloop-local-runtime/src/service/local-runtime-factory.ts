@@ -275,6 +275,7 @@ export class LocalRuntimeFactory {
         { environment: integrationEnvironment },
       );
       const runs = new RunService({
+        skillLoadDiagnostics: configuration.skillDiagnostics,
         requireExplicitModel: true,
         database, skills, ...(memory === undefined ? {} : { memory }), modelFactory: (onRetry, modelKey) => {
           const { provider, configuration: modelConfiguration } = currentModels();

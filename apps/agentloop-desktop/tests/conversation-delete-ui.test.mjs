@@ -1,3 +1,4 @@
+import { connectorCredentialStatus } from '../web/connector-status.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
@@ -36,7 +37,7 @@ async function fixture(preferencesStorage = new Map(), running = false, runtimeC
     localStorage: { getItem: key => preferencesStorage.get(key), setItem: (key, value) => preferencesStorage.set(key, value) }, createComposerPreferences,
     createArtifactWorkspace: () => ({ render: noop, collapse: noop, activate: noop }),
     createConversationView: () => ({ clear() { clearCount++; }, render: noop, submitting: noop, submitted: noop }),
-    artifactsVisible, createTurn: run => ({ ...run, events: [], lastSeq: 0 }),
+    connectorCredentialStatus, artifactsVisible, createTurn: run => ({ ...run, events: [], lastSeq: 0 }),
     updateTurn: (turn, run) => Object.assign(turn, run),
     readRunUpdate: () => new Promise(() => {}),
     installCapabilitySettings: noop, resetComposerInput: noop, autoResizeComposerInput: noop,
@@ -46,7 +47,7 @@ async function fixture(preferencesStorage = new Map(), running = false, runtimeC
       if (rejected) return { ok: false, status: rejected.status, json: async () => ({ error: rejected.error }) };
       if (url.pathname === '/api/session') data = { csrfToken: 'fixture-csrf', accountId: 'fixture', user: { email: 'test@example.test' } };
       else if (url.pathname === '/api/runtimes') data = { runtimes: runtimeRows };
-      else if (url.pathname === '/api/connectors') data = { connections: [{ id: 'mail', displayName: 'Mail', enabled: true, moduleAvailable: true }] };
+      else if (url.pathname === '/api/connectors') data = { connections: recovery.connections ?? [{ id: 'mail', displayName: 'Mail', enabled: true, moduleAvailable: true }] };
       else if (url.pathname === '/api/models') data = { models: ['model-a', 'model-b'] };
       else if (url.pathname === '/api/sources' && options.method === 'POST') data = { source: { id: 'source-note', originalName: 'note.txt' } };
       else if (url.pathname === '/api/conversations') data = { conversations: records };
@@ -72,6 +73,17 @@ async function fixture(preferencesStorage = new Map(), running = false, runtimeC
 }
 
 const pendingKey = 'agentloop-desktop-pending:fixture';
+
+test('a broken Connector remains visible with repair guidance and requires explicit authorization', async () => {
+  const ui = await fixture(new Map(), false, 2, { connections: [{ id: 'mail', displayName: '我的邮箱', enabled: true, moduleAvailable: true, credentialConfigured: false, unavailableReason: 'connector_credential_key_missing' }] });
+  const container = ui.element('run-connectors');
+  assert.equal(container.children[0].textContent, '本轮授权 Connector');
+  const choice = container.children[1];
+  assert.match(choice.children[1].textContent, /我的邮箱.*凭据待修复/);
+  assert.match(choice.title, /主密钥缺失.*恢复原密钥/);
+  assert.equal(choice.children[0].checked, false);
+  assert.equal(choice.children[0].disabled, false);
+});
 function pendingRecovery(failures = new Map()) {
   const pending = { requestId: 'unconfirmed-request', runtimeId: 'runtime-b', payload: {
     input: '保留这条未确认消息', modelKey: 'model-a', conversationId: 'not-yet-created', uploadedSourceIds: [], connectorConnectionIds: ['mail'],

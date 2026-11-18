@@ -1,3 +1,4 @@
+import { connectorCredentialStatus } from './connector-status.js';
 import { createSteerDrafts, createSteerQueueView } from './reference/ui/steer-queue.js';
 import { createComposerPreferences } from './composer-preferences.js';
 import { createArtifactWorkspace } from './artifact-workspace.js';
@@ -155,7 +156,7 @@ async function loadConnectors() {
     const { connections } = await api('/api/connectors');
     if (!connections.length) return;
     const title = node('span', 'desktop-connector-title', '本轮授权 Connector'); container.append(title);
-    for (const connection of connections.filter(c => c.enabled && c.moduleAvailable)) { const label = node('label', 'desktop-connector-choice'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = connection.id; checkbox.checked = false; checkbox.disabled = locked; label.append(checkbox, node('span', '', connection.displayName)); container.append(label); }
+    for (const connection of connections.filter(c => c.enabled && c.moduleAvailable)) { const label = node('label', 'desktop-connector-choice'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = connection.id; checkbox.checked = false; checkbox.disabled = locked; label.title = connectorCredentialStatus(connection); label.append(checkbox, node('span', '', `${connection.displayName}${connection.unavailableReason ? '（凭据待修复）' : ''}`)); container.append(label); }
     restoreConnectors();
   } catch { status('Connector 列表读取失败；本轮不会自动授权连接。', true); }
 }

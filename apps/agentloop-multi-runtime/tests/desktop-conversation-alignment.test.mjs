@@ -27,6 +27,34 @@ renderMessage`, {
 const event = (seq, type, data = {}) => ({ seq, type, data, createdAt: seq });
 const message = (extra = {}) => ({ id: 'turn', role: 'assistant', status: 'running', text: '', plan: [], events: [], ...extra });
 
+test('Skill load diagnostics stay out of the conversation while actual configuration failures remain readable', () => {
+  const turn = message();
+  replayAssistantEvents(turn, [
+    event(1, 'skill.load.failed', { code: 'SKILL_PACKAGE_INVALID', message: 'Skill 加载失败，请在设置中重新导入。' }),
+    event(2, 'run.failed', { code: 'CAPABILITY_UNAVAILABLE', message: '所选 Connector 的凭据已丢失，请在设置中重新填写并保存。' }),
+  ]);
+  const html = view(turn);
+  assert.doesNotMatch(html, /runtime-diagnostic|Skill 加载失败|SKILL_PACKAGE_INVALID/);
+  assert.ok(turn.events.some(event => event.type === 'skill.load.failed'));
+  assert.match(html, /所选 Connector 的凭据已丢失，请在设置中重新填写并保存/);
+  assert.doesNotMatch(html, /本次处理未完成/);
+});
+
+test('successful replies remain free of Skill load warnings after history replay', () => {
+  const events = [
+    event(1, 'skill.load.failed', { code: 'SKILL_PACKAGE_INVALID', message: 'Skill 加载失败，请在设置中重新导入。' }),
+    event(2, 'run.completed', { output: '已记住您的周报格式。' }),
+  ];
+  for (const replayed of [events, JSON.parse(JSON.stringify(events))]) {
+    const turn = message();
+    replayAssistantEvents(turn, replayed);
+    const html = view(turn);
+    assert.match(html, /已记住您的周报格式/);
+    assert.doesNotMatch(html, /runtime-diagnostic|Skill 加载失败|SKILL_PACKAGE_INVALID/);
+    assert.equal(turn.status, 'completed');
+  }
+});
+
 test('Multi Runtime uses Desktop ordered process, one row per call and chronological steer', () => {
   const events = [
     event(1, 'assistant.streaming', { content: '先检查' }),

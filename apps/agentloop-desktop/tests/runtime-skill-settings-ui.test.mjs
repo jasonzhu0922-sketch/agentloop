@@ -1,3 +1,4 @@
+import { connectorCredentialMessages, connectorCredentialStatus } from '../web/connector-status.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
@@ -44,6 +45,7 @@ async function fixture(tabName = 'runtimes', skillPackages) {
     throw Error(path);
   };
   const install = runInNewContext(source.replace(/^import .*;\n/gm, '').replace('export function', 'function') + '\ninstallCapabilitySettings', {
+    connectorCredentialMessages, connectorCredentialStatus,
     document: { createElement: tag => Object.assign(new Element(), { tag }), querySelectorAll: () => [tab] }, Node: Element,
     installModelSettings: () => ({ canLeave: () => true }), confirm: () => true,
   });

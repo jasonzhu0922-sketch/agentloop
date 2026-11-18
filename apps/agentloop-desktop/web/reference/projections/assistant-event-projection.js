@@ -127,6 +127,13 @@ export function liveProgressForEvent(event) {
 
 function failureMessage(data) {
   switch (data.code) {
+    case "CAPABILITY_UNAVAILABLE":
+    case "SKILL_PACKAGE_INVALID":
+    case "SKILL_PACKAGE_MUTATED":
+      // Configuration/admission errors explain what the user must repair.
+      // Keep the producer's reason; do not replace it with a generic failure.
+      return typeof data.message === "string" && data.message.trim()
+        ? data.message : "本轮所需能力不可用，请在设置中检查 Runtime 配置。";
     case "RUN_LIMIT_EXCEEDED":
       return "本轮处理次数已达上限，任务尚未完成。";
     case "STEP_NOT_COMPLETED":

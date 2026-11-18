@@ -73,6 +73,7 @@ import {
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import { readSkillExecutionManifest } from "../skills/skill-execution-manifest.ts";
 import type { PrivateSkill, SkillService } from "../skills/skill-service.ts";
+import type { SkillLoadDiagnostic } from "../skills/skill-directory.ts";
 import { hasSkillSourceContract } from "../skills/agentloop-metadata.ts";
 import type { SqlConnection } from "../storage/connection.ts";
 import { RunRepository, type RunRow } from "../storage/repositories/run-repository.ts";
@@ -480,6 +481,7 @@ export class RunService {
   private readonly hostRunQueries: RuntimeHostRunProjectionQueryService<RunRecord>;
   private readonly eventHub = new RunEventHub();
   private readonly runEventLogSink?: RunEventLogSink;
+  private readonly skillLoadDiagnostics?: readonly SkillLoadDiagnostic[];
   private readonly activeRunControllers = new Map<string, AbortController>();
   private readonly planningExtensions: readonly PlanningExtension[];
   private readonly stepExecutionStrategy?: StepExecutionStrategy;
@@ -490,6 +492,8 @@ export class RunService {
   constructor(options: {
     database: SqlConnection;
     skills: SkillService;
+    /** Host-discovered packages excluded before they could reach SkillService. */
+    skillLoadDiagnostics?: readonly SkillLoadDiagnostic[];
     modelFactory: ModelFactory;
     /** Bounded Planner contract-repair turns for the default ModelPlanner. */
     maxPlanningTurns?: number;
@@ -652,6 +656,7 @@ export class RunService {
     );
     this.checkpoints = new RunCheckpointRepository(options.database);
     this.runEventLogSink = options.runEventLogSink;
+    this.skillLoadDiagnostics = options.skillLoadDiagnostics;
     const recoveryEventLogSink: RecoveryEventLogSink = (event) => {
       this.logRunEvent(event.runId, event.seq, { type: event.type, data: event.data }, event.createdAt);
     };
@@ -2039,6 +2044,16 @@ export class RunService {
         await this.skills.refreshSkillDirectory();
       }
       const currentSkills = await this.skills.resolveForConversation(actorUserId);
+      // Loading failures are Run evidence as well as operational diagnostics.
+      // Publish only a user-facing explanation, never package-controlled error
+      // bodies or local source paths. Valid Skills remain available to the Run.
+      for (const diagnostic of [...(this.skillLoadDiagnostics ?? []), ...this.skills.loadDiagnostics()]) {
+        await emit({ type: "skill.load.failed", data: {
+          code: diagnostic.code, stage: diagnostic.stage,
+          ...(diagnostic.skillName === undefined ? {} : { skillName: diagnostic.skillName }),
+          message: `${diagnostic.skillName ? `Skill「${diagnostic.skillName}」` : "一个 Skill"}加载失败，已隔离，本轮无法使用。请在设置中检查或重新导入。`,
+        } });
+      }
       const privateSkills = resumePlanning?.context.allowedSkillIds === undefined ? currentSkills
         : currentSkills.filter((skill) => resumePlanning.context.allowedSkillIds!.includes(skill.id));
       if (resumePlanning !== undefined && (!Array.isArray(resumePlanning.context.skillVersions)

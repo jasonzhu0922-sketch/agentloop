@@ -372,6 +372,39 @@ test('pure presentation snapshots remain exactly aligned with Multi Runtime, not
   }
 });
 
+test('configuration failure reason and repair instruction survive live projection and history replay', () => {
+  const message = '所选 Connector 的凭据已丢失，请在设置中重新填写并保存。';
+  const failure = event(3, 'run.failed', { code: 'CAPABILITY_UNAVAILABLE', message });
+  const events = [event(1, 'run.started'), failure];
+  const live = createTurn(run());
+  updateTurn(live, run('failed'), events);
+  const restored = createTurn(run('failed'));
+  updateTurn(restored, run('failed'), JSON.parse(JSON.stringify(events)));
+  for (const turn of [live, restored]) {
+    const html = renderAssistant(turn, { process: false });
+    assert.equal(turn.error, message);
+    assert.equal(html.split(message).length - 1, 1);
+    assert.doesNotMatch(html, /本次处理未完成/);
+  }
+});
+
+test('Skill load diagnostics stay out of live and replayed conversation content', () => {
+  const message = 'Skill「broken<script>」加载失败，已隔离，本轮无法使用。请在设置中检查或重新导入。';
+  const warning = event(2, 'skill.load.failed', { code: 'SKILL_PACKAGE_INVALID', skillName: 'broken<script>', message });
+  const events = [event(1, 'run.started'), warning];
+  for (const status of ['running', 'completed', 'failed']) {
+    const restored = createTurn(run(status, status === 'completed' ? '正常回答' : undefined));
+    updateTurn(restored, restored.run, JSON.parse(JSON.stringify(events)));
+    for (const process of [false, true]) {
+      const html = renderAssistant(restored, { process });
+      assert.doesNotMatch(html, /runtime-diagnostic|broken|SKILL_PACKAGE_INVALID|已隔离，本轮无法使用/);
+      if (status === 'completed') assert.match(html, /正常回答/);
+    }
+    assert.ok(restored.events.some((event: { type: string }) => event.type === 'skill.load.failed'), 'diagnostic evidence remains available');
+    assert.equal(restored.status, status, 'a warning must not change the Run outcome');
+  }
+});
+
 
 test('artifact cards offer independent preview and scoped download actions', () => {
   const turn = createTurn(run('completed'));

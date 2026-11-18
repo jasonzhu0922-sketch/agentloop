@@ -1,4 +1,6 @@
 import { installModelSettings } from './model-settings.js';
+import { createMcpServerForm } from './mcp-settings-form.js';
+import { connectorCredentialMessages, connectorCredentialStatus } from './connector-status.js';
 import { createSkillMetadataForm, renderSkillRequirements, renderSkillSetup } from './skill-settings.js';
 const RUNTIME_ICONS = [
   ['xuanwu', '玄武', '沉稳守护'], ['qinglong', '青龙', '生发探索'], ['baihu', '白虎', '迅捷执行'], ['zhuque', '朱雀', '创意表达'],
@@ -16,6 +18,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
   let metadataDrawer;
   const labels = { general: ['常规', '管理当前账号的本机存储与 Memory 配置。'], 'web-search': ['联网搜索', '配置 websearch 工具使用的端点和凭据；配置按当前账号加密保存在本机。'], skills: ['Skill 管理', '上传和维护本机 Skill 包；安装后可在各个 Runtime 配置中分别选择。'], mcp: ['MCP 配置', '配置当前账号的 MCP Server，供所有本机 Runtime 使用。'], runtimes: ['子 Runtime 管理', '新增、停止、重启、删除和查看各个本机 Runtime；每个 Runtime 独立选择扩展 Skill，共享当前账号的 MCP。'], connectors: ['Connector 配置', '个人 Connector 只保存在 Desktop；配置凭据不会上传到云端。'] };
   const errors = { account_storage_outside_scope: '此目录不适用于当前账号，请选择其他目录。', runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_json_invalid: 'JSON 格式无效，请检查引号、括号和逗号。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', mcp_server_key_duplicate: '当前账号的 MCP key 不能重复。', mcp_server_referenced_by_runtime: '该 MCP 已被一个或多个 Runtime 选择，不能删除。请先在对应 Runtime 中解除勾选。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', skill_runtime_active: '请先停止使用同名 Skill 的 Runtime，再重新上传。', skill_package_referenced: '该 Skill 已被 Runtime 选择，请先在对应 Runtime 配置中取消选择。', skill_metadata_runtime_active: '请先停止使用此 Skill 的 Runtime。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。', web_search_api_key_required: 'Bocha 搜索需要 API Key。', web_search_endpoint_required: 'Bocha 搜索需要搜索端点。', web_search_endpoint_invalid: '搜索端点必须为 HTTP 或 HTTPS，且不能包含凭据、查询参数或片段。', web_search_provider_invalid: '搜索服务类型无效。', web_search_credentials_missing: '搜索凭据缺失，请重新填写 API Key。' };
+  Object.assign(errors, connectorCredentialMessages, { mcp_form_invalid: '请检查 MCP 配置中标出的输入问题。', mcp_configuration_invalid: 'MCP 配置无效，请检查地址、认证和参数。', mcp_url_must_not_contain_credentials_or_query: '请将凭据填写在认证区域，服务地址不能包含查询参数。' });
   const connectorBindings = {
     '126-mail': {
       title: '绑定 126 邮箱', displayName: '我的 126 邮箱', scopes: ['email:search', 'email:read'],
@@ -381,19 +384,6 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     if (!mcpCatalog.length) section.append(el('p', '尚无 MCP 条目。'));
     for (const server of mcpCatalog) section.append(el('div', `${server.displayName} · ${server.key}`, 'runtime-detail-choice'));
   }
-  // Some chat and document editors replace JSON delimiter quotes with curly
-  // quotes. Normalize delimiters only; preserve curly quotes inside strings.
-  function parseMcpJson(text) {
-    let normalized = '', quote = '', escaped = false;
-    for (const char of text) {
-      if (escaped) { normalized += char; escaped = false; continue; }
-      if (quote && char === '\\') { normalized += char; escaped = true; continue; }
-      if (!quote && (char === '"' || char === '“')) { quote = char; normalized += '"'; continue; }
-      if ((quote === '"' && char === '"') || (quote === '“' && char === '”')) { quote = ''; normalized += '"'; continue; }
-      normalized += char;
-    }
-    return JSON.parse(normalized);
-  }
   function renderDeviceMcp() {
     const header = el('section', undefined, 'mcp-list-heading');
     const copy = el('div'); copy.append(el('strong', 'MCP Servers'), el('p', '统一管理当前账号的 MCP 服务，供所有本机 Runtime 使用。'));
@@ -449,23 +439,19 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
       if (!allowAction()) return;
       editor?.remove(); editor = el('section', undefined, 'capability-card mcp-editor'); body.append(editor);
       const heading = el('div', undefined, 'mcp-editor-heading'); const headingCopy = el('div');
-      headingCopy.append(el('strong', existing ? `编辑 ${existing.displayName}` : '新增 MCP'), el('p', '粘贴完整的 MCP JSON 配置，凭据填写在 auth 中。')); heading.append(headingCopy); editor.append(heading);
-      const { id, ...config } = existing ?? { displayName: '新 MCP', key: `mcp-${Date.now()}`, transport: 'http', url: 'http://127.0.0.1:8000/mcp', auth: { kind: 'none' }, timeoutMs: 5000 };
-      const json = jsonEditor(config, 14); json.setAttribute('aria-label', 'MCP 配置 JSON');
-      editor.append(field('MCP 配置 JSON', json), el('p', '保存后凭据不会回显。编辑时省略凭据可保留原值；更换地址或认证目标时需重新填写。', 'mcp-editor-note'));
-      function draft() {
-        let value;
-        try { value = parseMcpJson(json.value); } catch { throw new Error('mcp_json_invalid'); }
-        if (!value || typeof value !== 'object' || Array.isArray(value) || !value.auth || typeof value.auth !== 'object' || Array.isArray(value.auth)) throw new Error('mcp_json_invalid');
-        const { credentialConfigured, ...auth } = value.auth;
-        const { id: ignoredId, ...fields } = value;
-        return { ...fields, auth, ...(id ? { id } : {}) };
-      }
+      headingCopy.append(el('strong', existing ? `编辑 ${existing.displayName}` : '新增 MCP'), el('p', '配置连接、认证和能力声明；也可切换到 JSON 导入完整配置。')); heading.append(headingCopy); editor.append(heading);
+      const form = createMcpServerForm({ document, config: existing ?? { displayName: '', key: '', transport: 'http', url: '', auth: { kind: 'none' }, timeoutMs: 5000 }, onDirty: markDirty });
+      editor.append(form.element);
+      function draft() { return { ...form.draft(), ...(existing?.id ? { id: existing.id } : {}) }; }
       const actions = el('div', undefined, 'capability-actions mcp-editor-actions');
       const cancel = button('取消', () => { dirty = false; editor.remove(); editor = undefined; message('已取消编辑。'); });
       const save = button('保存 MCP', async () => { await api('/api/mcp', { server: draft() }); dirty = false; await load(); await changed(); message('MCP 已保存，所有本机 Runtime 已同步。'); }); save.classList.add('primary');
-      actions.append(cancel, save); editor.append(actions);
-      json.focus();
+      const test = button('测试连接', async () => {
+        const result = await api('/api/mcp/test', { server: draft() });
+        message(result.ok ? `连接成功 · 发现 ${result.toolCount} 个可用工具；配置尚未保存。` : '连接失败，请检查服务地址、认证和协议。', !result.ok);
+      });
+      actions.append(cancel, test, save); editor.append(actions);
+      form.focus();
     }
   }
   async function renderConnectors() {
@@ -484,7 +470,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     for (const c of connections) {
       const section = el('section', undefined, 'connector-existing-card'); const head = el('div', undefined, 'connector-card-head'); head.append(el('strong', c.displayName));
       const actions = el('div', undefined, 'capability-actions'); const editButton = button('编辑', () => edit(c)); const removeButton = button('删除', async () => { if (!confirm('删除此账号的连接及本机凭据？')) return; await api(`/api/connectors/${c.id}/remove`, {}); dirty = false; await load(); await changed(); }, true); actions.append(editButton, removeButton); head.append(actions);
-      section.append(head, el('p', `${c.connectorKey} · ${c.enabled ? '已启用' : '已停用'} · ${c.credentialConfigured ? '凭据已保存' : '无凭据'}${!c.moduleAvailable ? ' · 模块不可用' : ''}`)); body.append(section);
+      section.append(head, el('p', `${c.connectorKey} · ${c.enabled ? '已启用' : '已停用'} · ${connectorCredentialStatus(c)}${!c.moduleAvailable ? ' · 模块不可用' : ''}`)); body.append(section);
     }
     let editor;
     function edit(existing, connectorKey) {

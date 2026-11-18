@@ -6,6 +6,29 @@ import { loadConnectorModules, type ConnectorModuleRegistration } from "../conne
 import type { LocalConnectorConfigurationPort, LocalConnectorRuntimeResolution } from "../contracts/host.ts";
 import type { LocalRuntimeSecretStore } from "./local-runtime-configuration-store.ts";
 import { LocalManagementError } from "./skill-import.ts";
+import { LocalRuntimeSecretUnavailableError } from "../persistence/encrypted-local-runtime-secret-store.ts";
+
+type CredentialIssue = "connector_credentials_missing" | "connector_credential_key_missing" | "connector_credentials_unreadable";
+const credentialMessages: Record<CredentialIssue, string> = {
+  connector_credentials_missing: "所选 Connector 的凭据已丢失，请在设置中重新填写并保存。",
+  connector_credential_key_missing: "Connector 的加密主密钥缺失，请恢复原密钥；现有凭据无法解密。",
+  connector_credentials_unreadable: "Connector 的加密凭据无法读取，请恢复原密钥和凭据备份，或重新配置连接。",
+};
+function credentialIssue(error: unknown): CredentialIssue | undefined {
+  return error instanceof LocalRuntimeSecretUnavailableError
+    ? error.reason === "local_runtime_secret_master_key_missing" ? "connector_credential_key_missing" : "connector_credentials_unreadable"
+    : undefined;
+}
+async function readCredentials(secrets: LocalRuntimeSecretStore, reference: string) {
+  try {
+    const values = await secrets.read(reference);
+    return values === undefined ? { unavailableReason: "connector_credentials_missing" as const } : { values };
+  } catch (error) {
+    const unavailableReason = credentialIssue(error);
+    if (!unavailableReason) throw error;
+    return { unavailableReason };
+  }
+}
 
 export interface ConnectorSettingInput {
   readonly id?: string; readonly connectorKey: string; readonly displayName: string;
@@ -51,12 +74,16 @@ export class ConnectorSettings implements LocalConnectorConfigurationPort {
     description: definition.manifest.description, capabilities: definition.capabilities,
   })); }
   async list(owner: string) {
-    return Promise.all((await this.rows()).filter(row => row.owner_id === owner).map(async row => ({
-      id: row.id, connectionId: row.id, connectorKey: row.connector_key, displayName: row.display_name,
-      enabled: row.enabled === 1, scopes: JSON.parse(row.scopes) as string[],
-      credentialConfigured: row.secret_ref !== null && await this.secrets.read(row.secret_ref) !== undefined,
-      moduleAvailable: this.modules.has(row.connector_key), updatedAt: row.updated_at,
-    })));
+    return Promise.all((await this.rows()).filter(row => row.owner_id === owner).map(async row => {
+      const credential = row.secret_ref === null ? undefined : await readCredentials(this.secrets, row.secret_ref);
+      return {
+        id: row.id, connectionId: row.id, connectorKey: row.connector_key, displayName: row.display_name,
+        enabled: row.enabled === 1, scopes: JSON.parse(row.scopes) as string[],
+        credentialConfigured: credential?.values !== undefined,
+        ...(credential?.unavailableReason ? { unavailableReason: credential.unavailableReason } : {}),
+        moduleAvailable: this.modules.has(row.connector_key), updatedAt: row.updated_at,
+      };
+    }));
   }
   async save(owner: string, input: ConnectorSettingInput) {
     if (!input || Object.keys(input).some(k => !["id", "connectorKey", "displayName", "enabled", "scopes", "credentials"].includes(k))
@@ -69,7 +96,13 @@ export class ConnectorSettings implements LocalConnectorConfigurationPort {
     if (credentials !== undefined && (!credentials || typeof credentials !== "object" || Array.isArray(credentials)
       || Object.entries(credentials).some(([k, v]) => !/^[A-Za-z][A-Za-z0-9_-]{0,100}$/.test(k) || typeof v !== "string" || !v.length || v.length > 16000))) throw new LocalManagementError(400, "connector_configuration_invalid");
     const id = existing?.id ?? `connection_${randomUUID()}`;
-    const reference = credentials === undefined ? existing?.secret_ref ?? null : await this.secrets.write(credentials);
+    let reference: string | null;
+    try { reference = credentials === undefined ? existing?.secret_ref ?? null : await this.secrets.write(credentials); }
+    catch (error) {
+      const issue = credentialIssue(error);
+      if (issue) throw new LocalManagementError(409, issue);
+      throw error;
+    }
     try {
       await this.database.prepare(`INSERT INTO desktop_connector_settings VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name, enabled=excluded.enabled,
@@ -113,11 +146,11 @@ export class ConnectorSettings implements LocalConnectorConfigurationPort {
         const row = [...byId.values()].find(r => r.connection.credentialRef === reference);
         if (!row) throw new LocalManagementError(403, "connector_connection_not_authorized");
         if (!row.secret) return {};
-        const values = await secrets.read(row.secret);
-        if (!values) throw new AppError("CAPABILITY_UNAVAILABLE", "所选 Connector 的凭据已丢失，请在设置中重新填写并保存。", 409, {
-          reasonCode: "connector_credentials_missing", connectionId: row.connection.id, connectorKey: row.connection.connectorKey,
+        const credential = await readCredentials(secrets, row.secret);
+        if (credential.unavailableReason) throw new AppError("CAPABILITY_UNAVAILABLE", credentialMessages[credential.unavailableReason], 409, {
+          reasonCode: credential.unavailableReason, connectionId: row.connection.id, connectorKey: row.connection.connectorKey,
         });
-        return values;
+        return credential.values!;
       } },
     } };
   }

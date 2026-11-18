@@ -1,3 +1,4 @@
+import { connectorCredentialMessages, connectorCredentialStatus } from '../web/connector-status.js';
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -56,6 +57,7 @@ test("Runtime settings show quarantined Skill details while retaining the ready 
     throw Error(path);
   };
   const install = runInNewContext(source.replace(/^import .*;\n/gm, "").replace("export function", "function") + "\ninstallCapabilitySettings", {
+    connectorCredentialMessages, connectorCredentialStatus,
     document: { createElement: () => new Element(), querySelectorAll: () => [tab] }, Node: Element,
     installModelSettings: () => ({ canLeave: () => true }), confirm: () => true,
   });

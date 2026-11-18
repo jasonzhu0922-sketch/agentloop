@@ -10,6 +10,15 @@ interface EncryptedSecretDocument {
   readonly ciphertext: string;
 }
 
+/** An existing credential cannot be read; callers may expose repair metadata.
+ * Filesystem and unexpected application failures remain ordinary errors. */
+export class LocalRuntimeSecretUnavailableError extends Error {
+  constructor(readonly reason: "local_runtime_secret_master_key_missing" | "local_runtime_secret_master_key_invalid" | "local_runtime_secret_invalid" | "local_runtime_secret_decryption_failed") {
+    super(reason);
+    this.name = "LocalRuntimeSecretUnavailableError";
+  }
+}
+
 /** Device-local encrypted persistence; secret values never enter Supervisor SQLite. */
 export class EncryptedLocalRuntimeSecretStore implements LocalRuntimeSecretStore {
   private key?: Buffer;
@@ -63,15 +72,19 @@ export class EncryptedLocalRuntimeSecretStore implements LocalRuntimeSecretStore
     });
     if (source === undefined) return undefined;
     const document = parseDocument(source);
-    const decipher = createDecipheriv("aes-256-gcm", await this.encryptionKey(false), Buffer.from(document.iv, "base64"));
-    decipher.setAuthTag(Buffer.from(document.authTag, "base64"));
-    const plaintext = Buffer.concat([
-      decipher.update(Buffer.from(document.ciphertext, "base64")),
-      decipher.final(),
-    ]).toString("utf8");
-    const parsed = JSON.parse(plaintext) as unknown;
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("local_runtime_secret_invalid");
-    return validateSecretValues(parsed as Record<string, unknown>);
+    const key = await this.encryptionKey(false);
+    let plaintext: string;
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(document.iv, "base64"));
+      decipher.setAuthTag(Buffer.from(document.authTag, "base64"));
+      plaintext = Buffer.concat([decipher.update(Buffer.from(document.ciphertext, "base64")), decipher.final()]).toString("utf8");
+    } catch { throw new LocalRuntimeSecretUnavailableError("local_runtime_secret_decryption_failed"); }
+    let parsed: unknown;
+    try { parsed = JSON.parse(plaintext); }
+    catch { throw new LocalRuntimeSecretUnavailableError("local_runtime_secret_invalid"); }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new LocalRuntimeSecretUnavailableError("local_runtime_secret_invalid");
+    try { return validateSecretValues(parsed as Record<string, unknown>); }
+    catch { throw new LocalRuntimeSecretUnavailableError("local_runtime_secret_invalid"); }
   }
 
   async remove(secretStorageKey: string): Promise<void> {
@@ -97,7 +110,7 @@ export class EncryptedLocalRuntimeSecretStore implements LocalRuntimeSecretStore
       throw error;
     });
     if (key === undefined) {
-      if (!allowCreate || (await this.listKeys()).length > 0) throw new Error("local_runtime_secret_master_key_missing");
+      if (!allowCreate || (await this.listKeys()).length > 0) throw new LocalRuntimeSecretUnavailableError("local_runtime_secret_master_key_missing");
       const candidate = randomBytes(32);
       const handle = await open(path, "wx", 0o600).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "EEXIST") return undefined;
@@ -108,7 +121,7 @@ export class EncryptedLocalRuntimeSecretStore implements LocalRuntimeSecretStore
         key = candidate;
       } else key = await readFile(path);
     }
-    if (key.length !== 32) throw new Error("local_runtime_secret_master_key_invalid");
+    if (key.length !== 32) throw new LocalRuntimeSecretUnavailableError("local_runtime_secret_master_key_invalid");
     this.key = key;
     return key;
   }
@@ -120,12 +133,14 @@ export class EncryptedLocalRuntimeSecretStore implements LocalRuntimeSecretStore
 }
 
 function parseDocument(source: string): EncryptedSecretDocument {
-  const value = JSON.parse(source) as Partial<EncryptedSecretDocument>;
-  if (value.schema !== "agentloop.localRuntimeSecret/v1"
+  let value: Partial<EncryptedSecretDocument> | null;
+  try { value = JSON.parse(source); }
+  catch { throw new LocalRuntimeSecretUnavailableError("local_runtime_secret_invalid"); }
+  if (!value || value.schema !== "agentloop.localRuntimeSecret/v1"
     || typeof value.iv !== "string"
     || typeof value.authTag !== "string"
     || typeof value.ciphertext !== "string") {
-    throw new Error("local_runtime_secret_invalid");
+    throw new LocalRuntimeSecretUnavailableError("local_runtime_secret_invalid");
   }
   return value as EncryptedSecretDocument;
 }

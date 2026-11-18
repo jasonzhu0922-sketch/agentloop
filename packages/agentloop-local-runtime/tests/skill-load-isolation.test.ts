@@ -84,6 +84,12 @@ test("a bad bundled Skill leaves the Runtime ready, diagnosed, and able to compl
   }
   assert.equal(run.status, "completed");
   assert.match(run.output ?? "", /你好/);
+  const diagnostics = (await runtime.events(context, run.id)).filter(event => event.type === "skill.load.failed");
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0]!.data.code, "SKILL_PACKAGE_INVALID");
+  assert.equal(diagnostics[0]!.data.skillName, "bad");
+  assert.match(String(diagnostics[0]!.data.message), /已隔离.*设置/);
+  assert.equal(JSON.stringify(diagnostics).includes(root), false, "public diagnostics must not include local paths");
 });
 
 test("a corrupted bound upload cannot prevent reopen, and repair preserves its original binding", async t => {
@@ -107,6 +113,16 @@ test("a corrupted bound upload cannot prevent reopen, and repair preserves its o
   assert.equal((await manager.skillPackages())[0]?.validationStatus, "invalid");
   assert.deepEqual((await manager.configuration("default")).skills.map(s => s.packageId), [skill!.packageId]);
   assert.deepEqual(await manager.runtime("default").models(), ["local:test"]);
+  const runtime = manager.runtime("default");
+  const context = { ownerUserId: "owner" };
+  let run = await runtime.startRun(context, { input: "你好", modelKey: "local:test" });
+  for (let i = 0; i < 200 && run.status === "running"; i++) {
+    await setTimeout(10); run = await runtime.getRun(context, run.id);
+  }
+  const issues = (await runtime.events(context, run.id)).filter(event => event.type === "skill.load.failed");
+  assert.equal(issues.length, 1, "host-discovered invalid bound uploads must also reach the conversation");
+  assert.equal(issues[0]!.data.skillName, "uploaded");
+  assert.equal(run.status, "completed");
   const db = new DatabaseSync(join(root, "runtime.db"), { readOnly: true });
   try { assert.deepEqual(db.prepare("SELECT name FROM discovered_skills").all(), []); } finally { db.close(); }
   await manager.close();
