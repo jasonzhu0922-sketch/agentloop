@@ -1,4 +1,5 @@
 const element = id => document.getElementById(id);
+const destination = new URLSearchParams(location.search).get('next') === '/memory' ? '/memory' : '/';
 const registering = location.pathname === '/register';
 const form = element('auth-form');
 const submit = element('auth-submit');
@@ -91,7 +92,7 @@ form.addEventListener('submit', async event => {
     if (!response.ok) throw new Error(body.error);
     // Credentials and tokens never enter browser storage; the host issues an HttpOnly cookie.
     submitCopy.textContent = registering ? '创建成功，正在进入…' : '登录成功，正在进入…';
-    location.replace('/');
+    location.replace(destination);
   } catch (error) {
     showError(messages[error.message] ?? '无法完成认证，请稍后重试。');
     element('auth-password').value = ''; element('auth-confirm').value = '';
@@ -108,7 +109,7 @@ try {
   element('auth-service').textContent = configured ? '账号服务已连接 · 密码不在本机保存' : messages.cloud_auth_not_configured;
   element('auth-service').dataset.state = configured ? 'ready' : 'error';
   const session = await fetch('/api/session', { credentials: 'same-origin' });
-  if (session.ok) location.replace('/');
+  if (session.ok) location.replace(destination);
   else submit.disabled = !configured;
 } catch {
   element('auth-service').textContent = messages.cloud_auth_unavailable;

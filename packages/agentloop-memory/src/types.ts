@@ -1,6 +1,7 @@
 import type {
   AgentLoopMemoryPlugin,
   MemoryApplicationTarget,
+  MemoryApplicability,
   MemoryAuthority,
   MemoryIntentCandidate,
   MemoryProjection,
@@ -80,10 +81,7 @@ export interface MemoryRevision {
   readonly applicationTargets: readonly MemoryApplicationTarget[];
   readonly value: Readonly<Record<string, unknown>>;
   readonly contentMarkdown: string;
-  readonly applicability: {
-    readonly conditions: readonly string[];
-    readonly exclusions: readonly string[];
-  };
+  readonly applicability: MemoryApplicability;
   readonly confidence: number;
   readonly validFrom: number;
   readonly expiresAt?: number;
@@ -116,6 +114,9 @@ export interface MemoryCandidate {
   readonly decision: "pending" | "accepted" | "confirmation_required" | "rejected";
   /** Optimistic concurrency guard used by semantic Task Group fusion. */
   readonly expectedCurrentRevisionId?: string;
+  readonly proposedApplicability?: MemoryApplicability;
+  readonly validFrom?: number;
+  readonly expiresAt?: number;
 }
 
 export interface MemoryStore {
@@ -137,7 +138,7 @@ export interface MemoryStore {
     readonly settlementJobId: string;
     readonly enqueuedAt: number;
   }>;
-  settlementBatchCandidates(input: { readonly minimum: number; readonly maxAttempts: number }): Promise<readonly { readonly scope: MemoryScope; readonly count: number }[]>;
+  settlementBatchCandidates(input: { readonly minimum: number; readonly maxAttempts: number; readonly now: number; readonly allowedRunIds?: readonly string[]; readonly allowedSettlementJobIds?: readonly string[] }): Promise<readonly { readonly scope: MemoryScope; readonly count: number; readonly oldestEnqueuedAt: number }[]>;
   claimSettlementBatch(input: { readonly scope: MemoryScope; readonly now: number; readonly maxAttempts: number; readonly limit: number; readonly allowedRunIds?: readonly string[]; readonly allowedSettlementJobIds?: readonly string[] }): Promise<readonly MemorySettlementJob[]>;
   claimSettlement(input: { readonly now: number; readonly maxAttempts: number; readonly allowedRunIds?: readonly string[]; readonly allowedSettlementJobIds?: readonly string[] }): Promise<MemorySettlementJob | undefined>;
   discardSettlement(job: MemorySettlementJob): Promise<void>;
@@ -152,7 +153,7 @@ export interface MemoryStore {
 }
 
 export interface SettlementAttempt {
-  readonly stage: "extraction" | "fusion";
+  readonly stage: "grouping" | "extraction" | "fusion";
   readonly schema: string;
   readonly modelKey: string;
   readonly inputHash: string;
@@ -163,6 +164,9 @@ export interface SettlementAttempt {
   readonly elapsedMs: number;
   readonly inputTokens?: number;
   readonly outputTokens?: number;
+  /** Validated grouping checkpoint; never an execution or knowledge claim. */
+  readonly partitionInputHash?: string;
+  readonly partition?: readonly { readonly caseIds: readonly string[]; readonly rationale: string }[];
 }
 
 export type MemorySettlementJobStatus = "queued" | "processing" | "succeeded" | "failed" | "dead_letter";
@@ -207,6 +211,8 @@ export interface ExperienceKeyStep {
   readonly producedEvidenceKinds: readonly string[];
   readonly successCriteria?: readonly string[];
   readonly cautions?: readonly string[];
+  readonly conditions?: readonly string[];
+  readonly verification?: string;
 }
 
 export interface ExperienceToolUsage {
@@ -217,6 +223,8 @@ export interface ExperienceToolUsage {
 }
 
 export interface ExperienceReusableKnowledge {
+  readonly kind?: "method" | "scoped_rule";
+  readonly recheckRules?: readonly string[];
   readonly rule: string;
   readonly conditions: readonly string[];
   readonly exclusions: readonly string[];
@@ -262,6 +270,11 @@ export interface ExperienceSettlementPattern {
   readonly keywords?: readonly string[];
   readonly reuseRule?: string;
   readonly recheckRules?: readonly string[];
+  readonly reuse?: {
+    readonly parameters: readonly { readonly name: string; readonly description: string }[];
+    readonly verifiedScope: readonly string[];
+    readonly unverifiedScope: readonly string[];
+  };
   readonly conflicts?: readonly string[];
   readonly generalizationWarnings?: readonly string[];
   readonly applicability: {
@@ -298,13 +311,23 @@ export interface MemorySettlementEvidence {
   readonly strategy?: string;
   readonly observations?: readonly Readonly<{
     id: string;
-    kind: "action" | "assessment" | "recovery" | "delivery";
+    kind: "action" | "assessment" | "recovery" | "delivery" | "decision" | "feedback";
     stepOrder?: number;
     toolName?: string;
     status: string;
     summary: string;
     sourceRefs: readonly MemorySourceRef[];
+    details?: Readonly<Record<string, unknown>>;
   }>[];
+  /** Canonical references, not quoted conclusions. Inherited results never
+   * count as a new independent execution merely because the Run ID changed. */
+  readonly dependencies?: readonly Readonly<{
+    kind: "prior_result" | "memory";
+    id: string;
+    sourceRunId?: string;
+    sourceRefs: readonly MemorySourceRef[];
+  }>[];
+  readonly coverage?: Readonly<{ totalObservations: number; retainedObservations: number; omittedObservations: number }>;
   readonly evidenceGaps?: readonly string[];
   readonly planSkeleton?: readonly Readonly<Record<string, unknown>>[];
   /** Optional structured facts supplied by a canonical local reader. */
@@ -432,4 +455,4 @@ export interface UserInteractionProfile {
   readonly formatting?: Readonly<Record<string, unknown>>;
 }
 
-export type { AgentLoopMemoryPlugin, MemoryApplicationTarget, MemoryProjection, MemoryAuthority, MemorySensitivity };
+export type { AgentLoopMemoryPlugin, MemoryApplicationTarget, MemoryApplicability, MemoryProjection, MemoryAuthority, MemorySensitivity };

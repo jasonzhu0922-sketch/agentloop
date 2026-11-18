@@ -6,6 +6,7 @@ import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "no
 import { AppError } from "@zhujun/agentloop";
 import { createLocalRuntimeManager, EncryptedLocalRuntimeSecretStore, type LocalRuntimeManager, type LocalRuntimeManagerOptions } from "@zhujun/agentloop-local-runtime";
 import { migrateLegacyAccount, type AccountMigration } from "./legacy-account-migration.ts";
+import { MemoryQuery } from "../memory/memory-query.ts";
 
 export function accountDataDirectory(root: string, owner: string): string {
   if (!/^cloud_[a-f0-9]{64}$/.test(owner)) throw new TypeError("desktop_account_id_invalid");
@@ -91,6 +92,7 @@ export class DesktopAccountManagers {
     return promise;
   }
   migration(owner: string): AccountMigration | undefined { return this.migrations.get(owner); }
+  memoryQuery(owner: string): MemoryQuery { return new MemoryQuery(accountDataDirectory(this.options.dataDirectory, owner), owner); }
 
   async grantSelectedStorage(owner: string, selected: string, kind: "workspace" | "uploads"): Promise<string> {
     const account = accountDataDirectory(this.options.dataDirectory, owner);

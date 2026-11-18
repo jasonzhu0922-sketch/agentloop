@@ -38,6 +38,9 @@ export type DesktopApplication = { existing: true; origin: string; browserOpened
 async function assets(webDirectory?: string): Promise<ReadonlyMap<string, StaticAsset>> {
   const entries = await Promise.all([
     ["/", "index.html", "text/html; charset=utf-8"],
+    ["/memory", "memory.html", "text/html; charset=utf-8"],
+    ["/memory.js", "memory.js", "text/javascript; charset=utf-8"],
+    ["/memory.css", "memory.css", "text/css; charset=utf-8"],
     ["/login", "login.html", "text/html; charset=utf-8"],
     ["/register", "login.html", "text/html; charset=utf-8"],
     ["/login.js", "login.js", "text/javascript; charset=utf-8"],

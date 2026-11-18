@@ -11,6 +11,7 @@
 
 相关设计：
 
+- [通用记忆沉淀范式](./USER-MEMORY-LEARNING-PARADIGM.md)
 - [Plan Template Fast Path 设计方案](./PLAN-TEMPLATE-FAST-PATH-DESIGN.md)
 - [会话统一成果图谱与跨 Run 接续方案](./CONVERSATION-WORK-PRODUCT-GRAPH-DESIGN.md)
 - [Multi Runtime 负载均衡设计](./MULTI-RUNTIME-LOAD-BALANCING-DESIGN.md)

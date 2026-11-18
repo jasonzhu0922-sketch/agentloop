@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>记忆查询 · 玄武</title>
+  <link rel="icon" href="/assets/xuanwu-mascot-icon.png"><link rel="stylesheet" href="/memory.css">
+  <script type="module" src="/memory.js"></script>
+</head>
+<body>
+  <div class="page">
+    <header class="header"><a class="brand" href="/"><img src="/assets/xuanwu-mascot-icon.png" alt="玄武"><span>玄武 <small>本机记忆</small></span></a><div class="header-actions"><span id="account">正在确认账号…</span><a href="/">返回对话 ↗</a></div></header>
+    <main>
+      <div class="intro"><div><span class="eyebrow">MEMORY EXPLORER</span><h1>记忆查询</h1><p>查看记住了什么，追溯从哪里来，核对在任务中如何被召回。</p></div><button id="refresh" type="button">↻ 刷新</button></div>
+      <nav class="tabs" aria-label="查询方式"><button type="button" data-tab="library" aria-selected="true">记忆库</button><button type="button" data-tab="jobs" aria-selected="false">沉淀记录</button><button type="button" data-tab="run" aria-selected="false">Run 核对</button></nav>
+      <p id="memory-state" class="note" hidden></p><p id="status" role="status" aria-live="polite">正在读取…</p><a id="login" href="/login?next=%2Fmemory" hidden>登录后查看当前账号的记忆 →</a>
+      <section id="library-panel" aria-label="记忆库">
+        <div id="stats" class="stats"></div>
+        <form id="library-search" class="filters"><label class="search">搜索记忆<input id="query" type="search" maxlength="200" placeholder="内容、关键词或语义键…"></label><label>类型<select id="category"><option value="reusable">偏好、事实与经验</option><option value="preference">偏好</option><option value="fact">事实</option><option value="procedure">可复用方法</option><option value="task_group">经验组</option><option value="episode">任务记录</option><option value="all">全部</option></select></label><label>状态<select id="item-status"><option value="active">已启用</option><option value="all">全部状态</option><option value="superseded">已替代</option><option value="deleted">已删除</option></select></label><button class="primary" type="submit">查询</button></form>
+        <div class="library-layout"><div><div class="list-heading"><h2>记忆条目</h2><span id="result-count"></span></div><div id="items" class="items"></div><div id="item-pager" class="pager"></div></div><aside id="detail" class="detail" aria-label="记忆详情"><div class="empty"><span>◇</span><h2>选择一条记忆</h2><p>查看完整内容、适用范围、来源与版本。</p></div></aside></div>
+      </section>
+      <section id="jobs-panel" aria-label="沉淀记录" hidden>
+        <p class="note">任务记录是经验来源；沉淀成功不一定产生新知识。可复用方法需要进一步验证。</p><div id="job-stats" class="stats"></div>
+        <form id="jobs-search" class="filters"><label class="search">Run ID<input id="job-query" type="search" maxlength="200" placeholder="输入完整或部分 Run ID"></label><label>作业状态<select id="job-status"><option value="all">全部</option><option value="queued">等待处理</option><option value="processing">处理中</option><option value="succeeded">已成功</option><option value="failed">待重试</option><option value="dead_letter">重试耗尽</option></select></label><button class="primary" type="submit">查询</button></form>
+        <div id="jobs" class="job-list"></div><div id="job-pager" class="pager"></div>
+      </section>
+      <section id="run-panel" aria-label="Run 核对" hidden>
+        <p class="note">已保存 → 已召回 → 执行证据。召回记录证明内容进入了上下文，是否实际采用需结合计划、工具调用和结果核对。</p>
+        <form id="run-search" class="filters"><label class="search">Run ID<input id="run-query" required minlength="4" maxlength="200" placeholder="输入完整 ID 或至少 4 位片段，例如 f970f89b"></label><button class="primary" type="submit">核对 Run</button></form>
+        <div id="run-result"><div class="empty"><span>⌕</span><h2>从一次任务开始核对</h2><p>支持查询当前账号全部 Runtime 的历史任务。</p></div></div>
+      </section>
+    </main><footer>记忆仅在本机、当前账号范围内查询 · 页面按需读取，不自动重放或修改记忆</footer>
+  </div>
+</body>
+</html>

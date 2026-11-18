@@ -100,20 +100,14 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
       && row.reason_code === "plan_assessed_and_completed"
       && Number(assessment.count) > 0
       && Number(assessment.count) === Number(assessment.approved);
-    const laterDisputed = row.conversation_id === null ? false : (await database!.prepare(`
-      SELECT 1 AS found FROM run_events e
-      JOIN runs later_run ON later_run.id = e.run_id
-      WHERE later_run.conversation_id = ?
-        AND e.type = 'conversation.outcome.disputed'
-        AND e.payload_json LIKE ? LIMIT 1
-    `).get<{ found: number }>(row.conversation_id, `%"targetRunId":"${input.runId}"%`)) !== undefined;
-    const laterCorrected = row.conversation_id === null ? false : (await database!.prepare(`
-      SELECT 1 AS found FROM run_events e
-      JOIN runs later_run ON later_run.id = e.run_id
-      WHERE later_run.conversation_id = ?
-        AND e.type = 'conversation.outcome.superseded'
-        AND e.payload_json LIKE ? LIMIT 1
-    `).get<{ found: number }>(row.conversation_id, `%"targetRunId":"${input.runId}"%`)) !== undefined;
+    const feedback = row.conversation_id === null ? [] : await database!.prepare(`
+      SELECT e.run_id, e.seq, e.type, e.payload_json FROM run_events e JOIN runs r ON r.id = e.run_id
+      WHERE r.owner_user_id = ? AND r.conversation_id = ?
+        AND e.type IN ('conversation.outcome.disputed', 'conversation.outcome.superseded') ORDER BY e.created_at`)
+      .all<{ run_id: string; seq: number; type: string; payload_json: string }>(input.ownerUserId, row.conversation_id);
+    const targetedFeedback = feedback.filter(event => parseJsonRecord(event.payload_json).targetRunId === input.runId);
+    const laterDisputed = targetedFeedback.some(event => event.type === 'conversation.outcome.disputed');
+    const laterCorrected = targetedFeedback.some(event => event.type === 'conversation.outcome.superseded');
     const scope: MemoryRunScope = {
       tenantId: this.tenantId,
       ownerUserId: input.ownerUserId,
@@ -143,6 +137,53 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
     }));
     const observedToolsByStep = new Map<string, string[]>();
     const observations: NonNullable<MemorySettlementEvidence["observations"]>[number][] = [];
+    const dependencies: NonNullable<MemorySettlementEvidence["dependencies"]>[number][] = [];
+    const semanticEvents = await database!.prepare(`SELECT seq, type, payload_json FROM run_events
+      WHERE run_id = ? AND type IN ('human_loop.answered', 'conversation.turn.resolved', 'memory.recalled') ORDER BY seq`)
+      .all<{ seq: number; type: string; payload_json: string }>(input.runId);
+    const safeValue = (value: unknown, depth = 0): unknown => {
+      if (depth > 4) return "[OMITTED]";
+      if (typeof value === "string") return safe(value, 600);
+      if (Array.isArray(value)) return value.slice(0, 24).map(item => safeValue(item, depth + 1));
+      if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).slice(0, 24).map(([key, item]) => [key, /password|passwd|token|cookie|secret|credential|密码|令牌/iu.test(key) ? "[REDACTED]" : safeValue(item, depth + 1)]));
+      return value;
+    };
+    for (const event of semanticEvents) {
+      const payload = parseJsonRecord(event.payload_json);
+      const refs: MemorySourceRef[] = [{ type: "event", runId: input.runId, sourceId: `${input.runId}:${event.seq}` }];
+      if (event.type === "human_loop.answered") {
+        const requestId = recordString(payload, "requestId");
+        if (!requestId) continue;
+        const request = await database!.prepare(`SELECT title, prompt, rationale, response_schema_json, plan_id, step_id, evidence_refs_json FROM human_loop_requests
+          WHERE id = ? AND run_id = ?`).get<{ title: string; prompt: string; rationale: string; response_schema_json: string; plan_id: string | null; step_id: string | null; evidence_refs_json: string }>(requestId, input.runId);
+        if (!request) continue;
+        const schema = parseJsonRecord(request.response_schema_json);
+        const options = Array.isArray(schema.options) ? schema.options : [];
+        const selected = Array.isArray(payload.value) ? payload.value : [payload.value];
+        const selectedOptions = options.filter(option => selected.includes(recordString(option, "id")));
+        observations.push({ id: `decision_${event.seq}`, kind: "decision", status: "user_confirmed", summary: safe(request.title),
+          details: { requestId, planId: request.plan_id, stepId: request.step_id, evidenceRefs: safeValue(parseJsonArray(request.evidence_refs_json)), question: safe(request.prompt, 1000), rationale: safe(request.rationale),
+            candidates: safeValue(options), selectedOptions: safeValue(selectedOptions), value: safeValue(payload.value),
+            candidateCoverage: { total: options.length, retained: Math.min(24, options.length), omitted: Math.max(0, options.length - 24) },
+            persistenceIntent: "task_only" }, sourceRefs: refs });
+      } else if (event.type === "conversation.turn.resolved") {
+        observations.push({ id: `turn_${event.seq}`, kind: "decision", status: "interpreted",
+          summary: safe(recordString(payload, "effectiveGoal") ?? "本轮任务意图"),
+          details: safeValue({ relation: payload.relation, mode: payload.mode, inputMode: payload.inputMode,
+            userConstraints: payload.userConstraints, sourceBinding: payload.sourceBinding, targetRunId: payload.targetRunId,
+            targetResult: payload.targetResult, authority: "model_interpretation" }) as Record<string, unknown>, sourceRefs: refs });
+        const resultId = recordString(recordAt(payload, ["targetResult"]), "resultId");
+        if (payload.inputMode === "prior_result" && resultId) dependencies.push({ kind: "prior_result", id: resultId,
+          ...(recordString(payload, "targetRunId") ? { sourceRunId: recordString(payload, "targetRunId") } : {}), sourceRefs: refs });
+      } else if (Array.isArray(payload.memoryRevisionIds)) {
+        for (const id of payload.memoryRevisionIds) if (typeof id === "string") dependencies.push({ kind: "memory", id, sourceRefs: refs });
+      }
+    }
+    for (const event of targetedFeedback) {
+      observations.push({ id: `feedback_${event.run_id}_${event.seq}`, kind: "feedback", status: "negative",
+        summary: event.type === "conversation.outcome.disputed" ? "用户质疑了该任务的结果" : "该任务结果已被后续纠正替代",
+        sourceRefs: [{ type: "user_feedback", runId: event.run_id, sourceId: `${event.run_id}:${event.seq}` }] });
+    }
     let artifactVerified: boolean | undefined;
     for (const action of observedActions) {
       const metadata = parseJsonRecord(action.metadata_json);
@@ -180,7 +221,9 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
     const assessmentDetails = row.plan_id === null ? [] : await database!.prepare(`SELECT id, step_id, approved, feedback FROM skill_compliance_assessments WHERE plan_id = ? ORDER BY created_at DESC LIMIT 8`)
       .all<{ id: string; step_id: string; approved: number; feedback: string }>(row.plan_id);
     for (const assessment of assessmentDetails) observations.push({ id: `observation_${observations.length + 1}`, kind: "assessment", status: assessment.approved ? "approved" : "rejected", summary: safe(assessment.feedback), sourceRefs: [{ type: "assessment", runId: input.runId, sourceId: assessment.id }] });
-    const boundedObservations = observations.length > 24 ? [...observations.slice(0, 8), ...observations.filter((item) => item.status === "failed" || item.status === "rejected").slice(-8), ...observations.slice(-8)] : observations;
+    const boundedObservations = [...new Map((observations.length > 24
+      ? [...observations.filter(item => item.kind === "decision" || item.kind === "feedback" || item.status === "failed" || item.status === "rejected").slice(-12), ...observations.slice(0, 6), ...observations.slice(-6)]
+      : observations).map(item => [item.id, item])).values()];
     const capabilityIds = [...new Set(normalizedPlanSkeleton.flatMap((step) => parseStringArrayValue(step.requiredCapabilities)))].sort();
     return {
       scope,
@@ -196,7 +239,9 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
       },
       ...(row.plan_goal === null || row.plan_goal.trim().length === 0 ? {} : { strategy: safe(row.plan_goal, 1200) }),
       ...(normalizedPlanSkeleton.length === 0 ? {} : { planSkeleton: normalizedPlanSkeleton }),
-      observations: [...new Map(boundedObservations.map((item) => [item.id, item])).values()],
+      observations: boundedObservations,
+      dependencies,
+      coverage: { totalObservations: observations.length, retainedObservations: boundedObservations.length, omittedObservations: observations.length - boundedObservations.length },
       evidenceGaps: [
         ...(!assessmentApproved ? ["assessment_not_fully_approved"] : []),
         ...(artifactVerified === undefined && deliverable.kind !== undefined && deliverable.kind !== "none" ? ["artifact_acceptance_not_observed"] : []),

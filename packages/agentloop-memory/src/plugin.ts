@@ -8,6 +8,9 @@ import type {
 } from "@zhujun/agentloop";
 import type { SqlConnection } from "@zhujun/agentloop";
 import { evaluateCandidate } from "./policy.ts";
+import { applicabilityMatches, relevanceScore } from "./applicability.ts";
+import { REUSABLE_LEARNING_CONTRACT } from "./learning-paradigm.ts";
+import { isMemoryApplicability } from "@zhujun/agentloop";
 import { SqliteMemoryStore } from "./sqlite-store.ts";
 import type {
   MemoryCandidate,
@@ -18,7 +21,8 @@ import type {
 } from "./types.ts";
 
 function hash(input: unknown): string {
-  return createHash("sha256").update(JSON.stringify(input)).digest("hex");
+  return createHash("sha256").update(JSON.stringify(input, (_key, value) => value && typeof value === "object" && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)).digest("hex");
 }
 
 function candidateId(scope: MemoryRunScope, messageId: string, userText: string): string {
@@ -124,6 +128,7 @@ function candidateFromIntent(
   // Validate syntax, size and evidence instead of enumerating preference types.
   if (intent.canonicalKey.length > 120 || !/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/u.test(intent.canonicalKey)) return undefined;
   if (!boundedMemoryValue(intent.value)) return undefined;
+  if (intent.applicability !== undefined && !isMemoryApplicability(intent.applicability)) return undefined;
   if (intent.sourceQuote !== undefined && (intent.sourceQuote.trim().length === 0 || intent.sourceQuote.length > 1_000 || !input.userText.includes(intent.sourceQuote))) return undefined;
   const proposedValue = intent.value;
   return {
@@ -133,7 +138,8 @@ function candidateFromIntent(
     ownerUserId: input.scope.ownerUserId,
     proposedKind: intent.kind,
     proposedSubtype: intent.subtype,
-    proposedCanonicalKey: intent.canonicalKey,
+    proposedCanonicalKey: intent.applicability && (intent.applicability.conditions.length || intent.applicability.exclusions.length || Object.keys(intent.applicability.context ?? {}).length || Object.keys(intent.applicability.excludedContext ?? {}).length)
+      ? `${intent.canonicalKey}:${hash(intent.applicability).slice(0, 24)}` : intent.canonicalKey,
     proposedValue,
     proposedContentMarkdown: intent.contentMarkdown
       ?? (intent.kind === "fact" ? "用户明确提供了一条事实。" : "用户明确指定了交互偏好。"),
@@ -143,6 +149,9 @@ function candidateFromIntent(
     ...(intent.kind === "preference" ? { proposedPreferenceEffect: "default" as const } : {}),
     activation: { mode: "always" },
     applicationTargets: intent.applicationTargets,
+    ...(intent.applicability === undefined ? {} : { proposedApplicability: intent.applicability }),
+    ...(intent.validFrom === undefined ? {} : { validFrom: intent.validFrom }),
+    ...(intent.expiresAt === undefined ? {} : { expiresAt: intent.expiresAt }),
     sourceRefs: [{ type: "user_message", runId: input.scope.runId, messageId: input.messageId,
       ...(intent.sourceQuote === undefined ? {} : { quotedText: intent.sourceQuote }) }],
     confidence: intent.confidence,
@@ -183,18 +192,26 @@ export function createMemoryPlugin(options: MemoryPluginOptions): AgentLoopMemor
       const epoch = await store.currentEpoch(scope);
       const active = await store.active(scope);
       const currentNow = now();
+      const context = { ...input.taskFingerprint, ...input.stepContext };
       const matching = active
         .filter(({ revision }) => revision.applicationTargets.includes(input.target))
         .filter(({ item, revision }) => input.target !== "planner" || item.kind !== "experience" || revision.experienceMaturity === "procedure")
         .filter(({ item, revision }) => item.kind !== "experience" || revision.value.settlementPromptSchemaVersion === "agentloop.semanticSettlement/v2")
+        .filter(({ item, revision }) => item.kind !== "experience" || revision.value.learningContract === REUSABLE_LEARNING_CONTRACT)
         .filter(({ revision }) => activationApplies(revision, input.taskFingerprint, currentNow))
-        .slice(0, Math.max(0, input.budget.maxItems));
+        .filter(({ revision }) => revision.validFrom <= currentNow && applicabilityMatches(revision.applicability, context))
+        .map(entry => ({ ...entry, relevance: relevanceScore(entry.revision, context.goal) }))
+        .filter(({ item, relevance }) => item.kind !== "experience" || typeof context.goal !== "string" || relevance > 0)
+        .sort((a, b) => {
+          const priority = (entry: typeof a) => (entry.item.kind === "preference" ? 2 : entry.item.kind === "fact" ? 1 : 0);
+          return priority(b) - priority(a) || b.relevance - a.relevance || b.revision.createdAt - a.revision.createdAt;
+        });
       if (matching.length === 0) return undefined;
       const bounded = boundEntries(matching, input.budget.maxTokens, (entries) => compileProjection({
         runId: input.runId, target: input.target, memoryEpoch: epoch, entries,
         taskFingerprint: input.taskFingerprint, stepContext: input.stepContext,
         now: currentNow, expiresAt: currentNow + projectionTtlMs,
-      }));
+      }), input.budget.maxItems);
       if (bounded.length === 0) return undefined;
       const projection = compileProjection({
         runId: input.runId,
@@ -232,7 +249,7 @@ export function createMemoryPlugin(options: MemoryPluginOptions): AgentLoopMemor
       // erase the accepted candidates or be silently persisted with them.
       for (const candidate of candidates) {
         if (candidate === undefined) continue;
-        const decision = evaluateCandidate(candidate);
+        const decision = evaluateCandidate(candidate, now());
         if (decision.kind === "reject") continue;
         if (decision.kind === "confirmation_required") {
           pendingConfirmations.push({ candidateId: candidate.id, prompt: "这条信息涉及需要确认的长期记忆，确认后我才会保存。" });
@@ -296,23 +313,25 @@ function matchesAny(values: readonly string[] | undefined, actual: unknown): boo
  * envelope IDs. Rendered response text and structured preferences describe the
  * same content; only the canonical representation is charged. */
 function projectionPayload(projection: MemoryProjection): unknown {
-  const preferences = projection.preferences?.map(({ subtype, value, contentMarkdown }) => ({ subtype, value, contentMarkdown }));
+  const preferences = projection.preferences?.map(({ subtype, value, contentMarkdown, applicability }) => ({ subtype, value, contentMarkdown, applicability }));
   if (projection.target === "planner") return {
     preferences,
-    facts: projection.relevantFacts.map(({ subtype, value }) => ({ subtype, value })),
+    preferenceConstraints: projection.preferenceConstraints,
+    facts: projection.relevantFacts.map(({ subtype, value, applicability }) => ({ subtype, value, applicability })),
     planningPriors: projection.planningPriors.map(({ schema, id, source, sourceRefs, ...method }) => method),
   };
   if (projection.target === "response" || projection.target === "human_loop") return {
-    preferences, facts: projection.facts?.map(({ subtype, value }) => ({ subtype, value })),
+    preferences, facts: projection.facts?.map(({ subtype, value, applicability }) => ({ subtype, value, applicability })),
   };
   return { preferences, augmentations: "augmentations" in projection
-    ? projection.augmentations.map(({ contentMarkdown }) => contentMarkdown) : [] };
+    ? projection.augmentations.map(({ contentMarkdown, applicability }) => ({ contentMarkdown, applicability })) : [] };
 }
 
-function boundEntries<T>(entries: readonly T[], maxTokens: number, project: (entries: readonly T[]) => MemoryProjection): readonly T[] {
+function boundEntries<T>(entries: readonly T[], maxTokens: number, project: (entries: readonly T[]) => MemoryProjection, maxItems = Infinity): readonly T[] {
   if (maxTokens <= 0) return [];
   const result: T[] = [];
   for (const entry of entries) {
+    if (result.length >= Math.max(0, maxItems)) break;
     const proposed = [...result, entry];
     const estimate = Math.max(1, Math.ceil(JSON.stringify(projectionPayload(project(proposed))).length / 4));
     if (estimate <= maxTokens) result.push(entry);
@@ -323,8 +342,9 @@ function boundEntries<T>(entries: readonly T[], maxTokens: number, project: (ent
 // Audit provenance stays in the revision addressed by sourceRefs. Only method
 // fields cross the Planner boundary; omit empty arrays without truncating steps.
 function methodFields(value: Readonly<Record<string, unknown>>, fields: readonly string[]): Readonly<Record<string, unknown>> {
-  return Object.fromEntries(fields.filter((key) => value[key] !== undefined
-    && (!Array.isArray(value[key]) || value[key].length > 0)).map((key) => [key, value[key]]));
+  return Object.fromEntries(fields.map(key => [key, key === "successCriteria" && typeof value.verification === "string" && Array.isArray(value[key])
+    ? value[key].filter(item => item !== value.verification) : value[key]] as const)
+    .filter(([, field]) => field !== undefined && (!Array.isArray(field) || field.length > 0)));
 }
 
 function compileProjection(input: {
@@ -350,7 +370,8 @@ function compileProjection(input: {
     expiresAt: input.expiresAt,
     preferences: input.entries
       .filter(({ item }) => item.kind === "preference" && item.subtype !== "contact.email")
-      .map(({ item, revision }) => ({ memoryRevisionId: revision.id, subtype: item.subtype, value: revision.value, contentMarkdown: revision.contentMarkdown })),
+      .map(({ item, revision }) => ({ memoryRevisionId: revision.id, subtype: item.subtype, value: revision.value, contentMarkdown: revision.contentMarkdown,
+        applicability: revision.applicability })),
   };
   let projection: any;
   if (input.target === "response" || input.target === "human_loop") {
@@ -366,8 +387,9 @@ function compileProjection(input: {
         subtype: item.subtype,
         value: revision.value,
         stale: revision.expiresAt !== undefined && revision.expiresAt <= input.now,
+        applicability: revision.applicability,
       }));
-    const revisionsFor = (subtype: string) => preferenceEntries.filter(({ item }) => item.subtype === subtype).map(({ revision }) => revision);
+    const revisionsFor = (subtype: string) => preferenceEntries.filter(({ item, revision }) => item.subtype === subtype && !revision.applicability.conditions.length && !revision.applicability.exclusions.length).map(({ revision }) => revision);
     const guidance = {
       preferredAddress: stringValue(revisionsFor("interaction.address"), "preferredAddress"),
       language: stringValue(revisionsFor("interaction.language"), "language"),
@@ -375,11 +397,11 @@ function compileProjection(input: {
       verbosity: stringValue(revisionsFor("interaction.verbosity"), "verbosity"),
       formatting: recordValue(revisionsFor("interaction.formatting"), "formatting"),
     };
-    const factLines = facts.map((fact) => `已确认事实（${fact.subtype}）：${JSON.stringify(fact.value)}`);
+    const factLines = facts.map((fact) => `已确认事实（仅在适用条件成立时使用）：${JSON.stringify(fact)}`);
     // Project all accepted preferences, including future concepts and all
     // values inside tone/formatting. The compatibility guidance is not a gate.
     const preferenceLines = projectedPreferences.map((preference) =>
-      `已确认偏好：${JSON.stringify({ subtype: preference.subtype, value: preference.value, description: preference.contentMarkdown })}`);
+      `已确认偏好（仅在适用条件成立时使用）：${JSON.stringify({ subtype: preference.subtype, value: preference.value, description: preference.contentMarkdown, applicability: preference.applicability })}`);
     const promptMarkdown = [
       ...preferenceLines,
       ...factLines,
@@ -391,10 +413,11 @@ function compileProjection(input: {
       subtype: item.subtype,
       value: revision.value,
       stale: revision.expiresAt !== undefined && revision.expiresAt <= input.now,
+        applicability: revision.applicability,
     }));
     const preferenceConstraints = input.entries
       .filter(({ item, revision }) => item.kind === "preference" && revision.preferenceEffect === "constraint")
-      .map(({ revision }) => revision.value);
+      .map(({ revision }) => ({ value: revision.value, applicability: revision.applicability }));
     const planningPriors = input.entries
       // An episode is an auditable Run record, not a reusable experience.
       // Only a multi-episode procedure may influence a future Planner.
@@ -420,7 +443,7 @@ function compileProjection(input: {
           ...stringArrayAt(step, "producedEvidenceKinds"),
         ]))].slice(0, 24);
         const reusableKnowledge = Array.isArray(pattern?.reusableKnowledge)
-          ? pattern.reusableKnowledge.filter(isRecord).map((item) => stringAt(item, "rule")).filter((item): item is string => item !== undefined).slice(0, 16)
+          ? pattern.reusableKnowledge.filter(isRecord).filter(item => item.kind === "method").map((item) => stringAt(item, "rule")).filter((item): item is string => item !== undefined).slice(0, 16)
           : [];
         const failureWarnings = Array.isArray(pattern?.failureLessons)
           ? pattern.failureLessons.filter(isRecord).map((item) => stringAt(item, "lesson")).filter((item): item is string => item !== undefined).slice(0, 12)
@@ -441,9 +464,19 @@ function compileProjection(input: {
           skillSuggestions,
           capabilitySuggestions,
           evidenceExpectations,
-          warnings: [...new Set([...revision.applicability.exclusions, ...cautions, ...failureWarnings, ...stringArrayAt(pattern ?? {}, "recheckRules")])],
+          // Scope already carries exclusions. Keep distinct warnings rather
+          // than serializing the same boundary again in another field.
+          warnings: [...new Set([...cautions, ...failureWarnings, ...stringArrayAt(pattern ?? {}, "recheckRules")])]
+            .filter(warning => !revision.applicability.exclusions.includes(warning)),
           confidence: revision.confidence,
           sourceRefs: [revision.id],
+          scope: revision.applicability,
+          requiresVerification: true,
+          reuse: pattern?.reuse as import("./types.ts").ExperienceSettlementPattern["reuse"],
+          reusableKnowledge: Array.isArray(pattern?.reusableKnowledge) ? pattern.reusableKnowledge.filter(isRecord).map(item => methodFields(item,
+            ["id", "kind", "rule", "trigger", "decision", "rationale", "action", "verification", "conditions", "exclusions", "expectedEvidence", "recheckRules"])) : [],
+          failureLessons: Array.isArray(pattern?.failureLessons) ? pattern.failureLessons.filter(isRecord).map(item => methodFields(item,
+            ["id", "lesson", "trigger", "symptom", "rootCause", "causeStatus", "doDifferently", "nextAction", "verification", "applicability", "exclusions"])) : [],
         };
       });
     projection = { ...base, target: "planner", relevantFacts: facts, preferenceConstraints, planningPriors, id: "" };
@@ -455,6 +488,7 @@ function compileProjection(input: {
         id: revision.id,
         contentMarkdown: item.kind === "preference" ? `${revision.contentMarkdown}\n${JSON.stringify(revision.value)}` : revision.contentMarkdown,
         reason: `${item.kind}:${item.subtype}`,
+        applicability: revision.applicability,
       })),
       id: "",
     };

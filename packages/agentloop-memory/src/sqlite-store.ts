@@ -121,7 +121,7 @@ export class SqliteMemoryStore implements MemoryStore {
     readonly memoryEpoch: number;
   }> {
     await this.migrated;
-    const policy = evaluateCandidate(candidate);
+    const policy = evaluateCandidate(candidate, now);
     if (policy.kind !== "accept") throw new Error(`candidate_policy:${policy.reason}`);
     if (candidate.tenantId !== scope.tenantId || candidate.ownerUserId !== scope.ownerUserId) throw new Error("memory_scope_mismatch");
     return this.connection.transaction(async () => {
@@ -152,22 +152,17 @@ export class SqliteMemoryStore implements MemoryStore {
         revision: revisionNumber,
         authority: candidate.authority,
         sensitivity: candidate.sensitivity as Exclude<typeof candidate.sensitivity, "secret">,
-        temporalClass: candidate.activation.mode === "explicit_only" ? "ephemeral" : "stable",
+        temporalClass: candidate.expiresAt !== undefined ? "time_bound" : candidate.activation.mode === "explicit_only" ? "ephemeral" : "stable",
         ...(candidate.proposedPreferenceEffect === undefined ? {} : { preferenceEffect: candidate.proposedPreferenceEffect }),
         ...(candidate.proposedExperienceMaturity === undefined ? {} : { experienceMaturity: candidate.proposedExperienceMaturity }),
         activation: candidate.activation,
         applicationTargets: [...candidate.applicationTargets],
         value: { ...candidate.proposedValue },
         contentMarkdown: candidate.proposedContentMarkdown,
-        applicability: candidate.proposedValue.settlementPattern !== null
-          && typeof candidate.proposedValue.settlementPattern === "object"
-          && !Array.isArray(candidate.proposedValue.settlementPattern)
-          && (candidate.proposedValue.settlementPattern as { applicability?: unknown }).applicability !== null
-          && typeof (candidate.proposedValue.settlementPattern as { applicability?: unknown }).applicability === "object"
-          ? (candidate.proposedValue.settlementPattern as { applicability: MemoryRevision["applicability"] }).applicability
-          : { conditions: [], exclusions: [] },
+        applicability: candidate.proposedApplicability ?? { conditions: [], exclusions: [] },
         confidence: candidate.confidence,
-        validFrom: now,
+        validFrom: candidate.validFrom ?? now,
+        ...(candidate.expiresAt === undefined ? {} : { expiresAt: candidate.expiresAt }),
         ...(previous === undefined ? {} : { supersedesRevisionId: previous.id }),
         sourceRefs: [...candidate.sourceRefs],
         changeReason: candidate.reason,
@@ -281,17 +276,19 @@ export class SqliteMemoryStore implements MemoryStore {
     });
   }
 
-  async settlementBatchCandidates(input: { readonly minimum: number; readonly maxAttempts: number }): Promise<readonly { readonly scope: MemoryScope; readonly count: number }[]> {
+  async settlementBatchCandidates(input: { readonly minimum: number; readonly maxAttempts: number; readonly now: number; readonly allowedRunIds?: readonly string[]; readonly allowedSettlementJobIds?: readonly string[] }): Promise<readonly { readonly scope: MemoryScope; readonly count: number; readonly oldestEnqueuedAt: number }[]> {
     await this.migrated;
+    const runFilter = input.allowedRunIds === undefined ? "" : ` AND run_id IN (${input.allowedRunIds.map(() => "?").join(",") || "NULL"})`;
+    const jobFilter = input.allowedSettlementJobIds === undefined ? "" : ` AND settlement_job_id IN (${input.allowedSettlementJobIds.map(() => "?").join(",") || "NULL"})`;
     const rows = await this.connection.prepare(`
-      SELECT tenant_id, owner_user_id, COUNT(*) AS count
+      SELECT tenant_id, owner_user_id, COUNT(*) AS count, MIN(enqueued_at) AS oldest_enqueued_at
       FROM local_memory_settlement_jobs
-      WHERE status IN ('queued', 'failed') AND attempts < ?
+      WHERE status IN ('queued', 'failed') AND attempts < ? AND next_attempt_at <= ?${runFilter}${jobFilter}
       GROUP BY tenant_id, owner_user_id
       HAVING COUNT(*) >= ?
       ORDER BY count DESC
-    `).all<{ tenant_id: string; owner_user_id: string; count: number }>(input.maxAttempts, input.minimum);
-    return rows.map((row) => ({ scope: { tenantId: row.tenant_id, ownerUserId: row.owner_user_id }, count: Number(row.count) }));
+    `).all<{ tenant_id: string; owner_user_id: string; count: number; oldest_enqueued_at: number }>(input.maxAttempts, input.now, ...(input.allowedRunIds ?? []), ...(input.allowedSettlementJobIds ?? []), input.minimum);
+    return rows.map((row) => ({ scope: { tenantId: row.tenant_id, ownerUserId: row.owner_user_id }, count: Number(row.count), oldestEnqueuedAt: Number(row.oldest_enqueued_at) }));
   }
 
   async claimSettlementBatch(input: { readonly scope: MemoryScope; readonly now: number; readonly maxAttempts: number; readonly limit: number; readonly allowedRunIds?: readonly string[]; readonly allowedSettlementJobIds?: readonly string[] }): Promise<readonly MemorySettlementJob[]> {

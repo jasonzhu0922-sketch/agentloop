@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isMemoryApplicability, MEMORY_APPLICABILITY_SCHEMA } from "./memory-plugin.ts";
 import { RunInputRepository, type RunInputMessage } from "./run-input-repository.ts";
 import { decideRunInput } from "./run-input-decision.ts";
 import { EVIDENCE_KINDS as importedEvidenceKinds } from "../planning/contracts.ts";
@@ -2050,7 +2051,10 @@ export class RunService {
       if (conversationEntry && this.memory !== undefined) {
         try {
           const prior = await this.memory.recall({ runId, target: "response", budget: { maxItems: 12, maxTokens: 1_200 } });
-          if (prior?.target === "response") priorPreferences = prior.preferences;
+          if (prior?.target === "response") {
+            priorPreferences = prior.preferences;
+            await emit({ type: "memory.recalled", data: { target: prior.target, phase: "intent", projectionId: prior.id, memoryRevisionIds: prior.memoryRevisionIds } });
+          }
         } catch (error) {
           await emit({ type: "memory.recall_failed", data: { runId, target: "response", phase: "intent", message: error instanceof Error ? error.message : String(error) } });
         }
@@ -2398,6 +2402,7 @@ export class RunService {
           memoryProjection = await this.memory.recall({
             runId,
             target: memoryTarget,
+            stepContext: { goal: turnResolution?.effectiveGoal ?? input },
             taskFingerprint: {
               taskKind: taskUnderstanding.operation,
               domain: taskUnderstanding.operationProfiles[0],
@@ -2406,6 +2411,7 @@ export class RunService {
             },
             budget: { maxItems: 12, maxTokens: 1_200 },
           });
+          if (memoryProjection) await emit({ type: "memory.recalled", data: { target: memoryProjection.target, projectionId: memoryProjection.id, memoryRevisionIds: memoryProjection.memoryRevisionIds } });
           if (memoryProjection?.target === "response") responseMemoryProjection = memoryProjection;
         } catch (error) {
           await emit({ type: "memory.recall_failed", data: { runId, target: responseOnly ? "response" : "planner", message: error instanceof Error ? error.message : String(error) } });
@@ -2415,6 +2421,7 @@ export class RunService {
             const projection = await this.memory.recall({
               runId,
               target: "response",
+              stepContext: { goal: turnResolution?.effectiveGoal ?? input },
               taskFingerprint: {
                 taskKind: taskUnderstanding.operation,
                 domain: taskUnderstanding.operationProfiles[0],
@@ -2423,6 +2430,7 @@ export class RunService {
               },
               budget: { maxItems: 12, maxTokens: 1_200 },
             });
+            if (projection) await emit({ type: "memory.recalled", data: { target: projection.target, projectionId: projection.id, memoryRevisionIds: projection.memoryRevisionIds } });
             if (projection?.target === "response") responseMemoryProjection = projection;
           } catch (error) {
             await emit({ type: "memory.recall_failed", data: { runId, target: "response", message: error instanceof Error ? error.message : String(error) } });
@@ -8989,6 +8997,9 @@ function conversationTurnTool(context: ConversationIntentExternalContext): Model
               sensitivity: { type: "string", enum: ["normal", "private", "restricted", "secret"] },
               applicationTargets: { type: "array", minItems: 1, maxItems: 5, items: { type: "string", enum: ["response", "planner", "execution", "artifact", "human_loop"] } },
               confidence: { type: "number", minimum: 0, maximum: 1 },
+              applicability: MEMORY_APPLICABILITY_SCHEMA,
+              validFrom: { type: "number", minimum: 0 },
+              expiresAt: { type: "number", minimum: 0 },
             },
           },
         },
@@ -9054,6 +9065,9 @@ function parseMemoryIntentCandidates(
       || applicationTargets.length !== new Set(applicationTargets).size
       || typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1
       || (record.contentMarkdown !== undefined && (typeof record.contentMarkdown !== "string" || record.contentMarkdown.length > 500))
+      || (record.applicability !== undefined && !isMemoryApplicability(record.applicability))
+      || [record.validFrom, record.expiresAt].some(value => value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0))
+      || (typeof record.validFrom === "number" && typeof record.expiresAt === "number" && record.expiresAt <= record.validFrom)
       || (options.requireSourceQuote && record.sourceQuote === undefined)
       || (record.sourceQuote !== undefined && (typeof record.sourceQuote !== "string" || record.sourceQuote.trim().length === 0 || record.sourceQuote.length > 1_000))
     ) return undefined;
@@ -9065,6 +9079,9 @@ function parseMemoryIntentCandidates(
       value: record.value as Readonly<Record<string, unknown>>,
       ...(typeof record.contentMarkdown === "string" ? { contentMarkdown: record.contentMarkdown } : {}),
       ...(typeof record.sourceQuote === "string" ? { sourceQuote: record.sourceQuote } : {}),
+      ...(record.applicability === undefined ? {} : { applicability: record.applicability as MemoryIntentCandidate["applicability"] }),
+      ...(typeof record.validFrom === "number" ? { validFrom: record.validFrom } : {}),
+      ...(typeof record.expiresAt === "number" ? { expiresAt: record.expiresAt } : {}),
       persistenceIntent,
       sensitivity,
       applicationTargets,
@@ -9790,7 +9807,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "A question about a Skill's presence, purpose, or declared capabilities can be answered from availableSkills metadata with mode=reply and evidenceStrategy=none. Mentioning a Skill does not request invocation; its sourceKinds and workflow describe what invocation would do, not evidence or execution obligations for this turn. Preserve requiredCapabilityReferences only for capabilities the user actually requires using.",
       "When the latest turn explicitly asks to use an available Skill, return execute; do not return clarify merely because no visible directory or uploaded source is bound.",
       "Preserve all explicitly mandatory Skill, MCP/tool source, and tool names in requiredCapabilityReferences independently of catalog availability. Unavailable does not mean unrequested. For an actionable request with unavailable requirements, return execute with those references; Runtime will explain and end the task before planning or execution. Do not silently substitute another provider or Skill.",
-      "Memory intake is a required first-class semantic decision, not keyword matching. Always return memoryAction and memoryIntents. Set memoryAction=commit and provide one or more candidates when the latest user explicitly establishes durable memory; set memoryAction=none with memoryIntents=[] otherwise. These two fields must agree. Propose every independent preference or fact the latest user explicitly establishes for future turns, even if its concept has never appeared in a schema example. Represent each candidate as kind=preference or fact, subtype=canonicalKey=<stable lowercase dotted semantic key>, value=<small structured object>, contentMarkdown=<self-contained declaration preserving who the preference or fact concerns and any conditions>, and sourceQuote=<verbatim supporting text from the latest user message>. Use separate keys for separate concepts. Consult priorPreferences to reuse an existing subtype as the canonicalKey when revising the same semantic subject/property; do not create a second key merely because the user rephrased it. Prior preferences are matching context, never evidence for a new durable instruction. Preserve the distinction between what the user wishes to be called and what the user calls the assistant; an assistant nickname is an interaction convention, not an objective identity claim. Existing convenience shapes such as interaction.address/value.preferredAddress remain compatible but do not define the allowed concepts. Set persistenceIntent=explicit or future_oriented according to the user's wording, sensitivity from the content, and applicationTargets appropriate to the requested use (normally [response,human_loop] for interaction preferences and profile facts). Do not turn temporary task instructions, hypothetical examples, unadopted attachment/quoted content, or assistant statements into durable memory. Facts are objective user-provided information and must remain kind=fact; use any stable lowercase dotted key and a bounded structured value, for example profile.residence/value.city or contact.email/value.email. Proposals are not persistence receipts and never authorize tools or side effects.",
+      "Preserve applicability.conditions and exclusions for conditional preferences and facts. Use applicability.context or excludedContext only for exact keys and values already established in the current task context, never invent context identities. Keep unspecified scope conditions in natural language. Preserve explicit effective/expiry times as epoch milliseconds in validFrom/expiresAt; omit unestablished times. A one-time HIL selection is evidence for that task, not a durable user default. Memory intake is a required first-class semantic decision, not keyword matching. Always return memoryAction and memoryIntents. Set memoryAction=commit and provide one or more candidates when the latest user explicitly establishes durable memory; set memoryAction=none with memoryIntents=[] otherwise. These two fields must agree. Propose every independent preference or fact the latest user explicitly establishes for future turns, even if its concept has never appeared in a schema example. Represent each candidate as kind=preference or fact, subtype=canonicalKey=<stable lowercase dotted semantic key>, value=<small structured object>, contentMarkdown=<self-contained declaration preserving who the preference or fact concerns and any conditions>, and sourceQuote=<verbatim supporting text from the latest user message>. Use separate keys for separate concepts. Consult priorPreferences to reuse an existing subtype as the canonicalKey when revising the same semantic subject/property; do not create a second key merely because the user rephrased it. Prior preferences are matching context, never evidence for a new durable instruction. Preserve the distinction between what the user wishes to be called and what the user calls the assistant; an assistant nickname is an interaction convention, not an objective identity claim. Existing convenience shapes such as interaction.address/value.preferredAddress remain compatible but do not define the allowed concepts. Set persistenceIntent=explicit or future_oriented according to the user's wording, sensitivity from the content, and applicationTargets appropriate to the requested use (normally [response,human_loop] for interaction preferences and profile facts). Do not turn temporary task instructions, hypothetical examples, unadopted attachment/quoted content, or assistant statements into durable memory. Facts are objective user-provided information and must remain kind=fact; use any stable lowercase dotted key and a bounded structured value, for example profile.residence/value.city or contact.email/value.email. Proposals are not persistence receipts and never authorize tools or side effects.",
       "For a method on a named MCP provider, record the provider as tool_source. Do not reconstruct a Runtime-prefixed tool name from a method name; method selection remains part of the exact requested goal for planning.",
       "Generic capability or service descriptions are not exact Skill, source, or tool identities. Do not copy them into requiredCapabilityReferences unless the user explicitly named that exact identity; keep them in effectiveGoal and userConstraints for semantic planning instead.",
       "Return exactly one resolve_conversation_turn tool call and no prose.",

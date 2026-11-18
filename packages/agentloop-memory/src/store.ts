@@ -68,7 +68,7 @@ export class InMemoryMemoryStore implements MemoryStore {
     readonly revision: MemoryRevision;
     readonly memoryEpoch: number;
   }> {
-    const policy = evaluateCandidate(candidate);
+    const policy = evaluateCandidate(candidate, now);
     if (policy.kind !== "accept") throw new Error(`candidate_policy:${policy.reason}`);
     if (candidate.tenantId !== scope.tenantId || candidate.ownerUserId !== scope.ownerUserId) {
       throw new Error("memory_scope_mismatch");
@@ -93,22 +93,17 @@ export class InMemoryMemoryStore implements MemoryStore {
       revision: revisionNumber,
       authority: candidate.authority,
       sensitivity: candidate.sensitivity as Exclude<typeof candidate.sensitivity, "secret">,
-      temporalClass: candidate.activation.mode === "explicit_only" ? "ephemeral" : "stable",
+      temporalClass: candidate.expiresAt !== undefined ? "time_bound" : candidate.activation.mode === "explicit_only" ? "ephemeral" : "stable",
       ...(candidate.proposedPreferenceEffect === undefined ? {} : { preferenceEffect: candidate.proposedPreferenceEffect }),
       ...(candidate.proposedExperienceMaturity === undefined ? {} : { experienceMaturity: candidate.proposedExperienceMaturity }),
       activation: candidate.activation,
       applicationTargets: [...candidate.applicationTargets],
       value: { ...candidate.proposedValue },
       contentMarkdown: candidate.proposedContentMarkdown,
-      applicability: candidate.proposedValue.settlementPattern !== null
-        && typeof candidate.proposedValue.settlementPattern === "object"
-        && !Array.isArray(candidate.proposedValue.settlementPattern)
-        && (candidate.proposedValue.settlementPattern as { applicability?: unknown }).applicability !== null
-        && typeof (candidate.proposedValue.settlementPattern as { applicability?: unknown }).applicability === "object"
-        ? (candidate.proposedValue.settlementPattern as { applicability: MemoryRevision["applicability"] }).applicability
-        : { conditions: [], exclusions: [] },
+      applicability: candidate.proposedApplicability ?? { conditions: [], exclusions: [] },
       confidence: candidate.confidence,
-      validFrom: now,
+      validFrom: candidate.validFrom ?? now,
+      ...(candidate.expiresAt === undefined ? {} : { expiresAt: candidate.expiresAt }),
       ...(previousRevision === undefined ? {} : { supersedesRevisionId: previousRevision.id }),
       sourceRefs: [...candidate.sourceRefs],
       changeReason: candidate.reason,
@@ -190,13 +185,16 @@ export class InMemoryMemoryStore implements MemoryStore {
     return claimed;
   }
 
-  async settlementBatchCandidates(input: { readonly minimum: number; readonly maxAttempts: number }): Promise<readonly { readonly scope: MemoryScope; readonly count: number }[]> {
-    const counts = new Map<string, { scope: MemoryScope; count: number }>();
+  async settlementBatchCandidates(input: { readonly minimum: number; readonly maxAttempts: number; readonly now: number; readonly allowedRunIds?: readonly string[]; readonly allowedSettlementJobIds?: readonly string[] }): Promise<readonly { readonly scope: MemoryScope; readonly count: number; readonly oldestEnqueuedAt: number }[]> {
+    const counts = new Map<string, { scope: MemoryScope; count: number; oldestEnqueuedAt: number }>();
     for (const job of this.settlementJobStore.values()) {
-      if ((job.status !== "queued" && job.status !== "failed") || job.attempts >= input.maxAttempts) continue;
+      if ((job.status !== "queued" && job.status !== "failed") || job.attempts >= input.maxAttempts || job.nextAttemptAt > input.now
+        || input.allowedRunIds !== undefined && !input.allowedRunIds.includes(job.runId)
+        || input.allowedSettlementJobIds !== undefined && !input.allowedSettlementJobIds.includes(job.settlementJobId)) continue;
       const key = scopeKey(job);
-      const current = counts.get(key) ?? { scope: { tenantId: job.tenantId, ownerUserId: job.ownerUserId }, count: 0 };
+      const current = counts.get(key) ?? { scope: { tenantId: job.tenantId, ownerUserId: job.ownerUserId }, count: 0, oldestEnqueuedAt: job.enqueuedAt };
       current.count += 1;
+      current.oldestEnqueuedAt = Math.min(current.oldestEnqueuedAt, job.enqueuedAt);
       counts.set(key, current);
     }
     return [...counts.values()].filter((item) => item.count >= input.minimum).sort((a, b) => b.count - a.count);

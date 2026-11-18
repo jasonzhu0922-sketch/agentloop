@@ -315,6 +315,7 @@ export function experienceCandidateFromEvidence(
     proposedSubtype: "experience.episode",
     proposedCanonicalKey: `experience.episode:${evidence.runId}:${evidence.terminalCommitRef}`,
     proposedValue: value,
+    proposedApplicability: { conditions: settlementPattern.applicability.conditions, exclusions: settlementPattern.applicability.exclusions },
     proposedContentMarkdown: renderSettlementMarkdown(settlementPattern),
     persistenceIntent: "future_oriented",
     authority: "verified_run",
@@ -347,6 +348,8 @@ export interface MemorySettlementWorkerOptions {
   readonly allowedSettlementJobIds?: readonly string[];
   /** Number of experience cases required before one semantic batch call. */
   readonly experienceBatchSize?: number;
+  /** Flush a partial batch after this age; zero processes available cases immediately. */
+  readonly maxBatchWaitMs?: number;
 }
 
 export interface MemorySettlementReaderLike {
@@ -374,6 +377,7 @@ export class MemorySettlementWorker {
   private readonly allowedRunIds?: readonly string[];
   private readonly allowedSettlementJobIds?: readonly string[];
   private readonly experienceBatchSize: number;
+  private readonly maxBatchWaitMs: number;
 
   constructor(options: MemorySettlementWorkerOptions) {
     this.store = options.store;
@@ -387,6 +391,7 @@ export class MemorySettlementWorker {
     this.allowedRunIds = options.allowedRunIds === undefined ? undefined : [...new Set(options.allowedRunIds)];
     this.allowedSettlementJobIds = options.allowedSettlementJobIds === undefined ? undefined : [...new Set(options.allowedSettlementJobIds)];
     this.experienceBatchSize = Math.max(1, Math.floor(options.experienceBatchSize ?? 1));
+    this.maxBatchWaitMs = Math.max(0, options.maxBatchWaitMs ?? 300_000);
   }
 
   async runOnce(): Promise<MemorySettlementRunResult> {
@@ -473,15 +478,16 @@ export class MemorySettlementWorker {
   }
 
   private async runBatchOnce(): Promise<MemorySettlementRunResult> {
-    const candidates = await this.store.settlementBatchCandidates({ minimum: this.experienceBatchSize, maxAttempts: this.maxAttempts });
-    const candidate = candidates[0];
+    const candidates = await this.store.settlementBatchCandidates({ minimum: 1, maxAttempts: this.maxAttempts, now: this.now(),
+      allowedRunIds: this.allowedRunIds, allowedSettlementJobIds: this.allowedSettlementJobIds });
+    const candidate = candidates.find(item => item.count >= this.experienceBatchSize || this.now() - item.oldestEnqueuedAt >= this.maxBatchWaitMs);
     if (candidate === undefined) return { status: "empty", reason: "waiting_for_experience_batch" };
     const jobs = await this.store.claimSettlementBatch({
       scope: candidate.scope, now: this.now(), maxAttempts: this.maxAttempts, limit: this.experienceBatchSize,
       ...(this.allowedRunIds === undefined ? {} : { allowedRunIds: this.allowedRunIds }),
       ...(this.allowedSettlementJobIds === undefined ? {} : { allowedSettlementJobIds: this.allowedSettlementJobIds }),
     });
-    if (jobs.length < this.experienceBatchSize) {
+    if (!jobs.length || jobs.length < this.experienceBatchSize && this.now() - Math.min(...jobs.map(job => job.enqueuedAt)) < this.maxBatchWaitMs) {
       for (const job of jobs) await this.store.releaseSettlement(job);
       return { status: "empty", reason: "waiting_for_experience_batch" };
     }
@@ -1244,6 +1250,7 @@ export async function consolidateProcedures(
           ...(procedureMetadata.validationResult === undefined ? {} : { settlementValidationResult: procedureMetadata.validationResult }),
         }),
       },
+      proposedApplicability: { conditions: procedurePattern.applicability.conditions, exclusions: procedurePattern.applicability.exclusions },
       proposedContentMarkdown: `可复用流程（来自 ${distinct.length} 次独立验证）：\n${renderSettlementMarkdown(procedurePattern)}`,
       persistenceIntent: "future_oriented",
       authority: "verified_run",

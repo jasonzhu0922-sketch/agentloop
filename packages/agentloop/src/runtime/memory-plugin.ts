@@ -22,6 +22,46 @@ export type MemoryAuthority =
 
 export type MemorySensitivity = "normal" | "private" | "restricted" | "secret";
 
+/** Conditions are model-readable; context selectors are exact, source-bound
+ * requirements. Missing context never satisfies a declared requirement. */
+export interface MemoryApplicability {
+  readonly conditions: readonly string[];
+  readonly exclusions: readonly string[];
+  readonly context?: Readonly<Record<string, readonly (string | number | boolean)[]>>;
+  readonly excludedContext?: Readonly<Record<string, readonly (string | number | boolean)[]>>;
+}
+
+export const MEMORY_APPLICABILITY_SCHEMA = {
+  type: "object", additionalProperties: false, required: ["conditions", "exclusions"],
+  properties: {
+    conditions: { type: "array", maxItems: 24, items: { type: "string", minLength: 1, maxLength: 1000 } },
+    exclusions: { type: "array", maxItems: 24, items: { type: "string", minLength: 1, maxLength: 1000 } },
+    context: { type: "object", maxProperties: 24, additionalProperties: { type: "array", minItems: 1, maxItems: 24, items: { anyOf: [{ type: "string", minLength: 1, maxLength: 200 }, { type: "number" }, { type: "boolean" }] } } },
+    excludedContext: { type: "object", maxProperties: 24, additionalProperties: { type: "array", minItems: 1, maxItems: 24, items: { anyOf: [{ type: "string", minLength: 1, maxLength: 200 }, { type: "number" }, { type: "boolean" }] } } },
+  },
+} as const;
+
+export function isMemoryApplicability(value: unknown): value is MemoryApplicability {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  if (Object.keys(row).some(key => !["conditions", "exclusions", "context", "excludedContext"].includes(key))) return false;
+  for (const key of ["conditions", "exclusions"]) {
+    const list = row[key];
+    if (!Array.isArray(list) || list.length > 24 || list.some(item => typeof item !== "string" || !item.trim() || item.length > 1000)) return false;
+  }
+  for (const key of ["context", "excludedContext"]) {
+    const selectors = row[key];
+    if (selectors === undefined) continue;
+    if (!selectors || typeof selectors !== "object" || Array.isArray(selectors) || Object.keys(selectors).length > 24) return false;
+    for (const [field, values] of Object.entries(selectors)) {
+      if (!/^[a-zA-Z][\w.:-]{0,119}$/u.test(field) || ["constructor", "prototype", "__proto__"].includes(field)) return false;
+      if (!Array.isArray(values) || !values.length || values.length > 24 || values.some(item =>
+        !(typeof item === "boolean" || typeof item === "number" && Number.isFinite(item) || typeof item === "string" && item.trim().length > 0 && item.length <= 200))) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Model-authored memory proposal. It is evidence only: the Memory plugin
  * still owns canonical subtype/value validation, privacy policy, and commit.
@@ -41,6 +81,9 @@ export interface MemoryIntentCandidate {
   readonly sensitivity: MemorySensitivity;
   readonly applicationTargets: readonly MemoryApplicationTarget[];
   readonly confidence: number;
+  readonly applicability?: MemoryApplicability;
+  readonly validFrom?: number;
+  readonly expiresAt?: number;
 }
 
 export type MemoryProjection =
@@ -67,6 +110,7 @@ export interface MemoryProjectionBase {
     readonly subtype: string;
     readonly value: Readonly<Record<string, unknown>>;
     readonly contentMarkdown: string;
+    readonly applicability?: MemoryApplicability;
   }[];
 }
 
@@ -85,6 +129,7 @@ export interface InteractionMemoryProjection extends MemoryProjectionBase {
     readonly subtype: string;
     readonly value: Readonly<Record<string, unknown>>;
     readonly stale: boolean;
+    readonly applicability?: MemoryApplicability;
   }[];
   readonly promptMarkdown: string;
 }
@@ -96,6 +141,7 @@ export interface PlanningMemoryProjection extends MemoryProjectionBase {
     readonly subtype: string;
     readonly value: Readonly<Record<string, unknown>>;
     readonly stale: boolean;
+    readonly applicability?: MemoryApplicability;
   }[];
   readonly preferenceConstraints: readonly Readonly<Record<string, unknown>>[];
   readonly planningPriors: readonly {
@@ -114,6 +160,16 @@ export interface PlanningMemoryProjection extends MemoryProjectionBase {
     readonly warnings: readonly string[];
     readonly confidence: number;
     readonly sourceRefs: readonly string[];
+    readonly scope?: MemoryApplicability;
+    readonly requiresVerification?: boolean;
+    /** Bind from the current task; historical case answers are never projected. */
+    readonly reuse?: {
+      readonly parameters: readonly { readonly name: string; readonly description: string }[];
+      readonly verifiedScope: readonly string[];
+      readonly unverifiedScope: readonly string[];
+    };
+    readonly reusableKnowledge?: readonly Readonly<Record<string, unknown>>[];
+    readonly failureLessons?: readonly Readonly<Record<string, unknown>>[];
   }[];
 }
 
@@ -123,6 +179,7 @@ export interface RuntimeGuidanceMemoryProjection extends MemoryProjectionBase {
     readonly id: string;
     readonly contentMarkdown: string;
     readonly reason: string;
+    readonly applicability?: MemoryApplicability;
   }[];
 }
 

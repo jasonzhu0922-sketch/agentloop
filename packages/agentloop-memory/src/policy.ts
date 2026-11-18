@@ -1,10 +1,16 @@
 import type { MemoryCandidate, MemoryKind, MemoryPolicyDecision, MemoryRevision } from "./types.ts";
+import { isMemoryApplicability } from "@zhujun/agentloop";
 
 const SECRET_MARKERS = /(?:password|passwd|token|cookie|private\s*key|secret|密码|口令|令牌|私钥|支付密码)/iu;
 
-export function evaluateCandidate(candidate: MemoryCandidate): MemoryPolicyDecision {
+export function evaluateCandidate(candidate: MemoryCandidate, now?: number): MemoryPolicyDecision {
+  if (candidate.proposedApplicability !== undefined && !isMemoryApplicability(candidate.proposedApplicability)) return { kind: "reject", reason: "applicability_invalid" };
+  const validFrom = candidate.validFrom ?? now;
+  if ([candidate.validFrom, candidate.expiresAt].some(value => value !== undefined && (!Number.isFinite(value) || value < 0))
+    || candidate.expiresAt !== undefined && validFrom !== undefined && candidate.expiresAt <= validFrom) return { kind: "reject", reason: "validity_interval_invalid" };
   if (candidate.sensitivity === "secret" || SECRET_MARKERS.test(candidate.proposedContentMarkdown)
     || SECRET_MARKERS.test(JSON.stringify(candidate.proposedValue))
+    || SECRET_MARKERS.test(JSON.stringify(candidate.proposedApplicability ?? {}))
     || candidate.sourceRefs.some((ref) => ref.quotedText !== undefined && SECRET_MARKERS.test(ref.quotedText))) {
     return { kind: "reject", reason: "secret_data_is_never_persisted" };
   }
@@ -36,6 +42,8 @@ export function evaluateCandidate(candidate: MemoryCandidate): MemoryPolicyDecis
 }
 
 export function validateRevision(revision: MemoryRevision, kind?: MemoryKind): void {
+  if (!isMemoryApplicability(revision.applicability)) throw new Error("applicability_invalid");
+  if (revision.expiresAt !== undefined && revision.expiresAt <= revision.validFrom) throw new Error("validity_interval_invalid");
   if (kind === "preference" && revision.preferenceEffect === undefined) {
     throw new Error("preference_effect_is_required");
   }

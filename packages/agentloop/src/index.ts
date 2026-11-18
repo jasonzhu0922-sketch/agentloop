@@ -150,6 +150,7 @@ export type {
   ExplicitMemoryCommitResult,
   InteractionMemoryProjection,
   MemoryApplicationTarget,
+  MemoryApplicability,
   MemoryAuthority,
   MemoryCommitReceipt,
   MemoryProjection,
@@ -161,6 +162,7 @@ export type {
   PlanningMemoryProjection,
   RuntimeGuidanceMemoryProjection,
 } from "./runtime/memory-plugin.ts";
+export { isMemoryApplicability } from "./runtime/memory-plugin.ts";
 export { collectProcessArtifacts, artifactId, previewProcessArtifact } from "./runtime/process-artifacts.ts";
 export type {
   ProcessArtifact,

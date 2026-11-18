@@ -155,6 +155,21 @@ export class DesktopApi {
       }
       const context = Object.freeze({ ownerUserId: session.ownerUserId });
       const manager = await this.accounts.forOwner(context.ownerUserId);
+      if (url.pathname === "/api/memory" || url.pathname.startsWith("/api/memory/")) {
+        if (request.method !== "GET") throw new HttpError(405, "memory_query_read_only");
+        const reader = this.accounts.memoryQuery(context.ownerUserId);
+        const configuration = await manager.deviceMemoryConfiguration();
+        const reply = (body: object) => json(response, 200, { ...body, configuration, accountId: context.ownerUserId });
+        if (url.pathname === "/api/memory") reply(await reader.items(url.searchParams));
+        else if (url.pathname === "/api/memory/jobs") reply(await reader.jobs(url.searchParams));
+        else if (url.pathname === "/api/memory/runs") reply(await reader.run(url.searchParams, await manager.runtimes()));
+        else {
+          const match = /^\/api\/memory\/items\/([a-zA-Z0-9_-]{1,200})$/.exec(url.pathname);
+          if (!match) throw new HttpError(404, "route_not_found");
+          reply(await reader.item(match[1]!, url.searchParams));
+        }
+        return;
+      }
       if (await this.managementRoute(request, response, url.pathname, context.ownerUserId, manager)) return;
       if (request.method === "GET" && url.pathname === "/api/conversations") {
         const summaries = await manager.runtimes();

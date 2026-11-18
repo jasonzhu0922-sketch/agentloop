@@ -58,6 +58,7 @@ test("an omitted Memory decision is repaired before an unseen preference is comm
               schema: "agentloop.memoryIntentCandidate/v1", kind: "preference", subtype: "interaction.assistant_name", canonicalKey: "interaction.assistant_name",
               value: { subject: "assistant", name: renaming ? "小武" : "玄武" }, contentMarkdown: `用户称呼助手为${renaming ? "小武" : "玄武"}。`,
               sourceQuote: renaming ? rename : "以后我会称呼你为玄武，你就是玄武",
+              applicability: { conditions: ["适合称呼助手时"], exclusions: [] }, validFrom: 0, expiresAt: 4_000_000_000_000,
               persistenceIntent: "future_oriented", sensitivity: "normal", applicationTargets: ["response", "human_loop"], confidence: 1,
             }] : [],
           } }] };
@@ -84,10 +85,14 @@ test("an omitted Memory decision is repaired before an unseen preference is comm
     const active = await memory.store.active({ tenantId: "tenant", ownerUserId: owner });
     assert.equal(active.length, 1);
     assert.equal(active[0].revision.revision, 2);
+    assert.deepEqual(active[0].revision.applicability.conditions, ["适合称呼助手时"]);
+    assert.equal(active[0].revision.validFrom, 0);
+    assert.equal(active[0].revision.expiresAt, 4_000_000_000_000);
     const firstEvents = await runs.events(owner, first.id);
     assert.ok(firstEvents.some((event) => event.type === "conversation.turn.resolution_rejected"
       && event.data.feedback === "memoryAction must be none or commit and is required for every turn."));
     assert.ok(firstEvents.some((event) => event.type === "memory.explicit_commit"));
+    assert.ok(firstEvents.some((event) => event.type === "memory.recalled" && Array.isArray(event.data.memoryRevisionIds)));
     assert.equal(establishingResolverAttempts, 2);
   } finally {
     await database.close();

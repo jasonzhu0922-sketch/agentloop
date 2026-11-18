@@ -161,7 +161,7 @@ test("projection budgeting counts structured values and does not let a large ite
   const memory = plugin();
   await memory.commitExplicit({ runId: "runA", messageId: "budget", userText: "偏好测试",
     memoryIntents: [preference("interaction.long", { text: "x".repeat(900) }), preference("interaction.assistant_name", { name: "玄武" })] });
-  const projection = await memory.recall({ runId: "runA", target: "response", budget: { maxItems: 10, maxTokens: 50 } });
+  const projection = await memory.recall({ runId: "runA", target: "response", budget: { maxItems: 1, maxTokens: 50 } });
   assert.ok(projection && "preferences" in projection);
   assert.equal(projection.preferences?.length, 1);
   assert.equal(projection.preferences[0].value.name, "玄武");
@@ -471,34 +471,40 @@ test("Planner budgets the complete method rather than large provenance and prese
   const audit = [{ type: "run", runId: "historical", quotedText: "auditable execution evidence ".repeat(4000) }];
   const steps = ["Load required workflow", "List available scenarios", "Inspect catalog", "Inspect source schema", "Execute read-only query", "Read and verify output"]
     .map((objective, index) => ({ order: index + 1, objective, toolNames: ["source.read"], skillIds: ["discovered:query"],
-      requiredEvidenceKinds: [], producedEvidenceKinds: [], successCriteria: ["Confirm complete output"],
+      requiredEvidenceKinds: [], producedEvidenceKinds: [], successCriteria: ["Check source and scope", "Confirm complete output"],
       conditions: ["User has selected the scenario"], verification: "Check source and scope", sourceRefs: audit }));
   const pattern = {
     goalSummary: "Acquire verified source data", classicPath: steps,
     toolUsage: [{ toolName: "source.read", purpose: "Inspect and query the selected source", stepOrders: [3, 4, 5], sourceRefs: audit }],
     applicability: { conditions: ["Structured source available"], exclusions: ["Unrelated tasks"] },
-    cautions: ["Keep the selected scope"], recheckRules: ["Reinspect schema after failures"],
-    reusableKnowledge: [{ rule: "Inspect schema before execution", sourceRefs: audit }],
+    cautions: ["Unrelated tasks", "Keep the selected scope"], recheckRules: ["Reinspect schema after failures"],
+    reusableKnowledge: [{ kind: "method", rule: "Inspect schema before execution", sourceRefs: audit }],
   };
   const candidate: MemoryCandidate = {
     schema: "agentloop.userMemoryCandidate/v1", id: "large-audit-procedure", tenantId: "tenant-1", ownerUserId: "user-a",
     proposedKind: "experience", proposedSubtype: "experience.procedure", proposedCanonicalKey: "procedure:query",
-    proposedExperienceMaturity: "procedure", proposedValue: { settlementPromptSchemaVersion: "agentloop.semanticSettlement/v2", settlementPattern: pattern, knowledgeSources: audit },
+    proposedApplicability: pattern.applicability,
+    proposedExperienceMaturity: "procedure", proposedValue: { learningContract: "agentloop.reusableLearning/v1", settlementPromptSchemaVersion: "agentloop.semanticSettlement/v2", settlementPattern: pattern, knowledgeSources: audit },
     proposedContentMarkdown: "Audit documentation ".repeat(5000), authority: "verified_run", sensitivity: "normal",
     persistenceIntent: "future_oriented", activation: { mode: "task_match", taskKinds: ["lookup"] },
     applicationTargets: ["planner"], sourceRefs: [{ type: "run", runId: "historical" }], confidence: 1, reason: "verified_procedure", decision: "pending",
   };
-  const committed = await memory.store.commit(scopes.runA, candidate, 1_700_000_000_000);
   const request = { runId: "runA2", target: "planner" as const, taskFingerprint: { taskKind: "lookup" }, budget: { maxItems: 12, maxTokens: 1200 } };
+  const { learningContract: _contract, ...legacyValue } = candidate.proposedValue;
+  await memory.store.commit(scopes.runA, { ...candidate, id: "legacy-method", proposedValue: legacyValue }, 1_699_999_999_999);
+  assert.equal(await memory.recall(request), undefined, "old methods must be re-extracted before automatic recall");
+  const committed = await memory.store.commit(scopes.runA, candidate, 1_700_000_000_000);
   const projection = await memory.recall(request);
   assert.equal(projection?.target, "planner");
   if (projection?.target !== "planner") return;
   const prior = projection.planningPriors[0]!;
-  assert.deepEqual(prior.suggestedSteps, steps.map(({ sourceRefs, requiredEvidenceKinds, producedEvidenceKinds, ...step }) => step));
+  assert.deepEqual(prior.suggestedSteps, steps.map(({ sourceRefs, requiredEvidenceKinds, producedEvidenceKinds, successCriteria, ...step }) =>
+    ({ ...step, successCriteria: ["Confirm complete output"] })));
   assert.deepEqual(prior.sourceRefs, [committed.revision.id]);
   assert.equal(prior.applicability, "Structured source available");
   assert.deepEqual(prior.toolUsage, [{ toolName: "source.read", purpose: "Inspect and query the selected source", stepOrders: [3, 4, 5] }]);
-  assert.deepEqual(prior.warnings, ["Unrelated tasks", "Keep the selected scope", "Reinspect schema after failures"]);
+  assert.deepEqual(prior.warnings, ["Keep the selected scope", "Reinspect schema after failures"]);
+  assert.deepEqual(prior.scope?.exclusions, ["Unrelated tasks"], "the exclusion remains in scope, without a duplicate warning");
   assert.match(prior.strategy, /Inspect schema before execution/);
   assert.equal(prior.classicPath, undefined, "method must be serialized only once");
   assert.doesNotMatch(JSON.stringify(projection), /auditable execution evidence|Audit documentation|knowledgeSources/);
@@ -506,6 +512,7 @@ test("Planner budgets the complete method rather than large provenance and prese
   assert.equal(await memory.recall({ ...request, budget: { maxItems: 12, maxTokens: 20 } }), undefined, "a method is skipped whole instead of losing its final steps or conditions");
   assert.equal(await memory.recall({ ...request, runId: "runB" }), undefined);
   assert.equal(await memory.recall({ ...request, taskFingerprint: { taskKind: "unrelated" } }), undefined);
+  assert.equal(await memory.recall({ ...request, stepContext: { goal: "Write a poem about mountains" } }), undefined);
   await memory.store.commit(scopes.runA, { ...candidate, id: "long-method", proposedValue: { ...candidate.proposedValue,
     settlementPattern: { ...pattern, classicPath: steps.map(step => ({ ...step, objective: "Long substantive method ".repeat(200) })) } } }, 1_700_000_000_001);
   assert.equal(await memory.recall(request), undefined, "large method content still counts even when its audit data is excluded");
