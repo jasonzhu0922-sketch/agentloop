@@ -1,4 +1,4 @@
-import type { AgentLoopToolEvidence, ModelMessage, ModelToolCall } from "./contracts.ts";
+import type { AgentLoopToolEvidence, ModelMessage, ModelToolCall, RuntimeEvent } from "./contracts.ts";
 import { parseRuntimeResultRef, type RuntimeResultRef } from "./runtime-result.ts";
 import { decisionCommitsFromEvents, type RuntimeDecisionCommit } from "./decision-ledger.ts";
 import { parseOutputBudgetState, type OutputBudgetState } from "./tool-content-budget.ts";
@@ -15,6 +15,8 @@ export interface RecoveryEvent {
 }
 
 export interface RecoveryTranscript {
+  /** Same-leaf committed observations/declarations; never inherited by a replacement leaf. */
+  readonly workProductEvents?: readonly RuntimeEvent[];
   readonly messages: readonly ModelMessage[];
   readonly toolEvidence: readonly AgentLoopToolEvidence[];
   readonly facts: Readonly<{
@@ -332,6 +334,7 @@ export function reconstructRecoveryTranscript(input: {
   return {
     messages,
     toolEvidence,
+    workProductEvents: scope.filter(event => ["assistant.committed", "tool.completed", "tool.failed", "tool.rejected"].includes(event.type)),
     facts: {
       stepId: input.stepId,
       ...(checkpointEventSeq === undefined ? {} : { checkpointEventSeq }),

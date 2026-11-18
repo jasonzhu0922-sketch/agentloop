@@ -3397,6 +3397,7 @@ export class RunService {
       resumeStepId?: string;
       steps: ReadonlyMap<string, Readonly<{
         messages: readonly ModelMessage[];
+        workProductEvents?: readonly RuntimeEvent[];
         toolEvidence: readonly AgentLoopToolEvidence[];
         toolCallUsage?: readonly Pick<AgentLoopToolEvidence, "toolCallId" | "toolName">[];
         facts: Readonly<{
@@ -3723,6 +3724,7 @@ export class RunService {
         ...(input.conversationHistory === undefined ? {} : { conversationHistory: input.conversationHistory }),
         ...(recovery === undefined ? {} : {
           initialMessages: recovery.messages,
+          initialWorkProductEvents: recovery.workProductEvents,
           initialCandidateRejections: recovery.facts.candidateRejections,
           initialOutputBudgetState: parseOutputBudgetState(recovery.facts.outputBudgetState),
         }),

@@ -49,7 +49,7 @@ test("e5a39e3f: the actual PNG receipts bind an image target without inventing a
       const state = deriveWorkProductSemantics({ facts, goalId, declarations: [], deliveryTargets: [{
         targetId: "monthly_sales_line_chart", purpose: "Monthly sales line chart", kind: "image", ...(format === undefined ? {} : { format }),
       }] });
-      assert.deepEqual(state.deliveryTargets.map(binding => ({ path: binding.path, sha256: binding.sha256, bytes: binding.bytes })), [{ path, sha256, bytes: 127199 }]);
+      assert.deepEqual(state.deliveryTargets.map(binding => ({ path: binding.path, sha256: binding.sha256, bytes: binding.bytes })), explicit ? [{ path, sha256, bytes: 127199 }] : []);
     }
   }
 });
@@ -114,7 +114,7 @@ test("an admitted delivery target binds one observed artifact version, never a s
   assert.equal(wrong.rejected[0]?.reason, "unknown_delivery_target");
 });
 
-test("a single compatible committed receipt binds its admitted target without model progress prose", () => {
+test("a single compatible receipt remains unbound even when its path names the report", () => {
   const sha256 = "c".repeat(64);
   const boundFacts = deriveWorkProductObservations({
     runId: fixture.runId,
@@ -130,22 +130,10 @@ test("a single compatible committed receipt binds its admitted target without mo
   const target = { targetId: "analysis-report", purpose: "ODS analysis report", kind: "document", format: "markdown" };
   const state = deriveWorkProductSemantics({ facts: boundFacts, goalId, deliveryTargets: [target], declarations: [] });
 
-  assert.deepEqual(state.deliveryTargets?.map((binding) => ({
-    targetId: binding.targetId,
-    path: binding.path,
-    sha256: binding.sha256,
-    observedByToolCallId: binding.observedByToolCallId,
-    bindingAuthority: binding.bindingAuthority,
-  })), [{
-    targetId: "analysis-report",
-    path: "results/analysis.md",
-    sha256,
-    observedByToolCallId: "write-report",
-    bindingAuthority: "runtime",
-  }]);
+  assert.deepEqual(state.deliveryTargets, []);
 });
 
-test("a unique hash-identified command output binds its compatible target without binding its sibling target", () => {
+test("unique hash-identified command outputs require explicit target selection", () => {
   const sha256 = "9".repeat(64);
   const boundFacts = deriveWorkProductObservations({
     runId: fixture.runId,
@@ -169,17 +157,7 @@ test("a unique hash-identified command output binds its compatible target withou
     ],
   });
 
-  assert.deepEqual(state.deliveryTargets?.map((binding) => ({
-    targetId: binding.targetId,
-    path: binding.path,
-    sha256: binding.sha256,
-    bindingAuthority: binding.bindingAuthority,
-  })), [{
-    targetId: "ingestion-standard",
-    path: "results/ingestion-standard.xlsx",
-    sha256,
-    bindingAuthority: "runtime",
-  }]);
+  assert.deepEqual(state.deliveryTargets, []);
 });
 
 test("post-commit command output bindings select same-format targets without model prose", () => {
@@ -309,7 +287,7 @@ test("a replacement receipt advances the Runtime binding to the current artifact
         mode: seq === 1 ? "create" : "overwrite",
         bytes: 12 + seq,
         sha256,
-        artifactReceipt: { schema: "agentloop.artifactReceipt/v1", artifact: { path: "results/analysis.md", bytes: 12 + seq, sha256 } },
+        artifactReceipt: { schema: "agentloop.artifactReceipt/v1", deliveryTargetId: "analysis-report", artifact: { path: "results/analysis.md", bytes: 12 + seq, sha256 } },
       }),
     },
   });

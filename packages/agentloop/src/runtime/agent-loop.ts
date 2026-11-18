@@ -75,6 +75,8 @@ export interface AgentLoopOptions {
   readonly conversationHistory?: readonly ModelMessage[];
   /** Complete, persisted exchanges from a prior interrupted execution. */
   readonly initialMessages?: readonly ModelMessage[];
+  /** Committed events from this same admitted leaf, restored without replaying effects. */
+  readonly initialWorkProductEvents?: readonly RuntimeEvent[];
   readonly initialToolEvidence?: readonly AgentLoopToolEvidence[];
   /** Prior attempts retain their quotas even when their content is outside this leaf's input scope. */
   readonly initialToolCallUsage?: readonly Pick<AgentLoopToolEvidence, "toolCallId" | "toolName">[];
@@ -268,6 +270,7 @@ function automaticArtifactAcceptanceCall(input: {
   readonly convergenceOnly: boolean;
   readonly availableToolNames: readonly string[];
   readonly attemptedArtifactKeys: ReadonlySet<string>;
+  readonly checkedPaths?: ReadonlySet<string>;
   readonly evidence: readonly AgentLoopToolEvidence[];
   readonly currentTargetBindings?: readonly { readonly targetId: string; readonly path: string; readonly versionId: string; readonly sha256: string }[];
 }): AutomaticArtifactAcceptanceCall | undefined {
@@ -279,11 +282,13 @@ function automaticArtifactAcceptanceCall(input: {
   const artifact: { readonly path: string; readonly sha256?: string; readonly toolCallId?: string; readonly acceptanceProfile?: string } | undefined =
     input.currentTargetBindings !== undefined
       ? input.currentTargetBindings.findLast((binding) => !acceptances.has(`${binding.path}\u0000${binding.sha256.toLowerCase()}`)
+        && !input.checkedPaths?.has(binding.path)
         && !input.attemptedArtifactKeys.has(`${binding.path}#${binding.sha256}`))
       : input.convergenceOnly || state?.nextAction !== "verify_existing_artifact" || state.workProduct.status !== "deliverable_available"
         ? undefined
         : state.workProduct.deliverableArtifacts.findLast((candidate) => artifactMatchesExpectedTarget(candidate,
           state.workProduct.expectedArtifactKind, state.workProduct.expectedArtifactFormat)
+          && !input.checkedPaths?.has(candidate.path)
           && !input.attemptedArtifactKeys.has([candidate.path, candidate.sha256 ?? candidate.toolCallId].join("#")));
   if (artifact === undefined) return undefined;
   const artifactKey = [artifact.path, artifact.sha256 ?? artifact.toolCallId].join("#");
@@ -535,6 +540,7 @@ const DEFAULT_CANDIDATE_REPAIR_ASSESSMENT_LIMIT = 2;
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoopResult> {
   const model = options.model;
   const workProducts = options.workProductContext === undefined ? undefined : new WorkProductContext(options.runId, options.workProductContext);
+  for (const event of options.initialWorkProductEvents ?? []) workProducts?.capture(event);
   const emit = async (event: RuntimeEvent): Promise<void> => {
     const observed = workProducts?.capture(event) ?? event;
     await options.emit?.(observed);
@@ -563,7 +569,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let rejectedCandidateIdentity: string | undefined;
   let evidenceProgressBoundary: CandidateCompletionEvaluation["failedBoundary"];
   let evidenceProgressFeedback: string | undefined;
-  let completionFencePending = false;
   let pendingCandidateRepairDirective: string | undefined;
   let pendingStructuredObservationSynthesisDirective: string | undefined;
   const rejectedStructuredCandidateOutputs = new Set(
@@ -759,13 +764,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       rejectedCandidateIdentity = undefined;
       evidenceProgressBoundary = undefined;
       evidenceProgressFeedback = undefined;
-    }
-    if (!evaluation.approved) {
-      // Assessment owns semantic acceptance. A rejection opens exactly the
-      // next repair turn with the complete Run-authorized catalog; once that
-      // turn produces evidence, the current-step completion fence applies
-      // again instead of allowing an unbounded chain of later-step work.
-      completionFencePending = false;
     }
     return evaluation;
   };
@@ -1033,13 +1031,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
     const missingToolEvidenceKinds = stepEvidenceState?.missingToolEvidenceKinds ?? [];
     const canConvergeFromCurrentEvidence = currentDecisionView.candidateReadiness.readyForAssessment;
-    // Receipt readiness permits Assessment; it does not establish that the
-    // Agent has collected the requested facts. Only physical artifact
-    // acceptance can request this early candidate-preparation boundary.
-    const completionFenceReady = options.requireStructuredCandidateSynthesis !== true
-      && completionFencePending
-      && stepEvidenceState?.nextAction === "submit_completion_candidate"
-      && stepEvidenceState.workProduct.status === "accepted";
+    // Physical readiness permits Assessment; it never requests semantic
+    // completion. The Agent may continue authoring with its execution budget.
     const finalConvergenceAllowed = requestedConvergenceReason !== undefined
       || step !== hardLimit
       || await shouldUseFinalConvergence(options.shouldUseFinalConvergence, {
@@ -1053,8 +1046,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       && toolEvidence.length > 0
       && canConvergeFromCurrentEvidence
       && (
-        completionFenceReady
-        || requestedConvergenceReason !== undefined
+        requestedConvergenceReason !== undefined
         || (step === hardLimit && finalConvergenceAllowed)
       );
     // Materialize before selecting the completion boundary so the same grant
@@ -1078,10 +1070,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       : [];
     if (convergenceOnly) {
       convergenceRequested = true;
-      if (completionFenceReady && requestedConvergenceReason === undefined) {
-        requestedConvergenceReason = "current_step_evidence_complete";
-      }
-      completionFencePending = false;
       const directive = pendingCandidateRepairDirective
         ?? pendingStructuredObservationSynthesisDirective
         ?? (completionPreparationDefinitions.length === 0
@@ -1200,193 +1188,164 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       },
     });
 
-    const automaticAcceptance = automaticArtifactAcceptanceCall({
-      stepEvidenceState,
-      convergenceOnly,
-      availableToolNames: grantedMaterialized.definitions.map((tool) => tool.name),
-      attemptedArtifactKeys: automaticArtifactAcceptanceAttempts,
-      evidence: toolEvidence,
-      ...(!artifactDeliveryTargetsEnabled ? {} : { currentTargetBindings: workProducts!.derive().semantics.deliveryTargets }),
-    });
-    if (automaticAcceptance !== undefined) {
-      automaticArtifactAcceptanceAttempts.add(automaticAcceptance.artifactKey);
-      await emit({
-        type: "runtime.artifact_acceptance.scheduled",
-        data: {
-          step,
-          toolCallId: automaticAcceptance.call.id,
-          artifactPath: automaticAcceptance.artifactPath,
-          ...(automaticAcceptance.profileId === undefined ? {} : { profileId: automaticAcceptance.profileId }),
-          reason: "deliverable_available_missing_artifact_acceptance",
-        },
-      });
-      const prepared = (() => {
-        try {
-          return { kind: "ready" as const, value: prepareWithArtifactTarget(automaticAcceptance.call) };
-        } catch (error) {
-          return { kind: "rejected" as const, call: automaticAcceptance.call, message: publicErrorMessage(error) };
-        }
-      })();
-      if (prepared.kind === "ready") {
-        await emit({
-          type: "assistant.tool_call.committed",
-          data: {
-            step,
-            toolCallId: automaticAcceptance.call.id,
-            name: automaticAcceptance.call.name,
-            arguments: automaticAcceptance.call.arguments,
-            runtimeOwned: true,
-          },
-        });
-        await emit({
-          type: "tool.planned",
-          data: {
-            step,
-            toolCallId: automaticAcceptance.call.id,
-            toolName: automaticAcceptance.call.name,
-            arguments: automaticAcceptance.call.arguments,
-            replaySafe: prepared.value.tool.replaySafe,
-          },
-        });
-      } else {
-        await emit({
-          type: "tool.rejected",
-          data: {
-            step,
-            toolCallId: automaticAcceptance.call.id,
-            toolName: automaticAcceptance.call.name,
-            reason: prepared.message,
-            invocationStatus: "rejected",
-            operationStatus: "unknown",
-            isError: true,
-            failurePhase: "prepare",
-          },
-        });
-      }
-      const outcome = await executePrepared(
-        prepared,
-        options.grant,
-        step,
-        emit,
-        options.signal,
-        maxToolResultCharacters,
-        options.actionTracker,
-      );
-      const evidence = toolEvidenceFromOutcome(outcome, options.progressPolicy);
-      toolEvidence.push(evidence);
-      await emitCommittedEvidenceFacts(emit, step, evidence);
-      messages.push({ role: "assistant", content: "", toolCalls: [automaticAcceptance.call] });
-      messages.push({
-        role: "tool",
-        toolCallId: automaticAcceptance.call.id,
-        name: automaticAcceptance.call.name,
-        content: outcome.content,
-        isError: outcome.isError,
-      });
-      await emit({
-        type: "runtime.artifact_acceptance.completed",
-        data: {
-          step,
-          toolCallId: automaticAcceptance.call.id,
-          artifactPath: automaticAcceptance.artifactPath,
-          operationStatus: outcome.operationStatus,
-          isError: outcome.isError,
-        },
-      });
-      await emit({
-        type: "step.completed",
-        data: {
-          step,
-          toolResults: [{
-            toolCallId: outcome.call.id,
-            invocationStatus: outcome.invocationStatus,
-            operationStatus: outcome.operationStatus,
-            ...(outcome.exitCode === undefined ? {} : { exitCode: outcome.exitCode }),
-            isError: outcome.isError,
-          }],
-        },
-      });
-      const acceptanceState = deriveRuntimeStepEvidenceState({
-        policy: options.progressPolicy,
-        evidence: toolEvidence,
-      });
-      if (outcome.isError || acceptanceState?.recentActionableDiagnostic === true) {
-        contextAssembler.setRuntimeDirective(executionFeedbackDirective({
-          suppressLegacyWorkProductProjection: workProducts !== undefined,
-          latestToolEvidence: [evidence],
+    // Runtime verification uses the same current decision, Tool preparation,
+    // Action and Result path as an explicit model check. It does not request
+    // convergence or turn a write receipt into a semantic completion signal.
+    const verifyAvailableArtifacts = async (): Promise<boolean> => {
+      let performed = false;
+      // No authoring occurs inside this batch. Check each presented path once,
+      // including tools whose historical receipts lack an immutable hash.
+      const checkedPaths = new Set<string>();
+      while (true) {
+        const facts = await workProducts?.deriveForDecision();
+        const view = deriveCurrentDecisionView({
+          runId: options.runId,
+          resultBindings: options.runtimeContext?.resultBindings,
+          context: options.currentDecisionContext?.(),
+          stepSemanticFrame: options.stepSemanticFrame,
+          evidence: deriveRuntimeStepEvidenceState({ policy: options.progressPolicy, evidence: toolEvidence }),
           toolEvidence,
-          progressPolicy: options.progressPolicy,
-        }));
-      }
-      const acceptanceView = deriveCurrentDecisionView({ runId: options.runId,
-        resultBindings: options.runtimeContext?.resultBindings,
-        context: options.currentDecisionContext?.(), stepSemanticFrame: options.stepSemanticFrame,
-        evidence: acceptanceState, toolEvidence });
-      if (!outcome.isError && acceptanceView.candidateReadiness.readyForAssessment) {
-        if (
-          (acceptanceState?.requiredEvidenceKinds.length ?? 0) > 0
-          && acceptanceState?.nextAction === "submit_completion_candidate"
-        ) {
-          completionFencePending = true;
-        }
-        requestedConvergenceReason = "artifact_acceptance_observed";
-
-        // Receipt-only workflows may synthesize a completion candidate from
-        // their authenticated evidence. Artifact-producing workflows opt out
-        // below because physical acceptance does not decide semantic delivery.
-        if (options.evaluateCandidate !== undefined) {
-          const candidate = deriveEvidenceCompletionCandidate({
-            policy: options.progressPolicy,
-            evidence: toolEvidence,
-            latestEvidence: [evidence],
-            userInput: options.input,
-          });
-          if (candidate !== undefined && evidenceCompletionCandidateHasAcceptedArtifact(options.progressPolicy, toolEvidence)) {
-            await emit({
-              type: "candidate.evidence_completion_detected",
-              data: {
-                step,
-                requiredEvidenceKinds: candidate.requiredEvidenceKinds,
-                satisfiedEvidenceKinds: candidate.satisfiedEvidenceKinds,
-                caveatedEvidenceKinds: candidate.caveatedEvidenceKinds,
-                sourceToolCallIds: candidate.sourceToolCallIds,
-                artifacts: candidate.artifacts,
-              },
-            });
-            const completion = await evaluateToolBackedCandidate({
-              step,
-              output: candidate.output,
-              projectedToolEvidence: toolEvidence,
-              stepSemanticFrame: options.stepSemanticFrame,
-              rejectionDirective: "Runtime evidence completion candidate was rejected. Repair this step using the available evidence.",
-            });
-            if (completion !== undefined) return completion;
+          ...(facts === undefined ? {} : { workProducts: facts }),
+        });
+        if (view.candidateReadiness.blockedBy.some((reason) =>
+          reason === "unread_results" || reason === "pending_computation" || reason === "recovery_decision")) break;
+        const automaticAcceptance = automaticArtifactAcceptanceCall({
+          stepEvidenceState: view.evidence,
+          convergenceOnly: false,
+          availableToolNames: grantedMaterialized.definitions.map((tool) => tool.name),
+          attemptedArtifactKeys: automaticArtifactAcceptanceAttempts,
+          checkedPaths,
+          evidence: toolEvidence,
+          ...(!artifactDeliveryTargetsEnabled ? {} : { currentTargetBindings: view.workProducts.deliveryTargets.filter(binding => binding.versionId.length > 0) }),
+        });
+        if (automaticAcceptance === undefined) break;
+        checkedPaths.add(automaticAcceptance.artifactPath);
+        performed = true;
+        automaticArtifactAcceptanceAttempts.add(automaticAcceptance.artifactKey);
+        await emit({
+          type: "runtime.artifact_acceptance.scheduled",
+          data: {
+            step,
+            toolCallId: automaticAcceptance.call.id,
+            artifactPath: automaticAcceptance.artifactPath,
+            ...(automaticAcceptance.profileId === undefined ? {} : { profileId: automaticAcceptance.profileId }),
+            reason: "deliverable_available_missing_artifact_acceptance",
+          },
+        });
+        const prepared = (() => {
+          try {
+            return { kind: "ready" as const, value: prepareWithArtifactTarget(automaticAcceptance.call) };
+          } catch (error) {
+            return { kind: "rejected" as const, call: automaticAcceptance.call, message: publicErrorMessage(error) };
           }
+        })();
+        if (prepared.kind === "ready") {
+          await emit({
+            type: "assistant.tool_call.committed",
+            data: {
+              step,
+              toolCallId: automaticAcceptance.call.id,
+              name: automaticAcceptance.call.name,
+              arguments: automaticAcceptance.call.arguments,
+              runtimeOwned: true,
+            },
+          });
+          await emit({
+            type: "tool.planned",
+            data: {
+              step,
+              toolCallId: automaticAcceptance.call.id,
+              toolName: automaticAcceptance.call.name,
+              arguments: automaticAcceptance.call.arguments,
+              replaySafe: prepared.value.tool.replaySafe,
+            },
+          });
+        } else {
+          await emit({
+            type: "tool.rejected",
+            data: {
+              step,
+              toolCallId: automaticAcceptance.call.id,
+              toolName: automaticAcceptance.call.name,
+              reason: prepared.message,
+              invocationStatus: "rejected",
+              operationStatus: "unknown",
+              isError: true,
+              failurePhase: "prepare",
+            },
+          });
         }
-        if (
-          options.progressPolicy?.autoCompleteFromEvidence !== true
-          && acceptanceState?.workProduct.status === "accepted"
-        ) {
-          // Runtime acceptance establishes only that the current revision is
-          // inspectable. Artifact completion is semantic: return control to
-          // the model with its authoring tools so it can continue a multi-write
-          // draft or explicitly submit a final user-facing candidate. Do not
-          // infer either outcome from tool-call count, prose, or a format
-          // heuristic.
-          requestedConvergenceReason = undefined;
-          contextAssembler.setRuntimeDirective([
-            "<runtime_artifact_delivery_review>",
-            "The current artifact revision passed its available physical acceptance checks. This does not by itself prove that the requested content is complete.",
-            "Compare the current revision with the original task and completed source evidence. If any requested content remains absent, continue authoring or repair the artifact with an authorized Tool.",
-            "Submit a final user-facing completion candidate only after the artifact semantically fulfills the requested deliverable.",
-            "</runtime_artifact_delivery_review>",
-          ].join("\n"));
-          // The automatic verifier is Runtime work, not a model authoring
-          // turn. Keep the follow-up model decision inside this logical Step
-          // so a final write at the primary limit still gets a continuation.
-          step -= 1;
+        const outcome = await executePrepared(
+          prepared,
+          options.grant,
+          step,
+          emit,
+          options.signal,
+          maxToolResultCharacters,
+          options.actionTracker,
+        );
+        const evidence = toolEvidenceFromOutcome(outcome, options.progressPolicy);
+        toolEvidence.push(evidence);
+        await emitCommittedEvidenceFacts(emit, step, evidence);
+        messages.push({ role: "assistant", content: "", toolCalls: [automaticAcceptance.call] });
+        messages.push({
+          role: "tool",
+          toolCallId: automaticAcceptance.call.id,
+          name: automaticAcceptance.call.name,
+          content: outcome.content,
+          isError: outcome.isError,
+        });
+        await emit({
+          type: "runtime.artifact_acceptance.completed",
+          data: {
+            step,
+            toolCallId: automaticAcceptance.call.id,
+            artifactPath: automaticAcceptance.artifactPath,
+            operationStatus: outcome.operationStatus,
+            isError: outcome.isError,
+          },
+        });
+        const acceptanceState = deriveRuntimeStepEvidenceState({ policy: options.progressPolicy, evidence: toolEvidence });
+        if (outcome.isError || acceptanceState?.recentActionableDiagnostic === true) {
+          contextAssembler.setRuntimeDirective(executionFeedbackDirective({
+            suppressLegacyWorkProductProjection: workProducts !== undefined,
+            latestToolEvidence: [evidence], toolEvidence, progressPolicy: options.progressPolicy,
+          }));
         }
       }
+      return performed;
+    };
+
+    // Receipt-owned candidates retain their existing automatic evaluation
+    // path. Authored deliverables instead request this check at their normal
+    // candidate boundary, after the Agent has finished the current revision.
+    const evidenceBeforeAutomaticVerification = toolEvidence.length;
+    if (options.progressPolicy?.autoCompleteFromEvidence === true && await verifyAvailableArtifacts()) {
+      const candidate = deriveEvidenceCompletionCandidate({
+        policy: options.progressPolicy, evidence: toolEvidence, latestEvidence: toolEvidence.slice(evidenceBeforeAutomaticVerification), userInput: options.input,
+      });
+      const facts = await workProducts?.deriveForDecision();
+      const acceptanceView = deriveCurrentDecisionView({
+        runId: options.runId, resultBindings: options.runtimeContext?.resultBindings,
+        context: options.currentDecisionContext?.(), stepSemanticFrame: options.stepSemanticFrame,
+        evidence: deriveRuntimeStepEvidenceState({ policy: options.progressPolicy, evidence: toolEvidence }),
+        toolEvidence, ...(facts === undefined ? {} : { workProducts: facts }),
+      });
+      if (candidate !== undefined && options.evaluateCandidate !== undefined
+        && acceptanceView.candidateReadiness.readyForAssessment
+        && evidenceCompletionCandidateHasAcceptedArtifact(options.progressPolicy, toolEvidence)) {
+        await emit({ type: "candidate.evidence_completion_detected", data: {
+          step, requiredEvidenceKinds: candidate.requiredEvidenceKinds,
+          satisfiedEvidenceKinds: candidate.satisfiedEvidenceKinds, caveatedEvidenceKinds: candidate.caveatedEvidenceKinds,
+          sourceToolCallIds: candidate.sourceToolCallIds, artifacts: candidate.artifacts,
+        } });
+        const completion = await evaluateToolBackedCandidate({
+          step, output: candidate.output, projectedToolEvidence: toolEvidence, stepSemanticFrame: options.stepSemanticFrame,
+          rejectionDirective: "Runtime evidence completion candidate was rejected. Repair this step using the available evidence.",
+        });
+        if (completion !== undefined) return completion;
+      }
+      step -= 1; // Runtime verification does not consume a model turn.
       continue;
     }
     let assembly = await contextAssembler.assemble(messages, modelStepDefinitions, options.signal);
@@ -1670,6 +1629,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         ].join("\n"));
         continue;
       }
+      await verifyAvailableArtifacts();
       const evaluation = await evaluateCandidate(step, {
         output: response.content,
         stepSemanticFrame: options.stepSemanticFrame,
@@ -1740,6 +1700,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       setCandidateRepairDirective(
         [
           candidateRepairDirective(evaluation, "Completion was rejected. Repair this step using the available evidence."),
+          executionFeedbackDirective({
+            suppressLegacyWorkProductProjection: workProducts !== undefined,
+            latestToolEvidence: toolEvidence.slice(-1), toolEvidence, progressPolicy: options.progressPolicy,
+          }),
           candidateRejectionProgressHint({
             policy: options.progressPolicy,
             evidence: toolEvidence,
@@ -2192,25 +2156,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         },
       });
     }
-    if (
-      (evidenceStateBeforeCandidate?.requiredEvidenceKinds.length ?? 0) > 0
-      && evidenceStateBeforeCandidate?.nextAction === "submit_completion_candidate"
-      && outcomes.some((outcome) => !outcome.isError && outcome.call.name !== "load_skill")
-    ) {
-      completionFencePending = true;
-    }
-    if (automaticArtifactAcceptanceCall({
-      stepEvidenceState: evidenceStateBeforeCandidate,
-      convergenceOnly: false,
-      availableToolNames: grantedMaterialized.definitions.map((tool) => tool.name),
-      attemptedArtifactKeys: automaticArtifactAcceptanceAttempts,
-      evidence: toolEvidence,
-      ...(!artifactDeliveryTargetsEnabled ? {} : { currentTargetBindings: workProducts!.derive().semantics.deliveryTargets }),
-    }) !== undefined) {
-      step -= 1;
-      continue;
-    }
-
     const evidenceCompletionCandidate = options.evaluateCandidate === undefined
       ? undefined
       : deriveEvidenceCompletionCandidate({

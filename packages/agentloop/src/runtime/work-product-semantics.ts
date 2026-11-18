@@ -89,10 +89,8 @@ export function workProductDeclarationFromContent(input: Omit<WorkProductDeclara
 
 /**
  * Pure interpretation layer: declarations never alter observations, versions,
- * or checks. Runtime derives a delivery binding only from a trusted committed
- * receipt or hash-identified Runtime file-change observation when target
- * ownership and artifact compatibility give one unambiguous answer; model
- * declarations remain the explicit route otherwise.
+ * or checks. Only explicit target selections may bind an observed version.
+ * A unique compatible file can still be an experiment or an incomplete draft.
  */
 export function deriveWorkProductSemantics(input: {
   readonly facts: WorkProductObservationState;
@@ -208,12 +206,6 @@ export function deriveWorkProductSemantics(input: {
     targets: input.deliveryTargets ?? [],
   });
   const explicitBindings = [...modelBindings, ...receiptBindings];
-  const runtimeBindings = deriveUnambiguousRuntimeDeliveryBindings({
-    facts,
-    goalId,
-    targets: input.deliveryTargets ?? [],
-    modelBindings: explicitBindings,
-  });
   return {
     schema: "agentloop.workProductSemantics/v1", goalId, declarations, rejected,
     roles: facts.objects.map((object) => {
@@ -236,7 +228,7 @@ export function deriveWorkProductSemantics(input: {
         resolutionSupport: item.claimedStatus !== "resolved" || !applies || successful.length === 0 ? "none"
           : checks.length > 0 && checks.every((check) => check.status === "passed") ? "version_scoped_check" : "successful_operation" };
     }),
-    deliveryTargets: [...explicitBindings, ...runtimeBindings],
+    deliveryTargets: explicitBindings,
   };
 }
 
@@ -297,71 +289,6 @@ function deriveReceiptSelectedDeliveryBindings(input: {
         observation.source.toolCallId === candidate.observedByToolCallId
         && observation.source.toolName === "computer_run_command"
         && observation.basis === "file_change") ? "runtime" as const : "model" as const,
-    }];
-  });
-}
-
-/**
- * Reduce committed Runtime-observed artifact versions into delivery bindings
- * only where their relation to the admitted target set is one-to-one. This is
- * deliberately not a path or extension fallback: the candidate must carry an
- * immutable content identity, and a same-format scratch file leaves the target
- * unbound until the producer supplies an explicit target selection.
- */
-function deriveUnambiguousRuntimeDeliveryBindings(input: {
-  readonly facts: WorkProductObservationState;
-  readonly goalId: string;
-  readonly targets: readonly WorkProductDeliveryTarget[];
-  readonly modelBindings: readonly WorkProductDeliveryBinding[];
-}): WorkProductDeliveryBinding[] {
-  const boundTargetIds = new Set(input.modelBindings.map((binding) => binding.targetId));
-  const boundArtifacts = new Set(input.modelBindings.map((binding) => `${binding.path}\u0000${binding.versionId}`));
-  const targets = input.targets.filter((target) => !boundTargetIds.has(target.targetId));
-  const candidates = input.facts.objects.flatMap((object) => {
-    const version = object.versions.find((candidate) => candidate.id === object.currentVersionId);
-    if (
-      object.presence !== "present"
-      || version?.bytes === undefined || version.bytes <= 0 || version.sha256 === undefined
-      || boundArtifacts.has(`${object.path}\u0000${version.id}`)
-    ) return [];
-    const observation = version.observationIds
-      .map((id) => input.facts.observations.find((observation) => observation.id === id))
-      .find((candidate) => candidate !== undefined
-        && candidate.operationStatus === "succeeded"
-        && (
-          (candidate.basis === "receipt" && DELIVERY_RECEIPT_TOOLS.has(candidate.source.toolName))
-          || (candidate.basis === "file_change"
-            && candidate.source.toolName === "computer_run_command"
-            && !input.facts.issues.some((issue) => issue.seq === candidate.source.seq && issue.code === "incomplete_file_changes"))
-        ));
-    if (observation === undefined) return [];
-    return [{ path: object.path, versionId: version.id, bytes: version.bytes, sha256: version.sha256,
-      observedByToolCallId: observation.source.toolCallId }];
-  });
-  const targetMatches = new Map(targets.map((target) => [target.targetId, candidates.filter((candidate) =>
-    artifactMatchesExpectedTarget({ path: candidate.path }, target.kind, target.format))]));
-  const candidateMatchCounts = new Map(candidates.map((candidate) => [`${candidate.path}\u0000${candidate.versionId}`, 0]));
-  for (const matches of targetMatches.values()) {
-    for (const candidate of matches) {
-      const key = `${candidate.path}\u0000${candidate.versionId}`;
-      candidateMatchCounts.set(key, (candidateMatchCounts.get(key) ?? 0) + 1);
-    }
-  }
-  return targets.flatMap((target) => {
-    const matches = targetMatches.get(target.targetId) ?? [];
-    if (matches.length !== 1) return [];
-    const candidate = matches[0]!;
-    if (candidateMatchCounts.get(`${candidate.path}\u0000${candidate.versionId}`) !== 1) return [];
-    return [{
-      targetId: target.targetId,
-      deliveryTargetId: target.deliveryTargetId ?? target.targetId,
-      path: candidate.path,
-      versionId: candidate.versionId,
-      bytes: candidate.bytes,
-      sha256: candidate.sha256,
-      declarationId: `runtime:${digest(JSON.stringify([input.goalId, target.targetId, candidate.path, candidate.versionId])).slice(0, 20)}`,
-      observedByToolCallId: candidate.observedByToolCallId,
-      bindingAuthority: "runtime" as const,
     }];
   });
 }

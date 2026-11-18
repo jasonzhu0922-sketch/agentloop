@@ -1477,14 +1477,14 @@ test("automatic artifact acceptance derives a Word profile from the final path i
   assert.equal(events.some((event) => event.type === "tool.rejected"), false);
   const scheduled = events.find((event) => event.type === "runtime.artifact_acceptance.scheduled");
   assert.deepEqual(scheduled?.data, {
-    step: 1,
+    step: 2,
     toolCallId: scheduled?.data.toolCallId,
     artifactPath: "risk-report.docx",
     reason: "deliverable_available_missing_artifact_acceptance",
   });
 });
 
-test("post-commit delivery binding registers one unambiguous receipt before automatic acceptance", async () => {
+test("post-commit explicit delivery selection registers the receipt before candidate acceptance", async () => {
   const sha256 = "f".repeat(64);
   const observedBindings: readonly { readonly targetId: string; readonly path: string; readonly sha256: string; readonly bindingAuthority: string }[][] = [];
   let verifyExecutions = 0;
@@ -1502,6 +1502,7 @@ test("post-commit delivery binding registers one unambiguous receipt before auto
       sha256,
       artifactReceipt: {
         schema: "agentloop.artifactReceipt/v1",
+        deliveryTargetId: "analysis-report",
         artifact: { path: "results/analysis.md", bytes: 32, sha256 },
         evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
       },
@@ -1531,7 +1532,7 @@ test("post-commit delivery binding registers one unambiguous receipt before auto
     complete: async () => {
       modelCalls += 1;
       return modelCalls === 1
-        ? { content: "", finishReason: "tool_calls", toolCalls: [{ id: "write-report", name: "computer_write_file", arguments: { path: "results/analysis.md" } }] }
+        ? { content: "", finishReason: "tool_calls", toolCalls: [{ id: "write-report", name: "computer_write_file", arguments: { path: "results/analysis.md", deliveryTargetId: "analysis-report" } }] }
         : { content: "The Markdown report is complete.", finishReason: "stop", toolCalls: [] };
     },
   };
@@ -1592,7 +1593,7 @@ test("post-commit delivery binding registers one unambiguous receipt before auto
     && bindings[0]?.targetId === "analysis-report"
     && bindings[0]?.path === "results/analysis.md"
     && bindings[0]?.sha256 === sha256
-    && bindings[0]?.bindingAuthority === "runtime"));
+    && bindings[0]?.bindingAuthority === "model"));
 });
 
 test("automatic artifact acceptance skips command stdout when the admitted target is PDF", async () => {
@@ -1897,7 +1898,7 @@ test("Runtime returns control for a concrete acceptance diagnostic so the model 
       if (modelCalls === 1) {
         return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "write-1", name: "computer_write_file", arguments: { path: "report.html" } }] };
       }
-      if (modelCalls === 2) {
+      if (modelCalls === 3) {
         assert.equal(runtimeStepSemanticState(request.runtimeContext?.content ?? "").nextAction, "repair_artifact_source");
         assert.match(request.runtimeContext?.content ?? "", /html_parse/);
         assert.match(request.runtimeContext?.content ?? "", /close the missing body tag/);
@@ -1923,7 +1924,7 @@ test("Runtime returns control for a concrete acceptance diagnostic so the model 
   });
 
   assert.match(result.output, /report\.html/);
-  assert.equal(modelCalls, 3);
+  assert.equal(modelCalls, 4);
   assert.equal(writeExecutions, 2);
   assert.equal(verifyExecutions, 2);
   assert.deepEqual(result.toolEvidence.filter((item) => item.toolName === "computer_read_file"), []);
@@ -4396,7 +4397,7 @@ test("artifact progress policy treats generated build scripts as source until a 
       }
       if (calls === 4) {
         const semanticState = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
-        assert.equal(semanticState.nextAction, "submit_completion_candidate");
+        assert.equal(semanticState.nextAction, "verify_existing_artifact");
         assert.deepEqual(semanticState.knownArtifacts.map((artifact) => artifact.path), ["report.html"]);
         return { content: "report.html accepted", finishReason: "stop", toolCalls: [] };
       }
@@ -4581,7 +4582,7 @@ test("artifact progress policy treats mismatched typed intermediates as source u
       }
       if (calls === 5) {
         const semanticState = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
-        assert.equal(semanticState.nextAction, "submit_completion_candidate");
+        assert.equal(semanticState.nextAction, "verify_existing_artifact");
         assert.deepEqual(semanticState.knownArtifacts.map((artifact) => artifact.path), ["poster.png"]);
         return { content: "poster.png accepted", finishReason: "stop", toolCalls: [] };
       }

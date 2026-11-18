@@ -63,6 +63,7 @@ const suites = Object.freeze({
     "tests/planner-source-constraints.test.ts",
     "tests/recovery-transcript.test.ts",
     "tests/bounded-authoring.test.ts",
+    "tests/artifact-candidate-authoring.test.ts",
     "tests/source-evidence-recovery.test.ts",
     "tests/candidate-recovery-chain.test.ts",
     "tests/recovery-retained-steps.test.ts",
