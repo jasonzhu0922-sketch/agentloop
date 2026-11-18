@@ -150,6 +150,10 @@ try {
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>\n`);
     run('/usr/bin/codesign', ['--force', '--sign', '-', join(contents, 'Resources/runtime/bin/node')]);
+    // Normalize the linker's initial signature/layout to the installed bundle
+    // form before comparing native code. Config and inventory are then sealed
+    // by the final signing pass below.
+    run('/usr/bin/codesign', ['--force', '--sign', '-', application]);
     await identifyNativeHost(application, join(contents, 'Resources'));
     // The Node signature changes executable bytes; capture the baseline only
     // after signing Node and before signing the outer bundle.
