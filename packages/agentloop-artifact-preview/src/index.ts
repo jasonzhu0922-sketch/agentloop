@@ -172,8 +172,26 @@ markdown.setOptions({
   pedantic: false,
   renderer: new AgentLoopMarkdownRenderer(),
 });
+markdown.use({
+  hooks: {
+    emStrongMask(source) {
+      // Treat single asterisks inside words/numbers as literal data, just as
+      // intraword underscores are literal. Keep the mask the same length so
+      // Marked can still match surrounding emphasis against the original text.
+      return source.replace(/(?<=[\p{L}\p{N}])\*(?=[\p{L}\p{N}])/gu, "+");
+    },
+  },
+  tokenizer: {
+    emStrong(source, maskedSource) {
+      // Marked masks closing delimiters but checks opening ones in the raw
+      // source. A protected opening star must not consume a later real closer.
+      if (source[0] === "*" && maskedSource[maskedSource.length - source.length] !== "*") return;
+      return false;
+    },
+  },
+});
 
-/** Renders model- or artifact-supplied GFM while escaping embedded HTML. */
+/** Renders safe GFM with literal intraword single asterisks for data fidelity. */
 export function renderMarkdown(raw: unknown): string {
   return markdown.parse(String(raw ?? ""), { async: false });
 }
