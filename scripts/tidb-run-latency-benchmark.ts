@@ -39,7 +39,13 @@ class QueryRecorder {
 }
 
 class MeasuredTiDbPool implements TiDbPoolLike {
-  constructor(private readonly pool: Pool, private readonly recorder: QueryRecorder) {}
+  private readonly pool: Pool;
+  private readonly recorder: QueryRecorder;
+
+  constructor(pool: Pool, recorder: QueryRecorder) {
+    this.pool = pool;
+    this.recorder = recorder;
+  }
 
   async getConnection(): Promise<TiDbClientLike> {
     return measuredClient(await this.pool.getConnection(), this.recorder);
@@ -62,12 +68,19 @@ function measuredClient(client: PoolConnection, recorder: QueryRecorder): TiDbCl
 
 class DeterministicStreamingModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
+  private readonly chunks: number;
+  private readonly delayMs: number;
+  private readonly chunkCharacters: number;
 
   constructor(
-    private readonly chunks: number,
-    private readonly delayMs: number,
-    private readonly chunkCharacters: number,
-  ) {}
+    chunks: number,
+    delayMs: number,
+    chunkCharacters: number,
+  ) {
+    this.chunks = chunks;
+    this.delayMs = delayMs;
+    this.chunkCharacters = chunkCharacters;
+  }
 
   async complete() {
     return { content: "benchmark completed", finishReason: "stop" as const, toolCalls: [] };
