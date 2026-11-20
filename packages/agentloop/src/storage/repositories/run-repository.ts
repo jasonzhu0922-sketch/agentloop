@@ -301,6 +301,13 @@ export class RunRepository {
     `).all(runId) as unknown as RunEventRow[];
   }
 
+  async eventsByRunAfter(runId: string, afterSeq: number): Promise<RunEventRow[]> {
+    return await this.connection.prepare(`
+      SELECT seq, type, payload_json, created_at
+      FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq
+    `).all(runId, afterSeq) as unknown as RunEventRow[];
+  }
+
   async latestEventByRun(runId: string): Promise<RunEventRow | undefined> {
     return await this.connection.prepare(`
       SELECT seq, type, payload_json, created_at

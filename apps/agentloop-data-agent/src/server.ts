@@ -179,10 +179,10 @@ export function createChatServer(agent: DataAgent, options: {
           const after = Number(url.searchParams.get("after") ?? "0");
           if (!Number.isSafeInteger(after) || after < 0) throw new AppError("BAD_REQUEST", "事件游标无效", 400);
           const [run, events, humanLoop] = await Promise.all([
-            agent.runs.get(OWNER, id), agent.runs.events(OWNER, id), agent.runs.currentHumanLoop(OWNER, id),
+            agent.runs.get(OWNER, id), agent.runs.eventsAfter(OWNER, id, after), agent.runs.currentHumanLoop(OWNER, id),
           ]);
           // UI projects persisted events; no second transcript or synthetic completion state.
-          json(response, 200, { run, humanLoop: humanLoop ?? null, events: events.filter(e => e.seq > after).map(publicEvent) }); return;
+          json(response, 200, { run, humanLoop: humanLoop ?? null, events: events.map(publicEvent) }); return;
         }
         if (request.method === "POST" && route[2] === "cancel") {
           await body(request);

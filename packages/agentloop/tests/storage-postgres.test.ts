@@ -90,8 +90,8 @@ test("TiDB event allocation uses its pinned session value after atomically incre
   });
 
   assert.equal(sequence, 8);
-  assert.ok(connection.calls.some((call) => call.sql.includes("ON DUPLICATE KEY UPDATE next_seq = GREATEST(next_seq, VALUES(next_seq))")));
   assert.ok(connection.calls.some((call) => call.sql === "UPDATE run_event_sequences SET next_seq = LAST_INSERT_ID(next_seq + 1) WHERE run_id = ?"));
+  assert.equal(connection.calls.some((call) => call.sql.includes("SELECT COALESCE(MAX(seq)")), false);
   assert.ok(connection.calls.some((call) => call.sql === "SELECT LAST_INSERT_ID() - 1 AS seq"));
 });
 

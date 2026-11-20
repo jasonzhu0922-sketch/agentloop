@@ -12,7 +12,7 @@ export interface StoredRunEvent {
  * recovery, while externally reachable reads are authorized and sanitized.
  */
 export class RuntimeEventQueryService {
-  private readonly runs: Pick<RunRepository, "eventsByRun"> & Partial<Pick<RunRepository, "latestEventByRun">>;
+  private readonly runs: Pick<RunRepository, "eventsByRun"> & Partial<Pick<RunRepository, "eventsByRunAfter" | "latestEventByRun">>;
   private readonly authorizeRun: (actorUserId: string, runId: string) => Promise<void>;
 
   constructor(input: {
@@ -26,6 +26,15 @@ export class RuntimeEventQueryService {
   async list(actorUserId: string, runId: string): Promise<StoredRunEvent[]> {
     await this.authorizeRun(actorUserId, runId);
     return (await this.storedForRun(runId)).map(publicRunEvent);
+  }
+
+  async listAfter(actorUserId: string, runId: string, afterSeq: number): Promise<StoredRunEvent[]> {
+    await this.authorizeRun(actorUserId, runId);
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new TypeError("Run event cursor is invalid");
+    const rows = this.runs.eventsByRunAfter === undefined
+      ? (await this.runs.eventsByRun(runId)).filter((row) => row.seq > afterSeq)
+      : await this.runs.eventsByRunAfter(runId, afterSeq);
+    return eventsFromRows(rows).map(publicRunEvent);
   }
 
   async latest(actorUserId: string, runId: string): Promise<StoredRunEvent | undefined> {

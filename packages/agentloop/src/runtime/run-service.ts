@@ -1279,6 +1279,10 @@ export class RunService {
     return await this.eventQueries.list(actorUserId, runId);
   }
 
+  async eventsAfter(actorUserId: string, runId: string, afterSeq: number): Promise<StoredRunEvent[]> {
+    return await this.eventQueries.listAfter(actorUserId, runId, afterSeq);
+  }
+
   async latestEvent(actorUserId: string, runId: string): Promise<StoredRunEvent | undefined> {
     return await this.eventQueries.latest(actorUserId, runId);
   }

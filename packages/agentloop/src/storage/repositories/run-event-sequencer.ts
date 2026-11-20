@@ -21,6 +21,53 @@ export async function appendRunEvent(
   runId: string,
   input: RunEventAppendInput,
 ): Promise<number> {
+  // The data-agent's shared state lives on TiDB, where every extra statement
+  // is a network round trip. Once the per-Run counter exists, its atomic
+  // increment is the sequence allocator; retain the repair path below for
+  // legacy Runs whose counter is missing or behind retained events.
+  if (connection.dialect === "tidb") {
+    try {
+      return await connection.transaction(async () => await appendTiDbFast(connection, runId, input));
+    } catch (error) {
+      if (!isDuplicateKeyError(error)) throw error;
+    }
+  }
+  return await appendRunEventRepair(connection, runId, input);
+}
+
+async function appendTiDbFast(
+  connection: SqlConnection,
+  runId: string,
+  input: RunEventAppendInput,
+): Promise<number> {
+  const updated = await connection.prepare(
+    "UPDATE run_event_sequences SET next_seq = LAST_INSERT_ID(next_seq + 1) WHERE run_id = ?",
+  ).run(runId);
+  let seq: number;
+  if (Number(updated.changes) === 1) {
+    const allocated = await connection.prepare(
+      "SELECT LAST_INSERT_ID() - 1 AS seq",
+    ).get<{ seq: number }>();
+    seq = Number(allocated?.seq);
+  } else {
+    // The first event of a newly-created or legacy Run has no counter row.
+    // A concurrent creator may win this insert; the duplicate-key retry above
+    // then re-enters the atomic update path.
+    await connection.prepare(
+      "INSERT INTO run_event_sequences(run_id, next_seq) VALUES (?, 2)",
+    ).run(runId);
+    seq = 1;
+  }
+  if (!Number.isSafeInteger(seq) || seq < 1) throw new TypeError("Run event sequence allocation failed");
+  await insertRunEvent(connection, runId, seq, input);
+  return seq;
+}
+
+async function appendRunEventRepair(
+  connection: SqlConnection,
+  runId: string,
+  input: RunEventAppendInput,
+): Promise<number> {
   return await connection.transaction(async () => {
     // Backfill lazily as well as in schema migration. Crucially, an existing
     // counter can be behind a retained event stream after an interrupted
@@ -56,10 +103,28 @@ export async function appendRunEvent(
     ).get<{ seq: number }>(...(connection.dialect === "tidb" ? [] : [runId]));
     const seq = Number(allocated?.seq);
     if (!Number.isSafeInteger(seq) || seq < 1) throw new TypeError("Run event sequence allocation failed");
-    await connection.prepare(`
-      INSERT INTO run_events(run_id, seq, type, payload_json, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(runId, seq, input.type, JSON.stringify(input.data), input.createdAt);
+    await insertRunEvent(connection, runId, seq, input);
     return seq;
   });
+}
+
+async function insertRunEvent(
+  connection: SqlConnection,
+  runId: string,
+  seq: number,
+  input: RunEventAppendInput,
+): Promise<void> {
+  await connection.prepare(`
+    INSERT INTO run_events(run_id, seq, type, payload_json, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(runId, seq, input.type, JSON.stringify(input.data), input.createdAt);
+}
+
+function isDuplicateKeyError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as { code?: unknown; errno?: unknown; message?: unknown };
+  return value.code === "ER_DUP_ENTRY"
+    || value.code === "ER_DUP_KEY"
+    || value.errno === 1062
+    || (typeof value.message === "string" && /duplicate (?:entry|key)/iu.test(value.message));
 }

@@ -52,3 +52,23 @@ test("latest event reads one durable row without requesting the full ledger", as
   assert.equal(latestReads, 1);
   assert.equal(fullReads, 0);
 });
+
+test("incremental event reads push the cursor into the repository", async () => {
+  let fullReads = 0;
+  const cursors: number[] = [];
+  const queries = new RuntimeEventQueryService({
+    runs: {
+      eventsByRun: async () => { fullReads++; return []; },
+      eventsByRunAfter: async (_runId, afterSeq) => {
+        cursors.push(afterSeq);
+        return [{ seq: afterSeq + 1, type: "run.completed", payload_json: JSON.stringify({ output: "done" }), created_at: 90 }];
+      },
+    },
+    authorizeRun: async () => {},
+  });
+  assert.deepEqual(await queries.listAfter("owner", "run-1", 8), [{
+    seq: 9, type: "run.completed", data: { output: "done" }, createdAt: 90,
+  }]);
+  assert.deepEqual(cursors, [8]);
+  assert.equal(fullReads, 0);
+});
