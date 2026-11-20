@@ -36,9 +36,15 @@ try {
   await writeFile(join(output, 'live-run.json'), JSON.stringify(snapshot, null, 2));
   assert.equal(snapshot.run.status, 'completed', JSON.stringify({ status: snapshot.run.status, errorCode: snapshot.run.errorCode, hil: snapshot.humanLoop }));
   assert.ok(snapshot.run.output?.trim());
+  await page.waitForFunction(() => {
+    const details = document.querySelector('.message.assistant.final .process-details');
+    return details && !details.open;
+  });
+  assert.equal(await page.locator('.message.assistant.final .process-details').evaluate(details => details.open), false);
   await page.reload();
   await page.waitForFunction(() => document.querySelectorAll('.message').length >= 2);
   assert.equal(await page.locator('.message.user').count(), 1);
+  assert.equal(await page.locator('.message.assistant.final .process-details').evaluate(details => details.open), false);
   assert.equal(await page.locator('#notice').textContent(), '');
   assert.deepEqual(errors, []);
   console.log('Browser, mobile, live answer and reload checks passed. Screenshots:', output);

@@ -3,7 +3,8 @@ const esc = (value = '') => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':
 const labels = { connection: '数据连接', server: 'Server', workflow: '工作流', tables: '数据表', metrics: '指标定义', terms: '业务术语', skills: '分析 Skills', sample_questions: '案例问题', model: '模型管理' };
 let catalog, models, modelSchema, connection, status, current, epoch = 0, saving = false;
 async function request(path, data, method = 'PUT') {
-  const response = await fetch(`/api/settings/${path}`, { method: data === undefined ? 'GET' : method,
+  const endpoint = path.startsWith('/') ? path : `/api/settings/${path}`;
+  const response = await fetch(endpoint, { method: data === undefined ? 'GET' : method,
     headers: data === undefined ? {} : { 'Content-Type': 'application/json' }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   const value = await response.json();
   if (!response.ok) throw new Error(value.error || '请求失败');
@@ -95,7 +96,30 @@ function renderStatus(root, panel) {
     root.innerHTML = header('工作流', '应用固定主 Skill，当前模型在分析步骤内完成领域推理。') + `<div class="workflow-list">${status.workflow.map((node, i) => `<article class="workflow-node"><span>${String(i + 1).padStart(2, '0')}</span><div><b>${esc(node.name)}</b><p>${esc(node.description)}</p></div></article>`).join('')}</div>`;
     return;
   }
-  root.innerHTML = header('Server', '本机问数服务与持久化状态。') + `<section class="form-card"><h3>${esc(status.service)}</h3><dl class="server-details"><dt>服务地址</dt><dd>${esc(status.url)}</dd><dt>状态存储</dt><dd>${esc(status.storage)}</dd><dt>固定能力</dt><dd>${esc(status.skill.name)}</dd><dt>能力版本</dt><dd><code>${esc(status.skill.contentHash)}</code></dd><dt>数据场景</dt><dd>集团经营分析</dd></dl><p class="form-hint">通过分析工作台发起查询。会话、执行进度、澄清与结果由 AgentLoop 内核持久化。</p><a class="secondary-btn" href="/">打开分析工作台 →</a></section>`;
+  const tools = status.mcp?.tools || [];
+  root.innerHTML = header('Server', '本机问数服务与持久化状态。') + `<section class="form-card"><h3>${esc(status.service)}</h3><dl class="server-details"><dt>服务地址</dt><dd>${esc(status.url)}</dd><dt>MCP SSE</dt><dd><code>${esc(status.mcp?.endpoint || '未配置')}</code></dd><dt>MCP 工具</dt><dd>${esc(tools.map(tool => tool.name).join('、') || '—')}</dd><dt>状态存储</dt><dd>${esc(status.storage)}</dd><dt>固定能力</dt><dd>${esc(status.skill.name)}</dd><dt>能力版本</dt><dd><code>${esc(status.skill.contentHash)}</code></dd><dt>数据场景</dt><dd>集团经营分析</dd></dl><p class="form-hint">通过分析工作台或 MCP 发起查询。会话、执行进度、澄清与结果由 AgentLoop 内核持久化。</p><a class="secondary-btn" href="/">打开分析工作台 →</a></section><section class="form-card mcp-verify-card"><h3>调用验证</h3><p class="form-hint">验证会走 initialize、tools/list 和 tools/call 流程。默认调用 <code>search_tables</code>，不会触发模型问数。</p><form id="mcp-verify-form"><div class="field-grid"><label>工具<select name="tool">${tools.map(tool => `<option value="${esc(tool.name)}">${esc(tool.name)}</option>`).join('')}</select></label>${field('question', '验证问题', '验证 MCP Server')}</div>${area('arguments', '调用参数（JSON）', '{\n  "question": "验证 MCP Server"\n}', 'rows="7" class="code" required')}<p class="editor-feedback" id="mcp-verify-feedback" role="status"></p><div class="form-actions"><button class="action-btn" type="submit">发起调用验证</button></div></form><pre id="mcp-verify-result" class="mcp-verify-result" hidden></pre></section>`;
+  const form = $('#mcp-verify-form');
+  const tool = form.elements.tool;
+  const question = form.elements.question;
+  const argumentsField = form.elements.arguments;
+  const syncArguments = () => {
+    try {
+      const value = JSON.parse(argumentsField.value);
+      if (value && typeof value === 'object' && !Array.isArray(value) && 'question' in value) value.question = question.value;
+      argumentsField.value = JSON.stringify(value, null, 2);
+    } catch { /* bindForm reports malformed JSON on submit */ }
+  };
+  question.oninput = syncArguments;
+  tool.onchange = () => { if (tool.value === 'query') question.value = '验证 MCP Server（仅用于连通性验证）'; syncArguments(); };
+  bindForm(form, async currentForm => {
+    let args;
+    try { args = JSON.parse(new FormData(currentForm).get('arguments')); } catch { throw new Error('调用参数需要有效 JSON'); }
+    if (!args || Array.isArray(args) || typeof args !== 'object') throw new Error('调用参数必须是 JSON 对象');
+    const result = await request('/api/mcp/verify', { tool: new FormData(currentForm).get('tool'), arguments: args }, 'POST');
+    const output = $('#mcp-verify-result'); output.hidden = false; output.textContent = JSON.stringify(result, null, 2);
+    const message = $('#mcp-verify-feedback'); message.textContent = result.ok ? 'MCP 调用成功，服务端工具链可用。' : 'MCP 请求已到达服务端，但工具调用失败，请查看返回详情。';
+    message.classList.toggle('error', !result.ok); feedback(result.ok ? 'MCP 调用验证成功。' : 'MCP 调用返回错误。', !result.ok);
+  });
 }
 function renderModels(root) {
   const items = [...models.models].sort((a, b) => Number(b.key === models.defaultModelKey) - Number(a.key === models.defaultModelKey));
