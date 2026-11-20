@@ -60,12 +60,12 @@ test("recovery preserves Step-scoped rejection decisions without replaying draft
       ["plan.step.started", { stepId: "other" }],
       ["candidate.rejected", { output: "Other draft", feedback: "Other gap" }],
       ["plan.step.started", { stepId: "lookup", recovered: true }],
-      ["candidate.rejected", { output: "Second draft", feedback: "Keep exact fields." }],
+      ["candidate.rejected", { output: "Second draft", feedback: "Keep exact fields.", decisionBasisDigest: "a".repeat(64) }],
     ),
   });
   assert.deepEqual(transcript.facts.candidateRejections, [
     { output: "Raw source table", feedback: "Synthesize the requested answer." },
-    { output: "Second draft", feedback: "Keep exact fields." },
+    { output: "Second draft", feedback: "Keep exact fields.", decisionBasisDigest: "a".repeat(64) },
   ]);
   assert.doesNotMatch(JSON.stringify(transcript.messages), /Raw source table|Second draft|Other draft/);
 });

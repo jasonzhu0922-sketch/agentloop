@@ -11,6 +11,7 @@ import type {
   MemoryScope,
   MemoryStore,
   SettlementAttempt,
+  MemoryApplicationReview,
 } from "./types.ts";
 
 function idHash(input: unknown): string {
@@ -42,6 +43,46 @@ export class SqliteMemoryStore implements MemoryStore {
 
   ready(): Promise<void> {
     return this.migrated;
+  }
+
+  async invalidateRun(scope: MemoryScope, runId: string, source: import("./types.ts").MemorySourceRef, now: number): Promise<void> {
+    await this.migrated;
+    await this.connection.prepare(`INSERT OR IGNORE INTO local_memory_run_invalidations
+      (tenant_id, owner_user_id, run_id, source_json, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(scope.tenantId, scope.ownerUserId, runId, json(source), now);
+  }
+  async invalidatedRuns(scope: MemoryScope): Promise<readonly string[]> {
+    await this.migrated;
+    const rows = await this.connection.prepare("SELECT run_id FROM local_memory_run_invalidations WHERE tenant_id = ? AND owner_user_id = ?")
+      .all<{ run_id: string }>(scope.tenantId, scope.ownerUserId);
+    return rows.map(row => row.run_id);
+  }
+
+  async feedbackCursor(sourceId: string): Promise<{ position: number; eventKey: string } | undefined> {
+    await this.migrated;
+    const row = await this.connection.prepare("SELECT cursor, event_key FROM local_memory_feedback_cursors WHERE source_id = ?").get<{ cursor: number; event_key: string }>(sourceId);
+    return row ? { position: Number(row.cursor), eventKey: row.event_key } : undefined;
+  }
+
+  async advanceFeedbackCursor(sourceId: string, cursor: { position: number; eventKey: string }): Promise<void> {
+    await this.migrated;
+    await this.connection.prepare(`INSERT INTO local_memory_feedback_cursors(source_id, cursor, event_key) VALUES (?, ?, ?)
+      ON CONFLICT(source_id) DO UPDATE SET cursor = excluded.cursor, event_key = excluded.event_key`).run(sourceId, cursor.position, cursor.eventKey);
+  }
+
+  async recordApplicationReview(scope: MemoryScope, review: MemoryApplicationReview): Promise<void> {
+    await this.migrated;
+    await this.connection.prepare(`INSERT OR IGNORE INTO local_memory_application_reviews
+      (id, tenant_id, owner_user_id, run_id, input_hash, review_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(review.id, scope.tenantId, scope.ownerUserId, review.runId, review.inputHash, json(review), review.createdAt);
+  }
+
+  async applicationReviews(scope: MemoryScope, runId: string): Promise<readonly MemoryApplicationReview[]> {
+    await this.migrated;
+    const rows = await this.connection.prepare(`SELECT review_json FROM local_memory_application_reviews
+      WHERE tenant_id = ? AND owner_user_id = ? AND run_id = ? ORDER BY created_at, id`)
+      .all<{ review_json: string }>(scope.tenantId, scope.ownerUserId, runId);
+    return rows.map(row => parse<MemoryApplicationReview>(row.review_json));
   }
 
   async settlementJobs(scope: MemoryScope, runId: string): Promise<readonly MemorySettlementJob[]> {
@@ -115,106 +156,117 @@ export class SqliteMemoryStore implements MemoryStore {
     return rows.map(joinRowToEntry);
   }
 
-  async commit(scope: MemoryScope, candidate: MemoryCandidate, now: number): Promise<{
+  async commit(scope: MemoryScope, candidate: MemoryCandidate, now: number) {
+    await this.migrated;
+    return this.connection.transaction(() => this.commitValue(scope, candidate, now));
+  }
+
+  async commitBatch(scope: MemoryScope, candidates: readonly MemoryCandidate[], now: number) {
+    await this.migrated;
+    return this.connection.transaction(async () => {
+      const results: Awaited<ReturnType<SqliteMemoryStore["commit"]>>[] = [];
+      for (const candidate of candidates) results.push(await this.commitValue(scope, candidate, now));
+      return results;
+    });
+  }
+
+  private async commitValue(scope: MemoryScope, candidate: MemoryCandidate, now: number): Promise<{
     readonly item: MemoryItem;
     readonly revision: MemoryRevision;
     readonly memoryEpoch: number;
   }> {
-    await this.migrated;
     const policy = evaluateCandidate(candidate, now);
     if (policy.kind !== "accept") throw new Error(`candidate_policy:${policy.reason}`);
     if (candidate.tenantId !== scope.tenantId || candidate.ownerUserId !== scope.ownerUserId) throw new Error("memory_scope_mismatch");
-    return this.connection.transaction(async () => {
-      const existing = await this.connection.prepare(`
-        SELECT * FROM local_memory_items
-        WHERE tenant_id = ? AND owner_user_id = ? AND kind = ? AND subtype = ?
-          AND ((canonical_key = ?) OR (canonical_key IS NULL AND ? IS NULL))
-          AND status = 'active'
-        LIMIT 1
-      `).get<LocalMemoryItemRow>(
-        scope.tenantId,
-        scope.ownerUserId,
-        candidate.proposedKind,
-        candidate.proposedSubtype,
-        candidate.proposedCanonicalKey ?? null,
-        candidate.proposedCanonicalKey ?? null,
-      );
-      if (candidate.expectedCurrentRevisionId !== undefined && existing?.current_revision_id !== candidate.expectedCurrentRevisionId) throw new Error("task_group_revision_conflict");
-      const memoryId = existing?.id ?? `mem_${idHash({ scope, candidate: candidate.id }).slice(0, 24)}`;
-      const previous = existing === undefined ? undefined : await this.connection.prepare(`
-        SELECT * FROM local_memory_revisions WHERE id = ?
-      `).get<LocalMemoryRevisionRow>(existing.current_revision_id);
-      const revisionNumber = previous === undefined ? 1 : Number(previous.revision) + 1;
-      const revision: MemoryRevision = {
-        schema: "agentloop.userMemoryRevision/v1",
-        id: `memrev_${idHash({ memoryId, revisionNumber, candidate: candidate.id }).slice(0, 24)}`,
-        memoryId,
-        revision: revisionNumber,
-        authority: candidate.authority,
-        sensitivity: candidate.sensitivity as Exclude<typeof candidate.sensitivity, "secret">,
-        temporalClass: candidate.expiresAt !== undefined ? "time_bound" : candidate.activation.mode === "explicit_only" ? "ephemeral" : "stable",
-        ...(candidate.proposedPreferenceEffect === undefined ? {} : { preferenceEffect: candidate.proposedPreferenceEffect }),
-        ...(candidate.proposedExperienceMaturity === undefined ? {} : { experienceMaturity: candidate.proposedExperienceMaturity }),
-        activation: candidate.activation,
-        applicationTargets: [...candidate.applicationTargets],
-        value: { ...candidate.proposedValue },
-        contentMarkdown: candidate.proposedContentMarkdown,
-        applicability: candidate.proposedApplicability ?? { conditions: [], exclusions: [] },
-        confidence: candidate.confidence,
-        validFrom: candidate.validFrom ?? now,
-        ...(candidate.expiresAt === undefined ? {} : { expiresAt: candidate.expiresAt }),
-        ...(previous === undefined ? {} : { supersedesRevisionId: previous.id }),
-        sourceRefs: [...candidate.sourceRefs],
-        changeReason: candidate.reason,
-        createdAt: now,
-      };
-      if (candidate.sensitivity === "secret") throw new Error("secret_data_is_never_persisted");
-      validateRevision(revision, candidate.proposedKind);
+    const existing = await this.connection.prepare(`
+      SELECT * FROM local_memory_items
+      WHERE tenant_id = ? AND owner_user_id = ? AND kind = ? AND subtype = ?
+        AND ((canonical_key = ?) OR (canonical_key IS NULL AND ? IS NULL))
+        AND status = 'active'
+      LIMIT 1
+    `).get<LocalMemoryItemRow>(
+      scope.tenantId,
+      scope.ownerUserId,
+      candidate.proposedKind,
+      candidate.proposedSubtype,
+      candidate.proposedCanonicalKey ?? null,
+      candidate.proposedCanonicalKey ?? null,
+    );
+    if (candidate.expectedCurrentRevisionId !== undefined && (existing?.current_revision_id ?? null) !== candidate.expectedCurrentRevisionId) throw new Error("task_group_revision_conflict");
+    const memoryId = existing?.id ?? `mem_${idHash({ scope, candidate: candidate.id }).slice(0, 24)}`;
+    const previous = existing === undefined ? undefined : await this.connection.prepare(`
+      SELECT * FROM local_memory_revisions WHERE id = ?
+    `).get<LocalMemoryRevisionRow>(existing.current_revision_id);
+    const revisionNumber = previous === undefined ? 1 : Number(previous.revision) + 1;
+    const revision: MemoryRevision = {
+      schema: "agentloop.userMemoryRevision/v1",
+      id: `memrev_${idHash({ memoryId, revisionNumber, candidate: candidate.id }).slice(0, 24)}`,
+      memoryId,
+      revision: revisionNumber,
+      authority: candidate.authority,
+      sensitivity: candidate.sensitivity as Exclude<typeof candidate.sensitivity, "secret">,
+      temporalClass: candidate.expiresAt !== undefined ? "time_bound" : candidate.activation.mode === "explicit_only" ? "ephemeral" : "stable",
+      ...(candidate.proposedPreferenceEffect === undefined ? {} : { preferenceEffect: candidate.proposedPreferenceEffect }),
+      ...(candidate.proposedExperienceMaturity === undefined ? {} : { experienceMaturity: candidate.proposedExperienceMaturity }),
+      activation: candidate.activation,
+      applicationTargets: [...candidate.applicationTargets],
+      value: { ...candidate.proposedValue },
+      contentMarkdown: candidate.proposedContentMarkdown,
+      applicability: candidate.proposedApplicability ?? { conditions: [], exclusions: [] },
+      confidence: candidate.confidence,
+      validFrom: candidate.validFrom ?? now,
+      ...(candidate.expiresAt === undefined ? {} : { expiresAt: candidate.expiresAt }),
+      ...(previous === undefined ? {} : { supersedesRevisionId: previous.id }),
+      sourceRefs: [...candidate.sourceRefs],
+      changeReason: candidate.reason,
+      createdAt: now,
+    };
+    if (candidate.sensitivity === "secret") throw new Error("secret_data_is_never_persisted");
+    validateRevision(revision, candidate.proposedKind);
+    await this.connection.prepare(`
+      INSERT INTO local_memory_revisions (
+        id, memory_id, revision, authority, sensitivity, temporal_class,
+        preference_effect, experience_maturity, activation_json, targets_json,
+        value_json, content_markdown, applicability_json, confidence,
+        valid_from, expires_at, supersedes_revision_id, source_refs_json,
+        change_reason, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      revision.id, revision.memoryId, revision.revision, revision.authority, revision.sensitivity,
+      revision.temporalClass, revision.preferenceEffect ?? null, revision.experienceMaturity ?? null,
+      json(revision.activation), json(revision.applicationTargets), json(revision.value),
+      revision.contentMarkdown, json(revision.applicability), revision.confidence, revision.validFrom,
+      revision.expiresAt ?? null, revision.supersedesRevisionId ?? null, json(revision.sourceRefs),
+      revision.changeReason, revision.createdAt,
+    );
+    const item: MemoryItem = existing === undefined
+      ? {
+          schema: "agentloop.userMemory/v1", id: memoryId, tenantId: scope.tenantId, ownerUserId: scope.ownerUserId,
+          kind: candidate.proposedKind, subtype: candidate.proposedSubtype,
+          ...(candidate.proposedCanonicalKey === undefined ? {} : { canonicalKey: candidate.proposedCanonicalKey }),
+          status: "active", currentRevisionId: revision.id, createdAt: now, updatedAt: now,
+        }
+      : { ...rowToItem(existing), currentRevisionId: revision.id, updatedAt: now, status: "active" };
+    if (existing === undefined) {
       await this.connection.prepare(`
-        INSERT INTO local_memory_revisions (
-          id, memory_id, revision, authority, sensitivity, temporal_class,
-          preference_effect, experience_maturity, activation_json, targets_json,
-          value_json, content_markdown, applicability_json, confidence,
-          valid_from, expires_at, supersedes_revision_id, source_refs_json,
-          change_reason, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        revision.id, revision.memoryId, revision.revision, revision.authority, revision.sensitivity,
-        revision.temporalClass, revision.preferenceEffect ?? null, revision.experienceMaturity ?? null,
-        json(revision.activation), json(revision.applicationTargets), json(revision.value),
-        revision.contentMarkdown, json(revision.applicability), revision.confidence, revision.validFrom,
-        revision.expiresAt ?? null, revision.supersedesRevisionId ?? null, json(revision.sourceRefs),
-        revision.changeReason, revision.createdAt,
-      );
-      const item: MemoryItem = existing === undefined
-        ? {
-            schema: "agentloop.userMemory/v1", id: memoryId, tenantId: scope.tenantId, ownerUserId: scope.ownerUserId,
-            kind: candidate.proposedKind, subtype: candidate.proposedSubtype,
-            ...(candidate.proposedCanonicalKey === undefined ? {} : { canonicalKey: candidate.proposedCanonicalKey }),
-            status: "active", currentRevisionId: revision.id, createdAt: now, updatedAt: now,
-          }
-        : { ...rowToItem(existing), currentRevisionId: revision.id, updatedAt: now, status: "active" };
-      if (existing === undefined) {
-        await this.connection.prepare(`
-          INSERT INTO local_memory_items (id, tenant_id, owner_user_id, kind, subtype, canonical_key, status, current_revision_id, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
-        `).run(item.id, item.tenantId, item.ownerUserId, item.kind, item.subtype, item.canonicalKey ?? null, item.currentRevisionId, item.createdAt, item.updatedAt);
-      } else {
-        await this.connection.prepare(`UPDATE local_memory_items SET current_revision_id = ?, updated_at = ? WHERE id = ?`).run(item.currentRevisionId, item.updatedAt, item.id);
-      }
-      const nextEpoch = (await this.currentEpoch(scope)) + 1;
-      await this.connection.prepare(`
-        INSERT INTO local_memory_epochs (tenant_id, owner_user_id, epoch) VALUES (?, ?, ?)
-        ON CONFLICT(tenant_id, owner_user_id) DO UPDATE SET epoch = excluded.epoch
-      `).run(scope.tenantId, scope.ownerUserId, nextEpoch);
-      return { item, revision, memoryEpoch: nextEpoch };
-    });
+        INSERT INTO local_memory_items (id, tenant_id, owner_user_id, kind, subtype, canonical_key, status, current_revision_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+      `).run(item.id, item.tenantId, item.ownerUserId, item.kind, item.subtype, item.canonicalKey ?? null, item.currentRevisionId, item.createdAt, item.updatedAt);
+    } else {
+      await this.connection.prepare(`UPDATE local_memory_items SET current_revision_id = ?, updated_at = ? WHERE id = ?`).run(item.currentRevisionId, item.updatedAt, item.id);
+    }
+    const nextEpoch = (await this.currentEpoch(scope)) + 1;
+    await this.connection.prepare(`
+      INSERT INTO local_memory_epochs (tenant_id, owner_user_id, epoch) VALUES (?, ?, ?)
+      ON CONFLICT(tenant_id, owner_user_id) DO UPDATE SET epoch = excluded.epoch
+    `).run(scope.tenantId, scope.ownerUserId, nextEpoch);
+    return { item, revision, memoryEpoch: nextEpoch };
   }
 
   async recordProjection(scope: MemoryScope, projection: MemoryProjection): Promise<void> {
     await this.migrated;
     await this.connection.prepare(`
-      INSERT OR REPLACE INTO local_memory_projections
+      INSERT OR IGNORE INTO local_memory_projections
         (id, tenant_id, owner_user_id, run_id, target, memory_epoch, projection_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(projection.id, scope.tenantId, scope.ownerUserId, projection.runId, projection.target, projection.memoryEpoch, json(projection), projection.createdAt);
@@ -365,6 +417,21 @@ export class SqliteMemoryStore implements MemoryStore {
 
   private async migrate(): Promise<void> {
     await this.connection.exec(`
+      CREATE TABLE IF NOT EXISTS local_memory_run_invalidations (
+        tenant_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, run_id TEXT NOT NULL,
+        source_json TEXT NOT NULL, created_at INTEGER NOT NULL,
+        PRIMARY KEY(tenant_id, owner_user_id, run_id)
+      );
+      CREATE TABLE IF NOT EXISTS local_memory_feedback_cursors (
+        source_id TEXT PRIMARY KEY, cursor INTEGER NOT NULL, event_key TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS local_memory_application_reviews (
+        id TEXT NOT NULL, tenant_id TEXT NOT NULL, owner_user_id TEXT NOT NULL,
+        run_id TEXT NOT NULL, input_hash TEXT NOT NULL, review_json TEXT NOT NULL, created_at INTEGER NOT NULL,
+        PRIMARY KEY (tenant_id, owner_user_id, id)
+      );
+      CREATE INDEX IF NOT EXISTS local_memory_application_review_run
+        ON local_memory_application_reviews(tenant_id, owner_user_id, run_id, created_at);
       CREATE TABLE IF NOT EXISTS local_memory_items (
         id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, owner_user_id TEXT NOT NULL,
         kind TEXT NOT NULL, subtype TEXT NOT NULL, canonical_key TEXT,

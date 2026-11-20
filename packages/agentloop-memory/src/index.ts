@@ -16,3 +16,5 @@ export type * from "./types.ts";
 export { SETTLEMENT_V2, SETTLEMENT_V2_SCHEMA, memorySafeText, memoryEntities } from "./semantic-v2.ts";
 export { settleV2Batch } from "./semantic-v2.ts";
 export { REUSABLE_LEARNING_CONTRACT } from "./learning-paradigm.ts";
+export { reviewMemoryApplications } from "./application-review.ts";
+export { reconcileMemoryFeedback } from "./semantic-v2.ts";

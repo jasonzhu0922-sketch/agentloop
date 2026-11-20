@@ -1346,9 +1346,12 @@ export class LocalRuntimeConfigurationStore {
     if (configuration === undefined) throw new LocalRuntimeConfigurationStoreError(404, "runtime_configuration_not_found");
     const memory = await this.deviceMemory();
     await this.assertValidMemoryConfiguration(memory);
-    const webSearch = await this.resolvedWebSearch();
+    const search = await this.webSearchResolution();
+    const webSearch = search.options;
     return { customSkillDirectories, skillPackageDeclarations, ...(skillDiagnostics.length === 0 ? {} : { skillDiagnostics }), mcpServers, integrationEnvironment: environment,
-      ...(webSearch === undefined ? {} : { webSearch }), memory,
+      ...(webSearch === undefined ? {} : { webSearch }),
+      webSearchAvailability: { enabled: search.configuration.enabled, credentialConfigured: search.configuration.credentialConfigured,
+        ...(search.configuration.unavailableReason === undefined ? {} : { unavailableReason: search.configuration.unavailableReason }) }, memory,
       ...(this.modelConfigurations === undefined ? {} : { modelConfiguration: await this.modelConfigurations.resolve() }) };
   }
 
@@ -1423,10 +1426,6 @@ export class LocalRuntimeConfigurationStore {
       SELECT memory_enabled, settlement_model_key FROM local_memory_configuration WHERE singleton = 1
     `).get() as { memory_enabled: number; settlement_model_key: string | null } | undefined;
     return resolvedMemory(row?.memory_enabled === 1, row?.settlement_model_key ?? null);
-  }
-
-  private async resolvedWebSearch(): Promise<WebToolsOptions | undefined> {
-    return (await this.webSearchResolution()).options;
   }
 
   private async publicWebSearch(): Promise<ResolvedLocalWebSearchConfiguration> {

@@ -24,7 +24,7 @@ export interface RecoveryTranscript {
     checkpointEventSeq?: number;
     unfinishedToolCalls: readonly Readonly<{ toolCallId: string; toolName: string }>[];
     candidateOutputs: readonly string[];
-    candidateRejections: readonly { readonly output: string; readonly feedback: string }[];
+    candidateRejections: readonly { readonly output: string; readonly feedback: string; readonly decisionBasisDigest?: string }[];
     decisionLedger: readonly RuntimeDecisionCommit[];
     outputBudgetState?: OutputBudgetState;
   }>;
@@ -111,7 +111,7 @@ export function reconstructRecoveryTranscript(input: {
   let outputBudgetState: OutputBudgetState | undefined;
   const assistants: AssistantCheckpoint[] = [];
   const candidateOutputs: string[] = [];
-  const candidateRejections: Array<{ output: string; feedback: string }> = [];
+  const candidateRejections: Array<{ output: string; feedback: string; decisionBasisDigest?: string }> = [];
   const humanResponses: HumanLoopResponseEvent[] = [];
   const humanLoopRequests = new Map<string, HumanLoopRequestSnapshot>();
   const toolCallCommitted = new Map<string, { name: string; arguments: unknown; seq: number }>();
@@ -130,6 +130,7 @@ export function reconstructRecoveryTranscript(input: {
       candidateRejections.push({
         output: event.data.output,
         feedback: typeof event.data.feedback === "string" ? event.data.feedback : "Completion was rejected.",
+        ...(typeof event.data.decisionBasisDigest === "string" ? { decisionBasisDigest: event.data.decisionBasisDigest } : {}),
       });
       continue;
     }

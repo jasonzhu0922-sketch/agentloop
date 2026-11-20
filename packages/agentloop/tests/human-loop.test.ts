@@ -22,6 +22,38 @@ import type { ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts
 import type { RuntimeEvent, RuntimeTool } from "../src/index.ts";
 import { ModelStepAssessor } from "../src/planning/assessor.ts";
 
+for (const unavailable of [false, true]) test(`HIL recovery registers the canonical terminal outcome once; unavailable Memory=${unavailable}`, async t => {
+  const database = new AppDatabase(":memory:"); t.after(() => database.close());
+  let calls = 0;
+  const enqueued: { runId: string; terminalCommitRef: string }[] = [];
+  const runs = new RunService({ database, skills: new SkillService(database), plannerFactory: singleStepTestPlanner,
+    assessorFactory: approvingTestAssessor,
+    memory: { name: "test", recall: async () => undefined, commitExplicit: async () => ({ kind: "not_applicable" }),
+      enqueueSettlement: async input => {
+        const outcome = await database.prepare("SELECT result_ref FROM run_outcomes WHERE run_id = ?").get(input.runId) as { result_ref: string };
+        assert.equal(input.terminalCommitRef, outcome.result_ref, "enqueue sees the committed result, not a provisional tool receipt");
+        enqueued.push(input);
+        if (unavailable) throw new Error("memory temporarily unavailable");
+        return { kind: "enqueued", settlementJobId: "job", enqueuedAt: 1 };
+      } },
+    modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async () => ++calls === 1
+      ? { content: "", finishReason: "tool_calls", toolCalls: [{ id: "choose", name: HUMAN_LOOP_TOOL_NAME, arguments: {
+        kind: "selection", title: "Select source", prompt: "Choose source", rationale: "User chooses the current scope", evidenceRefs: [],
+        responseSchema: { type: "select", minSelections: 1, maxSelections: 1, options: [{ id: "group", label: "Group" }] }, resume: { mode: "continue_step" },
+      } }] }
+      : { content: "Current scope query completed", finishReason: "stop", toolCalls: [] } }),
+  });
+  const run = await runs.execute("alice", "Query the selected source");
+  const request = await waitForHumanLoop(runs, "alice", run.id, "test-step");
+  assert.deepEqual(enqueued, [], "a paused Run is not a learning case yet");
+  await runs.respondHumanLoop("alice", run.id, request.id, ["group"], request.revision);
+  assert.equal((await waitForRunCompletion(runs, "alice", run.id)).status, "completed");
+  assert.equal(enqueued.length, 1);
+  const events = await runs.events("alice", run.id);
+  assert.ok(events.some(event => event.type === "run.completed" && event.data.recovered === true));
+  assert.ok(events.some(event => event.type === (unavailable ? "memory.settlement_enqueue_failed" : "memory.settlement_enqueued")));
+});
+
 test("recovery proposals let Admission derive delivery-target criteria exactly once", () => {
   const targetId = "data-distribution-analysis";
   const understanding = understandTask({
@@ -793,4 +825,62 @@ test("a required rejection reason is validated before the Human Loop answer is c
     await loops.respond({ ...input, value: { accepted: false, reason: 'Please stop' } });
     assert.equal(await loops.current(request.runId), undefined);
   } finally { database.close(); }
+});
+
+for (const mode of ["retained", "replaced", "revoked", "unavailable"] as const) test(`HIL resumes with freshly validated memory after service recreation: ${mode}`, async t => {
+  const database = new AppDatabase(":memory:"); t.after(() => database.close());
+  let resumed = false, calls = 0;
+  const seen: string[] = [], recalled: string[] = [];
+  const create = () => new RunService({ database, skills: new SkillService(database), plannerFactory: singleStepTestPlanner, assessorFactory: approvingTestAssessor,
+    memory: {name: "revalidated-memory", commitExplicit: async () => ({kind: "not_applicable"}),
+      recall: async ({runId, target}) => {
+        recalled.push(`${resumed ? "resume" : "initial"}:${target}`);
+        if (resumed && mode === "unavailable") throw new Error("local memory unavailable");
+        if (resumed && mode === "revoked") return undefined;
+        const marker = resumed && mode === "replaced" ? "MEMORY_CURRENT_REVISION" : "MEMORY_INITIAL_REVISION";
+        if (target === "planner") return {
+          schema: "agentloop.memoryProjection/v1", id: `methods:${marker}`, runId, target: "planner", memoryEpoch: resumed ? 2 : 1,
+          memoryRevisionIds: [marker], retrievalReasons: [], contentHash: marker, createdAt: Date.now(), expiresAt: Date.now() + 300_000,
+          relevantFacts: [], preferenceConstraints: [], planningPriors: [{ schema: "agentloop.planningPrior/v1", id: `prior:${marker}`, source: "experience_procedure",
+            applicability: "Current task scope is selected", strategy: "Inspect the current scope before reading",
+            suggestedSteps: [{ objective: `METHOD_${marker}`, toolNames: ["unavailable.memory_tool"], conditions: ["Current scope matches"], verification: "Confirm current scope" }],
+            knowledgeBindings: [{ knowledgeId: "path", section: "classicPath" }], evidenceExpectations: [], warnings: [], confidence: 0.8, sourceRefs: [marker] }],
+        };
+        if (target !== "response") return undefined;
+        return {schema: "agentloop.memoryProjection/v1", id: `projection:${marker}`, runId, target: "response", memoryEpoch: resumed ? 2 : 1,
+          memoryRevisionIds: [marker], retrievalReasons: [], contentHash: marker, createdAt: Date.now(), expiresAt: Date.now() + 300_000,
+          guidance: {}, facts: [], promptMarkdown: marker};
+      }, enqueueSettlement: async () => ({kind: "enqueued", settlementJobId: "job", enqueuedAt: 1})},
+    modelFactory: () => ({limits: TEST_MODEL_LIMITS, complete: async invocation => {
+      assert.equal(invocation.tools.some(tool => tool.name === "unavailable.memory_tool"), false);
+      seen.push(invocation.runtimeContext?.content ?? "");
+      if (++calls === 1) return {content: "", finishReason: "tool_calls", toolCalls: [{id: "choose", name: HUMAN_LOOP_TOOL_NAME, arguments: {
+        kind: "selection", title: "Select source", prompt: "Choose source", rationale: "User chooses the current scope", evidenceRefs: [],
+        responseSchema: {type: "select", minSelections: 1, maxSelections: 1, options: [{id: "group", label: "Group"}]}, resume: {mode: "continue_step"},
+      }}]};
+      return {content: "Current task completed", finishReason: "stop", toolCalls: []};
+    }}),
+  });
+  const first = create();
+  const run = await first.execute("alice", "Query the selected source");
+  const request = await waitForHumanLoop(first, "alice", run.id, "test-step");
+  assert.match(seen[0], /MEMORY_INITIAL_REVISION/);
+  assert.match(seen[0], /METHOD_MEMORY_INITIAL_REVISION/);
+  resumed = true;
+  const restarted = create();
+  await restarted.respondHumanLoop("alice", run.id, request.id, ["group"], request.revision);
+  assert.equal((await waitForRunCompletion(restarted, "alice", run.id)).status, "completed");
+  assert.ok(recalled.includes("resume:planner"));
+  assert.ok(recalled.includes("resume:response"));
+  if (mode === "retained") assert.match(seen.at(-1)!, /METHOD_MEMORY_INITIAL_REVISION/);
+  else if (mode === "replaced") { assert.match(seen.at(-1)!, /METHOD_MEMORY_CURRENT_REVISION/); assert.doesNotMatch(seen.at(-1)!, /MEMORY_INITIAL_REVISION/); }
+  else assert.doesNotMatch(seen.at(-1)!, /MEMORY_INITIAL_REVISION/);
+  const events = await restarted.events("alice", run.id);
+  if (mode === "retained" || mode === "replaced") {
+    const marker = mode === "replaced" ? "MEMORY_CURRENT_REVISION" : "MEMORY_INITIAL_REVISION";
+    assert.ok(events.some(event => event.type === "prompt_augmentation.activated" && event.data.stepId === "test-step"
+      && (event.data.augmentations as any[]).some(item => item.provenance?.bindings?.some((binding: any) => binding.memoryRevisionId === marker && binding.knowledgeId === "path"))));
+  }
+  assert.ok(events.some(event => event.type === (mode === "unavailable" ? "memory.recall_failed" : mode === "revoked" ? "run.completed" : "prompt_augmentation.activated")
+    && (mode === "unavailable" ? event.data.phase === "execution_resume" : true)));
 });

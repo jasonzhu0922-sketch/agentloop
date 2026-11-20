@@ -8,4 +8,7 @@ export class LocalRuntimeDatabaseRegistry {
     if (this.databases.get(runtimeId) === database) this.databases.delete(runtimeId);
   }
   list(): readonly SqlConnection[] { return [...this.databases.values()]; }
+  entries(): readonly { readonly sourceId: string; readonly database: SqlConnection }[] {
+    return [...this.databases].map(([sourceId, database]) => ({ sourceId, database }));
+  }
 }

@@ -241,9 +241,10 @@ export function deriveCurrentDecisionView(input: {
   const nextAction = awaitingDecision.some((gap) => gap.suggestedAction === "fail") ? "stop"
     : awaitingDecision.some((gap) => gap.suggestedAction === "ask_user") ? "request_input"
     : awaitingDecision.some((gap) => gap.suggestedAction === "revise_plan") ? "revise_plan"
+    : awaitingDecision.some((gap) => gap.repairPrerequisite === "external_change") ? "resolve_evidence_gap"
     : unreadResultRefs.length > 0 ? "read_bound_results"
     : evidence?.pendingComputation !== undefined && (evidence.nextAction === "execute_repaired_computation" || evidence.nextAction === "repair_computation_binding") ? evidence.nextAction
-    : awaitingDecision.some((gap) => gap.missingEvidenceKinds.length > 0) ? "resolve_evidence_gap"
+    : awaitingDecision.some((gap) => gap.missingEvidenceKinds.length > 0 || gap.repairPrerequisite === "new_observation") ? "resolve_evidence_gap"
     : awaitingDecision.length > 0 ? "revise_completion_candidate"
     : unboundDeliveryTargetIds.length > 0 && objects.some((object) => object.presence === "present") ? "bind_delivery_target"
     : evidence?.nextAction ?? input.stepSemanticFrame?.phaseRole ?? "inspect_current_state";
@@ -252,7 +253,8 @@ export function deriveCurrentDecisionView(input: {
   if ((evidence?.missingToolEvidenceKinds.length ?? 0) > 0) blockedBy.push("missing_tool_evidence");
   if (unboundDeliveryTargetIds.length > 0) blockedBy.push("unbound_delivery_target");
   if (evidence?.pendingComputation !== undefined) blockedBy.push("pending_computation");
-  if (awaitingDecision.some(gap => gap.suggestedAction !== "repair_leaf" || gap.missingEvidenceKinds.length > 0)) blockedBy.push("recovery_decision");
+  if (awaitingDecision.some(gap => gap.suggestedAction !== "repair_leaf" || gap.missingEvidenceKinds.length > 0
+    || gap.repairPrerequisite === "new_observation" || gap.repairPrerequisite === "external_change")) blockedBy.push("recovery_decision");
   return {
     schema: "agentloop.currentDecisionView/v1",
     identity,

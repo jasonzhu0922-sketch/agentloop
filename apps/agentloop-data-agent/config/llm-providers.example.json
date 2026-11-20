@@ -1,0 +1,20 @@
+{
+  "defaultProvider": "business-model",
+  "defaultModelKey": "business-model",
+  "providers": {
+    "business-model": {
+      "kind": "alibaba",
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "apiKeyEnv": "DATA_AGENT_LLM_API_KEY",
+      "defaultModel": "qwen-plus",
+      "contextWindowTokens": 128000,
+      "maxOutputTokens": 8192,
+      "timeoutMs": 180000,
+      "maxAttempts": 2,
+      "protocol": "chat-completions"
+    }
+  },
+  "models": {
+    "business-model": { "providerKey": "business-model", "providerModel": "qwen-plus", "displayName": "业务模型", "reasoning": "none" }
+  }
+}

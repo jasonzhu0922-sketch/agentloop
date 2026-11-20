@@ -54,6 +54,14 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('#run-evidence > details').length === 32);
   assert.match(await page.locator('#run-result').innerText(), /召回快照 · 1 条/);
   assert.match(await page.locator('#run-result').innerText(), /是否实际采用|实际采用情况/);
+  const reviews = page.locator('.run-card').filter({ has: page.getByRole('heading', { name: '逐条采用复核', exact: true }) });
+  assert.match(await reviews.innerText(), /无法判断/);
+  assert.match(await reviews.innerText(), /效果未验证/);
+  assert.match(await reviews.innerText(), /其执行支持已停止用于自动召回/);
+  await reviews.locator('.detail-section > details > summary').first().click();
+  assert.match(await reviews.innerText(), /does not establish adoption/);
+  assert.equal(await page.evaluate(() => (window as any).reviewXss), undefined, 'review reasons must remain literal text');
+  assert.equal((await reviews.innerText()).includes('foreign-private-review'), false);
   await page.locator('#run-result > .run-card').nth(1).locator('summary').click();
   assert.match(await page.locator('#run-result').innerText(), new RegExp(saved.projection!.id));
   await page.screenshot({ path: join(root, 'run-desktop.png'), fullPage: true });

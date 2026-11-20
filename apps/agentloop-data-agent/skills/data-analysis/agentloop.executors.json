@@ -1,0 +1,349 @@
+{
+  "schema": "agentloop.skillExecutors/v1",
+  "executors": [
+    {
+      "id": "data-access",
+      "description": "Read group business metadata or execute caller SQL using the deterministic TiDB/MySQL gateway and connection configuration bundled in this Skill. No external project or model workflow.",
+      "command": "python3",
+      "script": "scripts/data_client.py",
+      "actions": [
+        {
+          "id": "retrieve-knowledge",
+          "description": "Start data questions here: retrieve maintained business terms, source/metric candidates, reasons, ambiguities and gaps before domain planning. No live schema scan or business SQL.",
+          "inputs": [
+            {
+              "name": "request-json",
+              "description": "Metadata JSON: question; optional limit/offset/catalog_revision. Candidates are not semantic confirmation.",
+              "required": true
+            },
+            {
+              "name": "output",
+              "description": "Workspace JSON evidence path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "retrieve-knowledge",
+            "--scenario-id",
+            "group",
+            "--request-json",
+            "{{request-json}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "nl2sql.semantic-metadata/v1 with catalog_revision and explicit schema_verification. Full result saved on disk. Read the small inline content, otherwise use exact file pointers.",
+          "producesEvidenceKinds": [
+            "source_summary"
+          ]
+        },
+        {
+          "id": "search-tables",
+          "description": "Expand or narrow ranked table candidates without fetching full schemas. Supports pagination; ranking never changes query authority.",
+          "inputs": [
+            {
+              "name": "request-json",
+              "description": "Metadata JSON: question; optional limit/offset/catalog_revision.",
+              "required": true
+            },
+            {
+              "name": "output",
+              "description": "Workspace JSON evidence path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "search-tables",
+            "--scenario-id",
+            "group",
+            "--request-json",
+            "{{request-json}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "nl2sql.semantic-metadata/v1 with catalog_revision and explicit schema_verification. Full result saved on disk. Read the small inline content, otherwise use exact file pointers.",
+          "producesEvidenceKinds": [
+            "source_summary"
+          ]
+        },
+        {
+          "id": "search-metrics",
+          "description": "Find metric identities by business names and term aliases, optionally scoped to selected sources. No live schema scan.",
+          "inputs": [
+            {
+              "name": "request-json",
+              "description": "Metadata JSON: question; optional source_ids, limit/offset/catalog_revision.",
+              "required": true
+            },
+            {
+              "name": "output",
+              "description": "Workspace JSON evidence path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "search-metrics",
+            "--scenario-id",
+            "group",
+            "--request-json",
+            "{{request-json}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "nl2sql.semantic-metadata/v1 with catalog_revision and explicit schema_verification. Full result saved on disk. Read the small inline content, otherwise use exact file pointers.",
+          "producesEvidenceKinds": [
+            "source_summary"
+          ]
+        },
+        {
+          "id": "get-metrics",
+          "description": "Batch read exact source-bound metric definitions, formulas, selectors, units, grain and dependency fields, retaining provenance.",
+          "inputs": [
+            {
+              "name": "request-json",
+              "description": "Metadata JSON: metric_refs:[{source_id,metric_id}]; optional catalog_revision.",
+              "required": true
+            },
+            {
+              "name": "output",
+              "description": "Workspace JSON evidence path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "get-metrics",
+            "--scenario-id",
+            "group",
+            "--request-json",
+            "{{request-json}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "nl2sql.semantic-metadata/v1 with catalog_revision and explicit schema_verification. Full result saved on disk. Read the small inline content, otherwise use exact file pointers.",
+          "producesEvidenceKinds": [
+            "source_summary"
+          ]
+        },
+        {
+          "id": "search-columns",
+          "description": "Search live columns only inside explicitly selected sources. Return matched definitions and pagination without all table columns.",
+          "inputs": [
+            {
+              "name": "request-json",
+              "description": "Metadata JSON: question, source_ids:[id]; optional limit/offset/catalog_revision.",
+              "required": true
+            },
+            {
+              "name": "output",
+              "description": "Workspace JSON evidence path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "search-columns",
+            "--scenario-id",
+            "group",
+            "--request-json",
+            "{{request-json}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "nl2sql.semantic-metadata/v1 with catalog_revision and explicit schema_verification. Full result saved on disk. Read the small inline content, otherwise use exact file pointers.",
+          "producesEvidenceKinds": [
+            "source_summary"
+          ]
+        },
+        {
+          "id": "get-columns",
+          "description": "Batch read exact live column definitions for selected sources, including current table signatures. Unknown columns fail explicitly.",
+          "inputs": [
+            {
+              "name": "request-json",
+              "description": "Metadata JSON: columns:[{source_id,names:[field]}]; optional catalog_revision.",
+              "required": true
+            },
+            {
+              "name": "output",
+              "description": "Workspace JSON evidence path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "get-columns",
+            "--scenario-id",
+            "group",
+            "--request-json",
+            "{{request-json}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "nl2sql.semantic-metadata/v1 with catalog_revision and explicit schema_verification. Full result saved on disk. Read the small inline content, otherwise use exact file pointers.",
+          "producesEvidenceKinds": [
+            "source_summary"
+          ]
+        },
+        {
+          "id": "get-query-context",
+          "description": "After source selection, batch fetch metric-dependent and relevant live fields, entities, periods and relationships; returns a source-signature-bound plan_seed. Use it to generate SQL in this Run.",
+          "inputs": [
+            {
+              "name": "request-json",
+              "description": "Metadata JSON: question, source_ids:[id]; optional metric_refs:[{source_id,metric_id}], columns:[{source_id,names:[field]}], catalog_revision. See references/retrieval-contract.md.",
+              "required": true
+            },
+            {
+              "name": "output",
+              "description": "Workspace JSON evidence path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "get-query-context",
+            "--scenario-id",
+            "group",
+            "--request-json",
+            "{{request-json}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "nl2sql.semantic-metadata/v1 with catalog_revision and explicit schema_verification. Full result saved on disk. Read the small inline content, otherwise use exact file pointers.",
+          "producesEvidenceKinds": [
+            "source_summary"
+          ]
+        },
+        {
+          "id": "scenarios",
+          "description": "Read the configured group scenario identity.",
+          "inputs": [
+            {
+              "name": "output",
+              "description": "Workspace JSON result path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "scenarios",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "Group scenario identity and persisted file receipt."
+        },
+        {
+          "id": "catalog",
+          "description": "Read all authorized source identities and compact metric/term identities for one explicitly selected scenario. Full definitions are retrieved by question or selected source.",
+          "inputs": [
+            {
+              "name": "output",
+              "description": "Workspace JSON result path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "catalog",
+            "--scenario-id",
+            "group",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "Business metadata only; no model settings or connection credentials.",
+          "producesEvidenceKinds": [
+            "source_summary"
+          ]
+        },
+        {
+          "id": "resolve-entity",
+          "description": "Bind a matched business term and its interpreted canonical name to a source-specific entity definition. Query the exact canonical name and return all candidate codes, lookup evidence and an entity query_plan. Do not retry with the original short-name LIKE.",
+          "inputs": [
+            {
+              "name": "request-json",
+              "description": "JSON with mention, matched_term, canonical_name, source_id and entity_id from current catalog definitions.",
+              "required": true
+            },
+            {
+              "name": "output",
+              "description": "Workspace entity-resolution JSON path; reuse this file as the query plan.",
+              "required": true
+            }
+          ],
+          "args": [
+            "resolve-entity",
+            "--scenario-id",
+            "group",
+            "--request-json",
+            "{{request-json}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "resolved, ambiguous or unmatched; complete candidates and lookup query evidence. Ambiguous plans have no selected codes and require an explicit selection."
+        },
+        {
+          "id": "execute-entity-sql",
+          "description": "Execute SQL with a saved combined entity/metric/time query plan. Verify exact entity codes, metric project values and declared time ranges in each physical source WHERE before execution.",
+          "inputs": [
+            {
+              "name": "request-json",
+              "description": "JSON with SQL and separate params generated by the current Agent.",
+              "required": true
+            },
+            {
+              "name": "query-plan",
+              "description": "Workspace entity-resolution or combined query-plan JSON preserving all applicable entity, metric and time bindings.",
+              "required": true,
+              "evidenceInput": "immutable_workspace_artifact"
+            },
+            {
+              "name": "output",
+              "description": "Workspace query result JSON path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "execute",
+            "--scenario-id",
+            "group",
+            "--request-json",
+            "{{request-json}}",
+            "--query-plan",
+            "{{query-plan}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "Complete query evidence with query_plan and plan_verification. Binding mismatches are rejected before data SQL execution and identify the failed association.",
+          "producesEvidenceKinds": [
+            "source_summary",
+            "record_counts"
+          ]
+        },
+        {
+          "id": "execute-sql",
+          "description": "Execute caller SQL with inline query_plan binding selected metric names, source time ranges and resolved entities. Combine plan and SQL in this call; do not omit existing bindings. Definition probes may run without a plan.",
+          "inputs": [
+            {
+              "name": "request-json",
+              "description": "JSON with sql, separate params, and query_plan (schema, scenario_id, catalog_revision, metric_bindings, time_bindings, entity_bindings as applicable). See references/input-contract.md.",
+              "required": true
+            },
+            {
+              "name": "output",
+              "description": "Workspace JSON result path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "execute",
+            "--scenario-id",
+            "group",
+            "--request-json",
+            "{{request-json}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "Complete query file, status and audit identity, explicit file-root pointers, plan verification, and complete small answers inline. Consume the Runtime Result and reuse it; do not requery to read saved data.",
+          "producesEvidenceKinds": [
+            "source_summary",
+            "record_counts"
+          ]
+        }
+      ]
+    }
+  ]
+}

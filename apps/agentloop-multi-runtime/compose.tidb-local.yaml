@@ -51,7 +51,7 @@ services:
       - --advertise-address=tidb
       - --config=/etc/tidb/tidb.toml
     ports:
-      - "127.0.0.1:4000:4000"
+      - "0.0.0.0:4000:4000"
       - "127.0.0.1:10080:10080"
     volumes:
       - ./config/tidb-local/tidb.toml:/etc/tidb/tidb.toml:ro

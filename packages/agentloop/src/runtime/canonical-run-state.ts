@@ -39,6 +39,7 @@ export interface CanonicalGoalGap {
   readonly evidenceConcerns?: FailedBoundary["evidenceConcerns"];
   readonly concernResolutions?: SkillComplianceAssessment["concernResolutions"];
   readonly suggestedAction: FailedBoundary["suggestedRepairShape"];
+  readonly repairPrerequisite?: FailedBoundary["repairPrerequisite"];
   readonly openedAt: number;
   readonly resolvedAt?: number;
   readonly supersededByMessageId?: string;
@@ -479,6 +480,7 @@ export function recordCanonicalAssessment(
         !(currentGap?.evidenceConcerns ?? []).some((prior) => JSON.stringify(prior) === JSON.stringify(concern)))]),
     }),
     suggestedAction: boundary.suggestedRepairShape,
+    ...(boundary.repairPrerequisite === undefined ? {} : { repairPrerequisite: boundary.repairPrerequisite }),
     ...(boundary.unmetCriteria === undefined ? {} : { unmetCriteria: Object.freeze([...boundary.unmetCriteria]) }),
     openedAt: currentGap?.openedAt ?? now,
     repairStepIds: currentGap?.repairStepIds ?? Object.freeze([assessment.stepId]),

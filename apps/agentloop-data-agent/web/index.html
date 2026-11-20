@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>经营问数 · AgentLoop</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="经营问数首页"><span class="brand-icon">问</span><span>经营问数<small>AGENTLOOP</small></span></a>
+    <button id="new-chat" class="new-chat">＋ 新对话</button>
+    <p class="section-label">最近对话</p>
+    <nav id="history" aria-label="历史对话"></nav>
+    <a class="settings-link" href="/settings">◎ 知识与数据管理</a>
+    <div class="sidebar-footer"><span class="connection-dot"></span>集团经营分析<span class="database-label">TiDB</span></div>
+  </aside>
+  <main>
+    <header><div><span class="eyebrow">DATA ASSISTANT</span><h1>让业务问题，回到数据本身。</h1></div><span class="scope">集团经营分析</span></header>
+    <div id="notice" role="alert" hidden></div>
+    <section id="messages" aria-label="对话消息" aria-live="polite"></section>
+    <section id="welcome" class="welcome">
+      <div class="welcome-mark">问</div><h2>今天想了解什么？</h2>
+      <p>查询指标、比较变化，或从一段趋势开始。</p>
+      <div class="suggestions">
+        <button data-question="集团经营分析中有哪些可查询的指标？"><span>数据范围</span>有哪些指标可以查询？<b>↗</b></button>
+        <button data-question="人力月报最近一个月有哪些组织和员工人数数据？"><span>人力月报</span>看看最近一个月的员工人数<b>↗</b></button>
+        <button data-question="钢联行情有哪些指标可以分析历史走势？"><span>行情趋势</span>了解可分析的历史行情<b>↗</b></button>
+      </div>
+    </section>
+    <div class="composer-wrap">
+      <div id="human-loop" hidden></div>
+      <form id="composer"><label class="sr-only" for="prompt">输入业务问题</label><textarea id="prompt" placeholder="输入你的业务问题，例如：比较近三个月的经营指标…" rows="2" maxlength="20000" required></textarea>
+        <div class="composer-bottom"><span id="status">从真实业务数据开始</span><button id="stop" type="button" hidden>停止</button><button id="send" type="submit" aria-label="发送问题">发送 ↑</button></div>
+      </form>
+      <p class="footnote">答案依据当前业务目录与查询结果 · 有歧义时会向你确认</p>
+    </div>
+  </main>
+</body>
+</html>

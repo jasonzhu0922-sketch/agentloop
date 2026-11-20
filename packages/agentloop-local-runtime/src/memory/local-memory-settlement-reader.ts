@@ -1,4 +1,6 @@
-import type { SqlConnection } from "@zhujun/agentloop";
+import { RuntimeResultRepository, type SqlConnection } from "@zhujun/agentloop";
+import { memoryFeedbackEffect } from "./local-memory-feedback-semantics.ts";
+import { createHash } from "node:crypto";
 import { memorySafeText, memoryEntities, type MemorySettlementEvidence, type MemorySettlementReader, type MemoryRunScope, type MemorySourceRef } from "@zhujun/agentloop-memory";
 
 interface OutcomeRow {
@@ -13,6 +15,8 @@ interface OutcomeRow {
   readonly selected_skill_ids_json: string | null;
   readonly state_json: string | null;
   readonly delivery_receipt_json: string | null;
+  readonly result_json: string | null;
+  readonly user_input: string;
 }
 interface AssessmentRow {
   readonly count: number;
@@ -41,6 +45,7 @@ interface RuntimeActionRow {
   readonly state: string;
   readonly error_code: string | null;
   readonly kind: string;
+  readonly created_at: number;
 }
 
 /** Reads only canonical local Run/Outcome/Assessment rows for settlement. */
@@ -70,7 +75,7 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
     let database: SqlConnection | undefined;
     for (const candidate of this.databases()) {
       const found = await candidate.prepare(`
-      SELECT r.owner_user_id, r.conversation_id, o.status, o.reason_code, o.plan_id, o.result_ref, o.committed_at, o.delivery_receipt_json,
+      SELECT r.owner_user_id, r.conversation_id, r.input AS user_input, o.status, o.reason_code, o.plan_id, o.result_ref, o.committed_at, o.delivery_receipt_json, o.result_json,
              p.goal AS plan_goal, p.selected_skill_ids_json,
              c.state_json
       FROM runs r
@@ -100,14 +105,17 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
       && row.reason_code === "plan_assessed_and_completed"
       && Number(assessment.count) > 0
       && Number(assessment.count) === Number(assessment.approved);
-    const feedback = row.conversation_id === null ? [] : await database!.prepare(`
-      SELECT e.run_id, e.seq, e.type, e.payload_json FROM run_events e JOIN runs r ON r.id = e.run_id
-      WHERE r.owner_user_id = ? AND r.conversation_id = ?
-        AND e.type IN ('conversation.outcome.disputed', 'conversation.outcome.superseded') ORDER BY e.created_at`)
-      .all<{ run_id: string; seq: number; type: string; payload_json: string }>(input.ownerUserId, row.conversation_id);
+    const feedback: { run_id: string; seq: number; type: string; payload_json: string; created_at: number }[] = [];
+    if (row.conversation_id !== null) for (const feedbackDatabase of this.databases()) {
+      feedback.push(...await feedbackDatabase.prepare(`
+        SELECT e.run_id, e.seq, e.type, e.payload_json, e.created_at FROM run_events e JOIN runs r ON r.id = e.run_id
+        WHERE r.owner_user_id = ? AND r.conversation_id = ?
+          AND e.type IN ('conversation.outcome.disputed', 'conversation.outcome.superseded') ORDER BY e.created_at`)
+        .all<{ run_id: string; seq: number; type: string; payload_json: string; created_at: number }>(input.ownerUserId, row.conversation_id));
+    }
     const targetedFeedback = feedback.filter(event => parseJsonRecord(event.payload_json).targetRunId === input.runId);
     const laterDisputed = targetedFeedback.some(event => event.type === 'conversation.outcome.disputed');
-    const laterCorrected = targetedFeedback.some(event => event.type === 'conversation.outcome.superseded');
+    const laterCorrected = targetedFeedback.some(event => memoryFeedbackEffect(event.type, parseJsonRecord(event.payload_json)) === 'corrected');
     const scope: MemoryRunScope = {
       tenantId: this.tenantId,
       ownerUserId: input.ownerUserId,
@@ -122,25 +130,50 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
       FROM plan_steps WHERE plan_id = ? ORDER BY position
     `).all<PlanStepRow>(row.plan_id);
     const observedActions = await database!.prepare(`
-      SELECT id, step_id, metadata_json, state, error_code, kind
+      SELECT id, step_id, metadata_json, state, error_code, kind, created_at
       FROM runtime_actions
       WHERE run_id = ? AND kind IN ('tool_call', 'recovery_review')
       ORDER BY created_at ASC
     `).all<RuntimeActionRow>(input.runId);
     const entities = memoryEntities([row.plan_goal ?? "", ...planSkeleton.map((step) => step.objective)]);
     const safe = (value: string, max = 500) => memorySafeText(value, entities, max);
-    const actionArguments = await database!.prepare(`SELECT payload_json FROM run_events
-      WHERE run_id = ? AND type = 'tool.planned' ORDER BY seq LIMIT 200`).all<{ payload_json: string }>(input.runId);
+    const actionArguments = await database!.prepare(`SELECT seq, payload_json FROM run_events
+      WHERE run_id = ? AND type = 'tool.planned' ORDER BY seq`).all<{ seq: number; payload_json: string }>(input.runId);
+    const actionSequences = new Map(actionArguments.map(({ seq, payload_json }) => [recordString(parseJsonRecord(payload_json), "toolCallId"), seq]));
     const argumentsByCall = new Map(actionArguments.map(({ payload_json }) => {
       const payload = parseJsonRecord(payload_json);
       return [recordString(payload, "toolCallId"), parseJsonRecord(JSON.stringify(payload.arguments ?? {}))] as const;
     }));
+    const activations = await database!.prepare(`SELECT seq, payload_json FROM run_events
+      WHERE run_id = ? AND type = 'prompt_augmentation.activated' ORDER BY seq`).all<{ seq: number; payload_json: string }>(input.runId);
+    const methodHandoffs = activations.flatMap(({ seq, payload_json }) => {
+      const data = parseJsonRecord(payload_json), stepId = recordString(data, "stepId");
+      if (!stepId || !planSkeleton.some(step => step.step_id === stepId)) return [];
+      const activeIds = parseStringArrayValue(data.augmentationIds);
+      return parseJsonArray(JSON.stringify(data.augmentations ?? [])).flatMap(item => {
+        const augmentation = parseJsonRecord(JSON.stringify(item));
+        if (augmentation.source !== "local_memory" || !activeIds.includes(String(augmentation.id))) return [];
+        const provenance = recordAt(augmentation, ["provenance"]), projectionId = recordString(provenance, "projectionId");
+        if (provenance.schema !== "agentloop.memoryMethodHandoff/v1" || !projectionId) return [];
+        return parseJsonArray(JSON.stringify(provenance.bindings ?? [])).flatMap(binding => {
+          const row = parseJsonRecord(JSON.stringify(binding));
+          const memoryRevisionId = recordString(row, "memoryRevisionId"), knowledgeId = recordString(row, "knowledgeId");
+          return memoryRevisionId && knowledgeId ? [{ seq, stepId, projectionId, memoryRevisionId, knowledgeId,
+            sourceRef: { type: "event" as const, runId: input.runId, sourceId: `${input.runId}:${seq}` } }] : [];
+        });
+      });
+    });
     const observedToolsByStep = new Map<string, string[]>();
+    const committedActions = await database!.prepare(`SELECT seq, payload_json FROM run_events
+      WHERE run_id = ? AND type = 'action.result_committed' ORDER BY seq`).all<{ seq: number; payload_json: string }>(input.runId);
+    const committedSequences = new Map(committedActions.map(event => [recordString(parseJsonRecord(event.payload_json), "actionId"), event.seq]));
+    const recalledHandoffs: Array<{ seq: number; stepId: string; projectionId: string; memoryRevisionId: string; knowledgeId: string; sourceRef: MemorySourceRef }> = [];
     const observations: NonNullable<MemorySettlementEvidence["observations"]>[number][] = [];
+    const positions = new Map<string, { at: number; seq: number }>();
     const dependencies: NonNullable<MemorySettlementEvidence["dependencies"]>[number][] = [];
-    const semanticEvents = await database!.prepare(`SELECT seq, type, payload_json FROM run_events
+    const semanticEvents = await database!.prepare(`SELECT seq, type, payload_json, created_at FROM run_events
       WHERE run_id = ? AND type IN ('human_loop.answered', 'conversation.turn.resolved', 'memory.recalled') ORDER BY seq`)
-      .all<{ seq: number; type: string; payload_json: string }>(input.runId);
+      .all<{ seq: number; type: string; payload_json: string; created_at: number }>(input.runId);
     const safeValue = (value: unknown, depth = 0): unknown => {
       if (depth > 4) return "[OMITTED]";
       if (typeof value === "string") return safe(value, 600);
@@ -166,12 +199,14 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
             candidates: safeValue(options), selectedOptions: safeValue(selectedOptions), value: safeValue(payload.value),
             candidateCoverage: { total: options.length, retained: Math.min(24, options.length), omitted: Math.max(0, options.length - 24) },
             persistenceIntent: "task_only" }, sourceRefs: refs });
+        positions.set(observations.at(-1)!.id, { at: event.created_at, seq: event.seq });
       } else if (event.type === "conversation.turn.resolved") {
         observations.push({ id: `turn_${event.seq}`, kind: "decision", status: "interpreted",
           summary: safe(recordString(payload, "effectiveGoal") ?? "本轮任务意图"),
           details: safeValue({ relation: payload.relation, mode: payload.mode, inputMode: payload.inputMode,
             userConstraints: payload.userConstraints, sourceBinding: payload.sourceBinding, targetRunId: payload.targetRunId,
             targetResult: payload.targetResult, authority: "model_interpretation" }) as Record<string, unknown>, sourceRefs: refs });
+        positions.set(observations.at(-1)!.id, { at: event.created_at, seq: event.seq });
         const resultId = recordString(recordAt(payload, ["targetResult"]), "resultId");
         if (payload.inputMode === "prior_result" && resultId) dependencies.push({ kind: "prior_result", id: resultId,
           ...(recordString(payload, "targetRunId") ? { sourceRunId: recordString(payload, "targetRunId") } : {}), sourceRefs: refs });
@@ -180,11 +215,16 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
       }
     }
     for (const event of targetedFeedback) {
-      observations.push({ id: `feedback_${event.run_id}_${event.seq}`, kind: "feedback", status: "negative",
-        summary: event.type === "conversation.outcome.disputed" ? "用户质疑了该任务的结果" : "该任务结果已被后续纠正替代",
+      const payload = parseJsonRecord(event.payload_json), effect = memoryFeedbackEffect(event.type, payload);
+      observations.push({ id: `feedback_${event.run_id}_${event.seq}`, kind: "feedback", status: ["disputed", "corrected"].includes(effect) ? "negative" : "context",
+        summary: effect === "disputed" ? "用户质疑了该任务的结果" : effect === "corrected" ? "该任务结果已被后续纠正替代" : effect === "refined" ? "后续任务补充或细化了范围，不代表原结果错误" : "后续结果替代了该任务，是否纠错未知",
+        details: { feedbackEffect: effect, ...(typeof payload.relation === "string" ? { relation: payload.relation } : {}) },
         sourceRefs: [{ type: "user_feedback", runId: event.run_id, sourceId: `${event.run_id}:${event.seq}` }] });
+      positions.set(observations.at(-1)!.id, { at: event.created_at, seq: event.seq });
     }
     let artifactVerified: boolean | undefined;
+    const actionObservationsByEvidence = new Map<string, { id: string; stepId: string | null }>();
+    const insights: Array<{ id: string; stepId: string | null; sources: string[] }> = [];
     for (const action of observedActions) {
       const metadata = parseJsonRecord(action.metadata_json);
       const toolName = recordString(metadata, "toolName") ?? recordString(metadata, "name");
@@ -194,9 +234,29 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
       const sourceRefs: MemorySourceRef[] = [{ type: "action", runId: input.runId, sourceId: action.id }];
       const stepOrder = planSkeleton.findIndex((step) => step.step_id === action.step_id) + 1;
       const args = argumentsByCall.get(recordString(metadata, "toolCallId"));
+      const plannedSeq = actionSequences.get(recordString(metadata, "toolCallId"));
+      const memoryGuidance = methodHandoffs.filter(item => item.stepId === action.step_id && plannedSeq !== undefined && item.seq < plannedSeq)
+        .map(({ seq: _seq, stepId: _stepId, ...binding }) => binding);
       const method = args ? proceduralArguments(args) : "";
-      const errors = [action.error_code, recordString(content, "error"), recordString(content, "errorCode")].filter((value): value is string => !!value);
-      const failed = action.state !== "succeeded" || content.isError === true || (typeof content.exitCode === "number" && content.exitCode !== 0) || errors.length > 0;
+      const step = planSkeleton.find(step => step.step_id === action.step_id);
+      const insight = toolName === "record_execution_insight" && action.state === "succeeded"
+        && content.schema === "agentloop.executionInsight/v1" && content.authority === "model_interpretation";
+      if (toolName === "recall_task_knowledge" && action.state === "succeeded" && content.schema === "agentloop.taskKnowledgeRecall/v1"
+        && content.runId === input.runId && content.planId === row.plan_id && content.stepId === action.step_id
+        && typeof content.projectionId === "string" && committedSequences.has(action.id)) {
+        for (const item of parseJsonArray(JSON.stringify(content.knowledgeCards ?? []))) {
+          const card = recordAt(item, []), memoryRevisionId = recordString(card, "memoryRevisionId"), knowledgeId = recordString(card, "knowledgeId");
+          if (memoryRevisionId && knowledgeId && action.step_id) {
+            recalledHandoffs.push({ seq: committedSequences.get(action.id)!, stepId: action.step_id, projectionId: content.projectionId,
+              memoryRevisionId, knowledgeId, sourceRef: { type: "action", runId: input.runId, sourceId: action.id } });
+            dependencies.push({ kind: "memory", id: memoryRevisionId, sourceRefs });
+          }
+        }
+      }
+      if (["record_execution_insight", "recall_task_knowledge"].includes(toolName ?? "")) sourceRefs[0] = { ...sourceRefs[0]!, authority: "model_interpretation" };
+      const errors = [action.error_code, recordString(content, "errorCode")].filter((value): value is string => !!value);
+      const failed = action.state !== "succeeded" || content.isError === true || (typeof content.exitCode === "number" && content.exitCode !== 0)
+        || errors.length > 0 || !!recordString(content, "error");
       const checkResults = toolName === "verify_artifact_acceptance" ? parseJsonArray(JSON.stringify(content.checks ?? [])) : [];
       if (toolName === "verify_artifact_acceptance") {
         const passed = new Set(checkResults.filter((check) => check !== null && typeof check === "object" && (check as Record<string, unknown>).status === "passed").map((check) => String((check as Record<string, unknown>).id)));
@@ -208,22 +268,169 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
         typeof content.exitCode === "number" ? `exitCode=${content.exitCode}` : undefined,
         ...errors,
         ...checkResults.map((check) => check && typeof check === "object" ? `${String((check as Record<string, unknown>).id)}=${String((check as Record<string, unknown>).status)}` : ""),
-        // Only explicit bounded structural summaries are copied, never stdout, rows, file or Skill bodies.
-        recordString(content, "summary"),
       ].filter(Boolean).join("；");
-      observations.push({ id: `observation_${observations.length + 1}`, kind: action.kind === "recovery_review" ? "recovery" : "action", ...(stepOrder ? { stepOrder } : {}), ...(toolName ? { toolName } : {}), status: failed ? "failed" : "succeeded", summary: safe(summary || `${action.kind}:${action.state}`), sourceRefs });
+      observations.push({ id: `observation_${observations.length + 1}`, kind: insight ? "decision" : action.kind === "recovery_review" ? "recovery" : "action", ...(stepOrder ? { stepOrder } : {}), ...(toolName ? { toolName } : {}), status: failed ? "failed" : insight ? "interpreted" : "succeeded", summary: safe(insight ? recordString(content, "finding") ?? "执行发现" : summary || `${action.kind}:${action.state}`),
+        details: { executionObserved: action.state === "succeeded" || typeof payload.content === "string",
+          // Opaque equality is only used locally by compaction. Matching
+          // command forms never establish equivalent information acquisition.
+          repeatIdentity: createHash("sha256").update(JSON.stringify([args ?? action.id, payload.content ?? action.id])).digest("hex"),
+          ...(step ? { purpose: safe(step.objective), purposeAuthority: "plan_step" } : {}),
+          resultProfile: neutralResultProfile(content, safe),
+          resultDiagnostics: neutralResultDiagnostics(content, safe),
+          ...(insight ? { purpose: safe(recordString(content, "purpose") ?? ""), purposeAuthority: "model_interpretation",
+            finding: safe(recordString(content, "finding") ?? ""), informationStatus: recordString(content, "informationStatus"),
+            nextAction: safe(recordString(content, "nextAction") ?? ""), authority: "model_interpretation" } : {}),
+          method: { operation: safe(method || toolName || action.kind),
+            argumentFields: Object.keys(args ?? {}).filter(key => !/password|passwd|token|cookie|secret|credential/iu.test(key)).sort(),
+            selectors: [args?.pointer, ...parseJsonArray(JSON.stringify(args?.queries ?? [])).map(item => recordAt(item, []).pointer)]
+              .filter((value): value is string => typeof value === "string").slice(0, 20).map(value => safe(value)) },
+          ...(errors.length ? { errorCodes: errors.map(error => safe(error)) } : {}),
+          ...(memoryGuidance.length ? { memoryGuidance } : {}) }, sourceRefs });
+      positions.set(observations.at(-1)!.id, { at: action.created_at, seq: plannedSeq ?? Number.MAX_SAFE_INTEGER });
+      if (insight) insights.push({ id: observations.at(-1)!.id, stepId: action.step_id, sources: parseStringArrayValue(content.resultIds) });
+      if (action.kind === "tool_call") for (const key of [recordString(metadata, "toolCallId"), recordString(recordAt(result, ["ref"]), "resultId")]) {
+        if (key) actionObservationsByEvidence.set(key, { id: observations.at(-1)!.id, stepId: action.step_id });
+      }
       if (action.step_id === null || toolName === undefined || failed) continue;
       const current = observedToolsByStep.get(action.step_id) ?? [];
       if (!current.includes(toolName)) current.push(toolName);
       observedToolsByStep.set(action.step_id, current);
     }
+    for (const observation of observations) {
+      if (observation.kind !== "action" || observation.toolName === "recall_task_knowledge") continue;
+      const action = observedActions.find(item => item.id === observation.sourceRefs[0]?.sourceId);
+      const position = positions.get(observation.id);
+      const handoffs = recalledHandoffs.filter(item => item.stepId === action?.step_id && position && item.seq < position.seq)
+        .map(({ seq: _seq, stepId: _stepId, ...binding }) => binding);
+      if (handoffs.length) (observation as { details: Record<string, unknown> }).details = { ...observation.details,
+        memoryGuidance: [...(Array.isArray(observation.details?.memoryGuidance) ? observation.details.memoryGuidance : []), ...handoffs] };
+    }
+    for (const insight of insights) {
+      const observation = observations.find(item => item.id === insight.id)!;
+      const linked = insight.sources.map(id => actionObservationsByEvidence.get(id));
+      const valid = insight.sources.length > 0 && linked.every(item => item && item.stepId === insight.stepId
+        && !["record_execution_insight", "recall_task_knowledge"].includes(observations.find(observation => observation.id === item.id)?.toolName ?? "")
+        && positions.get(item.id)!.seq < positions.get(insight.id)!.seq);
+      if (valid) {
+        (observation as { relatedObservationIds?: readonly string[] }).relatedObservationIds = [...new Set(linked.map(item => item!.id))];
+        // Exact selected values come from the Runtime-owned Result, separately
+        // from the Agent's interpretation. Never expand a complete tool body.
+        const action = observedActions.find(item => item.id === observation.sourceRefs[0]?.sourceId);
+        const runtime = recordAt(parseJsonRecord(action?.metadata_json), ["runtimeResult", "payload"]);
+        const report = parseJsonRecord(typeof runtime.content === "string" ? runtime.content : undefined);
+        for (const [index, selected] of parseJsonArray(JSON.stringify(report.groundedEvidence ?? [])).entries()) {
+          const item = recordAt(selected, []), resultId = recordString(item, "resultId"), pointer = recordString(item, "pointer");
+          const source = resultId ? actionObservationsByEvidence.get(resultId) : undefined;
+          const original = source && observations.find(row => row.id === source.id);
+          const serialized = JSON.stringify(item.value);
+          if (!source || !original || source.stepId !== insight.stepId || !insight.sources.includes(resultId!) || !pointer || !serialized
+            || serialized.length > 600 || safe(serialized, 600) !== serialized
+            || original?.sourceRefs[0]?.sourceId !== item.actionId) continue;
+          const id = `${insight.id}_grounding_${index + 1}`;
+          observations.push({ id, kind: "action", stepOrder: observation.stepOrder, toolName: original.toolName,
+            status: "observed", summary: "从已提交结果选择的精确证据片段；含义和适用范围仍须核验",
+            details: { executionObserved: true, grounding: "exact_result_selection", pointer, value: item.value },
+            sourceRefs: [{ type: "action", runId: input.runId, sourceId: item.actionId as string, resultId, pointer,
+              sourceHash: createHash("sha256").update(serialized).digest("hex") }] });
+          positions.set(id, positions.get(insight.id)!);
+        }
+      } else {
+        // A malformed/legacy self-report cannot enter the learning view as a
+        // grounded finding. Keep an explicit audit gap, never invent a link.
+        (observation as { summary: string }).summary = "执行发现缺少可解析的当前步骤回执";
+        (observation as { details?: Readonly<Record<string, unknown>> }).details = { grounding: "unresolved" };
+      }
+    }
+    // Runtime control decisions are observable applications too. A stop after
+    // recall must not borrow a later recall or a different leaf's failures.
+    const controlEvents = await database!.prepare(`SELECT seq, payload_json, created_at FROM run_events
+      WHERE run_id = ? AND type = 'candidate.repair_stopped' ORDER BY seq`)
+      .all<{ seq: number; payload_json: string; created_at: number }>(input.runId);
+    for (const event of controlEvents) {
+      const payload = parseJsonRecord(event.payload_json), boundary = recordAt(payload, ["failedBoundary"]);
+      const stepId = recordString(boundary, "stepId"), stepOrder = planSkeleton.findIndex(step => step.step_id === stepId) + 1;
+      if (!stepId || !stepOrder || boundary.suggestedRepairShape !== "fail") continue;
+      const relatedObservationIds = [...new Set(parseStringArrayValue(boundary.reusableEvidenceRefs).flatMap(ref => {
+        const linked = actionObservationsByEvidence.get(ref), observation = observations.find(item => item.id === linked?.id);
+        const action = observedActions.find(item => item.id === observation?.sourceRefs[0]?.sourceId);
+        const producer = recordAt(parseJsonRecord(action?.metadata_json), ["runtimeResult", "producer"]);
+        return linked?.stepId === stepId && observation?.status === "failed" && observation.details?.executionObserved === true
+          && producer.runId === input.runId && producer.planId === row.plan_id && producer.stepId === stepId && producer.actionId === action?.id
+          && positions.get(linked.id)!.seq < event.seq ? [linked.id] : [];
+      }))];
+      if (!relatedObservationIds.length) continue;
+      const memoryGuidance = [...methodHandoffs, ...recalledHandoffs].filter(item => item.stepId === stepId && item.seq < event.seq)
+        .map(({ seq: _seq, stepId: _stepId, ...binding }) => binding);
+      const id = `control_${event.seq}`;
+      observations.push({ id, kind: "decision", status: "observed", stepOrder, relatedObservationIds,
+        summary: "Runtime stopped the current candidate loop after assessment required failure; requested results remain unmet",
+        details: { executionObserved: true, executionDecision: "stop", ...(memoryGuidance.length ? { memoryGuidance } : {}) },
+        sourceRefs: [{ type: "event", runId: input.runId, sourceId: `${input.runId}:${event.seq}` }] });
+      positions.set(id, { at: event.created_at, seq: event.seq });
+    }
     const normalizedPlanSkeleton: Readonly<Record<string, unknown>>[] = planSkeleton.map((step, i) => ({ ...planStepForMemory(step, observedToolsByStep.get(step.step_id) ?? []), stepId: `step_${i + 1}`, objective: safe(step.objective), cautions: [], successCriteria: parseJsonArray(step.success_criteria_json).map((item) => safe(typeof item === "string" ? item : String((item as Record<string, unknown>)?.description ?? ""))).filter(Boolean).slice(0, 6) }));
-    const assessmentDetails = row.plan_id === null ? [] : await database!.prepare(`SELECT id, step_id, approved, feedback FROM skill_compliance_assessments WHERE plan_id = ? ORDER BY created_at DESC LIMIT 8`)
-      .all<{ id: string; step_id: string; approved: number; feedback: string }>(row.plan_id);
-    for (const assessment of assessmentDetails) observations.push({ id: `observation_${observations.length + 1}`, kind: "assessment", status: assessment.approved ? "approved" : "rejected", summary: safe(assessment.feedback), sourceRefs: [{ type: "assessment", runId: input.runId, sourceId: assessment.id }] });
-    const boundedObservations = [...new Map((observations.length > 24
-      ? [...observations.filter(item => item.kind === "decision" || item.kind === "feedback" || item.status === "failed" || item.status === "rejected").slice(-12), ...observations.slice(0, 6), ...observations.slice(-6)]
-      : observations).map(item => [item.id, item])).values()];
+    const assessmentDetails = row.plan_id === null ? [] : await database!.prepare(`SELECT id, step_id, approved, feedback, criteria_json, created_at FROM skill_compliance_assessments WHERE plan_id = ? ORDER BY created_at`)
+      .all<{ id: string; step_id: string; approved: number; feedback: string; criteria_json: string; created_at: number }>(row.plan_id);
+    for (const assessment of assessmentDetails) {
+      const stepOrder = planSkeleton.findIndex(step => step.step_id === assessment.step_id) + 1;
+      const relatedObservationIds = [...new Set(parseJsonArray(assessment.criteria_json).flatMap(criterion =>
+        parseStringArrayValue(recordAt(criterion, []).evidenceRefs)).flatMap(ref => {
+          const linked = actionObservationsByEvidence.get(ref);
+          return linked?.stepId === assessment.step_id ? [linked.id] : [];
+        }))];
+      observations.push({ id: `observation_${observations.length + 1}`, kind: "assessment", ...(stepOrder ? { stepOrder } : {}), relatedObservationIds, status: assessment.approved ? "approved" : "rejected", summary: safe(assessment.feedback), sourceRefs: [{ type: "assessment", runId: input.runId, sourceId: assessment.id }] });
+      positions.set(observations.at(-1)!.id, { at: assessment.created_at, seq: Number.MAX_SAFE_INTEGER });
+    }
+    // The final statement is an Agent claim, not a source observation. Follow
+    // canonical Result inputs instead of assuming the last tool call delivered
+    // the answer. Broad provenance does not prove every input was used as the
+    // principal result; the model must preserve that uncertainty.
+    const finalResult = parseJsonRecord(row.result_json);
+    const finalProducer = recordAt(finalResult, ["producer"]);
+    const canonicalFinal = finalResult.schema === "agentloop.runtimeResult/v1" && finalResult.kind === "run" && finalProducer.runId === input.runId
+      && (row.plan_id === null || finalProducer.planId === row.plan_id) && recordAt(finalResult, ["publication"]).status === "published"
+      && recordAt(finalResult, ["ref"]).resultId === row.result_ref;
+    const deliveryInputs = new Set<string>();
+    if (canonicalFinal && row.plan_id) {
+      const results = await new RuntimeResultRepository(database!).listPlanResults({ runId: input.runId, planId: row.plan_id, actorUserId: input.ownerUserId });
+      const byId = new Map(results.map(result => [result.ref.resultId, result]));
+      const pending = parseJsonArray(JSON.stringify(finalResult.inputs ?? [])).map(ref => recordString(ref, "resultId")).filter((id): id is string => !!id);
+      while (pending.length) {
+        const id = pending.pop()!;
+        if (deliveryInputs.has(id)) continue;
+        deliveryInputs.add(id);
+        const result = byId.get(id);
+        if (result) pending.push(...result.inputs.map(ref => ref.resultId));
+      }
+    }
+    const deliveryRelated = [...new Set([...deliveryInputs].flatMap(id => {
+      const linked = actionObservationsByEvidence.get(id);
+      return linked ? [linked.id] : [];
+    }))];
+    for (const observation of observations) if (observation.kind === "action") {
+      (observation as { details: Record<string, unknown> }).details = { ...observation.details,
+        deliveryRelation: deliveryRelated.includes(observation.id) ? "declared_input" : "unknown" };
+    }
+    if (canonicalFinal) {
+      const text = recordString(recordAt(finalResult, ["payload"]), "content") ?? "";
+      // Retain short prose at the boundaries; never send tables, fenced code,
+      // whole files or the complete output as another transcript.
+      const prose = text.replace(/```[\s\S]*?(?:```|$)/gu, " ").split(/\r?\n/u).filter(line => !/^\s*\|/u.test(line)).join(" ");
+      const excerpt = prose.length > 600 ? `${prose.slice(0, 300)} … ${prose.slice(-295)}` : prose;
+      observations.push({ id: "delivery_statement", kind: "delivery", status: row.status, relatedObservationIds: deliveryRelated,
+        summary: "Agent committed a final statement; its claims require source verification",
+        details: { authority: "model_interpretation", statementExcerpt: safe(excerpt, 600), excerptComplete: false,
+          inputLinkage: deliveryRelated.length ? "declared_provenance" : "unknown", reasonCode: row.reason_code },
+        sourceRefs: [{ type: "outcome", runId: input.runId, sourceHash: outcomeRef, authority: "model_interpretation" }] });
+      positions.set("delivery_statement", { at: Number(row.committed_at), seq: Number.MAX_SAFE_INTEGER });
+    }
+    // Keep every structural observation. Settlement owns request budgets and
+    // evidence windows; sampling here irreversibly loses middle actions and
+    // handoff/assessment links before that adaptive boundary can see them.
+    const completeObservations = [...new Map(observations.map(item => [item.id, item])).values()].sort((left, right) => {
+      const a = positions.get(left.id)!, b = positions.get(right.id)!;
+      return a.at - b.at || a.seq - b.seq;
+    });
     const capabilityIds = [...new Set(normalizedPlanSkeleton.flatMap((step) => parseStringArrayValue(step.requiredCapabilities)))].sort();
     return {
       scope,
@@ -239,10 +446,12 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
       },
       ...(row.plan_goal === null || row.plan_goal.trim().length === 0 ? {} : { strategy: safe(row.plan_goal, 1200) }),
       ...(normalizedPlanSkeleton.length === 0 ? {} : { planSkeleton: normalizedPlanSkeleton }),
-      observations: boundedObservations,
+      observations: completeObservations,
+      taskRequest: { text: safe(row.user_input, 600), authority: "user_request", complete: row.user_input.length <= 600 },
       dependencies,
-      coverage: { totalObservations: observations.length, retainedObservations: boundedObservations.length, omittedObservations: observations.length - boundedObservations.length },
+      coverage: { totalObservations: observations.length, retainedObservations: completeObservations.length, omittedObservations: observations.length - completeObservations.length },
       evidenceGaps: [
+        ...(!canonicalFinal ? ["delivery_statement_not_available"] : []),
         ...(!assessmentApproved ? ["assessment_not_fully_approved"] : []),
         ...(artifactVerified === undefined && deliverable.kind !== undefined && deliverable.kind !== "none" ? ["artifact_acceptance_not_observed"] : []),
       ],
@@ -262,6 +471,83 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
       occurredAt: Number(row.committed_at),
     };
   }
+}
+
+/** Structural observations only: no row values, stdout bodies or conclusions.
+ * Counts describe returned evidence, never fulfillment of the task's goal. */
+function neutralResultDiagnostics(content: Record<string, unknown>, safe: (value: string, max?: number) => string): unknown[] {
+  const diagnostics: unknown[] = [];
+  // Preserve declared result state and short diagnostics, never infer a
+  // domain failure category or copy rows, logs, arbitrary details or stderr.
+  const visit = (value: unknown, pointer: string, depth: number) => {
+    if (!value || typeof value !== "object" || Array.isArray(value) || depth > 3 || diagnostics.length >= 8) return;
+    const row = value as Record<string, unknown>;
+    const diagnosticMessage = typeof row.code === "string" || typeof row.errorCode === "string" || /\/(?:error|diagnostic)$/u.test(pointer);
+    const fields = Object.fromEntries(["status", "isError", "code", "errorCode", "phase", ...(diagnosticMessage ? ["message"] : [])].flatMap(key => {
+      const item = row[key];
+      return typeof item === "boolean" || typeof item === "string" && item.length > 0
+        ? [[key, typeof item === "string" ? safe(item, key === "message" ? 240 : 80) : item]] : [];
+    }));
+    if (Object.keys(fields).length) diagnostics.push({ pointer, ...fields });
+    for (const key of ["error", "diagnostic", "content"]) {
+      visit(row[key], `${pointer}/${key}`, depth + 1);
+    }
+  };
+  visit(content, "", 0);
+  for (const key of ["stdout", "content"]) {
+    const value = content[key];
+    if (typeof value === "string" && value.length < 300_000) {
+      try { visit(JSON.parse(value), `/${key}`, 0); } catch { /* Unstructured text is not a diagnostic contract. */ }
+    }
+  }
+  return diagnostics;
+}
+
+function neutralResultProfile(content: Record<string, unknown>, safe: (value: string, max?: number) => string): unknown[] {
+  const profile: unknown[] = [];
+  let partial = false;
+  // These Runtime envelope fields locate audit receipts, not new source
+  // observations. Their own arrays must not crowd out the returned data.
+  const envelopeFields = new Set(["executionReceipt", "workflowEvidenceReceipt", "evidenceReceipt", "artifactReceipt", "artifactReceipts",
+    "computationReceipt", "controlSignals", "resultRef", "stdoutRef", "stderrRef", "inputRefs", "sourceRefs", "fileChanges", "outputBindings"]);
+  const visit = (value: unknown, pointer: string, depth: number) => {
+    if (profile.length >= 16 || depth > 3) { if (value && typeof value === "object") partial = true; return; }
+    if (Array.isArray(value)) { profile.push({ pointer: safe(pointer), items: value.length }); return; }
+    if (!value || typeof value !== "object") return;
+    for (const [key, item] of Object.entries(value)) {
+      if (envelopeFields.has(key) || /password|passwd|token|cookie|secret|credential/iu.test(key)) continue;
+      const path = `${pointer}/${key.replaceAll("~", "~0").replaceAll("/", "~1")}`;
+      if (typeof item === "number" && /^(?:count|rowCount|row_count|total|totalItems|returned|returnedItems|matched|failed|passed)$/u.test(key)) {
+        if (profile.length < 16) profile.push({ pointer: safe(path), count: item });
+      } else if (item && typeof item === "object") visit(item, path, depth + 1);
+    }
+  };
+  if (content.schema === "agentloop.jsonRead/v1" && Array.isArray(content.queries)) {
+    for (const value of content.queries.slice(0, 20)) {
+      const query = recordAt(value, []);
+      const pointer = typeof query.sourcePointer === "string" ? query.sourcePointer : typeof query.pointer === "string" ? query.pointer : undefined;
+      if (pointer === undefined) continue;
+      profile.push({ pointer: safe(pointer),
+        ...(Array.isArray(query.value) ? { returnedItems: query.value.length } : { valueType: typeof query.value }),
+        ...(typeof query.totalItems === "number" ? { totalItems: query.totalItems } : {}),
+        ...(query.nextOffset !== undefined ? { hasMore: query.nextOffset !== null } : {}) });
+    }
+    if (content.queries.length > 20) profile.push({ complete: false, reason: "structural_profile_budget" });
+    return profile;
+  }
+  visit(content, "", 0);
+  // Parse only bounded JSON to read structure; its text and row values never
+  // cross into the settlement evidence or the model's learning context.
+  for (const key of ["stdout", "content"]) {
+    const value = content[key];
+    if (typeof value === "string" && value.length < 300_000) {
+      try { visit(JSON.parse(value), `/${key}`, 0); } catch { /* No structured observation. */ }
+    } else if (typeof value === "string" && value.length >= 300_000) {
+      profile.push({ pointer: `/${key}`, available: false, reason: "structural_read_budget" });
+    }
+  }
+  if (partial) profile.push({ complete: false, reason: "structural_profile_budget" });
+  return profile;
 }
 
 function planStepForMemory(row: PlanStepRow, observedToolNames: readonly string[] = []): Readonly<Record<string, unknown>> {
@@ -294,6 +580,7 @@ function planStepForMemory(row: PlanStepRow, observedToolNames: readonly string[
       : generalizedObjective(row.role, requiredEvidenceKinds, toolNames),
     ...(row.role === null ? {} : { role: row.role }),
     dependencies,
+    ...(factLabels.length ? { requiredFacts: factLabels } : {}),
     ...(parseStringArray(row.skill_ids_json).length === 0 ? {} : { skillIds: parseStringArray(row.skill_ids_json) }),
     ...(parseStringArray(row.required_capabilities_json).length === 0 ? {} : { requiredCapabilities: parseStringArray(row.required_capabilities_json) }),
     ...(toolNames.length === 0 ? {} : { toolNames }),
@@ -342,7 +629,7 @@ function parseJsonRecord(value: string | null | undefined): Record<string, unkno
   }
 }
 
-function recordAt(value: Record<string, unknown>, path: readonly string[]): Record<string, unknown> {
+function recordAt(value: unknown, path: readonly string[]): Record<string, unknown> {
   let current: unknown = value;
   for (const key of path) {
     if (current === null || typeof current !== "object" || Array.isArray(current)) return {};

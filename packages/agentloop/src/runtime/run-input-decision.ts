@@ -3,6 +3,7 @@ import type { CanonicalRunState } from "./canonical-run-state.ts";
 import type { RunInputMessage } from "./run-input-repository.ts";
 import { AppError } from "../shared/errors.ts";
 import { nullableJsonSchema } from "../shared/json-schema.ts";
+import { CONVERSATION_TASK_INTENT_SCHEMA, parseConversationTaskIntent } from "./conversation-task-intent.ts";
 
 export interface RunInputDecision {
   readonly kind: "answer" | "amend" | "clarify" | "cancel";
@@ -19,6 +20,7 @@ export async function decideRunInput(input: {
   state?: CanonicalRunState;
   evidence: unknown;
   signal?: AbortSignal;
+  feedback?: readonly { feedback: string; decision?: unknown }[];
 }): Promise<RunInputDecision> {
   const response = await input.model.complete({
     runId: input.message.runId,
@@ -26,30 +28,21 @@ export async function decideRunInput(input: {
     systemPrompt: [
       "Interpret one user message steering an active plan-first Run. Return exactly one submit_run_input_decision call.",
       "answer: answer a progress/question using only the supplied persisted facts; unknowns remain unknown. The original goal continues. Use this only when the message asks for information and does not direct subsequent execution.",
-      "amend: the user changes or supplements the goal, scope, or execution constraints. Requests to finish, summarize now using existing evidence, or stop further acquisition change subsequent execution even when the delivery goal stays the same. Preserve every prior obligation unless the user explicitly supersedes it; retain missing facts as explicit caveats without claiming them verified. Provide the full effectiveGoal, full userConstraints and full taskIntent inventory, retaining stable targetIds for unchanged deliveries. The Runtime will revise and re-admit the Plan before acting, reusing existing bound Results.",
+      "amend: the user changes or supplements the goal, scope, or execution constraints. Requests to finish, summarize now using existing evidence, or stop further acquisition change subsequent execution even when the delivery goal stays the same. Preserve every prior obligation unless the user explicitly supersedes it; retain missing facts as explicit caveats without claiming them verified. Provide the full effectiveGoal and full userConstraints. Set taskIntent=null to explicitly preserve the current delivery inventory when only sources, methods, scope or execution constraints change. Supply a complete replacement taskIntent only when the requested outputs change, retaining stable targetIds for unchanged deliveries. The Runtime will revise and re-admit the Plan before acting, reusing existing bound Results.",
       "clarify: the message is ambiguous, contradicts an open HIL request, or requires a new attachment, source, permission, account or Runtime. Explain the precise missing decision. Never treat ordinary input as approval or an answer to a structured HIL request.",
       "cancel: only an explicit request to stop the current Run.",
       "Input does not grant new Tool, filesystem, model, Runtime or account authority. Source IDs and permissions remain bound.",
       "Use explanation as a concise user-visible answer/change explanation/question. Never claim an external action happened without its receipt.",
     ].join("\n"),
     runtimeContext: { id: `${input.message.runId}:input:${input.message.seq}`, phase: "planning",
-      content: JSON.stringify({ canonicalState: input.state, persistedEvidence: input.evidence, message: input.message }) },
+      content: JSON.stringify({ canonicalState: input.state, persistedEvidence: input.evidence, message: input.message, validationFeedback: input.feedback ?? [] }) },
     messages: [{ role: "user", content: input.message.text }],
     tools: [{ name: "submit_run_input_decision", description: "Submit a semantic input decision; no execution authority.", inputSchema: {
       type: "object", additionalProperties: false, required: ["kind", "explanation", "effectiveGoal", "userConstraints", "taskIntent"], properties: {
         kind: { type: "string", enum: ["answer", "amend", "clarify", "cancel"] }, explanation: { type: "string", minLength: 1, maxLength: 8000 },
         effectiveGoal: { type: ["string", "null"] }, userConstraints: nullableJsonSchema({ type: "array", items: { type: "string" } }),
-        taskIntent: { anyOf: [{ type: "null" }, { type: "object", additionalProperties: false,
-          required: ["schema", "operation", "requiresExecution", "deliverables"], properties: {
-            schema: { type: "string", enum: ["agentloop.conversationTaskIntent/v1"] },
-            operation: { type: "string", enum: ["answer", "lookup", "analysis", "create_artifact", "transform_artifact", "composite"] }, requiresExecution: { type: "boolean" },
-            deliverables: { type: "array", minItems: 1, maxItems: 8, items: { type: "object", additionalProperties: false,
-              required: ["targetId", "purpose", "expectedArtifactCount", "action", "kind", "surface", "format"], properties: {
-                targetId: { type: "string" }, purpose: { type: "string" }, expectedArtifactCount: { type: "integer", minimum: 1, maximum: 8 },
-                action: { type: "string", enum: ["none", "create", "modify", "transform"] }, kind: { type: "string", enum: ["none", "html", "document", "presentation", "spreadsheet", "image", "audio", "code"] },
-                surface: { type: "string", enum: ["conversation", "workspace_artifact"] }, format: { type: ["string", "null"] },
-              } } },
-          } }] },
+        taskIntent: { description: "For amend, null explicitly preserves the canonical delivery inventory; an object replaces it in full. For other decisions use null.",
+          anyOf: [{ type: "null" }, CONVERSATION_TASK_INTENT_SCHEMA] },
       },
     } }], toolChoice: { name: "submit_run_input_decision" },
   }, input.signal);
@@ -61,5 +54,12 @@ export async function decideRunInput(input: {
     || !value.explanation.trim() || value.explanation.length > 8000) throw new AppError("PLANNING_ERROR", "Input decision is malformed", 422);
   if (value.kind === "amend" && (typeof value.effectiveGoal !== "string" || !value.effectiveGoal.trim() || value.effectiveGoal.length > 16000
     || !Array.isArray(value.userConstraints) || value.userConstraints.some(v => typeof v !== "string" || v.length > 4000))) throw new AppError("PLANNING_ERROR", "Input amendment requires a complete goal and constraints", 422);
+  if (value.kind === "amend") {
+    let feedback = "An amendment must preserve or replace a non-empty canonical delivery inventory.";
+    const intent = parseConversationTaskIntent(value.taskIntent === null ? input.state?.intent.turnResolution?.taskIntent : value.taskIntent,
+      reason => { feedback = reason; });
+    if (intent === undefined || intent.deliverables.length === 0) throw new AppError("PLANNING_ERROR", feedback, 422, { decision: value });
+    return { ...value, taskIntent: intent } as unknown as RunInputDecision;
+  }
   return value as unknown as RunInputDecision;
 }

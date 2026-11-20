@@ -17,6 +17,7 @@ import type {
 } from "./types.ts";
 import { searchTaskGroupCandidates, taskGroupPatternFromRevision } from "./task-group.ts";
 import { SETTLEMENT_V2, SettlementV2Error, settleV2, settleV2Batch } from "./semantic-v2.ts";
+import { reviewMemoryApplications } from "./application-review.ts";
 
 function stableHash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value, (_key, nested) => {
@@ -362,6 +363,8 @@ export interface MemorySettlementRunResult {
   readonly settlementJobId?: string;
   readonly episodeRevisionId?: string;
   readonly reason?: string;
+  /** A batch summary never hides the independent outcome of a claimed job. */
+  readonly outcomes?: readonly MemorySettlementRunResult[];
 }
 
 /** Claims and settles one durable job. It is safe to call from a local timer. */
@@ -418,10 +421,21 @@ export class MemorySettlementWorker {
       }
       assertJobEvidenceScope(job, evidence);
       if (this.settlementPromptSchemaVersion === SETTLEMENT_V2 && this.settlementModel !== undefined) {
-        const result = await settleV2({ store: this.store, job, model: this.settlementModel, evidence,
-          consolidate: this.shouldConsolidate, now: this.now(), allowedRunIds: this.allowedRunIds });
+        // Fusion and application review have independent durable checkpoints.
+        // Always attempt both; a rejected new method cannot suppress feedback
+        // on an existing recalled method (or vice versa).
+        const failures: unknown[] = [];
+        let result: Awaited<ReturnType<typeof settleV2>> | undefined;
+        try {
+          await reviewMemoryApplications({ store: this.store, evidence, model: this.settlementModel, now: this.now() });
+        } catch (error) { failures.push(error); }
+        try {
+          result = await settleV2({ store: this.store, job, model: this.settlementModel, evidence,
+            consolidate: this.shouldConsolidate, now: this.now(), allowedRunIds: this.allowedRunIds });
+        } catch (error) { failures.push(error); }
+        if (failures.length) return this.finishFailedJob(job, failures);
         await this.store.finishSettlement({ job, now: this.now(), maxAttempts: this.maxAttempts, outcome: "succeeded" });
-        return { status: "succeeded", settlementJobId: job.settlementJobId, ...result };
+        return { status: "succeeded", settlementJobId: job.settlementJobId, ...result! };
       }
       if (this.settlementPromptSchemaVersion === SETTLEMENT_V2 && this.requireSettlementModel) throw new Error("settlement_model_required");
       const candidate = experienceCandidateFromEvidence(evidence);
@@ -471,10 +485,24 @@ export class MemorySettlementWorker {
         reason: baseCommitted === undefined ? "episode_already_exists" : "episode_committed",
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const finished = await this.store.finishSettlement({ job, now: this.now(), maxAttempts: error instanceof SettlementV2Error && !error.transient ? job.attempts : this.maxAttempts, outcome: "failed", error: message });
-      return { status: finished.status === "dead_letter" ? "dead_letter" : "retrying", settlementJobId: job.settlementJobId, reason: message };
+      return this.finishFailedJob(job, [error]);
     }
+  }
+
+  private async finishFailedJob(job: MemorySettlementJob, errors: readonly unknown[]): Promise<MemorySettlementRunResult> {
+    const message = errors.map(error => error instanceof Error ? error.message : String(error)).join("; ");
+    // Preserve each failed worker attempt separately from accepted model calls
+    // and the job's mutable last_error. No raw response, stack or DB value.
+    const issues = errors.flatMap(error => error instanceof SettlementV2Error ? error.issues : [{ path: "$.settlement", code:
+      error instanceof Error && /^memory_application_review:[a-z_;]+$/u.test(error.message) ? error.message : "settlement_runtime_failure" }]);
+    await this.store.recordSettlementAttempt(job, { stage: "settlement", schema: "agentloop.memorySettlementFailure/v1",
+      modelKey: this.settlementModel?.modelKey ?? "unavailable", inputHash: stableHash({ job: job.settlementJobId, attempt: job.attempts }),
+      candidateRevisionIds: [], status: "failed", elapsedMs: 0, errors: issues.slice(0, 16) });
+    // A separate retryable review must not lose its retry budget merely
+    // because fusion rejected a different piece of work in the same job.
+    const permanent = errors.every(error => error instanceof SettlementV2Error && !error.transient);
+    const finished = await this.store.finishSettlement({ job, now: this.now(), maxAttempts: permanent ? job.attempts : this.maxAttempts, outcome: "failed", error: message });
+    return { status: finished.status === "dead_letter" ? "dead_letter" : "retrying", settlementJobId: job.settlementJobId, reason: message };
   }
 
   private async runBatchOnce(): Promise<MemorySettlementRunResult> {
@@ -505,10 +533,31 @@ export class MemorySettlementWorker {
         assertJobEvidenceScope(job, evidence);
         evidences.push(evidence);
       }
-      if (this.settlementModel === undefined) throw new Error("settlement_model_required");
-      const result = await settleV2Batch({ store: this.store, jobs, model: this.settlementModel, evidences, consolidate: this.shouldConsolidate, now: this.now() });
-      for (const job of jobs) await this.store.finishSettlement({ job, now: this.now(), maxAttempts: this.maxAttempts, outcome: "succeeded" });
-      return { status: "succeeded", settlementJobId: jobs[0]!.settlementJobId, episodeRevisionId: result.episodeRevisionIds[0], reason: result.reason };
+      const failures = new Map<string, unknown[]>();
+      const failed = (job: MemorySettlementJob, error: unknown) => failures.set(job.settlementJobId, [...failures.get(job.settlementJobId) ?? [], error]);
+      // Existing knowledge feedback need not wait for new-method fusion.
+      for (const [index, evidence] of evidences.entries()) {
+        try { await reviewMemoryApplications({ store: this.store, evidence, model: this.settlementModel, now: this.now() }); }
+        catch (error) { failed(jobs[index]!, error); }
+      }
+      let result: Awaited<ReturnType<typeof settleV2Batch>> | undefined;
+      try {
+        if (this.settlementModel === undefined) throw new Error("settlement_model_required");
+        result = await settleV2Batch({ store: this.store, jobs, model: this.settlementModel, evidences, consolidate: this.shouldConsolidate, now: this.now(),
+          onGroupError: async (error, groupJobs) => { for (const job of groupJobs) failed(job, error); } });
+      } catch (error) { for (const job of jobs) failed(job, error); }
+      const outcomes: MemorySettlementRunResult[] = [];
+      for (const job of jobs) {
+        const errors = failures.get(job.settlementJobId);
+        if (errors) outcomes.push(await this.finishFailedJob(job, errors));
+        else {
+          await this.store.finishSettlement({ job, now: this.now(), maxAttempts: this.maxAttempts, outcome: "succeeded" });
+          outcomes.push({ status: "succeeded", settlementJobId: job.settlementJobId });
+        }
+      }
+      const failure = outcomes.find(item => item.status === "retrying") ?? outcomes.find(item => item.status === "dead_letter");
+      return { ...(failure ?? { status: "succeeded" as const, settlementJobId: jobs[0]!.settlementJobId }),
+        episodeRevisionId: result?.episodeRevisionIds[0], reason: failure?.reason ?? result?.reason, outcomes };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       for (const job of jobs) await this.store.finishSettlement({ job, now: this.now(), maxAttempts: error instanceof SettlementV2Error && !error.transient ? job.attempts : this.maxAttempts, outcome: "failed", error: message });

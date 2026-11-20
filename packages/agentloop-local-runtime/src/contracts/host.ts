@@ -50,6 +50,12 @@ export interface ResolvedLocalRuntimeConfiguration {
   /** Account-scoped web search configuration. The API key is resolved only
    * inside the Runtime factory and is never part of the management projection. */
   readonly webSearch?: WebToolsOptions;
+  /** Safe account configuration state, retained even when executable tools cannot load. */
+  readonly webSearchAvailability?: {
+    readonly enabled: boolean;
+    readonly credentialConfigured: boolean;
+    readonly unavailableReason?: string;
+  };
   readonly memory?: { readonly enabled: boolean; readonly settlementModelKey?: string };
 }
 

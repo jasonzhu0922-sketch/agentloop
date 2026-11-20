@@ -513,7 +513,31 @@ test("Planner budgets the complete method rather than large provenance and prese
   assert.equal(await memory.recall({ ...request, runId: "runB" }), undefined);
   assert.equal(await memory.recall({ ...request, taskFingerprint: { taskKind: "unrelated" } }), undefined);
   assert.equal(await memory.recall({ ...request, stepContext: { goal: "Write a poem about mountains" } }), undefined);
+  assert.equal(await memory.recall({ ...request, stepContext: { goal: " \n" } }), undefined, "blank goals cannot match an experience merely by fingerprint");
   await memory.store.commit(scopes.runA, { ...candidate, id: "long-method", proposedValue: { ...candidate.proposedValue,
     settlementPattern: { ...pattern, classicPath: steps.map(step => ({ ...step, objective: "Long substantive method ".repeat(200) })) } } }, 1_700_000_000_001);
   assert.equal(await memory.recall(request), undefined, "large method content still counts even when its audit data is excluded");
+});
+
+test("structured global interaction scope persists through SQLite reload without a subtype adapter", async () => {
+  const db = new AppDatabase(":memory:");
+  try {
+    const create = () => createLocalMemoryPlugin({database: db, resolveRunScope: async runId => scopes[runId]});
+    const memory = await create();
+    const quote = "以后交流时每次用我指定的无障碍表达方式";
+    const result = await memory.commitExplicit({runId: "runA", messageId: "global-mode", userText: quote,
+      memoryIntents: [preference("accessibility.conversation_style", {style: "Use the chosen accessible interaction style"}, {
+        sourceQuote: quote, contentMarkdown: "用户指定跨话题的无障碍交流风格。", applicability: {scope: "global_interaction", conditions: [], exclusions: []},
+      })]});
+    assert.equal(result.kind, "committed");
+    const reloaded = await create();
+    const p = await reloaded.recall({runId: "runA2", target: "response", stepContext: {goal: "修复服务中的异步错误"}, budget: {maxItems: 6, maxTokens: 1200}});
+    assert.equal(p?.preferences?.[0]?.applicability?.scope, "global_interaction");
+    assert.match(p!.retrievalReasons[0], /scope=global_interaction/);
+    const bad = await reloaded.commitExplicit({runId: "runA2", messageId: "invalid-target", userText: quote,
+      memoryIntents: [preference("accessibility.invalid_target", {style: "A convention"}, {
+        sourceQuote: quote, applicationTargets: ["planner"], applicability: {scope: "global_interaction", conditions: [], exclusions: []},
+      })]});
+    assert.equal(bad.kind, "not_applicable");
+  } finally { await db.close(); }
 });

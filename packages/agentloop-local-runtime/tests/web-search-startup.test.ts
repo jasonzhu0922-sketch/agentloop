@@ -45,6 +45,7 @@ for (const missing of ["file", "reference", "api-key"] as const) {
     for (const call of calls) {
       assert.equal(call.integrationEnvironment.WEB_SEARCH_DISABLED, "1");
       assert.equal(call.webSearch, undefined);
+      assert.deepEqual(call.webSearchAvailability, { enabled: true, credentialConfigured: false, unavailableReason: "web_search_credentials_missing" });
     }
     for (const id of ["default", child.id]) {
       const runtime = manager.runtime(id);
@@ -55,6 +56,14 @@ for (const missing of ["file", "reference", "api-key"] as const) {
         await setTimeout(10); run = await runtime.getRun(context, run.id);
       }
       assert.equal(run.status, "completed");
+      const events = await runtime.events(context, run.id);
+      const configured = events.find(event => event.type === "runtime.capability_snapshot.created" && (event.data.snapshot as any).scope === "runtime_configured")!.data.snapshot as any;
+      const search = configured.sources.find((source: any) => source.label === "Web search");
+      assert.equal(search.state, "load_failed");
+      assert.equal(search.unavailableReason, "web_search_credentials_missing");
+      assert.deepEqual(search.operations, []);
+      assert.ok(!JSON.stringify(configured).includes("synthetic-search-key"));
+      assert.ok(!JSON.stringify(configured).includes("search.example"));
     }
     await manager.restartRuntime("default");
     assert.equal((await manager.runtimes())[0]?.status, "ready");

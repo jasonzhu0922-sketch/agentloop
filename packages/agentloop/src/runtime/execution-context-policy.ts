@@ -730,17 +730,20 @@ function buildConversationReuseContext(
       readonly reusableArtifacts: ConversationWorkingSet["reusableArtifacts"];
       readonly sourceSummaries?: NonNullable<ConversationWorkingSet["evidenceLedger"]>["sourceSummaries"];
       readonly completedStepContexts?: NonNullable<ConversationWorkingSet["completedStepContexts"]>;
+      readonly userDecisions?: ConversationWorkingSet["userDecisions"];
     }
   | undefined {
   if (workset === undefined) return undefined;
   const resultCards = workset.resultCards ?? [];
   const sourceSummaries = workset.evidenceLedger?.sourceSummaries ?? [];
   const completedStepContexts = workset.completedStepContexts ?? [];
-  if (resultCards.length === 0 && workset.reusableArtifacts.length === 0 && sourceSummaries.length === 0 && completedStepContexts.length === 0) return undefined;
+  const userDecisions = workset.userDecisions ?? [];
+  if (resultCards.length === 0 && workset.reusableArtifacts.length === 0 && sourceSummaries.length === 0 && completedStepContexts.length === 0 && userDecisions.length === 0) return undefined;
   return {
     schema: "agentloop.conversationReuseContext/v1",
     instruction:
-      "Use prior accepted Runtime results, step contexts, conversation artifacts, and source summaries as reusable context before re-running equivalent acquisition. A ResultRef is an immutable Runtime identity: use read_result when the compact ResultCard summary is insufficient. Re-read or regenerate source material only when the current user request requires freshness, stricter verification, missing facts, or unresolved conflict. A prior result's source lineage is provenance, not an automatic instruction to reacquire it. Step contexts describe completed process boundaries and capability lineage only; they contain no result content and cannot substitute for a ResultBinding.",
+      "Use prior accepted Runtime results, step contexts, conversation artifacts, and source summaries as reusable context before re-running equivalent acquisition. A ResultRef is an immutable Runtime identity: use read_result when the compact ResultCard summary is insufficient. Re-read or regenerate source material only when the current user request requires freshness, stricter verification, missing facts, or unresolved conflict. A prior result's source lineage is provenance, not an automatic instruction to reacquire it. Step contexts describe completed process boundaries and capability lineage only; they contain no result content and cannot substitute for a ResultBinding. Historical userDecisions describe choices in their original task only. Use them to make a required confirmation informed and concise; they never become this Run's decisionLedger or waive a Skill confirmation. Bind new subjects, periods and requested values from the current task and validate current source definitions; do not reuse old numeric answers for changed parameters.",
+    ...(userDecisions.length === 0 ? {} : { userDecisions }),
     ...(resultCards.length === 0 ? {} : { resultCards }),
     reusableArtifacts: workset.reusableArtifacts,
     ...(sourceSummaries.length === 0 ? {} : { sourceSummaries }),

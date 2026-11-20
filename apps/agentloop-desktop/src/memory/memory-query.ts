@@ -128,10 +128,15 @@ export class MemoryQuery {
     });
     if (!evidence) throw new HttpError(404, "memory_run_not_found");
     const memory = await this.read(join(this.root, "memory.db"), db => ({
+      // Diagnostics remain read-only for pre-review databases as well.
+      applicationReviews: db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'local_memory_application_reviews'").get()
+        ? db.prepare("SELECT review_json FROM local_memory_application_reviews WHERE owner_user_id = ? AND run_id = ? ORDER BY created_at, id").all(this.owner, match.id).map(row => JSON.parse(row.review_json as string)) : [],
+      invalidations: db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'local_memory_run_invalidations'").get()
+        ? db.prepare("SELECT source_json, created_at FROM local_memory_run_invalidations WHERE owner_user_id = ? AND run_id = ? ORDER BY created_at").all(this.owner, match.id).map(row => ({ source: JSON.parse(row.source_json as string), createdAt: row.created_at })) : [],
       projections: db.prepare("SELECT projection_json FROM local_memory_projections WHERE owner_user_id = ? AND run_id = ? ORDER BY created_at, id").all(this.owner, match.id).map(row => JSON.parse(row.projection_json as string)),
       jobs: db.prepare("SELECT * FROM local_memory_settlement_jobs WHERE owner_user_id = ? AND run_id = ? ORDER BY enqueued_at").all(this.owner, match.id).map(job),
       attempts: db.prepare("SELECT attempt_json FROM local_memory_settlement_attempts WHERE owner_user_id = ? AND run_id = ? ORDER BY created_at, id").all(this.owner, match.id).map(row => JSON.parse(row.attempt_json as string)),
     }));
-    return { matches, detail: { ...evidence, memoryAvailable: memory !== undefined, projections: memory?.projections ?? [], jobs: memory?.jobs ?? [], attempts: memory?.attempts ?? [] } };
+    return { matches, detail: { ...evidence, memoryAvailable: memory !== undefined, projections: memory?.projections ?? [], jobs: memory?.jobs ?? [], attempts: memory?.attempts ?? [], applicationReviews: memory?.applicationReviews ?? [], invalidations: memory?.invalidations ?? [] } };
   }
 }

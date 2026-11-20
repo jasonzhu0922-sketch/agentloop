@@ -30,6 +30,8 @@ export interface RuntimeCapabilitySnapshotSource {
   readonly label: string;
   readonly transport?: string;
   readonly state: RuntimeCapabilitySourceState;
+  /** Host-observed availability failure; never a credential or configuration value. */
+  readonly unavailableReason?: string;
   readonly capabilities: readonly RuntimeCapabilitySnapshotCapability[];
   readonly operations: readonly RuntimeCapabilitySnapshotOperation[];
 }
@@ -53,6 +55,7 @@ export interface RuntimeCapabilitySnapshotSourceInput {
   readonly label: string;
   readonly transport?: string;
   readonly state: RuntimeCapabilitySourceState;
+  readonly unavailableReason?: string;
   readonly capabilities?: readonly ToolSourceCapability[];
   readonly operations?: readonly RuntimeCapabilitySnapshotOperation[];
   readonly identityValues?: readonly string[];
@@ -94,16 +97,18 @@ export function createRuntimeCapabilitySnapshotFromSources(input: {
     label: string;
     transport?: string;
     state: RuntimeCapabilitySourceState;
+    unavailableReason?: string;
     capabilities: Map<string, RuntimeCapabilitySnapshotCapability>;
     operations: Map<string, RuntimeCapabilitySnapshotOperation>;
   }>();
   for (const item of input.sources) {
     const identities = item.identityValues ?? [];
-    const key = JSON.stringify([item.label, item.transport ?? "", item.state]);
+    const key = JSON.stringify([item.label, item.transport ?? "", item.state, item.unavailableReason ?? ""]);
     const source = sources.get(key) ?? {
       label: item.label,
       ...(item.transport === undefined ? {} : { transport: item.transport }),
       state: item.state,
+      ...(item.unavailableReason === undefined ? {} : { unavailableReason: redactUnsafeMetadata(redactSourceIdentity(item.unavailableReason, identities)) }),
       capabilities: new Map(),
       operations: new Map(),
     };
@@ -128,6 +133,7 @@ export function createRuntimeCapabilitySnapshotFromSources(input: {
       label: source.label,
       ...(source.transport === undefined ? {} : { transport: source.transport }),
       state: source.state,
+      ...(source.unavailableReason === undefined ? {} : { unavailableReason: source.unavailableReason }),
       capabilities: Object.freeze([...source.capabilities.values()].sort(compareCapability)),
       operations: Object.freeze([...source.operations.values()]
         .sort((left, right) => left.label.localeCompare(right.label, "en"))
@@ -148,6 +154,7 @@ export function freezeRuntimeCapabilitySnapshot(
       label: source.label,
       ...(source.transport === undefined ? {} : { transport: source.transport }),
       state: source.state,
+      ...(source.unavailableReason === undefined ? {} : { unavailableReason: source.unavailableReason }),
       capabilities: source.capabilities,
       operations: source.operations,
     })),

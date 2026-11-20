@@ -5,6 +5,12 @@ const SECRET_MARKERS = /(?:password|passwd|token|cookie|private\s*key|secret|密
 
 export function evaluateCandidate(candidate: MemoryCandidate, now?: number): MemoryPolicyDecision {
   if (candidate.proposedApplicability !== undefined && !isMemoryApplicability(candidate.proposedApplicability)) return { kind: "reject", reason: "applicability_invalid" };
+  if (candidate.proposedApplicability?.scope === "global_interaction" && (candidate.proposedKind !== "preference"
+    || !["explicit_user", "user_confirmed"].includes(candidate.authority)
+    || candidate.applicationTargets.some(target => !["response", "human_loop"].includes(target))
+    || !candidate.sourceRefs.some(ref => ["user_message", "user_setting"].includes(ref.type)))) {
+    return { kind: "reject", reason: "global_interaction_requires_explicit_interaction_preference" };
+  }
   const validFrom = candidate.validFrom ?? now;
   if ([candidate.validFrom, candidate.expiresAt].some(value => value !== undefined && (!Number.isFinite(value) || value < 0))
     || candidate.expiresAt !== undefined && validFrom !== undefined && candidate.expiresAt <= validFrom) return { kind: "reject", reason: "validity_interval_invalid" };

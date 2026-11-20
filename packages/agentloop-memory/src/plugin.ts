@@ -8,8 +8,11 @@ import type {
 } from "@zhujun/agentloop";
 import type { SqlConnection } from "@zhujun/agentloop";
 import { evaluateCandidate } from "./policy.ts";
-import { applicabilityMatches, relevanceScore } from "./applicability.ts";
+import { applicabilityMatches } from "./applicability.ts";
+import { rankMemoryRevisions } from "./retrieval.ts";
+import { createSemanticRecall, type SemanticRecallResult } from "./semantic-recall.ts";
 import { REUSABLE_LEARNING_CONTRACT } from "./learning-paradigm.ts";
+import { isDecisionCandidate, projectedKnowledgeBindings, type KnowledgeUnit } from "./knowledge.ts";
 import { isMemoryApplicability } from "@zhujun/agentloop";
 import { SqliteMemoryStore } from "./sqlite-store.ts";
 import type {
@@ -48,6 +51,7 @@ function legacyCandidate(input: Parameters<NonNullable<MemoryPluginOptions["reso
       authority: "explicit_user",
       sensitivity: "normal",
       proposedPreferenceEffect: "default",
+      proposedApplicability: { scope: "global_interaction", conditions: [], exclusions: [] },
       activation: { mode: "always" },
       applicationTargets: ["response", "human_loop"],
       sourceRefs: [{ type: "user_message", runId: input.scope.runId, messageId: input.messageId }],
@@ -182,6 +186,7 @@ export function createMemoryPlugin(options: MemoryPluginOptions): AgentLoopMemor
   const store = options.store;
   const now = options.now ?? (() => Date.now());
   const projectionTtlMs = options.projectionTtlMs ?? 5 * 60_000;
+  const semanticRecall = options.recallModel ? createSemanticRecall(options.recallModel) : undefined;
 
   const plugin: AgentLoopMemoryPlugin = {
     name: "agentloop-memory",
@@ -189,34 +194,84 @@ export function createMemoryPlugin(options: MemoryPluginOptions): AgentLoopMemor
     recall: async (input): Promise<MemoryProjection | undefined> => {
       const scope = await options.resolveRunScope(input.runId);
       if (scope === undefined) return undefined;
-      const epoch = await store.currentEpoch(scope);
       const active = await store.active(scope);
+      const invalidatedRuns = new Set(await store.invalidatedRuns(scope));
       const currentNow = now();
       const context = { ...input.taskFingerprint, ...input.stepContext };
-      const matching = active
+      const eligible = active
+        .filter(({ item, revision }) => item.subtype !== "experience.knowledge" || knowledgeOriginCurrent(revision, active))
+        .filter(({ item, revision }) => !input.stepContext?.knowledgeOnly || item.subtype === "experience.knowledge")
+        .filter(({ revision }) => !input.stepContext?.knowledgeLayer || (revision.value.taskKnowledge as Record<string, unknown> | undefined)?.layer === input.stepContext.knowledgeLayer)
+        // A concurrent worker may still publish an older evidence snapshot.
+        // Durable invalidations fence it out until clean knowledge is published.
+        .filter(({ item, revision }) => item.kind !== "experience" || !Array.isArray(revision.value.knowledgeUnits)
+          || !(revision.value.knowledgeUnits as KnowledgeUnit[]).some(unit => (unit.status === "verified" || isDecisionCandidate(unit)) && unit.supports.some(support => invalidatedRuns.has(support.runId))))
         .filter(({ revision }) => revision.applicationTargets.includes(input.target))
         .filter(({ item, revision }) => input.target !== "planner" || item.kind !== "experience" || revision.experienceMaturity === "procedure")
         .filter(({ item, revision }) => item.kind !== "experience" || revision.value.settlementPromptSchemaVersion === "agentloop.semanticSettlement/v2")
         .filter(({ item, revision }) => item.kind !== "experience" || revision.value.learningContract === REUSABLE_LEARNING_CONTRACT)
         .filter(({ revision }) => activationApplies(revision, input.taskFingerprint, currentNow))
-        .filter(({ revision }) => revision.validFrom <= currentNow && applicabilityMatches(revision.applicability, context))
-        .map(entry => ({ ...entry, relevance: relevanceScore(entry.revision, context.goal) }))
-        .filter(({ item, relevance }) => item.kind !== "experience" || typeof context.goal !== "string" || relevance > 0)
+        .filter(({ revision }) => revision.validFrom <= currentNow && applicabilityMatches(revision.applicability, context));
+      const scores = rankMemoryRevisions(eligible.map(entry => entry.revision), typeof context.goal === "string" ? context.goal : "", context);
+      // This explicit typed scope concerns HOW to interact, independently of
+      // the task topic. Owner, target, activation and selectors still apply.
+      const globalInteraction = new Set(eligible.filter(({ item, revision }) => item.kind === "preference"
+        && revision.applicability.scope === "global_interaction"
+        && ["explicit_user", "user_confirmed"].includes(revision.authority)
+        && ["response", "human_loop"].includes(input.target)).map(entry => entry.revision.id));
+      const semantic: SemanticRecallResult = typeof context.goal === "string" && semanticRecall
+        ? await semanticRecall(input.runId, context.goal, eligible.filter(entry => !globalInteraction.has(entry.revision.id)).sort((a, b) =>
+          scores.get(b.revision.id)!.score - scores.get(a.revision.id)!.score
+          || scores.get(b.revision.id)!.fingerprint - scores.get(a.revision.id)!.fingerprint
+          || b.revision.createdAt - a.revision.createdAt).map(entry => entry.revision), JSON.stringify([scope.tenantId, scope.ownerUserId]))
+        : { status: "disabled", judgments: new Map(), candidateRevisionIds: [], elapsedMs: 0 };
+      // A relevance model can take seconds. Revocation, replacement or feedback
+      // during that await must fence out the old snapshot before publication.
+      const currentActive = await store.active(scope);
+      const currentActiveIds = new Set(currentActive.map(entry => entry.revision.id));
+      const currentInvalidations = new Set(await store.invalidatedRuns(scope));
+      const projectionEpoch = await store.currentEpoch(scope);
+      const matching = eligible
+        .filter(({ item, revision }) => item.subtype !== "experience.knowledge" || knowledgeOriginCurrent(revision, currentActive))
+        .filter(({ revision }) => currentActiveIds.has(revision.id)
+          && !(Array.isArray(revision.value.knowledgeUnits) && (revision.value.knowledgeUnits as KnowledgeUnit[])
+            .some(unit => (unit.status === "verified" || isDecisionCandidate(unit)) && unit.supports.some(support => currentInvalidations.has(support.runId)))))
+        .map(entry => {
+          const judgment = semantic.judgments.get(entry.revision.id);
+          const semanticScore = judgment?.relevant && judgment.confidence >= 0.8 ? judgment.confidence : 0;
+          return { ...entry, retrieval: { ...scores.get(entry.revision.id)!, semantic: semanticScore },
+            relevance: scores.get(entry.revision.id)!.score + semanticScore + Number(globalInteraction.has(entry.revision.id)),
+            // An uncertain or negative topic judgment is not permission to
+            // apply a convention. This policy is the same for every target.
+            excluded: judgment !== undefined && (!judgment.relevant || judgment.confidence < 0.8) };
+        })
+        .filter(entry => !entry.excluded)
+        .filter(({ item, relevance }) => item.kind !== "experience" || typeof context.goal !== "string" || !!context.goal.trim() && relevance > 0)
+        .filter(({ relevance }) => typeof context.goal !== "string" || !context.goal.trim() || relevance > 0)
         .sort((a, b) => {
-          const priority = (entry: typeof a) => (entry.item.kind === "preference" ? 2 : entry.item.kind === "fact" ? 1 : 0);
+          // Relevant methods must not be starved by unconditional topic defaults.
+          // Explicit constraints still precede advisory guidance.
+          const priority = (entry: typeof a) => input.target === "planner"
+            ? Number(entry.revision.preferenceEffect === "constraint")
+            : (entry.item.kind === "preference" ? 2 : entry.item.kind === "fact" ? 1 : 0);
           return priority(b) - priority(a) || b.relevance - a.relevance || b.revision.createdAt - a.revision.createdAt;
         });
-      if (matching.length === 0) return undefined;
       const bounded = boundEntries(matching, input.budget.maxTokens, (entries) => compileProjection({
-        runId: input.runId, target: input.target, memoryEpoch: epoch, entries,
+        runId: input.runId, target: input.target, memoryEpoch: projectionEpoch, entries,
         taskFingerprint: input.taskFingerprint, stepContext: input.stepContext,
         now: currentNow, expiresAt: currentNow + projectionTtlMs,
       }), input.budget.maxItems);
+      await input.onDiagnostic?.({
+        eligibleRevisionIds: eligible.map(entry => entry.revision.id), semanticStatus: semantic.status, semanticElapsedMs: semantic.elapsedMs,
+        semanticScores: [...semantic.judgments].map(([revisionId, judgment]) => ({ revisionId, ...judgment })),
+        projectedRevisionIds: bounded.map(entry => entry.revision.id),
+        budgetExcludedRevisionIds: matching.filter(entry => !bounded.includes(entry)).map(entry => entry.revision.id),
+      });
       if (bounded.length === 0) return undefined;
       const projection = compileProjection({
         runId: input.runId,
         target: input.target,
-        memoryEpoch: epoch,
+        memoryEpoch: projectionEpoch,
         entries: bounded,
         taskFingerprint: input.taskFingerprint,
         stepContext: input.stepContext,
@@ -282,6 +337,13 @@ export function createMemoryPlugin(options: MemoryPluginOptions): AgentLoopMemor
   return Object.assign(plugin, { store });
 }
 
+function knowledgeOriginCurrent(revision: MemoryRevision, active: Awaited<ReturnType<MemoryStore["active"]>>): boolean {
+  return active.some(entry => entry.item.subtype === "experience.independent_knowledge" && entry.item.id === revision.value.knowledgeLedgerId
+    && entry.revision.id === revision.value.knowledgeLedgerRevisionId && entry.revision.value.contradicted !== true
+    && (entry.revision.value.knowledgeUnit as KnowledgeUnit | undefined)?.id === (revision.value.taskKnowledge as Record<string, unknown> | undefined)?.knowledgeId
+    && ((entry.revision.value.knowledgeUnit as KnowledgeUnit).status === "verified" || isDecisionCandidate(entry.revision.value.knowledgeUnit as KnowledgeUnit)));
+}
+
 export async function createLocalMemoryPlugin(
   options: Omit<MemoryPluginOptions, "store"> & { readonly database: SqlConnection },
 ): Promise<AgentLoopMemoryPlugin & { readonly store: SqliteMemoryStore }> {
@@ -323,7 +385,7 @@ function projectionPayload(projection: MemoryProjection): unknown {
   if (projection.target === "response" || projection.target === "human_loop") return {
     preferences, facts: projection.facts?.map(({ subtype, value, applicability }) => ({ subtype, value, applicability })),
   };
-  return { preferences, augmentations: "augmentations" in projection
+  return { preferences, knowledgeCards: "knowledgeCards" in projection ? projection.knowledgeCards : [], augmentations: "augmentations" in projection
     ? projection.augmentations.map(({ contentMarkdown, applicability }) => ({ contentMarkdown, applicability })) : [] };
 }
 
@@ -351,7 +413,8 @@ function compileProjection(input: {
   readonly runId: string;
   readonly target: MemoryApplicationTarget;
   readonly memoryEpoch: number;
-  readonly entries: readonly { readonly item: { readonly kind: string; readonly subtype: string }; readonly revision: MemoryRevision }[];
+  readonly entries: readonly { readonly item: { readonly kind: string; readonly subtype: string }; readonly revision: MemoryRevision;
+    readonly retrieval?: { readonly lexical: number; readonly character: number; readonly fingerprint: number; readonly semantic?: number } }[];
   readonly taskFingerprint?: Readonly<Record<string, unknown>>;
   readonly stepContext?: Readonly<Record<string, unknown>>;
   readonly now: number;
@@ -364,7 +427,7 @@ function compileProjection(input: {
     target: input.target,
     memoryEpoch: input.memoryEpoch,
     memoryRevisionIds: input.entries.map(({ revision }) => revision.id),
-    retrievalReasons: input.entries.map(({ item }) => `${item.kind}:${item.subtype}`),
+    retrievalReasons: input.entries.map(({ item, revision, retrieval }) => `${item.kind}:${item.subtype}${revision.applicability.scope === "global_interaction" ? ";scope=global_interaction" : ""}${retrieval ? `;hybrid:lexical=${retrieval.lexical.toFixed(3)},character=${retrieval.character.toFixed(3)},fingerprint=${retrieval.fingerprint},semantic=${retrieval.semantic ?? 0}` : ""}`),
     projectionContextHash: hash({ taskFingerprint: input.taskFingerprint, stepContext: input.stepContext }),
     createdAt: input.now,
     expiresAt: input.expiresAt,
@@ -470,11 +533,12 @@ function compileProjection(input: {
             .filter(warning => !revision.applicability.exclusions.includes(warning)),
           confidence: revision.confidence,
           sourceRefs: [revision.id],
+          knowledgeBindings: projectedKnowledgeBindings(revision.value),
           scope: revision.applicability,
           requiresVerification: true,
           reuse: pattern?.reuse as import("./types.ts").ExperienceSettlementPattern["reuse"],
           reusableKnowledge: Array.isArray(pattern?.reusableKnowledge) ? pattern.reusableKnowledge.filter(isRecord).map(item => methodFields(item,
-            ["id", "kind", "rule", "trigger", "decision", "rationale", "action", "verification", "conditions", "exclusions", "expectedEvidence", "recheckRules"])) : [],
+            ["id", "kind", "rule", "trigger", "decision", "rationale", "action", "operation", "verification", "conditions", "exclusions", "expectedEvidence", "recheckRules"])) : [],
           failureLessons: Array.isArray(pattern?.failureLessons) ? pattern.failureLessons.filter(isRecord).map(item => methodFields(item,
             ["id", "lesson", "trigger", "symptom", "rootCause", "causeStatus", "doDifferently", "nextAction", "verification", "applicability", "exclusions"])) : [],
         };
@@ -484,7 +548,10 @@ function compileProjection(input: {
     projection = {
       ...base,
       target: input.target,
-      augmentations: input.entries.map(({ item, revision }) => ({
+      knowledgeCards: input.entries.filter(({ item }) => item.subtype === "experience.knowledge").map(({ revision }) => ({
+        ...revision.value.taskKnowledge as object, memoryRevisionId: revision.id, applicability: revision.applicability,
+      })),
+      augmentations: input.entries.filter(({ item }) => item.subtype !== "experience.knowledge").map(({ item, revision }) => ({
         id: revision.id,
         contentMarkdown: item.kind === "preference" ? `${revision.contentMarkdown}\n${JSON.stringify(revision.value)}` : revision.contentMarkdown,
         reason: `${item.kind}:${item.subtype}`,

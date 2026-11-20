@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
-import { createMemoryPlugin, InMemoryMemoryStore, MemorySettlementWorker, SqliteMemoryStore, SETTLEMENT_V2, settleV2Batch, REUSABLE_LEARNING_CONTRACT } from "../src/index.ts";
+import { createMemoryPlugin, InMemoryMemoryStore, MemorySettlementWorker, SqliteMemoryStore, SETTLEMENT_V2, settleV2Batch, REUSABLE_LEARNING_CONTRACT, reconcileMemoryFeedback } from "../src/index.ts";
 import type { MemorySettlementEvidence, MemorySettlementModel, MemoryStore } from "../src/types.ts";
+import { comparisonFixture } from "./fixtures/knowledge-comparison.ts";
 
 const scope = { tenantId: "device", ownerUserId: "alice" };
 function evidence(runId: string): MemorySettlementEvidence {
@@ -33,21 +34,27 @@ function learning(ref = "step_1"): Record<string, any> {
 function model(handler?: (input: Record<string, any>, output: Record<string, any>) => void): MemorySettlementModel {
   return { modelKey: "local:test", complete: async ({ input }) => {
     const value = input as Record<string, any>;
+    if (value.stage === "selection") return { content: JSON.stringify({ matches: value.candidates.map((item: any) => ({ id: item.id, relevance: 0.95 })) }) };
     if (value.stage === "grouping") {
       const groups = new Map<string, string[]>();
       for (const item of value.cases) groups.set(item.goal, [...(groups.get(item.goal) ?? []), item.id]);
       return { content: JSON.stringify({ schema: "agentloop.experienceFamilies/v1", groups: [...groups.values()].map(caseIds => ({ caseIds, rationale: "Fixture cases share a mechanism" })) }) };
     }
-    const output = learning(value.stage === "fusion" ? "episode_1_observation_1" : "observation_1");
-    if (value.stage === "fusion") {
+    const output = value.comparisonContract ? structuredClone(value.independentLearning) : learning(Object.hasOwn(value.sources, "episode_1_observation_1") ? "episode_1_observation_1" : "observation_1");
+    if (value.episodes) {
       const observed = Object.keys(value.sources).filter(ref => /^episode_\d+_observation_1$/.test(ref));
       const refs = observed.length ? observed : Object.keys(value.sources).filter(ref => /^episode_\d+_step_1$/.test(ref));
       output.classicPath[0].evidenceRefs = refs;
       output.toolUsage[0].evidenceRefs = refs;
     }
-    if (value.stage === "fusion") output.merge = { decision: value.candidateGroupIds.length ? "reinforce" : "new", ...(value.candidateGroupIds.length ? { targetGroupId: value.candidateGroupIds[0] } : {}), supportingEpisodeIds: value.episodeIds, conflicts: [] };
+    if (value.episodes || value.stage === "fusion") output.merge = { decision: value.candidateGroupIds.length ? "reinforce" : "new", ...(value.candidateGroupIds.length ? { targetGroupId: value.candidateGroupIds[0] } : {}), supportingEpisodeIds: value.episodeIds, conflicts: [] };
     handler?.(value, output);
-    return { content: JSON.stringify(output), usage: { inputTokens: 100, outputTokens: 50 } };
+    output.executionReview ??= [{ finding: "The supplied execution inspected current definitions and collected scoped evidence", status: "observed", evidenceRefs: Object.keys(value.sources).filter(ref => !ref.startsWith("group_") && /observation_\d+$/.test(ref)).slice(0, 1).length
+      ? Object.keys(value.sources).filter(ref => !ref.startsWith("group_") && /observation_\d+$/.test(ref)).slice(0, 1) : Object.keys(value.sources).filter(ref => !ref.startsWith("group_")).slice(0, 1) }];
+    for (const row of [...output.classicPath, ...output.reusableKnowledge, ...output.failureLessons]) row.evidenceAssessment ??= {
+      status: "supported", rationale: "Fixture evidence supports this bounded method", evidenceRefs: row.evidenceRefs, limitations: [],
+    };
+    return { content: JSON.stringify(comparisonFixture(value, output)), usage: { inputTokens: 100, outputTokens: 50 } };
   } };
 }
 async function settle(store: MemoryStore, runId: string, settlementModel = model(), override: Partial<MemorySettlementEvidence> = {}) {
@@ -55,6 +62,76 @@ async function settle(store: MemoryStore, runId: string, settlementModel = model
   await store.enqueueSettlement({ scope: value.scope, runId, terminalCommitRef: value.terminalCommitRef, now: 1000 });
   return new MemorySettlementWorker({ store, reader: { read: async () => value }, settlementModel, requireSettlementModel: true, consolidate: true, now: () => 1000, allowedRunIds: undefined }).runOnce();
 }
+
+test("fusion exposes admitted knowledge identities and never counts a forged target as support", async () => {
+  const store = new InMemoryMemoryStore();
+  assert.equal((await settle(store, "identity-one")).status, "succeeded");
+  let fusionCalls = 0;
+  const fixture = model((input, output) => {
+    if (input.stage !== "fusion" || !input.similarTaskGroups?.length) return;
+    const target = input.similarTaskGroups[0].knowledge.find((unit: any) => unit.section === "classicPath");
+    output.knowledgeRelations = [{ claimRef: "classicPath", targetKnowledgeId: ++fusionCalls === 1 ? "invented-knowledge-id" : target.knowledgeId,
+      decision: "support", rationale: "The current execution supports the unchanged method" }];
+    const currentIds = input.currentEpisodeIds ?? [input.currentEpisodeId];
+    const index = input.episodes.findIndex((episode: any) => currentIds.includes(episode.id));
+    output.merge.supportingEpisodeIds = currentIds;
+    output.classicPath[0].evidenceRefs = [`episode_${index + 1}_observation_1`];
+    output.toolUsage[0].evidenceRefs = output.classicPath[0].evidenceRefs;
+  });
+  const constrainedModel: MemorySettlementModel = { ...fixture, complete: async request => {
+    const input = request.input as any;
+    if (input.stage === "fusion" && input.similarTaskGroups?.length) {
+      const schema = JSON.parse(request.systemPrompt.split("Return one JSON object following this exact schema:\n")[1]!.split("\n")[0]!);
+      const choices = schema.properties.knowledgeRelations.items.properties.targetKnowledgeId.enum;
+      assert.deepEqual(choices, input.similarTaskGroups.flatMap((group: any) => group.knowledge.map((unit: any) => unit.knowledgeId)));
+      assert.equal(choices.includes("invented-knowledge-id"), false);
+    }
+    return fixture.complete(request);
+  } };
+  const rejected = await settle(store, "identity-two", constrainedModel);
+  assert.equal(rejected.status, "dead_letter");
+  assert.equal(fusionCalls, 1);
+  const unchanged = (await store.active(scope)).find(entry => entry.item.subtype === "experience.task_group")!;
+  assert.equal((unchanged.revision.value.knowledgeUnits as any[])[0].supports.length, 1);
+  const attempts = await store.settlementAttempts(scope, "identity-two");
+  assert.ok(attempts.some(attempt => attempt.errors.some(issue => issue.code === "knowledge_not_admitted")));
+  const accepted = await settle(store, "identity-three", constrainedModel);
+  assert.equal(accepted.status, "succeeded", accepted.reason);
+  const groups = (await store.active(scope)).filter(entry => entry.item.subtype === "experience.task_group");
+  assert.equal(groups.length, 1);
+  const path = (groups[0]!.revision.value.knowledgeUnits as any[]).find(unit => unit.section === "classicPath");
+  assert.equal(path.supports.length, 2);
+  assert.equal(path.supports.some((support: any) => support.runId === "identity-two"), false);
+});
+
+test("comparison regeneration retains its accepted claim and enforces the governing merge decision", async () => {
+  const store = new InMemoryMemoryStore();
+  assert.equal((await settle(store, "relation-one")).status, "succeeded");
+  let repairs = 0;
+  const fixture = model((input, output) => {
+    if (input.stage !== "fusion" || !input.similarTaskGroups?.length) return;
+    const target = input.similarTaskGroups[0].knowledge.find((unit: any) => unit.section === "classicPath");
+    output.knowledgeRelations = [{ claimRef: "classicPath", targetKnowledgeId: target.knowledgeId,
+      decision: "new", rationale: "The unchanged method has a wrongly encoded relationship" }];
+  });
+  const result = await settle(store, "relation-two", { ...fixture, complete: async request => {
+    const input = request.input as any;
+    if (input.correction) {
+      repairs++;
+      assert.equal(input.comparisonContract, "agentloop.knowledgeComparison/v1");
+      assert.match(input.independentLearning.classicPath[0].objective, /组织代码和最新报表月份/);
+      const reply = await fixture.complete(request), comparison = JSON.parse(reply.content);
+      assert.equal(comparison.merge.decision, "reinforce");
+      comparison.knowledgeRelations[0].decision = "support";
+      return { content: JSON.stringify(comparison) };
+    }
+    return fixture.complete(request);
+  } });
+  assert.equal(result.status, "succeeded", result.reason);
+  assert.equal(repairs, 1);
+  const group = (await store.active(scope)).find(entry => entry.item.subtype === "experience.task_group")!;
+  assert.equal((group.revision.value.knowledgeUnits as any[])[0].supports.length, 2);
+});
 
 test("v2 preserves semantic evidence and accepts a concrete path without inventing a knowledge rule", async () => {
   const store = new InMemoryMemoryStore();
@@ -275,7 +352,7 @@ test("batch replay retries publication after a committed group without repeating
 test("replay finds a completed batch outside the bounded fusion candidate window", async () => {
   const store = new InMemoryMemoryStore();
   let calls = 0;
-  const separate = model((_input, output) => { calls++; output.merge.decision = "new"; delete output.merge.targetGroupId; });
+  const separate = model((input, output) => { if (input.stage === "fusion") calls++; output.merge.decision = "new"; delete output.merge.targetGroupId; });
   const cases = Array.from({ length: 6 }, (_, i) => ({ ...evidence(`family-${i}`), strategy: `独立任务族 ${i}` }));
   for (const value of cases) await settleBatch(store, [value], separate);
   assert.equal(calls, 6);
@@ -294,7 +371,7 @@ test("multiple commits of one Run and unverified cases cannot publish a batch pr
 test("a batch containing a previously fused last case still learns its new cases", async () => {
   const store = new InMemoryMemoryStore();
   let calls = 0;
-  const localModel = model(() => { calls += 1; });
+  const localModel = model(input => { if (input.stage === "fusion") calls += 1; });
   await settleBatch(store, [evidence("one"), evidence("two")], localModel);
   await settleBatch(store, [evidence("three"), evidence("two")], localModel);
   assert.equal(calls, 2);
@@ -322,18 +399,26 @@ test("batch fusion receives sanitized execution and acceptance evidence rather t
   assert.equal((await store.active(scope)).some(({ item }) => item.subtype === "experience.procedure"), true);
 });
 
-test("batch input budgeting retains its current case and removes references to omitted evidence", async () => {
+test("oversized batches split into complete cases without settling omitted evidence", async () => {
   const store = new InMemoryMemoryStore();
   const values = Array.from({ length: 10 }, (_, index) => ({ ...evidence(`run-${index}`), observations: Array.from({length:24}, (_item, i) => ({
-    id: `a-${i}`, kind: "action" as const, toolName: "source.read", status: "succeeded", summary: "具体执行方法及验证结果".repeat(60), sourceRefs: [{type:"action" as const, runId:`run-${index}`}],
+    id: `a-${i}`, kind: "action" as const, toolName: "source.read", status: "succeeded", summary: `独立方法${i}:` + "具体执行方法及验证结果".repeat(60), sourceRefs: [{type:"action" as const, runId:`run-${index}`}],
   })) }));
+  const seen: string[] = [];
   await settleBatch(store, values, model((input) => {
-    assert.ok(input.episodeIds.includes(input.currentEpisodeId));
-    assert.ok(input.episodes.length < 10);
-    assert.equal(input.episodes.at(-1).id, input.currentEpisodeId);
-    assert.equal(Object.keys(input.sources).some(key => key.startsWith("episode_9_")), false);
+    if (input.stage !== "fusion") return;
+    assert.deepEqual(input.episodeIds, input.currentEpisodeIds);
+    assert.equal(input.episodes.length, input.currentEpisodeIds.length);
+    for (const episode of input.episodes) {
+      seen.push(episode.id);
+      assert.equal(episode.observations.length, 24);
+      for (const observation of episode.observations) assert.ok(observation.evidenceRefs[0] in input.sources);
+    }
     assert.ok(JSON.stringify(input).length <= 60_000);
   }));
+  assert.equal(seen.length, values.length);
+  assert.equal(new Set(seen).size, values.length);
+  assert.equal((await store.active(scope)).filter(({item}) => item.subtype === "experience.episode").length, values.length);
 });
 
 test("a mature group's new rule needs its own independent evidence", async () => {
@@ -407,7 +492,7 @@ test("mixed goals sharing task labels and tools are settled separately with alig
     taskFingerprint: { taskKind: "composite", artifactKind: "html" }, strategy: i === 1 ? "Research competing technical mechanisms" : "Write a quarterly management report",
   }));
   let calls = 0;
-  const separate = model((_input, output) => { calls++; output.merge.decision = "new"; delete output.merge.targetGroupId; });
+  const separate = model((input, output) => { if (input.stage === "fusion") calls++; output.merge.decision = "new"; delete output.merge.targetGroupId; });
   const first = await settleBatch(store, values, separate);
   assert.equal(calls, 2);
   assert.equal(first.reason, "multiple_goal_groups_settled");
@@ -489,7 +574,13 @@ test("confirmed causes require causal evidence; single-task fusion preserves tha
     output.failureLessons = [{ trigger: "字段版本变化", symptom: "字段读取失败", rootCause: "版本切换后字段已重命名", causeStatus: "confirmed",
       nextAction: "读取当前版本字段定义", verification: "对照版本和实际字段确认", applicability: ["字段定义可核对"], evidenceRefs: [ref] }];
   });
-  await assert.rejects(settleBatch(new InMemoryMemoryStore(), [evidence("unconfirmed")], withLesson), /causal_verification_required/);
+  const store = new InMemoryMemoryStore();
+  await settleBatch(store, [evidence("unconfirmed")], withLesson);
+  const group = (await store.active(scope)).find(row => row.item.subtype === "experience.task_group")!;
+  assert.deepEqual((group.revision.value.taskGroup as any).failureLessons, []);
+  const quarantined = group.revision.value.quarantinedUnits as any[];
+  assert.equal(quarantined[0].content.causeStatus, "confirmed");
+  assert.equal(quarantined[0].errors[0].code, "causal_verification_required");
   const value = evidence("confirmed");
   const result = await settle(new InMemoryMemoryStore(), value.runId, withLesson, { observations: value.observations!.map(item => ({ ...item, details: { causalVerification: true } })) });
   assert.equal(result.status, "succeeded", result.reason);
@@ -504,6 +595,40 @@ test("canonical correction suspends a single-task procedure before an unavailabl
     { quality: { ...evidence("one").quality, laterDisputed: true } });
   assert.equal(result.status, "retrying");
   assert.equal((await store.active(scope)).find(({ item }) => item.subtype === "experience.procedure")!.revision.activation.mode, "explicit_only");
+});
+
+test("feedback revocation requires no model or batch and keeps immutable history without adding support", async () => {
+  const store = new InMemoryMemoryStore();
+  await settle(store, "one"); await settle(store, "two");
+  const before = (await store.active(scope)).find(({ item }) => item.subtype === "experience.procedure")!;
+  assert.equal(before.revision.activation.mode, "task_match");
+  await reconcileMemoryFeedback(store, { ...evidence("one"), quality: { ...evidence("one").quality, laterDisputed: true } }, 2000);
+  const after = (await store.active(scope)).find(({ item }) => item.subtype === "experience.procedure")!;
+  assert.equal(after.revision.activation.mode, "explicit_only");
+  assert.equal(after.revision.supersedesRevisionId, before.revision.id);
+  assert.equal(before.revision.activation.mode, "task_match", "revocation does not rewrite the original revision");
+  const units = (await store.active(scope)).find(({ item }) => item.subtype === "experience.task_group")!.revision.value.knowledgeUnits as any[];
+  assert.ok(units.every(unit => unit.status === "candidate" && unit.supports.length === 1));
+  await reconcileMemoryFeedback(store, { ...evidence("one"), quality: { ...evidence("one").quality, laterDisputed: true } }, 3000);
+  assert.equal((await store.active(scope)).find(({ item }) => item.subtype === "experience.procedure")!.revision.id, after.revision.id, "repeated feedback is idempotent");
+});
+
+test("a late stale publication cannot restore recalled support after a durable negative signal", async () => {
+  const store = new InMemoryMemoryStore();
+  await settle(store, "one"); await settle(store, "two");
+  const plugin = createMemoryPlugin({ store, resolveRunScope: async runId => ({ ...scope, runId }), now: () => 2000 });
+  const request = { runId: "next", target: "planner" as const, taskFingerprint: evidence("one").taskFingerprint,
+    stepContext: { goal: evidence("one").strategy }, budget: { maxItems: 12, maxTokens: 4000 } };
+  assert.ok(await plugin.recall(request));
+  await store.invalidateRun(scope, "one", { type: "user_feedback", runId: "correction", sourceId: "feedback:1" }, 2000);
+  assert.equal(await plugin.recall(request), undefined, "the barrier applies even before any settlement reconciliation");
+  const before = (await store.active(scope)).find(({ item }) => item.subtype === "experience.procedure")!;
+  await store.commit(scope, { schema: "agentloop.userMemoryCandidate/v1", id: "stale-worker", ...scope,
+    proposedKind: "experience", proposedSubtype: "experience.procedure", proposedCanonicalKey: before.item.canonicalKey,
+    proposedExperienceMaturity: "procedure", proposedValue: before.revision.value, proposedContentMarkdown: before.revision.contentMarkdown,
+    authority: "verified_run", sensitivity: "normal", confidence: 0.7, persistenceIntent: "future_oriented", activation: { mode: "always" },
+    applicationTargets: ["planner"], sourceRefs: before.revision.sourceRefs, reason: "old_snapshot", decision: "accepted" }, 3000);
+  assert.equal(await plugin.recall(request), undefined, "a stale worker writing later cannot bypass the invalidation ledger");
 });
 
 test("changed successful evidence retracts old claim support until the method is verified again", async () => {
@@ -572,7 +697,7 @@ test("settlement honors the provider completion deadline instead of cancelling a
   assert.equal((await operation).reason, "task_group_updated");
 });
 
-test("batch publication retains action provenance and namespaces earlier group evidence during refinement", async () => {
+test("batch refinement retains original provenance in the knowledge ledger and current citations in the immutable extraction", async () => {
   const store = new InMemoryMemoryStore();
   await settleBatch(store, [evidence("one"), evidence("two")], model((input, output) => {
     output.classicPath[0].evidenceRefs = input.episodes[0].observations[0].evidenceRefs;
@@ -580,15 +705,18 @@ test("batch publication retains action provenance and namespaces earlier group e
   let group = (await store.active(scope)).find(({ item }) => item.subtype === "experience.task_group")!;
   assert.ok(group.revision.sourceRefs.some(ref => ref.type === "action" && ref.runId === "one"));
   await settleBatch(store, [evidence("three"), evidence("four")], model((input, output) => {
+    if (input.stage !== "fusion") return;
     const ref = input.similarTaskGroups[0].learning.classicPath[0].evidenceRefs[0];
-    assert.match(ref, /^group_1_episode_1_observation_1$/);
+    assert.match(ref, /^group_1_source_\d+$/);
     assert.ok(ref in input.sources);
     output.merge.decision = "refine";
-    output.classicPath[0].evidenceRefs = [ref];
   }));
   group = (await store.active(scope)).find(({ item }) => item.subtype === "experience.task_group")!;
   const sources = group.revision.value.knowledgeSources as Record<string, any[]>;
-  assert.equal(sources.group_1_episode_1_observation_1[0].runId, "one");
+  assert.equal(sources[(group.revision.value.taskGroup as any).classicPath[0].evidenceRefs[0]][0].runId, "three");
+  const unit = (group.revision.value.knowledgeUnits as any[])[0];
+  assert.ok(unit.evidence.some((ref: any) => ref.type === "action" && ref.runId === "one"));
+  assert.ok(unit.evidence.some((ref: any) => ref.type === "action" && ref.runId === "three"));
 });
 
 test("fusion schema exposes only admitted sources, canonical Skills and existing group choices", async () => {
@@ -684,6 +812,8 @@ test("two successful executions produce a Planner prior; third reinforces one gr
     assert.equal(projection.planningPriors.length, 1);
     assert.match(String(projection.planningPriors[0]!.suggestedSteps[0]!.objective), /组织代码和最新报表月份/);
     assert.deepEqual(projection.planningPriors[0]!.skillSuggestions, ["discovered:hr-data"]);
+    assert.equal(projection.planningPriors[0]!.knowledgeBindings?.[0]?.knowledgeId,
+      (groups[0]!.revision.value.knowledgeUnits as any[]).find(unit => unit.section === "classicPath" && unit.status === "verified")?.id);
   }
   const otherUser = createMemoryPlugin({ store, resolveRunScope: async (runId) => ({ ...scope, ownerUserId: "bob", runId }) });
   assert.equal(await otherUser.recall({ runId: "fresh", target: "planner", taskFingerprint: evidence("fresh").taskFingerprint, budget: { maxItems: 6, maxTokens: 2000 } }), undefined);
@@ -705,11 +835,101 @@ test("v2 corrects one structural error with field diagnostics, records hashes an
   assert.equal(JSON.stringify(attempts).includes("rawOutput"), false);
 });
 
+test("fusion regenerates invalid tool and causal claims within the unchanged evidence boundary", async () => {
+  const store = new InMemoryMemoryStore();
+  let calls = 0, boundary = "";
+  await settleBatch(store, [evidence("one"), evidence("two")], model((input, output) => {
+    calls++;
+    const current = JSON.stringify({ sources: input.sources, tools: input.allowedTools, skills: input.allowedSkills, causal: input.causalEvidenceRefs });
+    if (calls === 1) {
+      boundary = current;
+      output.classicPath[0].toolNames = ["invented.read"];
+      output.failureLessons = [{ trigger: "定义变化", symptom: "读取失败", rootCause: "字段重命名", causeStatus: "confirmed",
+        nextAction: "重新核对字段", verification: "对照当前定义", applicability: ["定义可核对"], evidenceRefs: output.classicPath[0].evidenceRefs }];
+    } else {
+      assert.equal(current, boundary);
+      assert.ok(input.correction.errors.some((error: any) => error.code === "tool_not_admitted"));
+      assert.ok(input.correction.errors.some((error: any) => error.code === "causal_verification_required"));
+    }
+  }));
+  assert.equal(calls, 2);
+  const attempts = await store.settlementAttempts(scope, "two");
+  assert.deepEqual(attempts.filter(row => row.stage === "fusion").map(row => row.status), ["invalid_output", "accepted"]);
+  assert.ok((await store.active(scope)).some(row => row.item.subtype === "experience.procedure"));
+});
+
+for (const backend of ["memory", "sqlite"] as const) test(`${backend}: invalid optional units are audited but never published or recalled`, async t => {
+  const db = backend === "sqlite" ? new AppDatabase(":memory:") : undefined;
+  t.after(() => db?.close());
+  const store = db ? new SqliteMemoryStore(db) : new InMemoryMemoryStore();
+  let calls = 0;
+  await settleBatch(store, [evidence("one"), evidence("two")], model((_input, output) => {
+    calls++;
+    output.toolUsage.push({ toolName: "QUARANTINED_TOOL", purpose: "不可准入的附属建议", evidenceRefs: output.classicPath[0].evidenceRefs });
+    output.failureLessons = [{ trigger: "定义变化", symptom: "读取失败", rootCause: "QUARANTINED_CAUSE", causeStatus: "confirmed",
+      nextAction: "核对当前定义", verification: "对照字段", applicability: ["定义可核对"], evidenceRefs: output.classicPath[0].evidenceRefs }];
+  }));
+  assert.equal(calls, 2);
+  const active = await store.active(scope);
+  const group = active.find(row => row.item.subtype === "experience.task_group")!;
+  const value = group.revision.value as any;
+  assert.deepEqual(value.quarantinedUnits.map((unit: any) => unit.section).toSorted(), ["failureLessons", "toolUsage"]);
+  assert.equal(value.taskGroup.classicPath.length, 1);
+  assert.equal(value.taskGroup.toolUsage.length, 1);
+  assert.deepEqual(value.taskGroup.failureLessons, []);
+  assert.doesNotMatch(JSON.stringify(value.knowledgeUnits), /QUARANTINED_/);
+  const attempts = (await store.settlementAttempts(scope, "two")).filter(row => row.stage === "fusion");
+  assert.deepEqual(attempts.map(row => row.status), ["invalid_output", "invalid_output", "accepted"]);
+  assert.equal(attempts[2]!.quarantinedUnits?.length, 2);
+  assert.equal(attempts[2]!.outputHash, attempts[1]!.outputHash);
+  assert.equal(attempts[2]!.acceptedOutputHash?.length, 64);
+  assert.equal(attempts[2]!.inputTokens, undefined, "isolation is not another model call");
+  const plugin = createMemoryPlugin({ store, resolveRunScope: async runId => ({ ...scope, runId }) });
+  const projection = await plugin.recall({ runId: "fresh", target: "planner", taskFingerprint: evidence("fresh").taskFingerprint, budget: { maxItems: 12, maxTokens: 4000 } });
+  assert.ok(projection);
+  assert.doesNotMatch(JSON.stringify(projection), /QUARANTINED_/);
+});
+
+test("invalid core workflows remain atomic and fail after bounded regeneration", async () => {
+  const store = new InMemoryMemoryStore();
+  let calls = 0;
+  await assert.rejects(settleBatch(store, [evidence("one"), evidence("two")], model((_input, output) => {
+    calls++;
+    output.classicPath.push({ ...output.classicPath[0], toolNames: ["invented.read"] });
+  })), /tool_not_admitted/);
+  assert.equal(calls, 2);
+  assert.equal((await store.active(scope)).some(row => row.item.subtype === "experience.procedure" || row.item.subtype === "experience.task_group"), false);
+});
+
+test("private output is rejected immediately even alongside an isolatable validation error", async () => {
+  const store = new InMemoryMemoryStore();
+  let calls = 0;
+  await assert.rejects(settleBatch(store, [evidence("one")], model((_input, output) => {
+    calls++;
+    output.toolUsage.push({ toolName: "invented.read", purpose: "Contact private.person@example.com", evidenceRefs: output.classicPath[0].evidenceRefs });
+  })), /sensitive_output/);
+  assert.equal(calls, 1);
+  assert.doesNotMatch(JSON.stringify(await store.settlementAttempts(scope, "one")), /private.person|example.com/);
+});
+
+test("isolating the only actionable unit cannot manufacture an empty successful method", async () => {
+  const store = new InMemoryMemoryStore();
+  await assert.rejects(settleBatch(store, [evidence("one")], model((_input, output) => {
+    output.classicPath = []; output.toolUsage = [];
+    output.failureLessons = [{ trigger: "定义变化", symptom: "读取失败", rootCause: "字段重命名", causeStatus: "confirmed",
+      nextAction: "核对定义", verification: "核对字段", applicability: ["字段可核对"], evidenceRefs: ["episode_1_observation_1"] }];
+  })), /causal_verification_required/);
+  assert.equal((await store.active(scope)).some(row => row.item.subtype === "experience.task_group"), false);
+});
+
 test("invented sources are rejected and the audit episode remains available", async () => {
   const store = new InMemoryMemoryStore();
   const result = await settle(store, "one", model((_input, output) => { output.classicPath[0].evidenceRefs = ["invented"]; }));
   assert.equal(result.status, "dead_letter");
   assert.match(result.reason!, /source_not_admitted/);
+  const attempts = await store.settlementAttempts(scope, "one");
+  assert.equal(attempts.filter(attempt => attempt.stage !== "settlement").length, 1, "unadmitted sources never receive a regeneration attempt");
+  assert.equal(attempts.filter(attempt => attempt.stage === "settlement" && attempt.status === "failed").length, 1, "the failed job is auditable independently of the model validation");
   assert.equal((await store.active(scope)).length, 1);
 });
 
@@ -763,4 +983,286 @@ test("conflicting evidence suspends the existing procedure", async () => {
   assert.equal(result.reason, "conflict_recorded");
   const plugin = createMemoryPlugin({ store, resolveRunScope: async (runId) => ({ ...scope, runId }) });
   assert.equal(await plugin.recall({ runId: "fresh", target: "planner", taskFingerprint: evidence("fresh").taskFingerprint, budget: { maxItems: 6, maxTokens: 2000 } }), undefined);
+});
+
+for (const backend of ["memory", "sqlite"] as const) test(`${backend}: historical source ancestry is a bounded view and dropped candidates leave no admitted sources`, async t => {
+  const db = backend === "sqlite" ? new AppDatabase(":memory:") : undefined;
+  t.after(() => db?.close());
+  const store = db ? new SqliteMemoryStore(db) : new InMemoryMemoryStore();
+  await settleBatch(store, [evidence("seed-one"), evidence("seed-two")]);
+  const seed = (await store.active(scope)).find(({ item }) => item.subtype === "experience.task_group")!;
+  const originals: string[] = [];
+  for (let index = 0; index < 4; index++) {
+    const orphaned = Object.fromEntries(Array.from({ length: 1808 }, (_, i) => [`group_1_ancestry_${i}_${"ancestor_".repeat(10)}`, [{ type: "action", runId: "unused", sourceId: `old-${i}` }]]));
+    const taskGroup = { ...(seed.revision.value.taskGroup as any), cautions: Array.from({ length: 12 }, () => "历史方法边界".repeat(240)) };
+    const committed = await store.commit(scope, { schema: "agentloop.userMemoryCandidate/v1", ...scope,
+      id: `history-${index}`, proposedKind: "experience", proposedSubtype: "experience.task_group", proposedCanonicalKey: index ? `history-${index}` : seed.item.canonicalKey,
+      proposedExperienceMaturity: "pattern", proposedValue: { ...seed.revision.value, taskGroup,
+        knowledgeSources: { ...seed.revision.value.knowledgeSources as object, ...orphaned } }, proposedContentMarkdown: "Historic method",
+      persistenceIntent: "future_oriented", authority: "verified_run", sensitivity: "normal", activation: { mode: "explicit_only" },
+      applicationTargets: ["planner"], sourceRefs: seed.revision.sourceRefs, confidence: 0.9, reason: "fixture", decision: "accepted" }, 2000);
+    originals.push(JSON.stringify(committed.revision.value));
+  }
+  await settleBatch(store, [evidence("new-one")], model((input, output) => {
+    if (input.stage !== "fusion") return;
+    assert.ok(input.similarTaskGroups.length < 4, "the fixture must exercise history eviction");
+    assert.equal(input.candidateGroupIds.length, input.similarTaskGroups.length);
+    assert.equal(input.candidateRevisionIds.length, input.similarTaskGroups.length);
+    const refs = input.similarTaskGroups.flatMap((group: any) => [...group.learning.classicPath, ...group.learning.toolUsage].flatMap((row: any) => row.evidenceRefs));
+    assert.deepEqual(new Set(Object.keys(input.sources).filter(ref => ref.startsWith("group_"))), new Set(refs));
+    assert.ok(Object.keys(input.sources).length < 20);
+    assert.equal(input.episodes[0].observations.length, 1);
+    assert.ok(JSON.stringify(input).length <= 60_000);
+    output.merge.decision = "refine";
+  }));
+  const groups = (await store.active(scope)).filter(({ item }) => item.subtype === "experience.task_group");
+  const updated = groups.find(({ revision }) => (revision.value.successfulRunIds as string[]).includes("new-one"))!;
+  const sources = updated.revision.value.knowledgeSources as Record<string, any[]>;
+  assert.deepEqual(Object.keys(sources).sort(), ["episode_1_observation_1"]);
+  assert.equal(sources.episode_1_observation_1[0].runId, "new-one");
+  assert.ok(originals.every(value => JSON.parse(value).knowledgeSources && Object.keys(JSON.parse(value).knowledgeSources).length > 1800), "historical snapshots remain intact");
+});
+
+test("repeated comparisons keep original receipts without replacing current citations with historical aliases", async () => {
+  const store = new InMemoryMemoryStore();
+  await settleBatch(store, [evidence("original")]);
+  for (let i = 0; i < 16; i++) await settleBatch(store, [evidence(`refinement-${i}`)], model((input, output) => {
+    if (input.stage !== "fusion") return;
+    const ref = input.similarTaskGroups[0].learning.classicPath[0].evidenceRefs[0];
+    assert.match(ref, /^group_1_source_\d+$/);
+    output.merge.decision = "refine";
+  }));
+  const group = (await store.active(scope)).find(({ item }) => item.subtype === "experience.task_group")!;
+  const sources = group.revision.value.knowledgeSources as Record<string, any[]>;
+  assert.equal(Object.keys(sources).length, 1, "the immutable extraction cites the current execution only");
+  assert.equal(sources[(group.revision.value.taskGroup as any).classicPath[0].evidenceRefs[0]][0].runId, "refinement-15");
+  const unit = (group.revision.value.knowledgeUnits as any[])[0];
+  assert.ok(unit.evidence.some((ref: any) => ref.runId === "original" && ref.type === "action"));
+  assert.equal(unit.supports.length, 17, "each actual scoped execution remains independently attributable");
+});
+
+for (const backend of ["memory", "sqlite"] as const) test(`${backend}: one large execution is processed in resumable evidence windows without losing late observations or multiplying support`, async t => {
+  const db = backend === "sqlite" ? new AppDatabase(":memory:") : undefined;
+  t.after(() => db?.close());
+  const store = db ? new SqliteMemoryStore(db) : new InMemoryMemoryStore();
+  const value = { ...evidence("large"), observations: Array.from({length: 180}, (_, i) => ({
+    id: `action-${i + 1}`, kind: "action" as const, toolName: "source.read", status: "succeeded", summary: `方法步骤${i + 1}：` + "读取执行证据并核对当前版本".repeat(60),
+    sourceRefs: [{type: "action" as const, runId: "large", sourceId: `action-${i + 1}`}],
+  })) };
+  const seen = new Set<string>();
+  let failOnce = true, calls = 0, correctedWindows = 0;
+  const settlementModel = model((input, output) => {
+    calls++;
+    assert.ok(input.episodes[0].evidenceWindow);
+    assert.equal(input.episodes[0].evidenceWindow.complete, false);
+    assert.equal(input.episodes[0].evidenceWindow.totalObservations, 180);
+    assert.ok(JSON.stringify(input).length <= 60_000);
+    if (input.episodes[0].evidenceWindow.index === 2 && failOnce) { failOnce = false; throw new Error("temporary provider failure"); }
+    for (const row of input.episodes[0].observations) {
+      const ref = row.evidenceRefs[0]; seen.add(ref);
+      assert.ok(ref in input.sources);
+    }
+    const ref = input.episodes[0].observations[0].evidenceRefs[0];
+    output.classicPath[0].evidenceRefs = [ref]; output.toolUsage[0].evidenceRefs = [ref];
+    if (!input.correction) delete output.learningValue.verification;
+    else correctedWindows++;
+  });
+  await assert.rejects(settleBatch(store, [value], settlementModel), /model_unavailable/);
+  await settleBatch(store, [value], settlementModel);
+  assert.equal(seen.size, 180);
+  assert.ok(correctedWindows > 1, "every evidence window leaves room for correction diagnostics");
+  const active = await store.active(scope);
+  const episode = active.find(({item}) => item.subtype === "experience.episode")!;
+  assert.equal((episode.revision.value.evidenceAudit as any).observations.length, 180);
+  assert.equal((episode.revision.value.evidenceAudit as any).observations.at(-1).id, "action-180");
+  const group = active.find(({item}) => item.subtype === "experience.task_group")!;
+  assert.equal((group.revision.value.knowledgeUnits as any[])[0].supports.length, 1);
+  assert.equal(active.some(({item}) => item.subtype === "experience.procedure"), false);
+  const beforeReplay = calls;
+  await settleBatch(store, [value], settlementModel);
+  assert.equal(calls, beforeReplay, "accepted windows checkpoint independently across retry/replay");
+});
+
+test("default single-job workers share adaptive settlement and retain observations after the legacy array limit", async () => {
+  const store = new InMemoryMemoryStore();
+  const value = { ...evidence("single-large"), observations: Array.from({length: 120}, (_, index) => ({
+    id: `a-${index}`, kind: "action" as const, toolName: "source.read", status: "succeeded", summary: `独立方法${index}:` + "核对版本和执行证据".repeat(80),
+    sourceRefs: [{type: "action" as const, runId: "single-large", sourceId: `a-${index}`}],
+  })) };
+  const seen = new Set<string>();
+  const result = await settle(store, value.runId, model((input, output) => {
+    assert.ok(["extraction", "fusion"].includes(input.stage));
+    for (const row of input.episodes[0].observations) seen.add(row.id);
+    const ref = input.episodes[0].observations[0].evidenceRefs[0];
+    output.classicPath[0].evidenceRefs = [ref]; output.toolUsage[0].evidenceRefs = [ref];
+  }), value);
+  assert.equal(result.status, "succeeded", result.reason);
+  assert.equal(seen.size, 120);
+});
+
+test("repeated tool calls settle through one compact method view with complete local provenance", async () => {
+  const store = new InMemoryMemoryStore();
+  const value = { ...evidence("repeated"), observations: Array.from({ length: 240 }, (_, index) => ({
+    id: `action-${index}`, kind: "action" as const, stepOrder: 1, toolName: "source.read", status: "succeeded",
+    summary: "Inspect current definitions, then collect the current evidence",
+    details: { repeatIdentity: "same-input-and-result" },
+    sourceRefs: [{ type: "action" as const, runId: "repeated", sourceId: `action-${index}` }],
+  })) };
+  let calls = 0;
+  const result = await settle(store, value.runId, model((input) => {
+    calls++;
+    assert.equal(input.stage, "fusion");
+    assert.equal(input.episodes[0].observations.length, 1);
+    assert.equal(input.episodes[0].observations[0].occurrences, 240);
+    assert.deepEqual(input.episodes[0].executionPath, [{ methods: ["method_1"], repetitions: 240 }]);
+    assert.equal(Object.keys(input.sources).filter(ref => ref.includes("observation")).length, 1);
+    assert.ok(JSON.stringify(input).length < 5000);
+  }), value);
+  assert.equal(result.status, "succeeded", result.reason);
+  assert.equal(calls, 1);
+  const active = await store.active(scope);
+  const episode = active.find(row => row.item.subtype === "experience.episode")!;
+  assert.equal((episode.revision.value.evidenceAudit as any).observations.length, 240);
+  const group = active.find(row => row.item.subtype === "experience.task_group")!;
+  assert.equal((group.revision.value.knowledgeSources as any).episode_1_observation_1.length, 240);
+  assert.equal((group.revision.value.knowledgeUnits as any[])[0].supports.length, 1);
+  assert.equal(active.some(row => row.item.subtype === "experience.procedure"), false);
+});
+
+test("history selection rejects unrelated broad-family neighbors before fusion and retains cross-language mechanisms", async () => {
+  const store = new InMemoryMemoryStore();
+  const titles = ["修复调用方与实现的契约并用复现验证", "排版并逐页检查文档", "核对原始来源开展调研", "定位数据源并核对指标定义"];
+  const value = (runId: string, goal: string) => ({ ...evidence(runId), strategy: goal,
+    taskFingerprint: { taskKind: "execute", domain: "general" }, planSkeleton: [{ objective: goal, toolNames: ["source.read"], skillIds: ["discovered:hr-data"] }] });
+  for (const [index, title] of titles.entries()) {
+    await settleBatch(store, [value(`history-${index}`, title)], model((_input, output) => {
+      output.title = title; output.goalSummary = title; output.classicPath[0].objective = title;
+      output.merge.decision = "new"; delete output.merge.targetGroupId;
+      output.caseFacts = [{ statement: "HISTORICAL_ANSWER_MUST_NOT_SELECT", context: ["Only the earlier execution"], evidenceRefs: output.classicPath[0].evidenceRefs }];
+    }));
+  }
+  const base = model((input, output) => {
+    if (input.stage !== "fusion") return;
+    assert.equal(input.candidateGroupIds.length, 1);
+    assert.equal(input.similarTaskGroups[0].learning.title, titles[0]);
+    assert.doesNotMatch(JSON.stringify(input.similarTaskGroups), /排版并逐页|开展调研|指标定义/);
+    output.merge.decision = "refine";
+  });
+  let selections = 0;
+  const localModel: MemorySettlementModel = { ...base, complete: async request => {
+    const input = request.input as any;
+    if (input.stage !== "selection") return base.complete(request);
+    selections++;
+    assert.equal(input.candidates.length, 4);
+    assert.doesNotMatch(JSON.stringify(input), /HISTORICAL_ANSWER_MUST_NOT_SELECT|evidenceRefs|sourceRefs|supportingEpisodeIds/);
+    assert.match(JSON.stringify(input.query), /Reproduce the bug/);
+    return { content: JSON.stringify({ matches: input.candidates.map((row: any) => ({ id: row.id, relevance: row.title === titles[0] ? 0.96 : 0.1 })) }) };
+  } };
+  await settleBatch(store, [value("current", "Reproduce the bug, repair the caller contract, then verify the regression")], localModel);
+  assert.equal(selections, 1);
+  const attempts = await store.settlementAttempts(scope, "current");
+  assert.equal(attempts.find(row => row.stage === "selection")!.selection!.filter(row => row.relevance >= 0.7).length, 1);
+});
+
+test("invalid history selection cannot silently admit unrelated history or publish duplicate groups; retry uses its checkpoint", async () => {
+  const store = new InMemoryMemoryStore();
+  await settleBatch(store, [evidence("seed")]);
+  const base = model();
+  let selectionCalls = 0, invalid = true, failFusion = false;
+  const localModel: MemorySettlementModel = { ...base, complete: async request => {
+    const input = request.input as any;
+    if (input.stage === "selection") {
+      selectionCalls++;
+      return { content: JSON.stringify({ matches: input.candidates.map((row: any) => ({ id: invalid ? "invented" : row.id, relevance: 0.9 })) }) };
+    }
+    if (failFusion) throw new Error("provider_unavailable");
+    return base.complete(request);
+  } };
+  await assert.rejects(settleBatch(store, [evidence("new")], localModel), /selection/);
+  assert.equal(selectionCalls, 2);
+  assert.equal((await store.active(scope)).filter(row => row.item.subtype === "experience.task_group").length, 1);
+  invalid = false; failFusion = true;
+  await assert.rejects(settleBatch(store, [evidence("new")], localModel), /model_unavailable/);
+  assert.equal(selectionCalls, 3);
+  failFusion = false;
+  await settleBatch(store, [evidence("new")], localModel);
+  assert.equal(selectionCalls, 3, "accepted selection is reusable only for the exact same query and revisions");
+  assert.equal((await store.active(scope)).filter(row => row.item.subtype === "experience.task_group").length, 1);
+});
+
+test("recorded interpretations alone cannot become independent method support", async () => {
+  const store = new InMemoryMemoryStore();
+  const values = ["interpretation-one", "interpretation-two"].map(runId => ({ ...evidence(runId), observations: [{
+    id: "insight", kind: "decision" as const, toolName: "record_execution_insight", status: "interpreted", summary: "The Agent reports a method worked",
+    sourceRefs: [{ type: "action" as const, runId, sourceId: "insight", authority: "model_interpretation" as const }],
+  }] }));
+  await settleBatch(store, values);
+  const active = await store.active(scope);
+  assert.equal(active.some(row => row.item.subtype === "experience.procedure"), false);
+  assert.ok((active.find(row => row.item.subtype === "experience.task_group")!.revision.value.knowledgeUnits as any[])
+    .every(unit => unit.status === "candidate" && unit.supports.length === 0));
+});
+
+for (const backend of ["memory", "sqlite"] as const) test(`${backend}: history fusion uses an independently summarized batch and resumes its accepted summary after failure`, async t => {
+  const database = backend === "sqlite" ? new AppDatabase(":memory:") : undefined;
+  t.after(() => database?.close());
+  const store = database ? new SqliteMemoryStore(database) : new InMemoryMemoryStore();
+  await settleBatch(store, [evidence("history")]);
+  const current = { ...evidence("current"), observations: [
+    { id: "rejected", kind: "action" as const, toolName: "source.read", status: "failed", summary: "Request was rejected before acquisition",
+      details: { resultDiagnostics: [{ status: "rejected", code: "bindings_missing" }] }, sourceRefs: [{ type: "action" as const, runId: "current", sourceId: "rejected" }] },
+    { id: "accepted", kind: "action" as const, toolName: "source.read", status: "succeeded", summary: "Corrected request returned nonempty evidence",
+      details: { resultProfile: [{ pointer: "/row_count", count: 180 }] }, sourceRefs: [{ type: "action" as const, runId: "current", sourceId: "accepted" }] },
+  ] };
+  let summaries = 0, fusions = 0;
+  const localModel = model((input, output) => {
+    if (input.stage === "extraction") {
+      summaries++;
+      assert.deepEqual(input.candidateGroupIds, []);
+      assert.deepEqual(input.similarTaskGroups, []);
+      assert.ok(Object.keys(input.sources).every(ref => !ref.startsWith("group_")));
+      assert.match(JSON.stringify(input), /bindings_missing/);
+      assert.match(JSON.stringify(input), /180/);
+      output.executionReview = [{ finding: "An invalid request was rejected; correction returned evidence. No successful empty result was observed.", status: "observed", evidenceRefs: ["episode_1_observation_1", "episode_1_observation_2"] }];
+    } else if (input.stage === "fusion") {
+      fusions++;
+      assert.match(input.independentLearning.executionReview[0].finding, /No successful empty result/);
+      assert.equal(input.similarTaskGroups.length, 1);
+      if (fusions === 1) throw new Error("temporary fusion failure");
+      output.classicPath[0].evidenceAssessment = { status: "tentative", rationale: "The old method's trigger was not exercised", evidenceRefs: output.classicPath[0].evidenceRefs, limitations: ["Request rejection does not support an empty-result strategy"] };
+    }
+  });
+  await assert.rejects(settleBatch(store, [current], localModel), /model_unavailable/);
+  await settleBatch(store, [current], localModel);
+  assert.equal(summaries, 1, "the accepted independent summary is reused, not regenerated after fusion failure");
+  assert.equal(fusions, 2);
+  const group = (await store.active(scope)).find(row => row.item.subtype === "experience.task_group")!;
+  const unit = (group.revision.value.knowledgeUnits as any[])[0];
+  assert.equal(unit.supports.length, 2);
+  assert.equal(unit.status, "candidate");
+  assert.equal(unit.assessment.status, "tentative");
+  assert.equal((await store.active(scope)).some(row => row.item.subtype === "experience.procedure"), false);
+});
+
+test("oversized semantic grouping requests split before model calls and cover every case", async () => {
+  const store = new InMemoryMemoryStore();
+  const values = Array.from({length: 12}, (_, i) => ({...evidence(`group-${i}`), strategy: `参数任务${i}`,
+    planSkeleton: Array.from({length: 3}, () => ({objective: "核对版本和执行证据".repeat(80), toolNames: ["source.read"], skillIds: ["discovered:hr-data"]})),
+    observations: Array.from({length: 6}, (_, j) => ({id: `a-${j}`, kind: "action" as const, toolName: "source.read", status: "succeeded", summary: "核对版本和执行证据".repeat(80), sourceRefs: [{type:"action" as const, runId:`group-${i}`}]})),
+  }));
+  const admitted = new Set<string>();
+  const base = model((input) => { for (const id of input.episodeIds) admitted.add(id); });
+  let groupingCalls = 0, groupingCorrections = 0;
+  await settleBatch(store, values, {...base, complete: async request => {
+    assert.ok(JSON.stringify(request.input).length <= 60_000);
+    if (request.input.stage === "grouping") {
+      groupingCalls++;
+      if (!(request.input as any).correction) return { content: "{}" };
+      groupingCorrections++;
+    }
+    return base.complete(request);
+  }});
+  assert.ok(groupingCalls > 1);
+  assert.ok(groupingCorrections > 0);
+  assert.equal(admitted.size, values.length);
 });

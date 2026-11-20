@@ -20,4 +20,6 @@ export { SKILL_LOADER_TOOL_NAME, createSkillLoader, skillExecutionCwd, skillExec
 export { assertNoDuplicateTools, composeRunTools, createCoreTools } from "./compose.ts";
 export { HUMAN_LOOP_TOOL_NAME, createHumanLoopTool } from "./human-loop-tool.ts";
 export { RESULT_READER_NAME, createResultTool } from "./result-tool.ts";
+export { createExecutionInsightTool } from "./execution-insight-tool.ts";
+export { createMemoryRecallTool } from "./memory-recall-tool.ts";
 export type { ComposeRunToolsOptions, CoreToolsOptions } from "./compose.ts";

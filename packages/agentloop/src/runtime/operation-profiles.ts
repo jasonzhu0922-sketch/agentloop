@@ -36,6 +36,7 @@ const OPERATION_PROFILES: readonly OperationProfile[] = [
     description: "Inspect, transform, summarize, or reason over tabular, spreadsheet, log, metric, or other bulk data inputs.",
     topLevelPrompt: "Data-analysis paradigm: acquire the smallest trustworthy data scope that answers the request, analyze it, then deliver. A successful bounded extraction or aggregation is canonical for the current step. In a multi-stage Plan, use dependency evidence as input; when successful, scope-matched evidence obtained in the current stage conflicts with an earlier-stage result, the current-stage evidence governs this stage. Preserve the earlier result as provenance and mention a material conflict, but do not reacquire or revalidate data merely to reconcile it. Do not plan or perform duplicate acquisition, readback, aggregation, or validation merely to increase confidence; do so only for an explicit user request, concrete evidence gap, freshness need, tool failure, or Runtime high-risk gate.",
     planningRules: [
+      "Analysis describes the reasoning operation, not a database source requirement. For news, current events or other narrative evidence, use relevant fresh observations and a bounded synthesis; do not invent table/schema/count requirements or explore unrelated business catalogs. Apply structured extraction requirements below only to structured data inputs.",
       "Plan a bounded extraction-and-analysis workflow; do not make full raw-data dumping the success criterion.",
       "Require a durable structured extraction artifact when the input is a visible spreadsheet directory, large, wide, or likely to be reused by later writing/reporting.",
       "Choose the smallest dependency shape that preserves semantic boundaries: one fact_acquisition leaf may both profile and extract when a generic extraction tool exists; split authoring/execution only when a custom parser, expensive transformation, or multiple data stages are actually needed.",
@@ -45,6 +46,7 @@ const OPERATION_PROFILES: readonly OperationProfile[] = [
       "Success criteria should cite source scope, schema/fields, row or record counts, and the analysis artifact or hash.",
     ],
     executionRules: [
+      "Before any additional acquisition, identify the material unresolved fact it can establish. Stop exploring a source when observed scope or dates make it unsuitable; do not keep querying adjacent terms merely to strengthen a negative coverage conclusion. Use another relevant authorized source or surface the capability blocker, preserving the original user goal.",
       "First identify source files, sheets/tables, schema, row/record counts, and the exact ranges or filters needed for the user goal.",
       "For authorized uploaded CSV, XLSX, or XLSM sources, use extract_source_tables first when field-based analysis, grouping, counting, or schema fidelity is needed; do not reconstruct CSV from read_source text.",
       "For user-authorized visible spreadsheet directories, use visible_index_directory spreadsheetProfile first, then visible_extract_tables for bounded structured table evidence when available.",

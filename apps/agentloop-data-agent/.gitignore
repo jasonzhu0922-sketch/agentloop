@@ -1,0 +1,5 @@
+.env
+config/llm-providers.json
+skills/data-analysis/connections.json
+.venv/
+data/

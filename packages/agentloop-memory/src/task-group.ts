@@ -5,6 +5,7 @@ import type {
   TaskGroupSearchInput,
   TaskGroupSearchResult,
 } from "./types.ts";
+import { rankMemoryRevisions } from "./retrieval.ts";
 
 function record(value: unknown): value is Readonly<Record<string, unknown>> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -14,18 +15,6 @@ function patternOf(value: Readonly<Record<string, unknown>>): ExperienceSettleme
   return record(pattern) && pattern.schema === "agentloop.experienceSettlement/v1" && pattern.phase === "procedure"
     ? pattern as unknown as ExperienceSettlementPattern
     : undefined;
-}
-
-function textTerms(pattern: ExperienceSettlementPattern, content: string): readonly string[] {
-  return [
-    pattern.title,
-    pattern.goalSummary,
-    pattern.reuseRule,
-    ...(pattern.keywords ?? []),
-    ...pattern.classicPath.map((step) => step.objective),
-    ...pattern.toolUsage.map((tool) => tool.toolName),
-    content,
-  ].filter((value): value is string => typeof value === "string").join(" ").toLocaleLowerCase().split(/[^\p{L}\p{N}_:-]+/u).filter((value) => value.length > 1);
 }
 
 function fingerprintScore(left: Readonly<Record<string, unknown>> | undefined, right: Readonly<Record<string, unknown>>): number {
@@ -59,18 +48,19 @@ export async function searchTaskGroupCandidates(
   scope: MemoryScope,
   input: TaskGroupSearchInput = {},
 ): Promise<readonly TaskGroupSearchResult[]> {
-  const queryTerms = [...new Set((input.query ?? []).flatMap((query) => query.toLocaleLowerCase().split(/[^\p{L}\p{N}_:-]+/u).filter((term) => term.length > 1)))];
+  const active = (await store.active(scope)).filter(entry => entry.item.kind === "experience" && entry.item.subtype === "experience.procedure" && entry.revision.experienceMaturity === "procedure" && patternOf(entry.revision.value));
+  const ranks = rankMemoryRevisions(active.map(entry => entry.revision), (input.query ?? []).join(" "), input.taskFingerprint);
   const results: TaskGroupSearchResult[] = [];
-  for (const entry of await store.active(scope)) {
+  for (const entry of active) {
     if (entry.item.kind !== "experience" || entry.item.subtype !== "experience.procedure" || entry.revision.experienceMaturity !== "procedure") continue;
     const pattern = patternOf(entry.revision.value);
     if (pattern === undefined) continue;
     const fingerprint = fingerprintScore(input.taskFingerprint, pattern.applicability.taskFingerprint);
     if (fingerprint < 0) continue;
-    const terms = textTerms(pattern, entry.revision.contentMarkdown);
-    const matchedTerms = queryTerms.filter((term) => terms.includes(term));
-    const score = fingerprint * 100 + matchedTerms.length * 5 + Math.min(1, entry.revision.confidence);
-    if (fingerprint === 0 && matchedTerms.length === 0 && input.taskFingerprint !== undefined) continue;
+    const rank = ranks.get(entry.revision.id)!;
+    const matchedTerms = rank.matchedTerms;
+    const score = fingerprint * 100 + rank.score * 100 + Math.min(1, entry.revision.confidence);
+    if (fingerprint === 0 && rank.lexical === 0 && rank.character === 0 && input.taskFingerprint !== undefined) continue;
     results.push({ item: entry.item, revision: entry.revision, score, matchedTerms });
   }
   return results.sort((left, right) => right.score - left.score || right.revision.createdAt - left.revision.createdAt).slice(0, Math.max(0, input.limit ?? 8));

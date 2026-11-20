@@ -87,6 +87,24 @@ function assertStrictObjects(schema: any): void {
   if (types.includes("array")) assertStrictObjects(schema.items);
 }
 
+for (const prerequisite of ["existing_evidence", "new_observation", "external_change"] as const) {
+  test(`Assessment preserves the repair prerequisite independently of receipt labels: ${prerequisite}`, async () => {
+    const input = assessmentInput();
+    const assessment = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, complete: async request => {
+      assert.match(request.systemPrompt, /Separate goal completion from execution feasibility/);
+      const boundary = { stepId: input.step.id, missingEvidenceKinds: [], violatedSkillRequirements: [],
+        reusableEvidenceRefs: ["candidateOutput"], suggestedRepairShape: "repair_leaf", repairPrerequisite: prerequisite, evidenceConcerns: [] };
+      const response = submission(input, undefined, boundary);
+      response.toolCalls[0]!.arguments.criteria[0]!.satisfied = false;
+      return response;
+    } }).assess(input);
+    assert.equal(assessment.approved, false);
+    assert.equal(assessment.failedBoundary?.repairPrerequisite, prerequisite);
+    assert.equal(enforceAdmittedAssessment(input, assessment).failedBoundary?.repairPrerequisite, prerequisite);
+    assert.deepEqual(assessment.failedBoundary?.missingEvidenceKinds, []);
+  });
+}
+
 for (const scope of ["fact_result", "user_delivery"] as const) {
   for (const hasFacts of [true, false]) {
     test(`${scope} assesses its owned result without substituting file existence; facts=${hasFacts}`, async () => {

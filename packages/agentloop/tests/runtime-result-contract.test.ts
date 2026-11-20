@@ -11,6 +11,7 @@ import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { ContextAssembler } from "../src/runtime/context-assembler.ts";
 import type { ModelMessage } from "../src/runtime/contracts.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
+import { toolOperationFailureCode } from "../src/runtime/tool-operation-outcome.ts";
 import { PlanRepository } from "../src/planning/plan-repository.ts";
 import { reconstructRecoveryTranscript } from "../src/runtime/recovery-transcript.ts";
 import { RunService } from "../src/runtime/run-service.ts";
@@ -220,6 +221,55 @@ async function seedRun(database: AppDatabase): Promise<string> {
   `).run(planId, runId, "inspect exact values", now, now);
   return owner.user.id;
 }
+
+test("failed operations commit readable Results without promoting failure or unknown effects to success", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const ownerUserId = await seedRun(database);
+    const actions = new RuntimeActionRepository(database);
+    const results = new RuntimeResultRepository(database);
+    const failure = { exitCode: 1, stdout: JSON.stringify({ status: "unavailable", diagnostic: { phase: "source.read" } }), stderr: "" };
+    let ref: RuntimeResultRef | undefined;
+    await actions.execute({ runId, planId, stepId, kind: "tool_call", replayPolicy: "unsafe", deadlineMs: 1000,
+      resultFailureCode: toolOperationFailureCode,
+      metadata: { toolCallId: "failed-read", toolName: "read_source" },
+      prepareResult: async (value, action) => {
+        const record = createRuntimeResult({ kind: "tool", producer: { actionId: action.id, runId, planId, stepId,
+          toolCallId: "failed-read", toolName: "read_source" }, value, publication: { status: "committed" } });
+        ref = record.ref; return record;
+      },
+    }, async () => failure);
+    assert.ok(ref);
+    const action = (await actions.list(runId))[0]!;
+    assert.equal(action.state, "failed");
+    assert.equal(action.errorCode, "TOOL_OPERATION_FAILED");
+    assert.equal(action.effectState, "unknown");
+    assert.equal(action.resultRef, ref.resultId);
+    const restored = new RuntimeResultRepository(database);
+    const read = await restored.readAuthorized({ resultId: ref.resultId, runId, planId, stepId, actorUserId: ownerUserId });
+    assert.deepEqual(JSON.parse(read!.payload.content), failure);
+    assert.equal((await results.listPlanResults({ runId, planId, actorUserId: ownerUserId }))[0]?.ref.resultId, ref.resultId);
+    assert.equal(await results.readAuthorized({ resultId: ref.resultId, runId, planId, stepId: "other" }), undefined);
+    assert.equal(await results.readAuthorized({ resultId: ref.resultId, runId, planId, stepId, actorUserId: "other" }), undefined);
+    const event = await database.prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND type = 'action.failed'").get(runId) as { payload_json: string };
+    assert.equal(JSON.parse(event.payload_json).resultRef, ref.resultId);
+    assert.equal((await database.prepare("SELECT count(*) AS n FROM run_outcomes WHERE run_id = ?").get(runId) as { n: number }).n, 0);
+
+    // A fenced commit must not leave a readable Result, even though the tool returned a value.
+    let fencedRef: RuntimeResultRef | undefined;
+    await assert.rejects(() => actions.execute({ runId, planId, stepId, kind: "tool_call", replayPolicy: "safe", deadlineMs: 1000,
+      resultFailureCode: toolOperationFailureCode, prepareResult: async (value, action) => {
+        const record = createRuntimeResult({ kind: "tool", producer: { actionId: action.id, runId, planId, stepId },
+          value, publication: { status: "committed" } });
+        fencedRef = record.ref;
+        await database.prepare("UPDATE runtime_actions SET fence = fence + 1 WHERE id = ?").run(action.id);
+        return record;
+      },
+    }, async () => failure), (error: unknown) => error instanceof AppError && error.code === "CONFLICT");
+    assert.ok(fencedRef);
+    assert.equal(await restored.readAuthorized({ resultId: fencedRef.resultId, runId, planId, stepId }), undefined);
+  } finally { await database.close(); }
+});
 
 test("successful Tool Actions atomically bind a unified opaque result ref and authorize exact bounded reads", async () => {
   const database = new AppDatabase(":memory:");

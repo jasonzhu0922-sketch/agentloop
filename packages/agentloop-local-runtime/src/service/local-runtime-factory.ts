@@ -9,6 +9,8 @@ import { LocalRuntimeSupervisorError } from "../contracts/host.ts";
 import { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.ts";
 import { LocalModelStreamCaptureStore } from "../persistence/model-stream-capture-store.ts";
 import { LocalMemorySettlementReader } from "../memory/local-memory-settlement-reader.ts";
+import { LocalMemoryFeedback } from "../memory/local-memory-feedback.ts";
+import { LocalMemoryOutcomes } from "../memory/local-memory-outcomes.ts";
 import { LocalRuntimeDatabaseRegistry } from "../memory/local-runtime-database-registry.ts";
 import { initializeLocalRunAdmissions } from "./local-run-admission.ts";
 
@@ -21,13 +23,14 @@ interface McpStartupIntegration {
 function configuredMcpCapabilitySnapshot(
   configuration: ResolvedLocalRuntimeConfiguration,
   integration: LoadedMcpIntegration,
+  webTools: ReturnType<typeof createWebTools>,
 ): RuntimeCapabilitySnapshot {
   const loaded = new Set(integration.loadedServers.map((server) => server.key));
   const failed = new Set(integration.failedServers.map((server) => server.key));
   return createRuntimeCapabilitySnapshotFromSources({
     scope: "runtime_configured",
     capturedAt: Date.now(),
-    sources: configuration.mcpServers.map((server) => ({
+    sources: [...configuration.mcpServers.map((server): Parameters<typeof createRuntimeCapabilitySnapshotFromSources>[0]["sources"][number] => ({
       label: server.displayName ?? "Configured MCP service",
       transport: server.transport,
       state: loaded.has(server.key)
@@ -41,7 +44,13 @@ function configuredMcpCapabilitySnapshot(
           description: tool.description,
         })),
       identityValues: [server.key, ...(server.aliases ?? [])],
-    })),
+    })), {
+      label: "Web search", transport: "http",
+      state: webTools.length > 0 ? "loaded_for_runtime" : configuration.webSearchAvailability?.enabled ? "load_failed" : "configured_for_runtime",
+      ...(webTools.length > 0 ? {} : { unavailableReason: configuration.webSearchAvailability?.unavailableReason ?? "web_search_disabled" }),
+      capabilities: [{ id: "web_research", category: "source", description: "Search and read current public web information.", sourceKinds: ["web"] }],
+      operations: webTools.map(tool => ({ label: tool.name, description: tool.description })),
+    }],
   });
 }
 
@@ -83,6 +92,7 @@ export function redactMcpDiagnostic(message: string, secretValues: readonly stri
 function localSettlementModel(
   modelKey: string,
   resolveProvider: () => LocalModelProviderPort | undefined,
+  maxOutputTokens = 6_000,
 ): MemorySettlementModel {
   if (!modelKey.startsWith("local:") || modelKey.length <= "local:".length) {
     throw new LocalRuntimeSupervisorError(400, "memory_settlement_model_must_be_local");
@@ -102,7 +112,7 @@ function localSettlementModel(
         systemPrompt,
         messages: [{ role: "user", content: JSON.stringify(input) }],
         tools: [],
-        maxOutputTokens: 6_000,
+        maxOutputTokens,
       }, signal);
       return { content: response.content, usage: response.usage };
     },
@@ -137,6 +147,7 @@ export class LocalRuntimeFactory {
       ...configuration.integrationEnvironment,
     };
     const activeWebSearch = integrationEnvironment.WEB_SEARCH_DISABLED === "1" ? undefined : configuration.webSearch ?? webToolsOptions;
+    const webTools = activeWebSearch === undefined ? [] : createWebTools(activeWebSearch);
     const runtimeRoot = this.runtimeRootFor(definition) ?? dirname(this.input.databasePath);
     const databasePath = definition.isDefault ? this.input.databasePath : join(runtimeRoot, "agentloop.db");
     const sourceStorageRoot = this.runtimeUploadRootFor(definition, uploadStorageRoot);
@@ -152,6 +163,8 @@ export class LocalRuntimeFactory {
     let memory: Awaited<ReturnType<typeof createLocalMemoryPlugin>> | undefined;
     let memoryTenantId: string | undefined;
     let settlementWorker: MemorySettlementWorker | undefined;
+    let memoryFeedback: LocalMemoryFeedback | undefined;
+    let memoryOutcomes: LocalMemoryOutcomes | undefined;
     let settlementTimer: NodeJS.Timeout | undefined;
     let planningRecoveryTimer: NodeJS.Timeout | undefined;
     try {
@@ -172,6 +185,7 @@ export class LocalRuntimeFactory {
         memoryTenantId = `local-device:${installationId}`;
         memory = await createLocalMemoryPlugin({
           database: memoryDatabase,
+          recallModel: localSettlementModel(settlementKey, () => currentModels().provider, 1_500),
           resolveRunScope: async (runId) => {
             const row = await database.prepare("SELECT owner_user_id, conversation_id, parent_run_id FROM runs WHERE id = ?").get(runId) as { owner_user_id: string; conversation_id: string | null; parent_run_id: string | null } | undefined;
             if (row === undefined) return undefined;
@@ -227,6 +241,8 @@ export class LocalRuntimeFactory {
         throw new AppError("MODEL_ERROR", "local_model_unavailable", 409);
       };
       if (memory !== undefined && memoryTenantId !== undefined) {
+        memoryOutcomes = new LocalMemoryOutcomes({ store: memory.store, tenantId: memoryTenantId, sources: () => this.databases.entries() });
+        memoryFeedback = new LocalMemoryFeedback({ store: memory.store, tenantId: memoryTenantId, sources: () => this.databases.entries() });
         const settlementModel = configuration.memory?.settlementModelKey === undefined
           ? undefined
           : localSettlementModel(
@@ -299,9 +315,9 @@ export class LocalRuntimeFactory {
         stepExecutionStrategy: policy?.stepExecutionStrategy,
         practiceProfileCatalog: policy?.practiceProfileCatalog,
         runToolProvider: connectorRuntimeService,
-        runtimeCapabilitySnapshotProvider: () => [configuredMcpCapabilitySnapshot(configuration, mcpIntegration)],
+        runtimeCapabilitySnapshotProvider: () => [configuredMcpCapabilitySnapshot(configuration, mcpIntegration, webTools)],
         tools: [
-          ...(activeWebSearch === undefined ? [] : createWebTools(activeWebSearch)),
+          ...webTools,
           ...mcpIntegration.tools,
         ],
         computerCommandEnvironment: commandConfiguration?.environment ?? this.input.computerCommandEnvironment,
@@ -334,7 +350,19 @@ export class LocalRuntimeFactory {
         );
       }
       if (settlementWorker !== undefined) {
-        settlementTimer = setInterval(() => { void settlementWorker!.runOnce(); }, 5_000);
+        let settling = false;
+        settlementTimer = setInterval(() => {
+          if (settling) return;
+          settling = true;
+          void (async () => {
+            await memoryOutcomes?.poll();
+            await memoryFeedback?.poll();
+            await settlementWorker!.runOnce();
+          })().catch(() => {
+            // Cursor/outbox stay durable for retry. Never log private evidence.
+            this.input.runEventLogSink?.(definition, "Local Memory feedback/settlement retry pending");
+          }).finally(() => { settling = false; });
+        }, 5_000);
         settlementTimer.unref();
       }
       const activeRunIds = new Set<string>();

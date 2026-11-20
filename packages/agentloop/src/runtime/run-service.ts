@@ -87,6 +87,7 @@ import { createCapabilityGrant } from "./capability-grant.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatPracticePromptAugmentation, type ArtifactKind, type DynamicPromptProfile, type TaskProfile } from "./dynamic-prompt.ts";
 import { resolvePracticeProfileResolution, type PracticeProfileCatalog, type PracticeProfileResolution } from "./practice-profiles.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "./execution-context-policy.ts";
+import { planningMemoryPromptAugmentation } from "./memory-guidance.ts";
 import {
   createRuntimeCapabilitySnapshot,
   freezeRuntimeCapabilitySnapshot,
@@ -209,7 +210,7 @@ import { CanonicalRunStateRepository } from "./canonical-run-state-repository.ts
 import type { AgentLoopMemoryPlugin, CurrentTurnMemoryCommitState, ExplicitMemoryCommitResult, InteractionMemoryProjection, MemoryIntentCandidate, PlanningMemoryProjection } from "./memory-plugin.ts";
 import { assertNoInferredCalendarDates, createRuntimeClock, parseRecurringTimeCondition, parseResolvedTemporalScope, resolveTemporalScope, withRuntimeClock, type RuntimeClock, type ResolvedTemporalScope, type RecurringTimeCondition } from "./runtime-clock.ts";
 import { temporalEvidenceGap } from "./temporal-evidence.ts";
-import { artifactFormatMatchesKind } from "./tool-progress-policy.ts";
+import { CONVERSATION_TASK_INTENT_SCHEMA, parseConversationTaskIntent } from "./conversation-task-intent.ts";
 import { decideRoundProgress } from "./round-progress.ts";
 
 export type ModelFactory = (onRetry?: ModelRetryReporter, modelKey?: string) => ModelAdapter;
@@ -483,6 +484,8 @@ export class RunService {
   private readonly runEventLogSink?: RunEventLogSink;
   private readonly skillLoadDiagnostics?: readonly SkillLoadDiagnostic[];
   private readonly activeRunControllers = new Map<string, AbortController>();
+  /** Provider waits can stop for Steer without cancelling dispatched Tool effects. */
+  private readonly executionModelControllers = new Map<string, Set<AbortController>>();
   private readonly planningExtensions: readonly PlanningExtension[];
   private readonly stepExecutionStrategy?: StepExecutionStrategy;
   private readonly toolExecutionPlugins: readonly ToolExecutionPlugin[];
@@ -600,6 +603,8 @@ export class RunService {
       driver: options.computerDriver,
       acceptanceService,
       results: this.results,
+      executionInsights: options.memory !== undefined,
+      ...(options.memory ? { memoryRecall: { memory: options.memory, authorizeRun: async (actorUserId: string, runId: string) => { await this.get(actorUserId, runId); } } } : {}),
       pluginTools: options.tools,
     });
     this.sourceIntake = new SourceIntakeService(this.sources, this.sourceStorageRoot, { ownerScopedStorage: this.ownerScopedWorkspace });
@@ -629,6 +634,7 @@ export class RunService {
         createdAt: run.created_at, ...(run.error_code === null ? {} : { errorCode: run.error_code }),
       })),
       events: async (runId) => await this.runtimeEvents(runId),
+      answers: async (runId) => await this.humanLoops.answers(runId),
       outcome: async (runId) => await this.outcomeForRun(runId),
       plan: async (runId) => await optionalPlanByRun(this.plans, runId),
       reusableArtifacts: async (run, events, plan) => await this.conversationReusableArtifacts(run, events, plan),
@@ -653,6 +659,7 @@ export class RunService {
       this.canonicalStates,
       options.database,
       this.maxRounds,
+      async (runId) => this.enqueueMemorySettlement(runId, (event) => this.appendRunEvent(runId, event)),
     );
     this.checkpoints = new RunCheckpointRepository(options.database);
     this.runEventLogSink = options.runEventLogSink;
@@ -778,6 +785,11 @@ export class RunService {
   async submitInput(actorUserId: string, runId: string, input: { requestId: string; text: string }): Promise<RunInputMessage> {
     await this.get(actorUserId, runId);
     const message = await new RunInputRepository(this.database).accept(actorUserId, runId, input);
+    if (message.status === "accepted" || message.status === "processing") {
+      for (const controller of this.executionModelControllers.get(runId) ?? []) {
+        controller.abort(new AppError("STEER_PENDING", "Run has unprocessed user input", 409));
+      }
+    }
     if (!this.isRunExecuting(runId)) void this.drainPausedInputs(actorUserId, runId).catch(async error => {
       if (error instanceof AppError && error.code === "CANCELLED") await this.cancel(actorUserId, runId);
       else await this.appendRunEvent(runId, { type: "run.input.processing_failed", data: { messageId: message.id, code: error instanceof AppError ? error.code : "INTERNAL_ERROR" } });
@@ -789,6 +801,42 @@ export class RunService {
     await this.get(actorUserId, runId);
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new AppError("BAD_REQUEST", "Invalid message cursor", 400);
     return await new RunInputRepository(this.database).list(runId, afterSeq);
+  }
+
+  private steerInterruptibleModel(runId: string, model: ModelAdapter): ModelAdapter {
+    const invoke = async (invocation: ModelInvocation, signal: AbortSignal | undefined,
+      call: (signal?: AbortSignal) => Promise<ModelResponse>): Promise<ModelResponse> => {
+      if (invocation.phase !== "execution") return call(signal);
+      const controller = new AbortController();
+      const controllers = this.executionModelControllers.get(runId) ?? new Set<AbortController>();
+      controllers.add(controller);
+      this.executionModelControllers.set(runId, controllers);
+      try {
+        await new RunInputRepository(this.database).checkpoint(runId);
+        const response = await call(signal === undefined ? controller.signal : AbortSignal.any([signal, controller.signal]));
+        if (controller.signal.aborted) throw controller.signal.reason;
+        return response;
+      } catch (error) {
+        if (controller.signal.aborted && !signal?.aborted) {
+          await this.appendRunEvent(runId, { type: "model.request.interrupted", data: { phase: "execution", reason: "steer_pending" } });
+          throw controller.signal.reason;
+        }
+        throw error;
+      } finally {
+        controllers.delete(controller);
+        if (controllers.size === 0) this.executionModelControllers.delete(runId);
+      }
+    };
+    return {
+      limits: model.limits, completeTimeoutMs: model.completeTimeoutMs, operationTimeoutMs: model.operationTimeoutMs,
+      reasoningVisibility: model.reasoningVisibility,
+      estimateInputTokens: model.estimateInputTokens?.bind(model), requestLogContext: model.requestLogContext?.bind(model),
+      complete: (request, signal) => invoke(request, signal, combined => model.complete(request, combined)),
+      ...(model.streamComplete === undefined ? {} : {
+        streamComplete: (request: ModelInvocation, sink: import("./contracts.ts").ModelStreamSink, signal?: AbortSignal) =>
+          invoke(request, signal, combined => model.streamComplete!(request, sink, combined)),
+      }),
+    };
   }
 
   async checkpointForRun(actorUserId: string, runId: string): Promise<RunCheckpointRecord | undefined> {
@@ -1022,7 +1070,6 @@ export class RunService {
       status: "cancelled",
       reasonCode: "user_cancelled",
     });
-    await this.enqueueMemorySettlement(runId);
     await this.appendRunEvent(runId, {
       type: "run.cancellation_requested",
       data: { runId, actorUserId, abortedActiveExecution: aborted },
@@ -1407,7 +1454,6 @@ export class RunService {
             status: "failed",
             reasonCode: "recovery_planner_failed",
           });
-          await this.enqueueMemorySettlement(runId);
           break;
         case "revise_plan":
           await this.applyPlanRevisionRecovery({
@@ -1559,7 +1605,6 @@ export class RunService {
           const output = await error.report();
           if ((await this.get(actorUserId, runId)).status !== "running") return this.get(actorUserId, runId);
           await this.terminal.commitStopped({ runId, planId: plan.id, status: "failed", reasonCode: error.code, output });
-          await this.enqueueMemorySettlement(runId, async (event) => this.appendRunEvent(runId, event));
           await emit({ type: "run.failed", data: { runId, planId: plan.id, code: error.code, message: error.message, output, recovered: true } });
           return this.get(actorUserId, runId);
         }
@@ -1585,7 +1630,6 @@ export class RunService {
             status: "failed",
             reasonCode: error.code,
           });
-          await this.enqueueMemorySettlement(runId, async (event) => this.appendRunEvent(runId, event));
           await emit({ type: "run.failed", data: { runId, planId: plan.id, code: error.code, message: error.message, recovered: true } });
           return this.get(actorUserId, runId);
         }
@@ -1749,7 +1793,6 @@ export class RunService {
             status: "failed",
             reasonCode: code,
           });
-          await this.enqueueMemorySettlement(paused.run_id);
           await this.appendRunEvent(paused.run_id, {
             type: "run.failed",
             data: {
@@ -1796,7 +1839,6 @@ export class RunService {
         status: "failed",
         reasonCode: "EXECUTION_AUTHORITY_LOST",
       });
-      await this.enqueueMemorySettlement(item.runId);
       this.activeRunControllers.get(item.runId)?.abort();
       await this.appendRunEvent(item.runId, {
         type: "run.checkpoint_created",
@@ -2065,7 +2107,8 @@ export class RunService {
       let priorPreferences: InteractionMemoryProjection["preferences"];
       if (conversationEntry && this.memory !== undefined) {
         try {
-          const prior = await this.memory.recall({ runId, target: "response", budget: { maxItems: 12, maxTokens: 1_200 } });
+          const prior = await this.memory.recall({ runId, target: "response", stepContext: { goal: input }, budget: { maxItems: 12, maxTokens: 1_200 },
+            onDiagnostic: async diagnostic => { await emit({ type: "memory.recall.assessed", data: { target: "response", phase: "intent", ...diagnostic } }); } });
           if (prior?.target === "response") {
             priorPreferences = prior.preferences;
             await emit({ type: "memory.recalled", data: { target: prior.target, phase: "intent", projectionId: prior.id, memoryRevisionIds: prior.memoryRevisionIds } });
@@ -2147,7 +2190,12 @@ export class RunService {
           throw error;
         }
       }
-      const responseOnly = turnResolution !== undefined && turnResolution.mode !== "execute";
+      // The direct-answer shortcut is valid only when no evidence acquisition
+      // is required. Delivery mode and catalog contents cannot decide whether
+      // to skip capability planning: every acquisition path must let Planner
+      // select its providers and Admission bind them before execution.
+      const responseOnly = turnResolution !== undefined && turnResolution.mode !== "execute"
+        && turnResolution.evidenceDemand === "none";
       const requestedCapabilityScope = requestedRuntimeCapabilityScope(input);
       const runtimeCapabilitySnapshot = requestedCapabilityScope === undefined
         // Replies already receive descriptive Skill metadata. Always preserve
@@ -2171,7 +2219,7 @@ export class RunService {
         await emit({
           type: "conversation.intent.classified",
           data: {
-            kind: responseOnly ? "reply" : "execute",
+            kind: turnResolution?.mode === "execute" ? "execute" : "reply",
             ...(turnResolution?.mode === "clarify" ? { resolutionMode: "clarify" } : {}),
           },
         });
@@ -2384,7 +2432,6 @@ export class RunService {
           });
           await throwIfRunCancelled(this.runs, runId, runController.signal);
           await this.terminal.commitStopped({ runId, status: "failed", reasonCode: "CAPABILITY_UNAVAILABLE", output });
-          await this.enqueueMemorySettlement(runId, emit);
           await emit({
             type: "run.failed",
             data: { runId, code: "CAPABILITY_UNAVAILABLE", message: "Required capabilities are unavailable on this Runtime", output,
@@ -2425,6 +2472,7 @@ export class RunService {
               sourceKind: taskUnderstanding.evidence.sourceKinds[0],
             },
             budget: { maxItems: 12, maxTokens: 1_200 },
+            onDiagnostic: async diagnostic => { await emit({ type: "memory.recall.assessed", data: { target: memoryTarget, ...diagnostic } }); },
           });
           if (memoryProjection) await emit({ type: "memory.recalled", data: { target: memoryProjection.target, projectionId: memoryProjection.id, memoryRevisionIds: memoryProjection.memoryRevisionIds } });
           if (memoryProjection?.target === "response") responseMemoryProjection = memoryProjection;
@@ -2444,6 +2492,7 @@ export class RunService {
                 sourceKind: taskUnderstanding.evidence.sourceKinds[0],
               },
               budget: { maxItems: 12, maxTokens: 1_200 },
+              onDiagnostic: async diagnostic => { await emit({ type: "memory.recall.assessed", data: { target: "response", ...diagnostic } }); },
             });
             if (projection) await emit({ type: "memory.recalled", data: { target: projection.target, projectionId: projection.id, memoryRevisionIds: projection.memoryRevisionIds } });
             if (projection?.target === "response") responseMemoryProjection = projection;
@@ -2521,10 +2570,12 @@ export class RunService {
           ...planningCapabilitiesFromSkills(planningSkills),
         ],
         capabilityRecovery: {
-          availableSkills: privateSkills,
+          // Recovery repairs missing bindings within the same relevant source
+          // catalog; a generic evidence-kind gap cannot recall unrelated domains.
+          availableSkills: planningSkills,
           availableCapabilities: [
             ...planningCapabilitiesFromTools(toolSummaries(allTools, new Set(catalogToolNames)), availableSources),
-            ...planningCapabilitiesFromSkills(privateSkills),
+            ...planningCapabilitiesFromSkills(planningSkills),
           ],
         },
         workspaceFacts: planningWorkspace,
@@ -2550,11 +2601,9 @@ export class RunService {
       const proposalFromPlanner = async (): Promise<PlanProposal> => planner.plan({
         ...planningTask,
         userAuthority: await this.userAuthority(runId, planningTask.canonicalState),
-        ...(
-          planningExtensionResolution.contexts.length === 0
-            ? {}
-            : { planningExtensionContexts: planningExtensionResolution.contexts }
-        ),
+        planningExtensionContexts: [{ schema: "agentloop.planningExtensionContext/v1", extensionName: "runtime-capabilities", kind: "capability_availability",
+          content: { inventories: runtimeCapabilitySnapshots, instruction: "These are descriptive availability facts, not execution grants. Only availableToolNames and admitted bindings authorize execution. Report a relevant unavailableReason precisely; do not probe unrelated sources to compensate for a missing capability." } },
+          ...planningExtensionResolution.contexts],
       }, runController.signal, emit);
       let proposal = bindRequiredSkillCompanions(
         planningExtensionResolution.proposal ?? await proposalFromPlanner(),
@@ -2699,7 +2748,11 @@ export class RunService {
       const assessor = this.assessorFactory(model);
       const registry = new ToolRegistry(allTools, { plugins: this.toolExecutionPlugins });
       const runtimeSkillCatalog = privateSkills.map(({ id, name, description }) => ({ id, name, description }));
+      const methodMemoryAugmentation = memoryProjection?.target === "planner" ? planningMemoryPromptAugmentation(memoryProjection) : undefined;
+      const unavailableCapabilities = capabilityAvailabilityAugmentation(runtimeCapabilitySnapshots);
       const initialRuntimePromptAugmentations = [
+        ...(unavailableCapabilities === undefined ? [] : [unavailableCapabilities]),
+        ...(methodMemoryAugmentation === undefined ? [] : [methodMemoryAugmentation]),
         ...(responseMemoryProjection === undefined ? [] : [interactionMemoryPromptAugmentation(responseMemoryProjection)]),
         ...(currentTurnMemoryCommit === undefined ? [] : [currentTurnMemoryCommitPromptAugmentation(currentTurnMemoryCommit)]),
         ...(responseOnly ? [{
@@ -2728,6 +2781,7 @@ export class RunService {
           ...(conversationHistory === undefined ? {} : { conversationHistory }),
           ...(conversationWorkingSet === undefined ? {} : { conversationWorkingSet }),
           ...(initialRuntimePromptAugmentations.length === 0 ? {} : { initialRuntimePromptAugmentations }),
+          memoryContextPrepared: true,
           ...(responseOnly ? { runtimeSkillCatalog } : {}),
           ...(responseMemoryProjection === undefined
             ? {}
@@ -2750,7 +2804,6 @@ export class RunService {
         plan = completion.plan;
         const output = completion.output;
         const reasonCode = completion.reasonCode;
-        await this.enqueueMemorySettlement(runId, emit);
         await this.notifyPlanningExtensionsAfterOutcome({
           runId,
           status: "completed",
@@ -2864,7 +2917,6 @@ export class RunService {
         const output = status === "failed" ? await partialOutputForFailure(appError) : undefined;
         if ((await this.runs.get(runId))?.status !== "running") return this.get(actorUserId, runId);
         await this.terminal.commitStopped({ runId, planId, status, reasonCode: appError.code, output });
-        await this.enqueueMemorySettlement(runId, emit);
         await this.notifyPlanningExtensionsAfterOutcome({
           runId,
           status,
@@ -3212,13 +3264,28 @@ export class RunService {
           kind: "planning", replayPolicy: "safe", deadlineMs: 900_000,
           metadata: { purpose: "steer", messageId: message.id, canonicalRevision: state.revision }, onDispatched: action => { actionId = action.id; },
         }, async () => {
-          let decision = await decideRunInput({ model: input.model, message, state,
-            evidence: { plan: plan === undefined ? undefined : { id: plan.id, version: plan.version, goal: plan.goal,
-              steps: plan.steps.filter(step => step.retiredAt === undefined).map(step => ({ id: step.id, objective: step.objective, status: step.status,
-                result: step.evidence?.publishedResult === undefined ? undefined : { ref: step.evidence.publishedResult.ref, content: step.evidence.publishedResult.payload.content.slice(0, 2400) } })) },
-              actions: actions.slice(-80).map(action => ({ id: action.id, stepId: action.stepId, kind: action.kind, state: action.state, effectState: action.effectState,
-                toolName: action.metadata.toolName, errorCode: action.errorCode })), humanLoop, clarificationSource,
-              recentEvents: events.slice(-40).map(event => ({ seq: event.seq, type: event.type })) }, signal: input.signal });
+          const decisionFeedback: { feedback: string; decision?: unknown }[] = [];
+          let decision: Awaited<ReturnType<typeof decideRunInput>> | undefined;
+          const capabilityInventories = events.filter(event => event.type === "runtime.capability_snapshot.created").map(event => event.data.snapshot);
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              decision = await decideRunInput({ model: input.model, message, state, feedback: decisionFeedback,
+                evidence: { plan: plan === undefined ? undefined : { id: plan.id, version: plan.version, goal: plan.goal,
+                  steps: plan.steps.filter(step => step.retiredAt === undefined).map(step => ({ id: step.id, objective: step.objective, status: step.status,
+                    result: step.evidence?.publishedResult === undefined ? undefined : { ref: step.evidence.publishedResult.ref, content: step.evidence.publishedResult.payload.content.slice(0, 2400) } })) },
+                  actions: actions.slice(-80).map(action => ({ id: action.id, stepId: action.stepId, kind: action.kind, state: action.state, effectState: action.effectState,
+                    toolName: action.metadata.toolName, errorCode: action.errorCode })), humanLoop, clarificationSource,
+                  runtimeCapabilityInventories: capabilityInventories,
+                  recentEvents: events.slice(-40).map(event => ({ seq: event.seq, type: event.type })) }, signal: input.signal });
+              break;
+            } catch (error) {
+              if (!(error instanceof AppError) || error.code !== "PLANNING_ERROR") throw error;
+              const failure = { feedback: error.message, ...(error.details?.decision === undefined ? {} : { decision: error.details.decision }) };
+              decisionFeedback.push(failure);
+              await this.appendRunEvent(input.runId, { type: "run.input.decision_attempt_failed", data: { messageId: message.id, attempt, code: error.code, ...failure } });
+            }
+          }
+          decision ??= { kind: "clarify", explanation: "补充要求已保留，但未能完成后续执行要求的解析，执行已暂停。请确认希望如何继续。" };
           if (humanLoop !== undefined && decision.kind !== "answer" && decision.kind !== "cancel") decision = {
             kind: "clarify", explanation: `已有待回答问题，请通过该问题的回答入口处理。${decision.explanation}`,
           };
@@ -3244,12 +3311,7 @@ export class RunService {
             }
             return;
           }
-          const intentRecord = optionalRecord(decision.taskIntent);
-          const intent = parseConversationTaskIntent({ ...intentRecord,
-            deliverables: Array.isArray(intentRecord.deliverables) ? intentRecord.deliverables.map(item => {
-              const value = optionalRecord(item); return value.format === null ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== "format")) : value;
-            }) : intentRecord.deliverables,
-          });
+          const intent = parseConversationTaskIntent(decision.taskIntent);
           if (intent === undefined || intent.deliverables.length === 0) throw new AppError("PLANNING_ERROR", "Steer must preserve a valid complete delivery inventory", 422);
           const understanding = understandTask({ objective: decision.effectiveGoal!, userConstraints: decision.userConstraints,
             evidenceDemand: state.intent.understanding.evidence.need, resolvedTaskIntent: intent });
@@ -3273,16 +3335,21 @@ export class RunService {
             const kinds = [...new Set(completed.flatMap(step => step.evidence!.toolCalls.filter(call => !call.isError).flatMap(call => call.admittedEvidenceKinds ?? [])))].filter((kind): kind is import("../planning/contracts.ts").EvidenceKind => (importedEvidenceKinds as readonly string[]).includes(kind));
             const retired = basePlan.steps.filter(step => step.retiredAt === undefined).map(step => step.id);
             const revisionFeedback: { feedback: string; evidenceRefs: readonly string[]; proposal?: PlanProposal }[] = [];
+            const requiredSkillIds = resolveCapabilityRequirements(turnResolution?.requiredCapabilityReferences ?? [], input.privateSkills, tools).skillIds;
+            const revisedSkillRoles = selectPlanningSkillRoles(input.privateSkills, understanding, requiredSkillIds, input.sources);
+            const revisedSkills = revisedSkillRoles.map(item => item.skill);
             for (let attempt = 1; attempt <= 3; attempt++) {
               try {
                 const proposal = await this.plannerFactory(input.model).plan({ runId: input.runId, canonicalState: amended,
                   userAuthority: await this.userAuthority(input.runId, amended),
-                  availableSkills: input.privateSkills, availableToolNames: [...input.rootGrant.allowedToolNames], availableTools: tools,
-                  availableCapabilities: [...planningCapabilitiesFromTools(tools, input.sources), ...planningCapabilitiesFromSkills(input.privateSkills)],
+                  availableSkills: revisedSkills, selectedSkillRoles: revisedSkillRoles.map(item => item.selection),
+                  availableToolNames: [...input.rootGrant.allowedToolNames], availableTools: tools,
+                  availableCapabilities: [...planningCapabilitiesFromTools(tools, input.sources), ...planningCapabilitiesFromSkills(revisedSkills)],
                   visibleDirectories: input.visibleDirectories, sources: input.sources, roundResultBindings: bindings,
                   reusableRoundEvidence: { kinds, toolSourceIds }, planningExtensionContexts: [{ schema: "agentloop.planningExtensionContext/v1",
                     extensionName: "runtime-input", kind: "steer", content: { message, previousPlan: basePlan,
-                      actions, revisionFeedback, instruction: "Plan only the remaining work under the amended intent. Previous Steps are archived; reuse their published Results and recorded Tool receipts. Never repeat a confirmed external action or assume an unknown action succeeded. Address the independent assessment feedback from previous revision attempts." } }],
+                    actions, revisionFeedback, runtimeCapabilityInventories: capabilityInventories,
+                    instruction: "Plan only the remaining work under the amended intent. Previous Steps are archived; reuse their published Results and recorded Tool receipts. Never repeat a confirmed external action or assume an unknown action succeeded. Address the independent assessment feedback from previous revision attempts. Capability inventories describe availability, not new execution authority; when a relevant capability is unavailable, explain the recorded reason rather than exploring unrelated sources." } }],
                 }, input.signal, event => this.appendRunEvent(input.runId, event));
                 // New contracts have new identities. Archived completed facts remain readable through explicit bindings.
                 const prefix = `steer${message.seq}.`;
@@ -3346,15 +3413,62 @@ export class RunService {
     }
   }
 
+  /** Rebuild advisory memory through the plugin's current owner/revision,
+   * validity and applicability fences. Recovery transcripts do not carry
+   * the system augmentations from the suspended execution segment. */
+  private async restoreExecutionMemory(input: Parameters<RunService["executePlanStepsOnce"]>[0]): Promise<Parameters<RunService["executePlanStepsOnce"]>[0]> {
+    const augmentations = (input.initialRuntimePromptAugmentations ?? []).filter(item => item.source !== "local_memory");
+    if (!augmentations.some(item => item.source === "runtime_capability_availability")) {
+      const snapshots = (await this.runtimeEvents(input.runId)).filter(event => event.type === "runtime.capability_snapshot.created")
+        .map(event => event.data.snapshot as unknown as RuntimeCapabilitySnapshot);
+      const availability = capabilityAvailabilityAugmentation(snapshots);
+      if (availability !== undefined) augmentations.push(availability);
+    }
+    let confirmedResponseMemory: InteractionMemoryProjection | undefined;
+    if (this.memory !== undefined) {
+      const understanding = input.canonicalState.intent.understanding;
+      for (const target of ["planner", "response"] as const) {
+        try {
+          const projection = await this.memory.recall({ runId: input.runId, target,
+            stepContext: { goal: input.canonicalState.intent.turnResolution?.effectiveGoal ?? input.plan.goal },
+            taskFingerprint: { taskKind: understanding.operation, domain: understanding.operationProfiles[0],
+              artifactKind: understanding.deliverable.kind, sourceKind: understanding.evidence.sourceKinds[0] },
+            budget: { maxItems: 12, maxTokens: 1_200 },
+            onDiagnostic: async diagnostic => { await input.emit({ type: "memory.recall.assessed", data: { target, phase: "execution_resume", ...diagnostic } }); },
+          });
+          if (!projection) continue;
+          await input.emit({ type: "memory.recalled", data: { target: projection.target, phase: "execution_resume",
+            projectionId: projection.id, memoryRevisionIds: projection.memoryRevisionIds } });
+          if (projection.target === "planner") {
+            const method = planningMemoryPromptAugmentation(projection);
+            if (method) augmentations.push(method);
+          } else if (projection.target === "response") {
+            confirmedResponseMemory = projection;
+            augmentations.push(interactionMemoryPromptAugmentation(projection));
+          }
+        } catch (error) {
+          await input.emit({ type: "memory.recall_failed", data: { runId: input.runId, target, phase: "execution_resume",
+            message: error instanceof Error ? error.message : String(error) } });
+        }
+      }
+    }
+    return { ...input, initialRuntimePromptAugmentations: augmentations, confirmedResponseMemory, memoryContextPrepared: true };
+  }
+
   private async executePlanSteps(input: Parameters<RunService["executePlanStepsOnce"]>[0]): Promise<ExecutionPlan> {
     const existingController = this.activeRunControllers.get(input.runId);
     const controller = existingController ?? new AbortController();
     if (existingController === undefined) this.activeRunControllers.set(input.runId, controller);
     let current = { ...input, signal: input.signal === undefined ? controller.signal : AbortSignal.any([input.signal, controller.signal]) };
+    let refreshMemory = input.initialRecovery !== undefined || input.memoryContextPrepared !== true;
     try {
       for (;;) {
         try {
           await new RunInputRepository(this.database).checkpoint(input.runId);
+          if (refreshMemory) {
+            current = { ...current, ...await this.restoreExecutionMemory(current) };
+            refreshMemory = false;
+          }
           return await this.executePlanStepsOnce(current);
         } catch (error) {
           if (!(error instanceof AppError) || error.code !== "STEER_PENDING") throw error;
@@ -3372,6 +3486,7 @@ export class RunService {
               }])),
             },
           };
+          refreshMemory = true;
         }
       }
     } finally {
@@ -3398,6 +3513,7 @@ export class RunService {
     conversationHistory?: readonly ModelMessage[];
     conversationWorkingSet?: ConversationWorkingSet;
     initialRuntimePromptAugmentations?: readonly RuntimePromptAugmentation[];
+    memoryContextPrepared?: boolean;
     confirmedResponseMemory?: InteractionMemoryProjection;
     currentTurnMemoryCommit?: CurrentTurnMemoryCommitState;
     /** Informational, frozen source metadata for a response-only capability reply. */
@@ -3801,7 +3917,7 @@ export class RunService {
           },
         }),
         checkpoint: () => new RunInputRepository(this.database).checkpoint(input.runId),
-        model: input.model,
+        model: this.steerInterruptibleModel(input.runId, input.model),
         tools: input.registry,
         grant: stepGrant,
         availableSkills: stepSkills.map((skill) => ({ id: skill.id, name: skill.name, contentHash: skill.contentHash })),
@@ -4435,7 +4551,6 @@ export class RunService {
       const completion = await this.finishPlanAfterInputs(input.actorUserId, input.run.id, revised, event => this.appendRunEvent(input.run.id, event));
       if (completion.nextRound) return;
       const { output, reasonCode } = completion;
-      await this.enqueueMemorySettlement(input.run.id);
       await this.appendRunEvent(input.run.id, {
         type: "terminal.delivery_committed",
         data: {
@@ -4797,7 +4912,6 @@ export class RunService {
         reasonCode: "STEP_NOT_COMPLETED",
         output,
       });
-      await this.enqueueMemorySettlement(input.run.id);
       await this.appendRunEvent(input.run.id, {
         type: "run.failed",
         data: {
@@ -4835,7 +4949,6 @@ export class RunService {
           reasonCode: code,
           output,
         });
-        await this.enqueueMemorySettlement(input.run.id);
         await this.appendRunEvent(input.run.id, {
           type: "run.failed",
           data: {
@@ -5867,6 +5980,8 @@ function failedBoundaryFromErrorDetails(value: unknown): FailedBoundary | undefi
     violatedSkillRequirements: stringArrayField(boundary.violatedSkillRequirements),
     reusableEvidenceRefs: stringArrayField(boundary.reusableEvidenceRefs),
     suggestedRepairShape,
+    ...(boundary.repairPrerequisite === "existing_evidence" || boundary.repairPrerequisite === "new_observation"
+      || boundary.repairPrerequisite === "external_change" ? { repairPrerequisite: boundary.repairPrerequisite } : {}),
     ...(Array.isArray(boundary.evidenceConcerns) ? { evidenceConcerns: boundary.evidenceConcerns.map((value) => {
       const item = asRecord(value);
       if (typeof item?.observation !== "string" || typeof item.hypothesis !== "string"
@@ -6191,6 +6306,7 @@ function canonicalGapForRepair(
   if (
     observed.stepId !== gap.stepId
     || observed.suggestedRepairShape !== gap.suggestedAction
+    || observed.repairPrerequisite !== gap.repairPrerequisite
     || !sameStringSet(observed.missingEvidenceKinds, gap.missingEvidenceKinds)
     || !sameStringSet(observed.violatedSkillRequirements, gap.violatedSkillRequirements)
     || !sameUnmetCriteria(observed.unmetCriteria, gap.unmetCriteria)
@@ -6210,6 +6326,7 @@ function failedBoundaryFromCanonicalGap(gap: CanonicalGoalGap): FailedBoundary {
     violatedSkillRequirements: gap.violatedSkillRequirements,
     reusableEvidenceRefs: gap.reusableEvidenceRefs ?? [],
     suggestedRepairShape: gap.suggestedAction,
+    ...(gap.repairPrerequisite === undefined ? {} : { repairPrerequisite: gap.repairPrerequisite }),
     ...(gap.unmetCriteria === undefined ? {} : { unmetCriteria: gap.unmetCriteria }),
     ...(gap.evidenceConcerns === undefined ? {} : { evidenceConcerns: gap.evidenceConcerns }),
   };
@@ -6302,6 +6419,15 @@ export interface PlanningSkillRoleSelection {
   readonly selection: SelectedSkillRole;
   /** The matched Skill that declared this required companion. */
   readonly companionForSkillId?: string;
+}
+
+function capabilityAvailabilityAugmentation(snapshots: readonly RuntimeCapabilitySnapshot[]): RuntimePromptAugmentation | undefined {
+  const unavailable = snapshots.flatMap(snapshot => snapshot.sources.filter(source => source.state === "load_failed" || source.unavailableReason !== undefined)
+    .map(source => ({ scope: snapshot.scope, label: source.label, state: source.state, unavailableReason: source.unavailableReason })));
+  if (unavailable.length === 0) return undefined;
+  return { schema: "agentloop.promptAugmentation/v1", id: "runtime:capability-availability", source: "runtime_capability_availability",
+    content: `<runtime_capability_availability>\n${JSON.stringify({ sources: unavailable,
+      instruction: "These frozen host configuration observations explain unavailable capabilities; they are not business evidence, service-health tests or execution grants. When relevant, report the exact blocker in plain language. Do not probe unrelated sources or silently change providers to compensate for it. Generic Tool authorization is not proof of source coverage or successful acquisition. If no relevant evidence is accessible and the missing capability blocks the requested factual answer, use the structured Human Loop to request the missing source or configuration and preserve the original deliverable. An absence record is not acquired source evidence and must not be submitted as successful factual acquisition." })}\n</runtime_capability_availability>` };
 }
 
 export function selectPlanningSkills(
@@ -6673,6 +6799,7 @@ function selectFirstRoundSkillRole(
     roles.has("source_provider")
     && (sourceWorkRequested || explicitlyRequested)
     && (explicitlyRequested || skillSourceKindsCompatible(metadata.sourceKinds, sourceKinds))
+    && ((metadata.intentExamples?.length ?? 0) === 0 || hasMeaningfulPlanningSkillAffinity(skill, semanticSignal))
   ) {
     return {
       skillId: skill.id,
@@ -6716,11 +6843,20 @@ function hasMeaningfulPlanningSkillAffinity(skill: PrivateSkill, signal: string)
   const intentExamples = skill.agentLoop?.intentExamples ?? [];
   if (intentExamples.length > 0) {
     const signalTokens = new Set(tokenizePlanningSignal(signal));
-    const exampleTokens = new Set(intentExamples.flatMap(tokenizePlanningSignal));
-    return [...signalTokens].some((token) =>
-      !GENERIC_PRIMARY_BUILDER_AFFINITY_TOKENS.has(token)
-      && exampleTokens.has(token)
-    );
+    // Source-independent methods can be recalled by their requested operation.
+    // Source-bound domain workflows need corroborating subject coverage.
+    if ((skill.agentLoop?.sourceKinds.length ?? 0) === 0) return intentExamples.some(example => tokenizePlanningSignal(example)
+      .some(token => signalTokens.has(token) && !GENERIC_PRIMARY_BUILDER_AFFINITY_TOKENS.has(token)));
+    return intentExamples.some(example => {
+      const matches = tokenizePlanningSignal(example).filter(token => signalTokens.has(token)
+        && !GENERIC_PRIMARY_BUILDER_AFFINITY_TOKENS.has(token));
+      // Substrings of the same phrase are one lexical observation, not
+      // independent evidence of workflow relevance. A short shared word
+      // alone cannot assign a domain owner; retain substantive phrases or
+      // multiple independent anchors within one declared task example.
+      const anchors = matches.filter(token => !matches.some(other => other !== token && other.includes(token)));
+      return anchors.some(token => token.length >= 4) || anchors.length >= 2;
+    });
   }
   const skillTokens = new Set(tokenizePlanningSignal(planningSkillSemanticText(skill)));
   return tokenizePlanningSignal(signal).some((token) =>
@@ -7330,7 +7466,9 @@ function requiresEvidenceProgressAfterAssessment(
   return assessment.assessmentMethod === "model"
     && !assessment.approved
     && assessment.failedBoundary?.suggestedRepairShape === "repair_leaf"
-    && (assessment.failedBoundary?.missingEvidenceKinds.length ?? 0) > 0;
+    && ((assessment.failedBoundary?.missingEvidenceKinds.length ?? 0) > 0
+      || assessment.failedBoundary?.repairPrerequisite === "new_observation"
+      || assessment.failedBoundary?.repairPrerequisite === "external_change");
 }
 
 function stepNeedsReusableSourceEvidence(step: ExecutionPlan["steps"][number]): boolean {
@@ -8932,39 +9070,7 @@ function conversationTurnTool(context: ConversationIntentExternalContext): Model
         },
         ...priorCandidateProperties,
         effectiveGoal: { type: "string", minLength: 1, maxLength: 2_000, description: "Self-contained requested outcome. Preserve the user's scope; do not add methodology, source metadata, audit or comparison requirements inferred from professional practice." },
-        taskIntent: {
-          type: "object",
-          additionalProperties: false,
-          required: ["schema", "operation", "requiresExecution", "deliverables"],
-          properties: {
-            schema: { type: "string", enum: ["agentloop.conversationTaskIntent/v1"] },
-            operation: {
-              type: "string",
-              enum: ["answer", "lookup", "analysis", "create_artifact", "transform_artifact", "composite"],
-            },
-            requiresExecution: { type: "boolean" },
-            deliverables: {
-              type: "array",
-              description: "Terminal user-requested outputs only. Never include scripts, temporary files, manifests, specs, or other implementation artifacts unless the user explicitly requested that item as a delivered output.",
-              maxItems: 8,
-              items: {
-                type: "object",
-                additionalProperties: false,
-                required: ["targetId", "purpose", "expectedArtifactCount", "action", "kind", "surface"],
-                properties: {
-                  targetId: { type: "string", minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
-                  purpose: { type: "string", minLength: 1, maxLength: 500 },
-                  expectedArtifactCount: { type: "integer", minimum: 1, maximum: 8 },
-                  action: { type: "string", enum: ["none", "create", "modify", "transform"] },
-                  kind: { type: "string", enum: ["html", "document", "presentation", "spreadsheet", "image", "audio", "code", "none"] },
-                  format: { type: "string", minLength: 1, maxLength: 32,
-                    description: "Optional physical file format compatible with kind, such as png, svg, pdf, docx or xlsx. Content or presentation types belong in purpose. Omit when the user did not constrain the physical encoding." },
-                  surface: { type: "string", enum: ["conversation", "workspace_artifact"] },
-                },
-              },
-            },
-          },
-        },
+        taskIntent: CONVERSATION_TASK_INTENT_SCHEMA,
         evidenceStrategy: {
           type: "string",
           enum: ["none", "lookup_lite", "source_grounded", "strict_user_source", "bound_visible_sources"],
@@ -9824,7 +9930,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "A question about a Skill's presence, purpose, or declared capabilities can be answered from availableSkills metadata with mode=reply and evidenceStrategy=none. Mentioning a Skill does not request invocation; its sourceKinds and workflow describe what invocation would do, not evidence or execution obligations for this turn. Preserve requiredCapabilityReferences only for capabilities the user actually requires using.",
       "When the latest turn explicitly asks to use an available Skill, return execute; do not return clarify merely because no visible directory or uploaded source is bound.",
       "Preserve all explicitly mandatory Skill, MCP/tool source, and tool names in requiredCapabilityReferences independently of catalog availability. Unavailable does not mean unrequested. For an actionable request with unavailable requirements, return execute with those references; Runtime will explain and end the task before planning or execution. Do not silently substitute another provider or Skill.",
-      "Preserve applicability.conditions and exclusions for conditional preferences and facts. Use applicability.context or excludedContext only for exact keys and values already established in the current task context, never invent context identities. Keep unspecified scope conditions in natural language. Preserve explicit effective/expiry times as epoch milliseconds in validFrom/expiresAt; omit unestablished times. A one-time HIL selection is evidence for that task, not a durable user default. Memory intake is a required first-class semantic decision, not keyword matching. Always return memoryAction and memoryIntents. Set memoryAction=commit and provide one or more candidates when the latest user explicitly establishes durable memory; set memoryAction=none with memoryIntents=[] otherwise. These two fields must agree. Propose every independent preference or fact the latest user explicitly establishes for future turns, even if its concept has never appeared in a schema example. Represent each candidate as kind=preference or fact, subtype=canonicalKey=<stable lowercase dotted semantic key>, value=<small structured object>, contentMarkdown=<self-contained declaration preserving who the preference or fact concerns and any conditions>, and sourceQuote=<verbatim supporting text from the latest user message>. Use separate keys for separate concepts. Consult priorPreferences to reuse an existing subtype as the canonicalKey when revising the same semantic subject/property; do not create a second key merely because the user rephrased it. Prior preferences are matching context, never evidence for a new durable instruction. Preserve the distinction between what the user wishes to be called and what the user calls the assistant; an assistant nickname is an interaction convention, not an objective identity claim. Existing convenience shapes such as interaction.address/value.preferredAddress remain compatible but do not define the allowed concepts. Set persistenceIntent=explicit or future_oriented according to the user's wording, sensitivity from the content, and applicationTargets appropriate to the requested use (normally [response,human_loop] for interaction preferences and profile facts). Do not turn temporary task instructions, hypothetical examples, unadopted attachment/quoted content, or assistant statements into durable memory. Facts are objective user-provided information and must remain kind=fact; use any stable lowercase dotted key and a bounded structured value, for example profile.residence/value.city or contact.email/value.email. Proposals are not persistence receipts and never authorize tools or side effects.",
+      "Set applicability.scope=global_interaction only for an explicitly durable, topic-independent convention governing interaction with the user, with applicationTargets limited to response and human_loop. Do not use global_interaction for facts, business definitions, task-specific formats, source choices or methods; use task or omit scope for those. An absence of conditions does not establish global interaction scope. Preserve applicability.conditions and exclusions for conditional preferences and facts. Use applicability.context or excludedContext only for exact keys and values already established in the current task context, never invent context identities. Keep unspecified scope conditions in natural language. Preserve explicit effective/expiry times as epoch milliseconds in validFrom/expiresAt; omit unestablished times. A one-time HIL selection is evidence for that task, not a durable user default. Memory intake is a required first-class semantic decision, not keyword matching. Always return memoryAction and memoryIntents. Set memoryAction=commit and provide one or more candidates when the latest user explicitly establishes durable memory; set memoryAction=none with memoryIntents=[] otherwise. These two fields must agree. Propose every independent preference or fact the latest user explicitly establishes for future turns, even if its concept has never appeared in a schema example. Represent each candidate as kind=preference or fact, subtype=canonicalKey=<stable lowercase dotted semantic key>, value=<small structured object>, contentMarkdown=<self-contained declaration preserving who the preference or fact concerns and any conditions>, and sourceQuote=<verbatim supporting text from the latest user message>. Use separate keys for separate concepts. Consult priorPreferences to reuse an existing subtype as the canonicalKey when revising the same semantic subject/property; do not create a second key merely because the user rephrased it. Prior preferences are matching context, never evidence for a new durable instruction. Preserve the distinction between what the user wishes to be called and what the user calls the assistant; an assistant nickname is an interaction convention, not an objective identity claim. Existing convenience shapes such as interaction.address/value.preferredAddress remain compatible but do not define the allowed concepts. Set persistenceIntent=explicit or future_oriented according to the user's wording, sensitivity from the content, and applicationTargets appropriate to the requested use (normally [response,human_loop] for interaction preferences and profile facts). Do not turn temporary task instructions, hypothetical examples, unadopted attachment/quoted content, or assistant statements into durable memory. Facts are objective user-provided information and must remain kind=fact; use any stable lowercase dotted key and a bounded structured value, for example profile.residence/value.city or contact.email/value.email. Proposals are not persistence receipts and never authorize tools or side effects.",
       "For a method on a named MCP provider, record the provider as tool_source. Do not reconstruct a Runtime-prefixed tool name from a method name; method selection remains part of the exact requested goal for planning.",
       "Generic capability or service descriptions are not exact Skill, source, or tool identities. Do not copy them into requiredCapabilityReferences unless the user explicitly named that exact identity; keep them in effectiveGoal and userConstraints for semantic planning instead.",
       "Return exactly one resolve_conversation_turn tool call and no prose.",
@@ -10061,69 +10167,6 @@ function conversationTurnResolutionAttemptSummary(response: ModelResponse, input
   };
 }
 
-function parseConversationTaskIntent(
-  value: unknown,
-  onInvalid?: (feedback: string) => void,
-): ConversationTaskIntent | undefined {
-  const reject = (feedback: string): undefined => { onInvalid?.(feedback); return undefined; };
-  const record = optionalRecord(value);
-  if (record.schema !== "agentloop.conversationTaskIntent/v1") return reject("taskIntent.schema must be agentloop.conversationTaskIntent/v1.");
-  const operations = new Set(["answer", "lookup", "analysis", "create_artifact", "transform_artifact", "composite"]);
-  if (typeof record.operation !== "string" || !operations.has(record.operation)) return reject("taskIntent.operation must be one of answer, lookup, analysis, create_artifact, transform_artifact, or composite.");
-  if (typeof record.requiresExecution !== "boolean") return reject("taskIntent.requiresExecution must be a boolean and must agree with mode=execute.");
-  if (!Array.isArray(record.deliverables) || record.deliverables.length > 8) return reject("taskIntent.deliverables must be an array containing at most 8 terminal output families.");
-  const actions = new Set(["none", "create", "modify", "transform"]);
-  const kinds = new Set(["html", "document", "presentation", "spreadsheet", "image", "audio", "code", "none"]);
-  const surfaces = new Set(["conversation", "workspace_artifact"]);
-  const targetIds = new Set<string>();
-  const deliverables: ConversationTaskIntent["deliverables"][number][] = [];
-  for (const [index, item] of record.deliverables.entries()) {
-    const deliverable = optionalRecord(item);
-    const action = deliverable.action;
-    const kind = deliverable.kind;
-    const surface = deliverable.surface;
-    const format = deliverable.format;
-    const targetId = deliverable.targetId;
-    const purpose = deliverable.purpose;
-    const expectedArtifactCount = deliverable.expectedArtifactCount;
-    const path = `taskIntent.deliverables[${index}]`;
-    if (typeof targetId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(targetId) || targetId.length > 128) {
-      return reject(`${path}.targetId must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ and be at most 128 characters. Use an ASCII identifier; put the user-visible title in purpose.`);
-    }
-    if (targetIds.has(targetId)) return reject(`${path}.targetId must be unique across taskIntent.deliverables.`);
-    if (typeof purpose !== "string" || purpose.trim().length === 0 || purpose.length > 500) return reject(`${path}.purpose must be a non-empty string no longer than 500 characters.`);
-    if (typeof action !== "string" || !actions.has(action)) return reject(`${path}.action must be one of none, create, modify, or transform.`);
-    if (typeof kind !== "string" || !kinds.has(kind)) return reject(`${path}.kind must be one of html, document, presentation, spreadsheet, image, audio, code, or none. Put a concrete file format in format.`);
-    if (typeof surface !== "string" || !surfaces.has(surface)) return reject(`${path}.surface must be conversation or workspace_artifact.`);
-    if (!Number.isInteger(expectedArtifactCount) || (expectedArtifactCount as number) < 1 || (expectedArtifactCount as number) > 8) {
-      return reject(`${path}.expectedArtifactCount must be an integer from 1 to 8. Preserve the number of terminal artifacts explicitly requested by the user; use 1 only when exactly one artifact is requested.`);
-    }
-    if ((expectedArtifactCount as number) > 1 && targetId.length > 126) return reject(`${path}.targetId must be at most 126 characters when expectedArtifactCount is greater than 1, leaving room for per-artifact IDs.`);
-    if (format !== undefined && (typeof format !== "string" || format.trim().length === 0 || format.length > 32)) return reject(`${path}.format must be a non-empty string no longer than 32 characters when present.`);
-    if (typeof format === "string" && !artifactFormatMatchesKind(format, kind)) {
-      return reject(`${path}.format=${JSON.stringify(format)} cannot be satisfied by a physical ${kind} artifact. Put content and presentation requirements in purpose. Use a compatible physical file format only when required by the user; otherwise omit format. Do not change the requested content or silently substitute another required encoding.`);
-    }
-    targetIds.add(targetId);
-    deliverables.push({
-      targetId: targetId.trim(),
-      purpose: purpose.trim(),
-      expectedArtifactCount: expectedArtifactCount as number,
-      action: action as ConversationTaskIntent["deliverables"][number]["action"],
-      kind: kind as ConversationTaskIntent["deliverables"][number]["kind"],
-      ...(format === undefined ? {} : { format: (format as string).trim() }),
-      surface: surface as ConversationTaskIntent["deliverables"][number]["surface"],
-    });
-  }
-  if (deliverables.reduce((count, item) => count + (item.surface === "workspace_artifact" ? item.expectedArtifactCount : 0), 0) > 8) {
-    return reject("taskIntent.deliverables must request at most 8 workspace artifacts in total across all output families. Preserve explicit user cardinality; do not silently reduce the requested count.");
-  }
-  return {
-    schema: "agentloop.conversationTaskIntent/v1",
-    operation: record.operation as ConversationTaskIntent["operation"],
-    requiresExecution: record.requiresExecution,
-    deliverables,
-  };
-}
 
 function conversationResultForCandidateId(
   workset: ConversationWorkingSet | undefined,

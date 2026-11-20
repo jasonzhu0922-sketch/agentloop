@@ -3,6 +3,7 @@ import { parseRuntimeResult, parseRuntimeResultBinding, parseRuntimeResultJson, 
 import type { RuntimeDeliveryReceipt } from "./contracts.ts";
 
 interface ActionResultRow {
+  readonly id: string;
   readonly metadata_json: string;
 }
 
@@ -19,7 +20,8 @@ interface BoundStepResultRow extends StepResultRow {
 /**
  * Reads Runtime-owned results from their canonical producer records.
  *
- * Tool results live on the successful Runtime Action that committed them;
+ * Tool results live on the closed Runtime Action that committed them. A failed
+ * operation is an observation, never an accepted Step or a successful effect;
  * Step results live on the completed Plan step that published them. This keeps
  * one result protocol without creating a second result database beside the
  * existing Action/Plan authorities.
@@ -38,7 +40,7 @@ export class RuntimeResultRepository {
       .get(...(input.actorUserId === undefined ? [input.planId, input.runId] : [input.planId, input.runId, input.actorUserId]));
     if (plan === undefined) return [];
     const actions = await this.database.prepare(`SELECT id, step_id, result_ref, metadata_json FROM runtime_actions
-      WHERE run_id = ? AND plan_id = ? AND state = 'succeeded' AND result_ref IS NOT NULL
+      WHERE run_id = ? AND plan_id = ? AND state IN ('succeeded', 'failed') AND result_ref IS NOT NULL
         ${input.resultId === undefined ? "" : "AND result_ref = ?"} ORDER BY created_at, id`)
       .all<{ id: string; step_id: string; result_ref: string; metadata_json: string }>(...(input.resultId === undefined
         ? [input.runId, input.planId] : [input.runId, input.planId, input.resultId]));
@@ -114,16 +116,19 @@ export class RuntimeResultRepository {
       if (owner === undefined) return undefined;
     }
     const action = await this.database.prepare(`
-      SELECT metadata_json
+      SELECT id, metadata_json
       FROM runtime_actions
       WHERE result_ref = ?
         AND run_id = ?
         AND plan_id = ?
         AND step_id = ?
-        AND state = 'succeeded'
+        AND state IN ('succeeded', 'failed')
     `).get(input.resultId, input.runId, input.planId, input.stepId) as ActionResultRow | undefined;
     const actionResult = resultFromMetadata(action?.metadata_json);
-    if (actionResult?.ref.resultId === input.resultId && actionResult.kind === "tool") return actionResult;
+    if (actionResult?.ref.resultId === input.resultId && actionResult.kind === "tool"
+      && actionResult.publication.status === "committed" && actionResult.producer.actionId === action?.id
+      && actionResult.producer.runId === input.runId && actionResult.producer.planId === input.planId
+      && actionResult.producer.stepId === input.stepId) return actionResult;
 
     const currentStep = await this.database.prepare(`
       SELECT steps.dependencies_json, steps.execution_binding_json

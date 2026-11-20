@@ -96,6 +96,7 @@ const SUBMIT_ASSESSMENT_TOOL = {
           "violatedSkillRequirements",
           "reusableEvidenceRefs",
           "suggestedRepairShape",
+          "repairPrerequisite",
           "evidenceConcerns",
         ],
         properties: {
@@ -104,6 +105,8 @@ const SUBMIT_ASSESSMENT_TOOL = {
           violatedSkillRequirements: { type: "array", items: { type: "string" } },
           reusableEvidenceRefs: { type: "array", items: { type: "string" } },
           suggestedRepairShape: { type: "string", enum: ["repair_leaf", "revise_plan", "ask_user", "fail"] },
+          repairPrerequisite: { type: "string", enum: ["existing_evidence", "new_observation", "external_change"],
+            description: "existing_evidence: correct synthesis or delivery from observed facts. new_observation: an unobserved result or verification is necessary. external_change: the attempted path requires a changed condition; Recovery must consider alternatives or stop. Classify from supplied observations, not a presumed root cause." },
           evidenceConcerns: {
             type: "array", maxItems: 20,
             description: "Observed contradictions and unverified explanations, with exact supplied evidence IDs, including accepted user answer or decision IDs for scope contradictions. Empty when no specific contradiction is observed.",
@@ -233,6 +236,7 @@ export class ModelStepAssessor implements StepAssessor {
             "Skill entries are advisory QA observations, not completion gates. Assess each supplied Skill exactly once using its exact id; use not_assessed when QA is outside the user's question.",
             "Evidence concerns and temporal gaps are advisory context. Resolve every entry in openEvidenceConcerns once in concernResolutions, retaining unresolved observations honestly; an unresolved observation alone cannot veto a reply that matches the request. Return [] when there are no open concerns. Record observed contradictions separately from hypotheses using exact supplied evidence IDs; do not invent a cause or a missing fact.",
             "Use failedBoundary: null when the reply matches the user request. For a mismatch, identify the unanswered question or unmet explicit requirement and the smallest correction. Leave missingEvidenceKinds empty for a reply revision; request new evidence only when the user explicitly required verification or an operation whose result is missing. Do not demand schema_summary or other receipts merely to support an ordinary reply.",
+            "Separate goal completion from execution feasibility. A missing result does not establish that repeating work can obtain it. In failedBoundary.repairPrerequisite distinguish correction using existing evidence, a necessary new observation, and a path blocked until external conditions change. An honest failure explanation does not fulfill a requested result; rewriting it cannot repair an acquisition gap. Use exact supplied observations and keep the underlying cause uncertain unless proven. Recovery owns alternative selection, bounded probes, requests for necessary input and stopping.",
           ],
           taskProfile,
         }),
@@ -1126,6 +1130,11 @@ function parseFailedBoundary(input: StepAssessmentInput, value: unknown): Failed
   }
   requireStringArray(record.violatedSkillRequirements, "failedBoundary.violatedSkillRequirements", 50);
   const suggestedRepairShape = parseSuggestedRepairShape(record.suggestedRepairShape);
+  const repairPrerequisite = record.repairPrerequisite;
+  if (repairPrerequisite !== undefined && repairPrerequisite !== "existing_evidence"
+    && repairPrerequisite !== "new_observation" && repairPrerequisite !== "external_change") {
+    throw new TypeError("failedBoundary.repairPrerequisite is invalid");
+  }
   const evidenceConcerns = parseEvidenceConcerns(record.evidenceConcerns, input);
   return {
     stepId,
@@ -1133,6 +1142,7 @@ function parseFailedBoundary(input: StepAssessmentInput, value: unknown): Failed
     violatedSkillRequirements: [],
     reusableEvidenceRefs: parseEvidenceRefs(record.reusableEvidenceRefs, "failedBoundary.reusableEvidenceRefs", 100),
     suggestedRepairShape,
+    ...(repairPrerequisite === undefined ? {} : { repairPrerequisite }),
     ...(evidenceConcerns.length === 0 ? {} : { evidenceConcerns }),
   };
 }

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>知识与数据管理 · AgentLoop</title>
+  <link rel="stylesheet" href="/settings.css"><script type="module" src="/settings.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="/"><span class="logo">⌁</span><span><b>经营问数</b><small>AGENTLOOP DATA AGENT</small></span></a>
+    <nav aria-label="主导航"><a href="/">分析工作台</a><a class="active" href="/settings" aria-current="page">知识与数据管理</a></nav>
+    <span class="connection" id="database-status">● 连接未检测</span>
+  </header>
+  <div class="knowledge-layout">
+    <aside class="knowledge-nav">
+      <div class="knowledge-title"><span class="eyebrow">ADMIN CONSOLE</span><h1>知识与数据</h1><p>管理 Agent 的数据口径与分析能力。</p></div>
+      <nav class="knowledge-tabs" aria-label="配置分类">
+        <button data-panel="connection">⌁ <span>数据连接</span></button>
+        <button data-panel="server">⇄ <span>Server</span></button>
+        <button data-panel="workflow">⇢ <span>工作流</span><em id="workflow-count">5</em></button>
+        <button data-panel="tables">▦ <span>数据表</span><em id="tables-count">—</em></button>
+        <button data-panel="metrics">◈ <span>指标定义</span><em id="metrics-count">—</em></button>
+        <button data-panel="terms">⌘ <span>业务术语</span><em id="terms-count">—</em></button>
+        <button data-panel="skills">✦ <span>分析 Skills</span><em id="skills-count">—</em></button>
+        <button data-panel="sample_questions">▧ <span>案例问题</span><em id="sample_questions-count">—</em></button>
+        <button data-panel="model">◎ <span>模型管理</span></button>
+      </nav>
+      <div class="knowledge-nav-foot">配置会作用于下一次分析<br>集团经营分析 · 单场景</div>
+    </aside>
+    <main class="knowledge-content"><div id="feedback" role="status" aria-live="polite" hidden></div><div id="knowledge-panel" aria-busy="true"><p>正在加载配置…</p></div></main>
+  </div>
+  <footer class="app-footer"><span>AgentLoop</span><span>TiDB · SQL · Evidence-first analytics</span></footer>
+  <dialog id="editor-dialog" aria-labelledby="editor-title"><div id="editor-content"></div></dialog>
+</body>
+</html>

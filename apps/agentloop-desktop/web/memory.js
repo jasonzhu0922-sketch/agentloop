@@ -1,8 +1,10 @@
 const $ = id => document.getElementById(id);
-const labels = { preference: '偏好', fact: '事实', 'experience.episode': '任务记录', 'experience.task_group': '经验组', 'experience.procedure': '可复用方法',
+const labels = { preference: '偏好', fact: '事实', 'experience.episode': '任务记录', 'experience.task_group': '经验组', 'experience.procedure': '可复用方法', 'experience.knowledge': '任务知识',
   active: '已启用', superseded: '已替代', deleted: '已删除', queued: '等待处理', processing: '处理中', succeeded: '已成功', failed: '待重试', dead_letter: '重试耗尽',
   candidate: '待验证', verified: '已验证', response: '回复', planner: '规划', execution: '执行', artifact: '产物', human_loop: '用户确认',
-  completed: '已完成', cancelled: '已取消', running: '执行中', classicPath: '方法路径', reusableKnowledge: '复用规则', failureLessons: '失败教训' };
+  completed: '已完成', cancelled: '已取消', running: '执行中', classicPath: '方法路径', reusableKnowledge: '复用规则', failureLessons: '失败教训',
+  accepted: '复核完成', invalid_output: '复核输出无效', model_unavailable: '复核模型不可用', adopted: '复核认为已采用', not_adopted: '复核认为未采用', unknown: '无法判断',
+  supported: '相关验收支持', contradicted: '存在反证', unverified: '效果未验证' };
 const errors = { memory_query_invalid: '查询条件无效，请检查输入。Run ID 至少需要 4 位。', memory_run_query_too_broad: '匹配的任务过多，请输入更完整的 Run ID。',
   memory_item_not_found: '该记忆不存在或已不可访问，请刷新列表。', memory_run_not_found: '该任务已被删除，请重新查询。', memory_storage_invalid: '记忆存储状态异常，请检查本机数据目录。',
   account_changed: '登录账号已切换，请刷新页面后查询。' };
@@ -144,6 +146,21 @@ async function loadRun(afterSeq = 0, continuation) {
     recalls.append(node('p', '这里证明记忆已进入对应阶段的上下文。实际采用情况请继续核对下方执行证据。', 'note'));
     if (!detail.projections.length) recalls.append(node('p', detail.memoryAvailable ? '没有找到召回投影；这不代表记忆库为空。' : '当前账号没有记忆数据库。', 'meta'));
     for (const projection of detail.projections) recalls.append(disclosure(`${labels[projection.target] || projection.target} · ${projection.memoryRevisionIds?.length || 0} 个记忆版本 · ${projection.id}`, projection));
+    const reviews = runCard('逐条采用复核');
+    reviews.append(node('p', '异步模型复核会关联当前任务的动作与验收证据；复核结论不证明因果收益，也不会增加知识的独立验证次数。历史复核按原证据快照保留。', 'note'));
+    if (detail.invalidations?.length) {
+      reviews.append(node('p', '该任务已有后续纠正或争议，其执行支持已停止用于自动召回。下方历史复核保留原结论，请结合反馈来源查看。', 'note'), disclosure('后续反馈来源', detail.invalidations));
+    }
+    if (!detail.applicationReviews?.length) reviews.append(node('p', '暂无逐条复核记录；这不代表未采用。旧快照可能没有知识身份，新任务也可能仍在等待异步结算。', 'meta'));
+    for (const review of detail.applicationReviews || []) {
+      const card = node('section', undefined, 'detail-section'); card.append(badge(review.status), node('p', `${date(review.createdAt)} · ${review.modelKey}`, 'meta'));
+      for (const application of review.applications) {
+        const row = node('details'), title = node('summary'); title.append(badge(application.adoption), badge(application.effect), document.createTextNode(` ${application.knowledgeId}`));
+        row.append(title, node('p', application.reason, 'content'), facts([['记忆版本', application.memoryRevisionId], ['召回快照', application.projectionId], ['关联步骤', application.stepOrders.join('、') || '未定位']]), disclosure('执行与验收引用', application.evidenceRefs)); card.append(row);
+      }
+      if (review.errors.length) card.append(node('p', review.errors.join('；'), 'meta'));
+      card.append(disclosure('复核快照与输入指纹', review)); reviews.append(card);
+    }
     const settlement = runCard(`本次沉淀 · ${detail.jobs.length} 条作业`);
     for (const job of detail.jobs) { settlement.append(badge(job.status), node('p', `尝试 ${job.attempts} 次${job.lastError ? ` · ${job.lastError}` : ''}`, 'meta')); }
     if (!detail.jobs.length) settlement.append(node('p', '没有异步沉淀作业；显式记忆保存请查看 memory.explicit_commit 事件。', 'meta'));

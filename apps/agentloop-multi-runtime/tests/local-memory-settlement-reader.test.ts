@@ -16,16 +16,17 @@ test("Memory reader preserves observed methods, failures and true artifact check
   await db.prepare(`INSERT INTO canonical_run_states(run_id,state_id,intent_id,revision,state_json,created_at,updated_at) VALUES ('r','state','intent',1,?,1,1)`)
     .run(JSON.stringify({ intent: { understanding: { operation: "composite", operationProfiles: ["data_analysis"], deliverable: { kind: "html" } } } }));
   await db.prepare(`INSERT INTO skill_compliance_assessments(id,plan_id,step_id,attempt,approved,criteria_json,skills_json,evidence_digest,feedback,created_at)
-    VALUES ('assessment','p','s',1,1,'[]','[]','hash','范围和月份一致',1)`).run();
+    VALUES ('assessment','p','s',1,1,?,'[]','hash','范围和月份一致',1)`)
+    .run(JSON.stringify([{ evidenceRefs: ["read", "result:verify", "not-observed", "candidateOutput"] }]));
   await db.prepare(`INSERT INTO run_outcomes(run_id,plan_id,status,result_ref,reason_code,committed_at) VALUES ('r','p','completed','outcome','plan_assessed_and_completed',1)`).run();
   for (const [id, state, tool, content, error] of [
-    ["failed", "failed", "computer_run_command", { exitCode: 1, error: "invalid_month" }, "invalid_month"],
+    ["failed", "failed", "computer_run_command", { exitCode: 1, error: "RAW_ERROR_BODY", summary: "RAW_RESULT_SUMMARY" }, "invalid_month"],
     ["loaded", "succeeded", "load_skill", { content: "RAW_SKILL_BODY token=abc123" }, null],
     ["read", "succeeded", "computer_run_command", { exitCode: 0, stdout: "PRIVATE_EMPLOYEE_ROWS" }, null],
     ["verify", "succeeded", "verify_artifact_acceptance", { checks: [{ id: "artifact_non_empty", status: "passed" }, { id: "format_matches_request", status: "passed" }, { id: "artifact_openable", status: "failed" }] }, null],
   ] as const) {
     await db.prepare(`INSERT INTO runtime_actions(id,run_id,plan_id,step_id,kind,state,attempt,max_attempts,replay_policy,fence,revision,metadata_json,error_code,created_at,updated_at)
-      VALUES (?,'r','p','s','tool_call',?,1,1,'safe',1,1,?,?,1,1)`).run(id, state, JSON.stringify({ toolName: tool, toolCallId: id, runtimeResult: { payload: { content: JSON.stringify(content) } } }), error);
+      VALUES (?,'r','p','s','tool_call',?,1,1,'safe',1,1,?,?,1,1)`).run(id, state, JSON.stringify({ toolName: tool, toolCallId: id, runtimeResult: { ref: { resultId: `result:${id}` }, payload: { content: JSON.stringify(content) } } }), error);
   }
   await db.prepare(`INSERT INTO run_events(run_id,seq,type,payload_json,created_at) VALUES ('r',1,'tool.planned',?,1)`)
     .run(JSON.stringify({ toolCallId: "read", arguments: { command: "python3", args: ["scripts/hr_data.py", "fetch", "--org", "private-org", "--api-key", "private-key"] } }));
@@ -38,9 +39,15 @@ test("Memory reader preserves observed methods, failures and true artifact check
   assert.equal(JSON.stringify(value).includes("测试企业"), false);
   assert.equal(JSON.stringify(value).includes("PRIVATE_EMPLOYEE_ROWS"), false);
   assert.equal(JSON.stringify(value).includes("RAW_SKILL_BODY"), false);
+  assert.equal(JSON.stringify(value).includes("RAW_RESULT_SUMMARY"), false);
+  assert.equal(JSON.stringify(value).includes("RAW_ERROR_BODY"), false);
   assert.equal(JSON.stringify(value).includes("private-key"), false);
   assert.match(value.observations!.find((item) => item.id === "observation_3")!.summary, /scripts\/hr_data.py fetch --org/);
   assert.ok(value.observations!.some((item) => item.status === "failed" && item.summary.includes("invalid_month")));
+  assert.equal(value.observations!.find(item => item.kind === "assessment")?.stepOrder, 1, "per-knowledge application review must bind acceptance to the actual step");
+  assert.deepEqual(value.observations!.find(item => item.kind === "assessment")?.relatedObservationIds,
+    value.observations!.filter(item => item.sourceRefs.some(ref => ["read", "verify"].includes(ref.sourceId ?? ""))).map(item => item.id),
+    "resolve exact tool/result references into observations; candidateOutput and missing receipts cannot attest to an action");
   assert.equal((value.planSkeleton![0]!.toolNames as string[]).includes("never.called"), false);
   await assert.rejects(reader.read({ tenantId: "device", ownerUserId: "alice", runId: "r", terminalCommitRef: "different" }), /terminal_commit_mismatch/);
   assert.equal(await reader.read({ tenantId: "device", ownerUserId: "bob", runId: "r", terminalCommitRef: "outcome" }), undefined);

@@ -11,6 +11,7 @@ import type {
   ExecutionPlan,
 } from "../planning/contracts.ts";
 import { createRuntimeResultCard, type RuntimeResultCard, type RuntimeResultRecord } from "./runtime-result.ts";
+import type { RuntimeHumanLoopAnswer } from "./user-authority.ts";
 
 const RUN_LIMIT = 8;
 const ARTIFACT_LIMIT = 24;
@@ -50,6 +51,7 @@ export class RuntimeConversationWorkingSetQueryService {
   private readonly input: {
     readonly runs: (conversationId: string) => Promise<readonly ConversationWorkingSetRun[]>;
     readonly events: (runId: string) => Promise<readonly ConversationWorkingSetEvent[]>;
+    readonly answers?: (runId: string) => Promise<readonly RuntimeHumanLoopAnswer[]>;
     readonly outcome: (runId: string) => Promise<ConversationWorkingSetOutcome | undefined>;
     readonly plan: (runId: string) => Promise<ExecutionPlan | undefined>;
     readonly reusableArtifacts: (run: ConversationWorkingSetRun, events: readonly ConversationWorkingSetEvent[], plan: ExecutionPlan | undefined) => Promise<readonly ConversationReusableArtifact[]>;
@@ -78,10 +80,21 @@ export class RuntimeConversationWorkingSetQueryService {
     const sourceSummaries: ConversationSourceSummary[] = [];
     const outcomeRelations: ConversationOutcomeRelation[] = [];
     const resolvedIntents: ConversationResolvedIntent[] = [];
+    const userDecisions: NonNullable<ConversationWorkingSet["userDecisions"]>[number][] = [];
     let activeGoal: ConversationWorkingSet["activeGoal"] | undefined;
 
     for (const run of recentRuns) {
       const events = await this.input.events(run.id);
+      for (const answer of await this.input.answers?.(run.id) ?? []) {
+        // Do not copy free text/form fields (which can contain credentials).
+        if (!answer.selectedOptions?.length && typeof answer.value !== "boolean") continue;
+        userDecisions.push({ runId: run.id, requestId: answer.requestId, eventSeq: answer.eventSeq,
+          priorGoal: truncate(run.input, 600), question: truncate(answer.question.prompt, 600), requiresConfirmation: true,
+          ...(answer.selectedOptions?.length ? { selectedOptions: answer.selectedOptions.slice(0, 12).map(option => ({
+            id: option.id, label: truncate(option.label, 200), ...(option.identityRefs ? { identityRefs: option.identityRefs } : {}),
+          })) } : { confirmed: answer.value as boolean }),
+        });
+      }
       const resolution = this.input.turnResolution(events);
       if (resolution !== undefined) resolvedIntents.push({ runId: run.id, resolution });
       for (const event of events) {
@@ -174,6 +187,8 @@ export class RuntimeConversationWorkingSetQueryService {
       priorRuns: recentRuns.map((run) => ({ runId: run.id, input: run.input, status: run.status })),
       ...(activeGoal === undefined ? {} : { activeGoal }), planCursors,
       ...(resolvedIntents.length === 0 ? {} : { resolvedIntents }), resultCards: boundedResultCards,
+      ...(userDecisions.length === 0 ? {} : { userDecisions: userDecisions
+        .filter(decision => !outcomeRelations.some(relation => relation.targetRunId === decision.runId)).slice(-8) }),
       reusableArtifacts: boundedArtifacts, failedBoundaries,
       ...(outcomeRelations.length === 0 ? {} : { outcomeRelations }),
       recommendedCapabilities: { skillIds: [...requiredSkillIds], capabilityIds: [...recommendedCapabilityIds] },

@@ -125,7 +125,7 @@ export interface AgentLoopOptions {
   /** Source-backed facts and delivery require Agent synthesis within their owned scope. */
   readonly requireStructuredCandidateSynthesis?: boolean;
   /** Durable rejection decisions for this same Step, restored on recovery. */
-  readonly initialCandidateRejections?: readonly { readonly output: string; readonly feedback: string }[];
+  readonly initialCandidateRejections?: readonly { readonly output: string; readonly feedback: string; readonly decisionBasisDigest?: string }[];
   readonly convergencePrompt?: string;
   readonly convergenceMaxOutputTokens?: number;
   readonly shouldConvergeAfterToolStep?: (
@@ -567,6 +567,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let rejectedCandidateAssessments = 0;
   let rejectedUnassessableCandidates = 0;
   let rejectedCandidateIdentity: string | undefined;
+  let rejectedEvidenceBasis: string | undefined;
   let evidenceProgressBoundary: CandidateCompletionEvaluation["failedBoundary"];
   let evidenceProgressFeedback: string | undefined;
   let pendingCandidateRepairDirective: string | undefined;
@@ -626,6 +627,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       type: "prompt_augmentation.activated",
       data: {
         schema: "agentloop.promptAugmentationActivation/v1",
+        ...(options.currentDecisionContext === undefined ? {} : { stepId: options.currentDecisionContext().stepId }),
         augmentationIds: initialPromptAugmentations,
         contextRevision: contextAssembler.runtimeContextRevision,
         augmentations: (options.initialRuntimePromptAugmentations ?? [])
@@ -684,6 +686,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const recoveredRejection = options.initialCandidateRejections?.at(-1);
   if (recoveredRejection !== undefined) {
     const context = options.currentDecisionContext?.();
+    const gap = context?.canonicalState.gaps.find(gap => gap.status === "open" && gap.stepId === context.stepId);
+    rejectedEvidenceBasis = recoveredRejection.decisionBasisDigest;
+    evidenceProgressFeedback = recoveredRejection.feedback;
+    if (gap?.stepId !== undefined) evidenceProgressBoundary = {
+      stepId: gap.stepId, missingEvidenceKinds: gap.missingEvidenceKinds,
+      violatedSkillRequirements: gap.violatedSkillRequirements, reusableEvidenceRefs: gap.reusableEvidenceRefs ?? [],
+      suggestedRepairShape: gap.suggestedAction,
+      ...(gap.repairPrerequisite === undefined ? {} : { repairPrerequisite: gap.repairPrerequisite }),
+      ...(gap.unmetCriteria === undefined ? {} : { unmetCriteria: gap.unmetCriteria }),
+      ...(gap.evidenceConcerns === undefined ? {} : { evidenceConcerns: gap.evidenceConcerns }),
+    };
     const repairingAdmittedScope = context !== undefined && deriveCurrentDecisionView({
       runId: options.runId, context,
     }).currentGap.repairInProgressGapIds.length > 0;
@@ -717,12 +730,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     };
     const candidateIdentity = createHash("sha256").update(JSON.stringify({
       decisionBasisDigest: assessmentContext.decisionBasisDigest,
-      output: assessmentContext.output.trim(),
-      deliveryCandidate: assessmentContext.deliveryCandidate,
+      output: assessmentContext.output.trim(), deliveryCandidate: assessmentContext.deliveryCandidate,
     })).digest("hex");
-    if (rejectedCandidateIdentity !== undefined && candidateIdentity === rejectedCandidateIdentity) {
+    // A wording change can repair synthesis, but cannot supply a missing
+    // observation. Only gate gaps that Assessment declared evidence-dependent.
+    if ((rejectedEvidenceBasis !== undefined && assessmentContext.decisionBasisDigest === rejectedEvidenceBasis)
+      || (rejectedCandidateIdentity !== undefined && candidateIdentity === rejectedCandidateIdentity)) {
       const feedback = evidenceProgressFeedback
-        ?? "This exact candidate was rejected against the same observations and contract. A repeated submission cannot resolve that gap.";
+        ?? "This gap requires a changed observation or condition. Rewriting the candidate cannot resolve it.";
       return {
         approved: false,
         feedback,
@@ -732,18 +747,21 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       };
     }
     if (options.evaluateCandidate === undefined) return { approved: true, feedback: "" };
-    const evaluation = await options.evaluateCandidate(assessmentContext);
+    const assessed = await options.evaluateCandidate(assessmentContext);
+    const evaluation = assessed.failedBoundary?.repairPrerequisite === "new_observation"
+      ? { ...assessed, requiresEvidenceProgress: true } : assessed;
     if (!evaluation.approved) latestCandidateRejectionFeedback = evaluation.feedback;
     const repairShape = evaluation.failedBoundary?.suggestedRepairShape;
-    if (!evaluation.approved && (repairShape === "fail" || repairShape === "revise_plan" || repairShape === "ask_user")) {
+    const externalChangeRequired = evaluation.failedBoundary?.repairPrerequisite === "external_change";
+    if (!evaluation.approved && (externalChangeRequired || repairShape === "fail" || repairShape === "revise_plan" || repairShape === "ask_user")) {
       await emit({ type: "candidate.rejected", data: { step, output: context.output, feedback: evaluation.feedback } });
       await emit({
         type: "candidate.repair_stopped",
-        data: { step, reason: `assessment_requires_${repairShape}`, failedBoundary: evaluation.failedBoundary },
+        data: { step, reason: externalChangeRequired ? "assessment_requires_changed_conditions" : `assessment_requires_${repairShape}`, failedBoundary: evaluation.failedBoundary },
       });
       throw await completionFailure(new AppError(
         "STEP_NOT_COMPLETED", "Assessment requires a Recovery decision outside the current candidate loop", 422,
-        { feedback: evaluation.feedback, failedBoundary: evaluation.failedBoundary, repairExhausted: repairShape === "fail" },
+        { feedback: evaluation.feedback, failedBoundary: evaluation.failedBoundary, repairExhausted: externalChangeRequired || repairShape === "fail" },
       ), step, context.output, evaluation);
     }
     if (evaluation.assessmentReused === true) {
@@ -758,10 +776,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
     if (!evaluation.approved && evaluation.requiresEvidenceProgress === true) {
       rejectedCandidateIdentity = candidateIdentity;
+      rejectedEvidenceBasis = evaluation.failedBoundary?.repairPrerequisite === "new_observation"
+        || (evaluation.failedBoundary?.missingEvidenceKinds.length ?? 0) > 0
+        ? assessmentContext.decisionBasisDigest : undefined;
       evidenceProgressBoundary = evaluation.failedBoundary;
       evidenceProgressFeedback = evaluation.feedback;
-    } else if (evaluation.approved || candidateIdentity !== rejectedCandidateIdentity) {
+    } else {
       rejectedCandidateIdentity = undefined;
+      rejectedEvidenceBasis = undefined;
       evidenceProgressBoundary = undefined;
       evidenceProgressFeedback = undefined;
     }
@@ -905,7 +927,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     });
     await emit({
       type: evaluation.approved ? "candidate.approved" : "candidate.rejected",
-      data: { step: input.step, output: input.output, feedback: evaluation.feedback },
+      data: { step: input.step, output: input.output, feedback: evaluation.feedback,
+        ...(rejectedEvidenceBasis === undefined ? {} : { decisionBasisDigest: rejectedEvidenceBasis }) },
     });
     if (evaluation.approved) {
       await emit({ type: "loop.completed", data: { step: input.step, output: input.output } });
@@ -1649,7 +1672,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       });
       await emit({
         type: evaluation.approved ? "candidate.approved" : "candidate.rejected",
-        data: { step, output: response.content, feedback: evaluation.feedback },
+        data: { step, output: response.content, feedback: evaluation.feedback,
+          ...(rejectedEvidenceBasis === undefined ? {} : { decisionBasisDigest: rejectedEvidenceBasis }) },
       });
       if (evaluation.approved) {
         await emit({ type: "loop.completed", data: { step, output: response.content } });
@@ -1935,6 +1959,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           type: "prompt_augmentation.activated",
           data: {
             schema: "agentloop.promptAugmentationActivation/v1",
+            ...(options.currentDecisionContext === undefined ? {} : { stepId: options.currentDecisionContext().stepId }),
             augmentationIds: applied,
             contextRevision: contextAssembler.runtimeContextRevision,
             augmentations: enrichment.augmentations
@@ -3449,7 +3474,9 @@ function candidateRepairDirective(evaluation: CandidateCompletionEvaluation, fal
   }
   if (evaluation.requiresEvidenceProgress === true) {
     lines.push(
-      "Assessment found a substantive gap. If committed observations already support the requested result, correct the candidate from those observations. If observations are missing, acquire or inspect them with an authorized current-step action. A changed candidate is reassessed; identical rejected submissions are not useful progress.",
+      evaluation.failedBoundary?.repairPrerequisite === "new_observation" || (evaluation.failedBoundary?.missingEvidenceKinds.length ?? 0) > 0
+        ? "Assessment identified a gap that requires a new observation. Acquire or inspect the missing evidence with an authorized current-step action before submitting another candidate. Rephrasing the answer, naming a method, or repeating the same observation cannot supply the missing evidence. If no feasible action can change the gap, hand it to Runtime Recovery instead of rewriting the failure explanation."
+        : "Assessment identified an unresolved result gap. Correct interpretation or delivery using existing observations when sufficient; otherwise inspect or acquire the missing evidence with an authorized current-step action. Do not resubmit an identical rejected candidate.",
       "If that action is a Tool call, emit the Tool call structurally. Naming the Tool, path, or ResultRef in prose does not execute it and does not change the Runtime decision basis.",
     );
   }
@@ -3457,12 +3484,7 @@ function candidateRepairDirective(evaluation: CandidateCompletionEvaluation, fal
     const { missingEvidenceKinds, violatedSkillRequirements, reusableEvidenceRefs, suggestedRepairShape } = evaluation.failedBoundary;
     if (missingEvidenceKinds.length > 0) {
       lines.push(`Required completion evidence still missing: ${missingEvidenceKinds.join(", ")}.`);
-      if (missingEvidenceKinds.includes("source_summary") && !missingEvidenceKinds.includes("source_urls")) {
-        lines.push(
-          "Source discovery already produced traceable references. Advance the task by reading one or more of the highest-relevance available sources with a current source-content Tool (for example webfetch); do not resubmit another discovery-only summary.",
-          "Official or first-party sources are not required unless the admitted Plan explicitly uses strict_fail_on_missing_source. Prefer the strongest accessible relevant source and preserve caveats for anything still unverified.",
-        );
-      }
+      lines.push("Use the admitted source bindings and observed results to choose a feasible acquisition or inspection. A missing evidence kind does not establish that discovery succeeded or that any particular source tool is appropriate.");
     }
     if (violatedSkillRequirements.length > 0) {
       lines.push(`Unmet Skill requirements: ${violatedSkillRequirements.join(", ")}.`);

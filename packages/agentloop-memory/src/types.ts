@@ -24,6 +24,8 @@ export type MemoryActivation =
   | { readonly mode: "explicit_only" };
 
 export interface MemorySourceRef {
+  /** A recorded interpretation is provenance, never independent execution support. */
+  readonly authority?: "model_interpretation";
   readonly type:
     | "user_message"
     | "user_setting"
@@ -40,6 +42,8 @@ export interface MemorySourceRef {
   readonly sourceHash?: string;
   readonly quotedText?: string;
   readonly sourceId?: string;
+  readonly resultId?: string;
+  readonly pointer?: string;
 }
 
 export interface MemoryScope {
@@ -112,14 +116,20 @@ export interface MemoryCandidate {
   readonly confidence: number;
   readonly reason: string;
   readonly decision: "pending" | "accepted" | "confirmation_required" | "rejected";
-  /** Optimistic concurrency guard used by semantic Task Group fusion. */
-  readonly expectedCurrentRevisionId?: string;
+  /** Optimistic concurrency guard. null asserts that the key is absent. */
+  readonly expectedCurrentRevisionId?: string | null;
   readonly proposedApplicability?: MemoryApplicability;
   readonly validFrom?: number;
   readonly expiresAt?: number;
 }
 
 export interface MemoryStore {
+  invalidateRun(scope: MemoryScope, runId: string, source: MemorySourceRef, now: number): Promise<void>;
+  invalidatedRuns(scope: MemoryScope): Promise<readonly string[]>;
+  feedbackCursor(sourceId: string): Promise<{ readonly position: number; readonly eventKey: string } | undefined>;
+  advanceFeedbackCursor(sourceId: string, cursor: { readonly position: number; readonly eventKey: string }): Promise<void>;
+  recordApplicationReview(scope: MemoryScope, review: MemoryApplicationReview): Promise<void>;
+  applicationReviews(scope: MemoryScope, runId: string): Promise<readonly MemoryApplicationReview[]>;
   settlementJobs(scope: MemoryScope, runId: string): Promise<readonly MemorySettlementJob[]>;
   recordSettlementAttempt(job: MemorySettlementJob, attempt: SettlementAttempt): Promise<void>;
   settlementAttempts(scope: MemoryScope, runId: string): Promise<readonly SettlementAttempt[]>;
@@ -131,6 +141,10 @@ export interface MemoryStore {
     readonly revision: MemoryRevision;
     readonly memoryEpoch: number;
   }>;
+  /** All candidates commit together, or none of their revisions/epochs do. */
+  commitBatch(scope: MemoryScope, candidates: readonly MemoryCandidate[], now: number): Promise<readonly {
+    readonly item: MemoryItem; readonly revision: MemoryRevision; readonly memoryEpoch: number;
+  }[]>;
   recordProjection(scope: MemoryScope, projection: MemoryProjection): Promise<void>;
   projections(scope: MemoryScope, runId: string): Promise<readonly MemoryProjection[]>;
   enqueueSettlement(input: { readonly scope: MemoryScope; readonly runId: string; readonly terminalCommitRef: string; readonly now: number }): Promise<{
@@ -152,14 +166,48 @@ export interface MemoryStore {
   }): Promise<MemorySettlementJob>;
 }
 
+/** A retrospective, evidence-linked semantic assessment. This is never
+ * Runtime execution authority, a causal benefit estimate, or new support. */
+export interface MemoryApplicationReview {
+  readonly schema: "agentloop.memoryApplicationReview/v1";
+  readonly id: string;
+  readonly runId: string;
+  readonly terminalCommitRef: string;
+  readonly inputHash: string;
+  readonly modelKey: string;
+  readonly status: "accepted" | "invalid_output" | "model_unavailable";
+  readonly applications: readonly {
+    readonly projectionId: string;
+    readonly memoryRevisionId: string;
+    readonly knowledgeId: string;
+    readonly adoption: "adopted" | "not_adopted" | "unknown";
+    readonly reason: string;
+    readonly effect: "supported" | "contradicted" | "unverified";
+    readonly stepOrders: readonly number[];
+    readonly evidenceRefs: readonly MemorySourceRef[];
+  }[];
+  readonly errors: readonly string[];
+  readonly createdAt: number;
+}
+
+/** Rejected optional knowledge is durable audit data, never recalled content. */
+export interface SettlementQuarantinedUnit {
+  readonly section: "toolUsage" | "failureLessons" | "reusableKnowledge" | "knowledgeRelations";
+  readonly index: number;
+  readonly content: Readonly<Record<string, unknown>>;
+  readonly errors: readonly { readonly path: string; readonly code: string }[];
+}
+
 export interface SettlementAttempt {
-  readonly stage: "grouping" | "extraction" | "fusion";
+  readonly stage: "grouping" | "selection" | "extraction" | "fusion" | "settlement";
   readonly schema: string;
   readonly modelKey: string;
   readonly inputHash: string;
   readonly outputHash?: string;
+  readonly acceptedOutputHash?: string;
+  readonly quarantinedUnits?: readonly SettlementQuarantinedUnit[];
   readonly candidateRevisionIds: readonly string[];
-  readonly status: "accepted" | "invalid_output" | "model_unavailable";
+  readonly status: "accepted" | "invalid_output" | "model_unavailable" | "failed";
   readonly errors: readonly { readonly path: string; readonly code: string }[];
   readonly elapsedMs: number;
   readonly inputTokens?: number;
@@ -167,6 +215,15 @@ export interface SettlementAttempt {
   /** Validated grouping checkpoint; never an execution or knowledge claim. */
   readonly partitionInputHash?: string;
   readonly partition?: readonly { readonly caseIds: readonly string[]; readonly rationale: string }[];
+  /** Relevance checkpoint over compact historical indexes, not new support. */
+  readonly selectionInputHash?: string;
+  readonly selection?: readonly { readonly id: string; readonly relevance: number }[];
+  /** Validated learning only, never model input, private reasoning or tool bodies.
+   * Revalidated against the exact input before a publication/review retry. */
+  readonly learning?: Readonly<Record<string, unknown>>;
+  readonly learningInputHash?: string;
+  /** Validated relation-only comparison over a fixed independent extraction. */
+  readonly comparison?: Readonly<Record<string, unknown>>;
 }
 
 export type MemorySettlementJobStatus = "queued" | "processing" | "succeeded" | "failed" | "dead_letter";
@@ -223,8 +280,18 @@ export interface ExperienceToolUsage {
 }
 
 export interface ExperienceReusableKnowledge {
-  readonly kind?: "method" | "scoped_rule";
+  readonly standalone?: true;
+  readonly kind?: "method" | "scoped_rule" | "decision_rule";
+  readonly decisionPolicy?: {
+    readonly action: "stop" | "retry" | "change_path";
+    readonly alternatives: readonly string[];
+    readonly resumeWhen: readonly string[];
+  };
   readonly recheckRules?: readonly string[];
+  /** Exact resource/version selectors, independent of the parent task family. */
+  readonly resourceContext?: readonly { readonly key: string; readonly value: string }[];
+  /** A bounded parameterized command, request, query or other operation shape. */
+  readonly operation?: string;
   readonly rule: string;
   readonly conditions: readonly string[];
   readonly exclusions: readonly string[];
@@ -268,6 +335,7 @@ export interface ExperienceSettlementPattern {
   readonly title?: string;
   readonly goalSummary?: string;
   readonly keywords?: readonly string[];
+  readonly retrievalQueries?: readonly string[];
   readonly reuseRule?: string;
   readonly recheckRules?: readonly string[];
   readonly reuse?: {
@@ -309,10 +377,14 @@ export interface MemorySettlementEvidence {
   readonly terminalStatus: "completed" | "failed" | "cancelled";
   readonly taskFingerprint: Readonly<Record<string, unknown>>;
   readonly strategy?: string;
+  /** Bounded request, distinct from the Agent's interpreted goal or answer. */
+  readonly taskRequest?: Readonly<{ text: string; authority: "user_request"; complete: boolean }>;
   readonly observations?: readonly Readonly<{
     id: string;
     kind: "action" | "assessment" | "recovery" | "delivery" | "decision" | "feedback";
     stepOrder?: number;
+    /** Canonical reader-resolved links, not inferred from matching step numbers. */
+    relatedObservationIds?: readonly string[];
     toolName?: string;
     status: string;
     summary: string;
@@ -432,6 +504,8 @@ export interface MemoryPolicyDecision {
 }
 
 export interface MemoryPluginOptions {
+  /** Local-only model, supplied by the embedding host. No remote fallback. */
+  readonly recallModel?: MemorySettlementModel;
   readonly resolveRunScope: (runId: string) => Promise<MemoryRunScope | undefined>;
   /** A durable local store in production; InMemoryMemoryStore is test-only. */
   readonly store: MemoryStore;

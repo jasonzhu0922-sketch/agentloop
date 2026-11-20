@@ -25,6 +25,14 @@ export async function seedMemory(root: string, owner: string) {
     await db.prepare("UPDATE local_memory_settlement_jobs SET status = 'dead_letter', attempts = 5, last_error = 'invalid_output' WHERE run_id = 'memory-run-0001'").run();
     await db.prepare(`INSERT INTO local_memory_settlement_attempts (id,tenant_id,owner_user_id,run_id,settlement_job_id,attempt_json,created_at) VALUES ('attempt','fixture-device',?,'memory-run-0001','job',?,1)`)
       .run(owner, JSON.stringify({ stage: "extraction", status: "invalid_output", modelKey: "local:fixture", errors: [{ path: "learning", code: "evidence_missing" }] }));
+    for (const reviewOwner of [owner, "foreign"]) await store.recordApplicationReview({ tenantId: "fixture-device", ownerUserId: reviewOwner }, {
+      schema: "agentloop.memoryApplicationReview/v1", id: `review:${reviewOwner}`, runId: "memory-run-0001", terminalCommitRef: "fixture-commit",
+      inputHash: "fixture-input-hash", modelKey: "local:fixture", status: "accepted", createdAt: 1, errors: [],
+      applications: [{ projectionId: projection!.id, memoryRevisionId: entry.revision.id, knowledgeId: "knowledge:fixture", adoption: "unknown", effect: "unverified",
+        reason: reviewOwner === owner ? "The evidence does not establish adoption <script>window.reviewXss=true</script>" : "foreign-private-review", stepOrders: [], evidenceRefs: [] }],
+    });
+    await store.invalidateRun({ tenantId: "fixture-device", ownerUserId: owner }, "memory-run-0001", { type: "user_feedback", runId: "followup", sourceId: "followup:1" }, 2);
+    await store.invalidateRun({ tenantId: "fixture-device", ownerUserId: "foreign" }, "memory-run-0001", { type: "user_feedback", runId: "foreign-private-feedback" }, 2);
     return { id: entry.item.id, revisionId: entry.revision.id, projection };
   } finally { await db.close(); }
 }

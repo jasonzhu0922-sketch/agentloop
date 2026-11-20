@@ -111,7 +111,7 @@ export class RuntimeActionRepository {
     resultFailureCode?: (value: unknown) => string | undefined;
     /** A completed operation receipt may prove its effect boundary despite an operation failure. */
     resultFailureEffectState?: (value: unknown) => RuntimeActionEffectState;
-    /** Build the canonical Runtime result that is atomically committed with Action success. */
+    /** Commit an observed return value with its Action, including operation failures. */
     prepareResult?: (value: T, action: RuntimeActionRecord) => Promise<RuntimeResultRecord>;
     /**
      * Observability hook invoked after the Action and lease are durable, but
@@ -125,17 +125,11 @@ export class RuntimeActionRepository {
       await input.onDispatched?.(action);
       const value = await operation();
       const resultFailureCode = input.resultFailureCode?.(value);
-      if (resultFailureCode === undefined) {
-        const result = await input.prepareResult?.(value, action);
-        await this.succeed(action.id, action.fence, result);
-      } else {
-        await this.fail(
-          action.id,
-          action.fence,
-          resultFailureCode,
-          input.resultFailureEffectState?.(value) ?? failedResultEffectState(value),
-        );
-      }
+      const result = await input.prepareResult?.(value, action);
+      await this.commitResult(action.id, action.fence, result, resultFailureCode === undefined ? undefined : {
+        code: resultFailureCode,
+        effectState: input.resultFailureEffectState?.(value) ?? failedResultEffectState(value),
+      });
       return value;
     } catch (error) {
       await this.fail(action.id, action.fence, errorCode(error), failureEffectState(error));
@@ -499,7 +493,8 @@ export class RuntimeActionRepository {
     return await this.require(actionId);
   }
 
-  private async succeed(actionId: string, fence: number, runtimeResult?: RuntimeResultRecord): Promise<void> {
+  private async commitResult(actionId: string, fence: number, runtimeResult?: RuntimeResultRecord,
+    failure?: { readonly code: string; readonly effectState: RuntimeActionEffectState }): Promise<void> {
     const now = Date.now();
     await this.database.transaction(async () => {
       const row = await this.requireRow(actionId);
@@ -518,12 +513,16 @@ export class RuntimeActionRepository {
       }
       const metadata = JSON.parse(row.metadata_json) as Record<string, unknown>;
       const resultRef = runtimeResult?.ref.resultId;
+      const effectState = failure?.effectState ?? "applied";
       const result = await this.database.prepare(`
         UPDATE runtime_actions
-        SET state = 'succeeded', lease_until = NULL, effect_state = 'applied', result_ref = ?, metadata_json = ?, revision = revision + 1,
+        SET state = ?, lease_until = NULL, error_code = ?, effect_state = ?, result_ref = ?, metadata_json = ?, revision = revision + 1,
             updated_at = ?, closed_at = ?
         WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
       `).run(
+        failure === undefined ? "succeeded" : "failed",
+        failure?.code ?? null,
+        effectState,
         resultRef ?? null,
         JSON.stringify(runtimeResult === undefined ? metadata : { ...metadata, runtimeResult }),
         now,
@@ -533,10 +532,11 @@ export class RuntimeActionRepository {
         row.revision,
       ) as { changes: number };
       if (result.changes !== 1) throw new AppError("CONFLICT", "Runtime Action lease was lost before result commit", 409);
-      await this.appendEvent(row.run_id, "action.result_committed", {
+      await this.appendEvent(row.run_id, failure === undefined ? "action.result_committed" : "action.failed", {
         actionId,
         fence,
-        effectState: "applied",
+        effectState,
+        ...(failure === undefined ? {} : { code: failure.code }),
         ...(resultRef === undefined ? {} : { resultRef }),
       }, now);
     });

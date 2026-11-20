@@ -25,6 +25,9 @@ export type MemorySensitivity = "normal" | "private" | "restricted" | "secret";
 /** Conditions are model-readable; context selectors are exact, source-bound
  * requirements. Missing context never satisfies a declared requirement. */
 export interface MemoryApplicability {
+  /** Only explicit, topic-independent interaction preferences use this scope.
+   * Absence retains task relevance checking for existing memories. */
+  readonly scope?: "task" | "global_interaction";
   readonly conditions: readonly string[];
   readonly exclusions: readonly string[];
   readonly context?: Readonly<Record<string, readonly (string | number | boolean)[]>>;
@@ -34,6 +37,7 @@ export interface MemoryApplicability {
 export const MEMORY_APPLICABILITY_SCHEMA = {
   type: "object", additionalProperties: false, required: ["conditions", "exclusions"],
   properties: {
+    scope: { type: "string", enum: ["task", "global_interaction"], description: "global_interaction only for explicit topic-independent interaction preferences; facts, methods, topic definitions and task formats use task." },
     conditions: { type: "array", maxItems: 24, items: { type: "string", minLength: 1, maxLength: 1000 } },
     exclusions: { type: "array", maxItems: 24, items: { type: "string", minLength: 1, maxLength: 1000 } },
     context: { type: "object", maxProperties: 24, additionalProperties: { type: "array", minItems: 1, maxItems: 24, items: { anyOf: [{ type: "string", minLength: 1, maxLength: 200 }, { type: "number" }, { type: "boolean" }] } } },
@@ -44,7 +48,8 @@ export const MEMORY_APPLICABILITY_SCHEMA = {
 export function isMemoryApplicability(value: unknown): value is MemoryApplicability {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const row = value as Record<string, unknown>;
-  if (Object.keys(row).some(key => !["conditions", "exclusions", "context", "excludedContext"].includes(key))) return false;
+  if (Object.keys(row).some(key => !["scope", "conditions", "exclusions", "context", "excludedContext"].includes(key))) return false;
+  if (row.scope !== undefined && row.scope !== "task" && row.scope !== "global_interaction") return false;
   for (const key of ["conditions", "exclusions"]) {
     const list = row[key];
     if (!Array.isArray(list) || list.length > 24 || list.some(item => typeof item !== "string" || !item.trim() || item.length > 1000)) return false;
@@ -170,11 +175,31 @@ export interface PlanningMemoryProjection extends MemoryProjectionBase {
     };
     readonly reusableKnowledge?: readonly Readonly<Record<string, unknown>>[];
     readonly failureLessons?: readonly Readonly<Record<string, unknown>>[];
+    /** Stable identities for the exact knowledge projected in this prior.
+     * classicPath refers to suggestedSteps as a whole; other sections use index. */
+    readonly knowledgeBindings?: readonly {
+      readonly knowledgeId: string;
+      readonly section: "classicPath" | "reusableKnowledge" | "failureLessons";
+      readonly index?: number;
+    }[];
   }[];
+}
+
+export interface MemoryKnowledgeCard {
+  readonly memoryRevisionId: string;
+  readonly knowledgeId: string;
+  readonly layer: "strategy" | "environment";
+  readonly content: Readonly<Record<string, unknown>>;
+  readonly parameters: readonly { readonly name: string; readonly description: string }[];
+  readonly verificationBasis: "independent_executions" | "source_observation" | "execution_observation";
+  readonly maturity?: "candidate" | "verified";
+  readonly requiresVerification: true;
+  readonly applicability?: MemoryApplicability;
 }
 
 export interface RuntimeGuidanceMemoryProjection extends MemoryProjectionBase {
   readonly target: "execution" | "artifact";
+  readonly knowledgeCards?: readonly MemoryKnowledgeCard[];
   readonly augmentations: readonly {
     readonly id: string;
     readonly contentMarkdown: string;
@@ -248,6 +273,15 @@ export interface AgentLoopMemoryPlugin {
     readonly taskFingerprint?: Readonly<Record<string, unknown>>;
     readonly stepContext?: Readonly<Record<string, unknown>>;
     readonly budget: MemoryProjectionBudget;
+    /** Audit IDs and scores only; no private memory content or model prose. */
+    readonly onDiagnostic?: (diagnostic: {
+      readonly eligibleRevisionIds: readonly string[];
+      readonly semanticStatus: "disabled" | "empty" | "succeeded" | "invalid_output" | "unavailable";
+      readonly semanticElapsedMs: number;
+      readonly semanticScores: readonly { readonly revisionId: string; readonly relevant: boolean; readonly confidence: number }[];
+      readonly projectedRevisionIds: readonly string[];
+      readonly budgetExcludedRevisionIds: readonly string[];
+    }) => Promise<void>;
   }): Promise<MemoryProjection | undefined>;
 
   commitExplicit(input: ExplicitMemoryCommitRequest): Promise<ExplicitMemoryCommitResult>;

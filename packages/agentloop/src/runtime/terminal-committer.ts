@@ -23,6 +23,7 @@ export class TerminalCommitter {
   private readonly canonicalStates: CanonicalRunStateRepository;
   private readonly connection: SqlConnection;
   private readonly maxRounds: number;
+  private readonly afterTerminalCommit?: (runId: string) => Promise<void>;
 
   constructor(
     plans: PlanRepository,
@@ -31,6 +32,7 @@ export class TerminalCommitter {
     canonicalStates: CanonicalRunStateRepository,
     connection: SqlConnection,
     maxRounds = 8,
+    afterTerminalCommit?: (runId: string) => Promise<void>,
   ) {
     this.plans = plans;
     this.outcomes = outcomes;
@@ -38,6 +40,7 @@ export class TerminalCommitter {
     this.canonicalStates = canonicalStates;
     this.connection = connection;
     this.maxRounds = maxRounds;
+    this.afterTerminalCommit = afterTerminalCommit;
   }
 
   async commitCompleted(runId: string, planId: string, output: string): Promise<void> {
@@ -66,6 +69,7 @@ export class TerminalCommitter {
       await this.outcomes.commitCompleted({ runId, planId, result });
       await new RunRoundRepository(this.connection).finish(runId, "completed", Date.now());
     });
+    await this.notifyTerminalCommit(runId);
   }
 
   async commitCompletedWithDeferredValidation(runId: string, planId: string, output: string): Promise<void> {
@@ -165,6 +169,7 @@ export class TerminalCommitter {
       await this.outcomes.commitCompletedWithCaveats({ runId, planId, result, reasonCode });
       await new RunRoundRepository(this.connection).finish(runId, "completed", Date.now());
     });
+    await this.notifyTerminalCommit(runId);
   }
 
   async commitStopped(input: {
@@ -190,6 +195,15 @@ export class TerminalCommitter {
       await new RunRoundRepository(this.connection).finish(input.runId, input.status, Date.now());
       await new PlanningRecoveryRepository(this.connection).finish(input.runId, "cancelled", Date.now());
     });
+    await this.notifyTerminalCommit(input.runId);
+  }
+
+  private async notifyTerminalCommit(runId: string): Promise<void> {
+    try { await this.afterTerminalCommit?.(runId); }
+    catch {
+      // The committed Outcome is the durable outbox. A failed observer cannot
+      // invalidate completion; the local reconciler retries from that record.
+    }
   }
 
   private async commitCanonicalCompletion(state: Awaited<ReturnType<CanonicalRunStateRepository["get"]>>, reasonCode: string): Promise<void> {

@@ -10,6 +10,7 @@ import type {
   MemoryScope,
   MemoryStore,
   SettlementAttempt,
+  MemoryApplicationReview,
 } from "./types.ts";
 
 function scopeKey(scope: MemoryScope): string {
@@ -28,6 +29,30 @@ export class InMemoryMemoryStore implements MemoryStore {
   private readonly projectionsByRun = new Map<string, MemoryProjection[]>();
   private readonly settlementJobStore = new Map<string, MemorySettlementJob>();
   private readonly attempts: Array<{ job: MemorySettlementJob; value: SettlementAttempt }> = [];
+  private readonly applicationReviewStore = new Map<string, MemoryApplicationReview>();
+  private readonly feedbackCursors = new Map<string, { position: number; eventKey: string }>();
+  private readonly invalidations = new Map<string, Set<string>>();
+
+  async invalidateRun(scope: MemoryScope, runId: string, _source: import("./types.ts").MemorySourceRef, _now: number): Promise<void> {
+    const key = scopeKey(scope), runs = this.invalidations.get(key) ?? new Set<string>();
+    runs.add(runId); this.invalidations.set(key, runs);
+  }
+  async invalidatedRuns(scope: MemoryScope): Promise<readonly string[]> { return [...this.invalidations.get(scopeKey(scope)) ?? []]; }
+
+  async feedbackCursor(sourceId: string) { return structuredClone(this.feedbackCursors.get(sourceId)); }
+  async advanceFeedbackCursor(sourceId: string, cursor: { position: number; eventKey: string }): Promise<void> {
+    this.feedbackCursors.set(sourceId, { ...cursor });
+  }
+
+  async recordApplicationReview(scope: MemoryScope, review: MemoryApplicationReview): Promise<void> {
+    const key = `${scopeKey(scope)}\u0000${review.id}`;
+    if (!this.applicationReviewStore.has(key)) this.applicationReviewStore.set(key, structuredClone(review));
+  }
+
+  async applicationReviews(scope: MemoryScope, runId: string): Promise<readonly MemoryApplicationReview[]> {
+    const prefix = `${scopeKey(scope)}\u0000`;
+    return structuredClone([...this.applicationReviewStore].filter(([key, value]) => key.startsWith(prefix) && value.runId === runId).map(([, value]) => value));
+  }
 
   async settlementJobs(scope: MemoryScope, runId: string): Promise<readonly MemorySettlementJob[]> {
     return [...this.settlementJobStore.values()]
@@ -63,11 +88,27 @@ export class InMemoryMemoryStore implements MemoryStore {
       .filter((entry) => entry.revision !== undefined);
   }
 
-  async commit(scope: MemoryScope, candidate: MemoryCandidate, now: number): Promise<{
+  async commit(scope: MemoryScope, candidate: MemoryCandidate, now: number) {
+    return this.commitValue(scope, candidate, now);
+  }
+
+  async commitBatch(scope: MemoryScope, candidates: readonly MemoryCandidate[], now: number) {
+    // No await between snapshot and completion: rollback cannot erase another
+    // JavaScript caller's committed work.
+    const snapshots = [new Map(this.items), new Map(this.revisions), new Map(this.epochs)] as const;
+    try { return candidates.map(candidate => this.commitValue(scope, candidate, now)); }
+    catch (error) {
+      const restore = <K, V>(target: Map<K, V>, source: Map<K, V>) => { target.clear(); for (const [key, value] of source) target.set(key, value); };
+      restore(this.items, snapshots[0]); restore(this.revisions, snapshots[1]); restore(this.epochs, snapshots[2]);
+      throw error;
+    }
+  }
+
+  private commitValue(scope: MemoryScope, candidate: MemoryCandidate, now: number): {
     readonly item: MemoryItem;
     readonly revision: MemoryRevision;
     readonly memoryEpoch: number;
-  }> {
+  } {
     const policy = evaluateCandidate(candidate, now);
     if (policy.kind !== "accept") throw new Error(`candidate_policy:${policy.reason}`);
     if (candidate.tenantId !== scope.tenantId || candidate.ownerUserId !== scope.ownerUserId) {
@@ -82,7 +123,7 @@ export class InMemoryMemoryStore implements MemoryStore {
       item.subtype === candidate.proposedSubtype &&
       item.canonicalKey === candidate.proposedCanonicalKey,
     );
-    if (candidate.expectedCurrentRevisionId !== undefined && matching?.currentRevisionId !== candidate.expectedCurrentRevisionId) throw new Error("task_group_revision_conflict");
+    if (candidate.expectedCurrentRevisionId !== undefined && (matching?.currentRevisionId ?? null) !== candidate.expectedCurrentRevisionId) throw new Error("task_group_revision_conflict");
     const itemId = matching?.id ?? `mem_${hash({ key, candidate: candidate.id }).slice(0, 24)}`;
     const previousRevision = matching === undefined ? undefined : this.revisions.get(matching.currentRevisionId);
     const revisionNumber = previousRevision === undefined ? 1 : previousRevision.revision + 1;
@@ -136,11 +177,12 @@ export class InMemoryMemoryStore implements MemoryStore {
   async recordProjection(scope: MemoryScope, projection: MemoryProjection): Promise<void> {
     const key = `${scopeKey(scope)}\u0000${projection.runId}`;
     const current = this.projectionsByRun.get(key) ?? [];
-    this.projectionsByRun.set(key, [...current, projection]);
+    if (current.some(saved => saved.id === projection.id)) return;
+    this.projectionsByRun.set(key, [...current, structuredClone(projection)]);
   }
 
   async projections(scope: MemoryScope, runId: string): Promise<readonly MemoryProjection[]> {
-    return [...(this.projectionsByRun.get(`${scopeKey(scope)}\u0000${runId}`) ?? [])];
+    return structuredClone(this.projectionsByRun.get(`${scopeKey(scope)}\u0000${runId}`) ?? []);
   }
 
   async enqueueSettlement(input: { readonly scope: MemoryScope; readonly runId: string; readonly terminalCommitRef: string; readonly now: number }): Promise<{

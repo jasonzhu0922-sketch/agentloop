@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import { toolNamesForConversationMode } from "../src/runtime/conversation-tool-p
 import { ToolRegistry, type RuntimeTool } from "../src/tools/tool-registry.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
+import { removeSkillPackage } from "../src/skills/skill-package.ts";
 import { approvingTestAssessor, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
 import type { ModelResponse } from "../src/runtime/contracts.ts";
 import { connectorOperationTools } from "../../connector-sdk/src/agentloop-adapter.ts";
@@ -29,9 +30,87 @@ function text(content: string): ModelResponse { return { content, finishReason: 
 function call(name: string, args: Record<string, unknown>): ModelResponse {
   return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `call-${name}`, name, arguments: args }] };
 }
+function answerPlan(goal: string, capabilities: readonly string[]): ModelResponse {
+  return call("submit_outcome_plan", { schema: "agentloop.outcomePlan/v2", goal, shape: "single_leaf", selectedSkillRoles: [],
+    leaves: [{ id: "response", objective: goal, role: "deliver", dependsOn: [], requiredFacts: [], skillIds: [],
+      requiredCapabilities: ["conversation_delivery", ...capabilities], targetIds: ["answer"], sourceConstraint: null,
+      evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "mark_unverified_facts" } }],
+  });
+}
 function tool(name: string, effect?: "read" | "write", replaySafe = true): RuntimeTool {
   return { name, description: "Host-declared operation", effect, replaySafe, executionMode: "parallel",
     inputSchema: { type: "object" }, parse: input => input, execute: async () => ({ value: "live-observation" }) };
+}
+
+for (const fixture of [
+  { name: "data-analysis", evidenceStrategy: "source_grounded", goal: "截至2026年6月底，管理合并账套1001G300的年初起累计毛利率是多少？" },
+  { name: "archive-query", evidenceStrategy: "lookup_lite", goal: "查询内部档案中合同的当前状态。" },
+]) {
+  test(`an evidence-backed reply plans and binds ${fixture.name} before loading its package`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentloop-reply-skill-"));
+    const db = new AppDatabase(":memory:");
+    let planningTurns = 0, executionTurns = 0;
+    try {
+      const packageRoot = join(root, "skills", fixture.name);
+      await mkdir(packageRoot, { recursive: true });
+      await writeFile(join(packageRoot, "SKILL.md"), ["---", `name: ${fixture.name}`,
+        "description: 查询内部业务数据与档案，读取账套指标和合同状态。", "agentloop:",
+        "  roles:", "    - source_provider", "  artifactKinds:", "    - none",
+        "  sourceKinds:", "    - database", "  producesEvidenceKinds:", "    - source_summary", "---",
+        "Read observation.txt in this Skill package and answer from that recorded observation."].join("\n"));
+      await writeFile(join(packageRoot, "observation.txt"), "Recorded source observation: fixture-value");
+      const skills = new SkillService(db, { skillDirectory: join(root, "skills"), packageStoreRoot: join(root, "packages") });
+      await skills.refreshSkillDirectory();
+      const skill = (await skills.resolveForConversation("owner"))[0]!;
+      await mkdir(join(root, "workspace"));
+      const service = new RunService({ database: db, skills, workspaceRoot: join(root, "workspace"),
+        assessorFactory: () => approvingTestAssessor(),
+        modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+          if (request.runId.startsWith("conversation-turn:")) return resolve(fixture.goal, {
+            evidenceStrategy: fixture.evidenceStrategy,
+            taskIntent: { schema: "agentloop.conversationTaskIntent/v1", operation: "lookup", requiresExecution: false,
+              deliverables: [{ targetId: "answer", purpose: fixture.goal, expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }] },
+          });
+          if (request.phase === "planning") {
+            planningTurns++;
+            assert.ok(request.runtimeContext!.content.includes(skill.id));
+            return call("submit_outcome_plan", { schema: "agentloop.outcomePlan/v2", goal: fixture.goal, shape: "single_leaf",
+              selectedSkillRoles: [{ skillId: skill.id, role: "source_provider", reason: "Acquire the requested private fact." }],
+              leaves: [{ id: "answer", objective: fixture.goal, role: "deliver", dependsOn: [], requiredFacts: [],
+                skillIds: [skill.id], requiredCapabilities: ["conversation_delivery", `skill_source_provider.database.${skill.id}`],
+                targetIds: ["answer"], sourceConstraint: null,
+                evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "mark_unverified_facts" } }],
+            });
+          }
+          assert.ok(request.tools.some(item => item.name === "load_skill"), "the admitted Skill must be callable");
+          executionTurns++;
+          if (executionTurns === 1) return call("load_skill", { name: skill.name });
+          if (executionTurns === 2) return call("computer_read_file", { path: `@skills/${skill.name}/observation.txt` });
+          assert.match(JSON.stringify(request.messages), /fixture-value/);
+          return text("The recorded observation is fixture-value.");
+        } }),
+      });
+      const run = await service.executeConversation("owner", fixture.goal).catch(async error => {
+        const failures = await db.prepare("SELECT payload_json FROM run_events WHERE type = 'run.failed'").all();
+        assert.fail(`${error}: ${JSON.stringify(failures)}`);
+      });
+      const events = await service.events("owner", run.id);
+      assert.equal(run.status, "completed", JSON.stringify(events.filter(event => /failed|rejected/.test(event.type))));
+      assert.equal(planningTurns, 1);
+      assert.equal(executionTurns, 3);
+      assert.equal(events.find(event => event.type === "conversation.turn.resolved")!.data.mode, "reply");
+      const { plan } = await service.plan("owner", run.id);
+      assert.deepEqual(plan.selectedSkillIds, [skill.id]);
+      assert.deepEqual(plan.steps[0].skillIds, [skill.id]);
+      assert.ok(events.some(event => event.type === "tool.completed" && event.data.toolName === "load_skill"));
+      assert.ok(events.some(event => event.type === "run.completed"));
+      assert.equal(events.some(event => event.type === "tool.rejected"), false);
+    } finally {
+      db.close();
+      await removeSkillPackage(join(root, "packages"));
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 }
 
 test("conversation modes retain Run authority independently of effect declarations", () => {
@@ -52,7 +131,7 @@ test("reply can select a generic service reader and then a visible file without 
   const root = await mkdtemp(join(tmpdir(), "agentloop-read-reply-"));
   const visible = await mkdtemp(join(tmpdir(), "agentloop-read-source-"));
   const db = new AppDatabase(":memory:");
-  let reads = 0, executionTurns = 0, assessments = 0;
+  let reads = 0, planningTurns = 0, executionTurns = 0, assessments = 0;
   const observe = { ...tool("observe_catalog", "read", false), execute: async () => { reads++; return { status: "live-observation" }; } };
   try {
     await writeFile(join(visible, "state.txt"), "file-observation");
@@ -66,6 +145,10 @@ test("reply can select a generic service reader and then a visible file without 
       } }),
       modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
         if (request.runId.startsWith("conversation-turn:")) return resolve("Explain the current state", { evidenceStrategy: "lookup_lite" });
+        if (request.phase === "planning") {
+          planningTurns++;
+          return answerPlan("Explain the current state", ["authorized_tool_use"]);
+        }
         assert.equal(request.phase, "execution");
         const names = request.tools.map(item => item.name);
         assert.ok(names.includes("observe_catalog"));
@@ -90,7 +173,7 @@ test("reply can select a generic service reader and then a visible file without 
     });
     const run = await service.executeConversation("owner", "Explain the current state", { visibleDirectories: [visible] });
     assert.equal(run.status, "completed", JSON.stringify((await service.events("owner", run.id)).slice(-8)));
-    assert.equal(reads, 1); assert.equal(executionTurns, 4); assert.equal(assessments, 1);
+    assert.equal(reads, 1); assert.equal(planningTurns, 1); assert.equal(executionTurns, 4); assert.equal(assessments, 1);
     const events = await service.events("owner", run.id);
     const resolved = events.find(event => event.type === "conversation.turn.resolved")!.data;
     assert.equal(resolved.mode, "reply"); assert.equal(resolved.evidenceDemand, "lookup_lite");
@@ -242,6 +325,7 @@ for (const recovery of [false, true]) {
           if (request.runId.startsWith("conversation-turn:")) return resolve("整理我今天收到的邮件", {
             evidenceStrategy: "source_grounded", requiredCapabilityReferences: [{ kind: "tool_source", reference: "126 邮箱" }],
           });
+          if (request.phase === "planning") return answerPlan("整理我今天收到的邮件", ["email.count", "email.search", "email.read"]);
           const toolFor = (operation: string) => request.tools.find(tool => tool.description.includes(`Connector operation: ${operation}`))!;
           for (const operation of ["email.count", "email.search", "email.read"]) assert.ok(toolFor(operation), operation);
           assert.equal(request.tools.some(tool => tool.name === "computer_run_command"), false);

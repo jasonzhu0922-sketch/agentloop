@@ -18,6 +18,8 @@
     "restart:accounts": "node apps/agentloop-account-service/scripts/local-service-manager.mjs --background",
     "test:accounts": "npm run test --workspace agentloop-account-service",
     "build:kernel": "npm run build --workspace @zhujun/agentloop",
+    "start:data-agent": "npm run start --workspace agentloop-data-agent",
+    "test:data-agent": "npm run test --workspace agentloop-data-agent",
     "build:local-runtime": "npm run build --workspace @zhujun/agentloop-local-runtime",
     "test:local-runtime": "npm run test --workspace @zhujun/agentloop-local-runtime",
     "build:desktop": "npm run build --workspace agentloop-desktop",

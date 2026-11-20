@@ -11,6 +11,93 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+for (const continuation of ["stop", "alternate"] as const) {
+  test(`a blocked source follows the canonical Recovery chain with its failed Result: ${continuation}`, async t => {
+    const root = await mkdtemp(join(tmpdir(), "blocked-source-recovery-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const database = new AppDatabase(":memory:");
+    t.after(() => database.close());
+    let primaryReads = 0, alternativeReads = 0, assessments = 0, recoveries = 0, reports = 0;
+    let failureResultId = "", gapId = "";
+    const source = { id: "authorized-source", transport: "api" as const, capabilities: [{ id: "source.observe",
+      category: "source_acquisition" as const, sourceKinds: ["api" as const], producesEvidenceKinds: ["source_summary" as const] }] };
+    const runs = new RunService({ database, workspaceRoot: root, skills: new SkillService(database), maxSteps: 16,
+      plannerFactory: () => ({ plan: async task => {
+        const plan = await singleStepTestPlanner().plan(task);
+        return { ...plan, steps: plan.steps.map(step => ({ ...step, requiredCapabilities: ["source.observe", "conversation_delivery"],
+          evidenceContract: { requiredKinds: ["source_summary" as const], caveatPolicy: "none" as const } })) };
+      } }),
+      tools: [{ name: "read_primary", description: "Read the primary endpoint", inputSchema: { type: "object" }, source,
+        executionMode: "parallel", replaySafe: true, parse: value => value,
+        execute: async () => { primaryReads += 1; return { exitCode: 1, stdout: '{"status":"unavailable","phase":"source.read"}', stderr: "" }; } },
+      ...(continuation === "alternate" ? [{ name: "read_alternate", description: "Read the authorized independent endpoint", inputSchema: { type: "object" }, source,
+        executionMode: "parallel" as const, replaySafe: true, parse: (value: unknown) => value,
+        execute: async () => { alternativeReads += 1; return { total: 42,
+          evidenceReceipt: { schema: "agentloop.toolEvidenceReceipt/v1", evidenceKinds: { satisfied: ["source_summary"], caveated: [], failed: [] } } }; } }] : [])],
+      assessorFactory: () => ({ assess: async input => {
+        assessments += 1;
+        const assessment = await approvingTestAssessor().assess(input);
+        if (alternativeReads > 0) return assessment;
+        const failure = input.evidence.toolCalls.find(call => call.toolName === "read_primary")!;
+        assert.ok(failure.resultRef, "the failed operation must be formally referenceable");
+        failureResultId = failure.resultRef.resultId;
+        return { ...assessment, approved: false, feedback: "The requested total is unobserved; the primary path is blocked.",
+          criteria: assessment.criteria.map(criterion => ({ ...criterion, satisfied: false })),
+          failedBoundary: { stepId: input.step.id, missingEvidenceKinds: ["source_summary" as const],
+            violatedSkillRequirements: [], reusableEvidenceRefs: [failureResultId],
+            suggestedRepairShape: "repair_leaf" as const, repairPrerequisite: "external_change" as const } };
+      } }),
+      recoveryPlannerFactory: () => ({ decide: async input => {
+        recoveries += 1;
+        assert.equal(input.failedBoundary?.repairPrerequisite, "external_change");
+        assert.equal(input.canonicalGap?.repairPrerequisite, "external_change");
+        gapId = input.canonicalGap!.id;
+        assert.ok(input.availableResults?.some(result => result.result.resultId === failureResultId));
+        const stored = (await new CanonicalRunStateRepository(database).get(input.runId)).gaps.find(gap => gap.id === gapId)!;
+        assert.equal(stored.repairPrerequisite, "external_change");
+        const base = { actionId: input.action.id, expectedActionRevision: input.action.revision, evidenceRefs: [failureResultId] };
+        if (continuation === "stop") return { ...base, decision: "fail" as const, rationale: "No authorized independent source is available; stop until conditions change." };
+        const failed = input.plan!.steps.find(step => step.id === input.failedBoundary!.stepId)!;
+        const repair = repairLeafForFailedBoundary(failed, input.failedBoundary!, input.plan!.version);
+        return { ...base, decision: "revise_plan" as const,
+          rationale: "Inspect the failed observation, then read the authorized independent endpoint once; stop if it also fails.",
+          planRevision: { schema: "agentloop.outcomePlan/v2" as const, shape: "recovery_patch" as const,
+            goal: input.plan!.goal, selectedSkillIds: [], steps: [{ ...repair, id: "alternate-source",
+              inputResultRefs: [{ schema: "agentloop.resultRef/v1" as const, resultId: failureResultId }] }] } };
+      } }),
+      planRevisionAssessorFactory: () => ({ assess: async () => ({ approved: true, feedback: "The independent endpoint can establish the same total.", evidenceRefs: [failureResultId] }) }),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+        if ((request.runtimeContext?.content ?? "").includes("<runtime_failure_report>")) {
+          reports += 1; assert.deepEqual(request.tools, []);
+          return { content: "The requested total could not be read; the source remains unavailable.", finishReason: "stop", toolCalls: [] };
+        }
+        if (recoveries > 0) {
+          if (!request.messages.some(message => message.role === "tool" && message.name === "read_result")) {
+            return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "inspect-failure", name: "read_result", arguments: { resultId: failureResultId } }] };
+          }
+          if (alternativeReads === 0) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "alternate-read", name: "read_alternate", arguments: {} }] };
+          return { content: "The total is 42 from the authorized independent endpoint.", finishReason: "stop", toolCalls: [] };
+        }
+        if (primaryReads === 0) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "primary-read", name: "read_primary", arguments: {} }] };
+        return { content: "The source could not be read.", finishReason: "stop", toolCalls: [] };
+      } }),
+    });
+    const run = await runs.execute("owner", "Read the total from the authorized source.");
+    const events = await runs.events("owner", run.id);
+    const diagnostic = JSON.stringify(events.filter(event => /failed|rejected/.test(event.type)));
+    assert.equal(run.status, continuation === "stop" ? "failed" : "completed", diagnostic);
+    assert.equal(primaryReads, 1);
+    assert.equal(alternativeReads, continuation === "stop" ? 0 : 1);
+    assert.equal(assessments, continuation === "stop" ? 1 : 2);
+    assert.equal(recoveries, 1);
+    assert.equal(reports, continuation === "stop" ? 1 : 0);
+    assert.ok(events.some(event => event.type === "candidate.repair_stopped"));
+    const gap = (await new CanonicalRunStateRepository(database).get(run.id)).gaps.find(gap => gap.id === gapId)!;
+    assert.equal(gap.status, continuation === "stop" ? "open" : "resolved");
+    assert.equal(events.filter(event => event.type === "terminal.delivery_committed").length, continuation === "stop" ? 0 : 1);
+  });
+}
+
 test("artifact repair stagnation creates one canonical Gap and Recovery completes a different construction plan", async t => {
   const root = await mkdtemp(join(tmpdir(), "artifact-repair-recovery-"));
   t.after(() => rm(root, { recursive: true, force: true }));

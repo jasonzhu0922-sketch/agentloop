@@ -11,6 +11,9 @@ import { createSkillLoader } from "./skill-loader.ts";
 import { createSourceTools } from "./source-tools.ts";
 import { createHumanLoopTool } from "./human-loop-tool.ts";
 import { createResultTool } from "./result-tool.ts";
+import { createExecutionInsightTool } from "./execution-insight-tool.ts";
+import { createMemoryRecallTool } from "./memory-recall-tool.ts";
+import type { AgentLoopMemoryPlugin } from "../runtime/memory-plugin.ts";
 import { createResultJsonMaterializer } from "./result-materializer.ts";
 import type { RuntimeTool } from "./tool-registry.ts";
 import { createVisibleDirectoryTools } from "./visible-directory-tools.ts";
@@ -20,13 +23,18 @@ export interface CoreToolsOptions {
   driver?: ComputerDriver;
   acceptanceService?: ArtifactAcceptanceService;
   results?: RuntimeResultRepository;
+  /** Opt-in host support for public execution findings, e.g. local Memory. */
+  executionInsights?: boolean;
+  memoryRecall?: { readonly memory: AgentLoopMemoryPlugin; readonly authorizeRun: (actorUserId: string, runId: string) => Promise<void> };
   pluginTools?: readonly RuntimeTool<unknown>[];
 }
 
 export function createCoreTools(options: CoreToolsOptions): readonly RuntimeTool<unknown>[] {
   return [
     createHumanLoopTool(),
-    ...(options.results === undefined ? [] : [createResultTool(options.results), createResultJsonMaterializer(options.results, options.executor)]),
+    ...(options.memoryRecall ? [createMemoryRecallTool(options.memoryRecall.memory, options.memoryRecall.authorizeRun)] : []),
+    ...(options.results === undefined ? [] : [createResultTool(options.results), createResultJsonMaterializer(options.results, options.executor),
+      ...(options.executionInsights ? [createExecutionInsightTool(options.results)] : [])]),
     ...createComputerTools(options.executor, options.driver, options.acceptanceService),
     ...createArtifactConverterTools(options.executor),
     ...(options.pluginTools ?? []),

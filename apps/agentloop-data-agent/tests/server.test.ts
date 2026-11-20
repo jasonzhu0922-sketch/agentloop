@@ -1,0 +1,35 @@
+import assert from "node:assert/strict";
+import { once } from "node:events";
+import { resolve } from "node:path";
+import test from "node:test";
+import type { AddressInfo } from "node:net";
+import { createChatServer } from "../src/server.ts";
+import type { DataAgent } from "../src/agent.ts";
+import { MODEL_CONFIGURATION_EDITOR_SCHEMA } from "@zhujun/agentloop";
+
+test("chat opens without login and protects mutations from other origins", async t => {
+  const starts: unknown[] = [];
+  const agent = { runs: { listConversations: async () => [] }, start: async (message: unknown) => { starts.push(message); return { id: "run" }; } } as unknown as DataAgent;
+  const server = createChatServer(agent, { webRoot: resolve(import.meta.dirname, "../web"), models: [{ key: "test", displayName: "Test" }], defaultModelKey: "test" });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const root = await fetch(url);
+  assert.equal(root.status, 200);
+  assert.match(await root.text(), /输入你的业务问题/);
+  const cookie = root.headers.get("set-cookie")!.split(";")[0];
+  assert.equal((await fetch(`${url}/api/config`)).status, 403);
+  const config = await fetch(`${url}/api/config`, { headers: { Cookie: cookie } });
+  assert.equal(config.status, 200);
+  assert.deepEqual((await config.json()).models, [{ key: "test", displayName: "Test" }]);
+  assert.equal((await fetch(`${url}/api/model-configuration/schema`)).status, 403);
+  const schema = await fetch(`${url}/api/model-configuration/schema`, { headers: { Cookie: cookie } });
+  assert.equal(schema.status, 200);
+  assert.deepEqual(await schema.json(), MODEL_CONFIGURATION_EDITOR_SCHEMA);
+  const data = { requestId: "request", conversationId: "conversation", input: "指标", modelKey: "test", ownerUserId: "untrusted" };
+  const crossSite = await fetch(`${url}/api/messages`, { method: "POST", headers: { Cookie: cookie, Origin: "https://elsewhere.invalid", "Content-Type": "application/json" }, body: JSON.stringify(data) });
+  assert.equal(crossSite.status, 403); assert.equal(starts.length, 0);
+  const result = await fetch(`${url}/api/messages`, { method: "POST", headers: { Cookie: cookie, Origin: url, "Content-Type": "application/json" }, body: JSON.stringify(data) });
+  assert.equal(result.status, 202);
+  assert.deepEqual(starts, [{ requestId: "request", conversationId: "conversation", input: "指标", modelKey: "test" }]);
+});

@@ -146,8 +146,9 @@ export interface TaskSpec {
   readonly visibleDirectories?: readonly PlanningVisibleDirectory[];
   readonly sources?: readonly UploadedSourceSummary[];
   /**
-   * A conversational answer is still persisted through the canonical Plan
-   * lifecycle, but it may neither select capabilities nor execute Tools.
+   * Use the deterministic direct-answer Plan, retaining Run-authorized Tools.
+   * Any required evidence acquisition uses outcome planning so its providers
+   * are selected and bound before execution, independently of delivery mode.
    */
   readonly responseOnly?: boolean;
   /**
@@ -341,6 +342,17 @@ export interface ConversationWorkingSet {
   readonly planCursors: readonly ConversationPlanCursor[];
   /** Canonical turn intents persisted by prior Runs, keyed by their owning Run. */
   readonly resolvedIntents?: readonly ConversationResolvedIntent[];
+  /** Historical choices are scoped evidence, never authority for a new Run. */
+  readonly userDecisions?: readonly {
+    readonly runId: string;
+    readonly requestId: string;
+    readonly eventSeq: number;
+    readonly priorGoal: string;
+    readonly question: string;
+    readonly selectedOptions?: readonly { readonly id: string; readonly label: string; readonly identityRefs?: readonly string[] }[];
+    readonly confirmed?: boolean;
+    readonly requiresConfirmation: true;
+  }[];
   /** Process and capability lineage for completed steps; never result content. */
   readonly completedStepContexts?: readonly ConversationStepContext[];
   /**
@@ -692,6 +704,9 @@ export interface FailedBoundary {
   readonly violatedSkillRequirements: readonly string[];
   readonly reusableEvidenceRefs: readonly string[];
   readonly suggestedRepairShape: SuggestedRepairShape;
+  /** What must change before another candidate can address this gap. Recovery
+   * still owns path selection; this observation neither grants nor stops work. */
+  readonly repairPrerequisite?: "existing_evidence" | "new_observation" | "external_change";
   readonly evidenceConcerns?: readonly EvidenceConcern[];
   /** Exact unmet result conditions and explanations, not receipt labels. */
   readonly unmetCriteria?: readonly {

@@ -16,6 +16,11 @@ test("an omitted Memory decision is repaired before an unseen preference is comm
   let runs: RunService;
   const memory = await createLocalMemoryPlugin({
     database,
+    // This fixture's convention is universal. As in the local host, provide
+    // a relevance model so unrelated goal wording need not match its text.
+    recallModel: { modelKey: "local:fixture", complete: async ({ input }) => ({ content: JSON.stringify({
+      matches: (input as any).candidates.map((candidate: any) => ({ id: candidate.id, relevanceScore: 1 })),
+    }) }) },
     resolveRunScope: async (runId) => {
       const run = await runs.get(owner, runId);
       return { runId, tenantId: "tenant", ownerUserId: run.ownerUserId };

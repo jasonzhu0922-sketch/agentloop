@@ -21,11 +21,13 @@ const model: MemorySettlementModel = { modelKey: "local:test", complete: async (
   const episodes = input.episodes as Record<string, any>[];
   const refs = episodes.flatMap(row => row.observations[0].evidenceRefs);
   return { content: JSON.stringify({ schema: "agentloop.semanticSettlement/v2", learningContract: REUSABLE_LEARNING_CONTRACT,
+    executionReview: [{ finding: "独立执行核对了当前主体和期间，并读取及验证对应数据", status: "observed", evidenceRefs: refs }],
     reuse: { parameters: [{ name: "subject", description: "当前任务指定主体" }, { name: "period", description: "当前任务指定期间" }], verifiedScope: ["已执行来源中的趋势查询"], unverifiedScope: ["其他来源需要重新核对"] },
     caseFacts: [{ statement: "某次历史任务二月为负值", context: ["原始任务限定期间"], evidenceRefs: refs }],
     learningValue: { status: "actionable", novelty: "new", actionChange: "按当前参数取数和验证", verification: "对象期间与结果一致" },
     title: "按当前主体和期间分析趋势", goalSummary: "查询并验证当前任务的数据趋势", keywords: ["趋势", "查询"], appliesTo: ["可定位实体和期间的数据源"], exclusions: ["来源口径不匹配时需重查"],
-    classicPath: [{ objective: "核对 {{subject}} 与 {{period}} 后取数", toolNames: ["source.read"], skillIds: ["discovered:analysis"], conditions: ["已授权来源"], verification: "当前结果完整且计算可复算", evidenceRefs: refs }],
+    classicPath: [{ objective: "核对 {{subject}} 与 {{period}} 后取数", toolNames: ["source.read"], skillIds: ["discovered:analysis"], conditions: ["已授权来源"], verification: "当前结果完整且计算可复算", evidenceRefs: refs,
+      evidenceAssessment: { status: "supported", rationale: "每个引用均包含独立执行的范围核对和读取验证", limitations: [] } }],
     toolUsage: [{ toolName: "source.read", purpose: "按当前参数读取", evidenceRefs: refs }], reusableKnowledge: [], failureLessons: [], cautions: [], recheckRules: ["来源变化重新核对"],
     merge: { decision: "new", supportingEpisodeIds: input.episodeIds, conflicts: [] },
   }) };

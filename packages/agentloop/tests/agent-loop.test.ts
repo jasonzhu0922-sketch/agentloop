@@ -3566,8 +3566,9 @@ test("a rejected assessed candidate grants bounded tool repair grace", async () 
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
 });
 
-test("paraphrasing an unresolved result remains bounded after changed candidates are reassessed", async () => {
+test("paraphrasing an evidence-dependent gap reaches Recovery without another assessment", async () => {
   let calls = 0;
+  let assessments = 0;
   let repairRuntimeContext = "";
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["read_evidence"]);
@@ -3601,7 +3602,7 @@ test("paraphrasing an unresolved result remains bounded after changed candidates
       maxSteps: 3,
       deferFailureReport: true,
       emit: (event) => { events.push(event); },
-      evaluateCandidate: async () => ({
+      evaluateCandidate: async () => { assessments += 1; return ({
         approved: false,
         feedback: "The catalog detail needed for the requested parameters is still missing.",
         requiresEvidenceProgress: true,
@@ -3612,7 +3613,7 @@ test("paraphrasing an unresolved result remains bounded after changed candidates
           reusableEvidenceRefs: [],
           suggestedRepairShape: "repair_leaf",
         },
-      }),
+      }); },
     }),
     (error: unknown) =>
       error instanceof AppError
@@ -3620,10 +3621,12 @@ test("paraphrasing an unresolved result remains bounded after changed candidates
       && error.details?.feedback === "The catalog detail needed for the requested parameters is still missing.",
   );
 
-  assert.equal(calls, 3);
+  assert.equal(calls, 2);
+  assert.equal(assessments, 1);
   assert.match(repairRuntimeContext, /emit the Tool call structurally/u);
   assert.match(repairRuntimeContext, /Naming the Tool, path, or ResultRef in prose does not execute it/u);
-  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 3);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 2);
+  assert.match(String(events.find(event => event.type === "candidate.rejected")?.data.decisionBasisDigest), /^[a-f0-9]{64}$/u);
   const blocked = events.find((event) =>
     event.type === "candidate.repair_limit_blocked"
     && (event.data as { reason?: string }).reason === "assessment_requires_decision_basis_transition"
@@ -3633,6 +3636,15 @@ test("paraphrasing an unresolved result remains bounded after changed candidates
     (blocked.data as { feedback?: string }).feedback,
     "The catalog detail needed for the requested parameters is still missing.",
   );
+  const checkpoint = events.filter(event => event.type === "candidate.rejected").map(event => ({
+    output: String(event.data.output), feedback: String(event.data.feedback), decisionBasisDigest: String(event.data.decisionBasisDigest),
+  }));
+  await assert.rejects(() => runAgentLoop({ runId: grant.runId, grant, systemPrompt: "Answer from the catalog evidence.",
+    input: "query catalog", tools: new ToolRegistry([]), maxSteps: 4, deferFailureReport: true,
+    initialCandidateRejections: checkpoint,
+    model: { limits: TEST_MODEL_LIMITS, complete: async () => ({ content: "Another wording of the missing result.", finishReason: "stop", toolCalls: [] }) },
+    evaluateCandidate: async () => { assert.fail("Restoring the Step cannot reset an evidence-dependent rejection"); },
+  }), (error: unknown) => error instanceof AppError && error.details?.decisionBasisUnchanged === true);
 });
 
 test("rejected completion candidates are not projected as prior assistant answers during repair", async () => {
@@ -7643,6 +7655,87 @@ function runtimeStepSemanticState(content: string): {
     readonly requiredWorkflowAction?: { readonly actionId: string };
   };
 }
+
+for (const recovered of [false, true]) {
+  test(`a bounded probe permits reassessment only when observations change: recovered=${recovered}`, async () => {
+    const grant = makeGrant(["read_source"]);
+    let calls = 0, reads = 0, assessments = 0;
+    const events: RuntimeEvent[] = [];
+    const operation = () => runAgentLoop({ runId: grant.runId, grant, systemPrompt: "Read the source.", input: "Report the total.",
+      maxSteps: 8, deferFailureReport: true, emit: event => { events.push(event); },
+      tools: new ToolRegistry([{
+        name: "read_source", description: "Read a source", inputSchema: { type: "object" }, executionMode: "parallel",
+        replaySafe: true, parse: value => value, execute: async () => {
+          reads += 1;
+          return recovered && reads === 2 ? { exitCode: 0, stdout: '{"total":42}', stderr: "" }
+            : { exitCode: 1, stdout: '{"status":"unavailable"}', stderr: "" };
+        },
+      }]),
+      model: { limits: TEST_MODEL_LIMITS, complete: async () => {
+        calls += 1;
+        return calls % 2 === 1 ? { content: "", finishReason: "tool_calls", toolCalls: [{
+          id: `read-${calls}`, name: "read_source", arguments: {},
+        }] } : { content: calls === 2 ? "The source is unavailable." : recovered ? "The total is 42." : "Still unable to read the source.",
+          finishReason: "stop", toolCalls: [] };
+      } },
+      evaluateCandidate: async () => {
+        assessments += 1;
+        return reads === 2 && recovered ? { approved: true, feedback: "The observed total is delivered." }
+          : { approved: false, feedback: "A source observation is still required.", failedBoundary: {
+            stepId: "read", missingEvidenceKinds: [], violatedSkillRequirements: [], reusableEvidenceRefs: [],
+            suggestedRepairShape: "repair_leaf", repairPrerequisite: "new_observation",
+          } };
+      },
+    });
+    if (recovered) assert.equal((await operation()).output, "The total is 42.");
+    else await assert.rejects(operation, (error: unknown) => error instanceof AppError
+      && error.code === "STEP_NOT_COMPLETED" && error.details?.decisionBasisUnchanged === true);
+    assert.equal(reads, 2);
+    assert.equal(calls, 4);
+    assert.equal(assessments, recovered ? 2 : 1);
+  });
+}
+
+test("a changed-condition prerequisite hands off to the existing Recovery boundary immediately", async () => {
+  const grant = makeGrant([]);
+  let assessments = 0, calls = 0;
+  const events: RuntimeEvent[] = [];
+  await assert.rejects(() => runAgentLoop({ runId: grant.runId, grant, systemPrompt: "Use observed facts.", input: "Read the source.",
+    maxSteps: 8, deferFailureReport: true, tools: new ToolRegistry([]), emit: event => { events.push(event); },
+    model: { limits: TEST_MODEL_LIMITS, complete: async () => {
+      calls += 1; return { content: "The source requires a changed condition.", finishReason: "stop", toolCalls: [] };
+    } },
+    evaluateCandidate: async () => {
+      assessments += 1;
+      return { approved: false, feedback: "Recovery must select an alternative or stop.", failedBoundary: {
+        stepId: "read", missingEvidenceKinds: [], violatedSkillRequirements: [], reusableEvidenceRefs: [],
+        suggestedRepairShape: "repair_leaf", repairPrerequisite: "external_change",
+      } };
+    },
+  }), (error: unknown) => error instanceof AppError && error.code === "STEP_NOT_COMPLETED"
+    && error.details?.repairExhausted === true);
+  assert.equal(calls, 1);
+  assert.equal(assessments, 1);
+  assert.equal(events.find(event => event.type === "candidate.repair_stopped")?.data.reason, "assessment_requires_changed_conditions");
+});
+
+test("an evidence-independent interpretation can be corrected without another source action", async () => {
+  const grant = makeGrant([]);
+  let calls = 0, assessments = 0;
+  const result = await runAgentLoop({ runId: grant.runId, grant, systemPrompt: "Interpret the observed total 42.", input: "Report the total.",
+    maxSteps: 4, tools: new ToolRegistry([]),
+    model: { limits: TEST_MODEL_LIMITS, complete: async () => ({ content: ++calls === 1 ? "The total is 24." : "The total is 42.",
+      finishReason: "stop", toolCalls: [] }) },
+    evaluateCandidate: async candidate => {
+      assessments += 1;
+      return { approved: candidate.output.includes("42"), feedback: "Correct the interpretation of the observed total.",
+        failedBoundary: { stepId: "answer", missingEvidenceKinds: [], violatedSkillRequirements: [], reusableEvidenceRefs: [],
+          suggestedRepairShape: "repair_leaf", repairPrerequisite: "existing_evidence" } };
+    },
+  });
+  assert.equal(result.output, "The total is 42.");
+  assert.equal(assessments, 2);
+});
 
 function makeGrant(toolNames: readonly string[]): CapabilityGrant {
   return {
