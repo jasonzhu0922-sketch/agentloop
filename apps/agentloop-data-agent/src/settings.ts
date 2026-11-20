@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { AppError } from "@zhujun/agentloop";
 import { ModelSettings } from "./model-settings.ts";
+import { pythonUtf8Environment } from "./python-environment.ts";
 
 export class SettingsService {
   readonly models: ModelSettings;
@@ -12,7 +13,7 @@ export class SettingsService {
     const { python, script, skillRoot } = this.options;
     const result = await new Promise<string>((accept, reject) => {
       const child = execFile(python, [script, skillRoot, action], { timeout: 45_000, maxBuffer: 8_000_000,
-        env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } }, (error, stdout) => {
+        env: pythonUtf8Environment({ ...process.env, PYTHONDONTWRITEBYTECODE: "1" }) }, (error, stdout) => {
         if (error) reject(new AppError("INTERNAL_ERROR", "目录服务不可用，请检查服务端数据库连接", 503));
         else accept(stdout);
       });

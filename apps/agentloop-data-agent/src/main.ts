@@ -5,10 +5,12 @@ import { createChatServer } from "./server.ts";
 import { connectState } from "./tidb-state.ts";
 import { ModelSettings } from "./model-settings.ts";
 import { SettingsService } from "./settings.ts";
+import { enableUtf8Python } from "./python-environment.ts";
 import { describeStartupError } from "./startup-diagnostics.ts";
 import { colorizeTerminalLogLabel, colorizeTerminalLogLine } from "@zhujun/agentloop";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+enableUtf8Python();
 const port = Number(process.env.DATA_AGENT_PORT ?? "8810");
 if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error("DATA_AGENT_PORT 无效");
 const stateUrl = process.env.DATA_AGENT_TIDB_URL;

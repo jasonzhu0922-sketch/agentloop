@@ -6,6 +6,18 @@ import test from "node:test";
 import { createChatServer } from "../src/server.ts";
 import type { DataAgent } from "../src/agent.ts";
 import type { SettingsService } from "../src/settings.ts";
+import { enableUtf8Python, pythonUtf8Environment } from "../src/python-environment.ts";
+
+test("Python child processes always use UTF-8 instead of the Windows code page", () => {
+  const inherited = pythonUtf8Environment({ PYTHONUTF8: "0", PYTHONIOENCODING: "cp936", KEEP: "value" });
+  assert.equal(inherited.PYTHONUTF8, "1");
+  assert.equal(inherited.PYTHONIOENCODING, "utf-8");
+  assert.equal(inherited.KEEP, "value");
+  const mutable: NodeJS.ProcessEnv = {};
+  enableUtf8Python(mutable);
+  assert.equal(mutable.PYTHONUTF8, "1");
+  assert.equal(mutable.PYTHONIOENCODING, "utf-8");
+});
 
 test("settings mutations use host admission, refresh the connection package and preserve request identity", async t => {
   const calls: unknown[] = [];
