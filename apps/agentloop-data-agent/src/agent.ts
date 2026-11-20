@@ -19,6 +19,28 @@ export interface AgentOptions {
 }
 export interface StartMessage { requestId: string; conversationId: string; input: string; modelKey: string }
 
+export interface DataAgentMcpCall {
+  id: string;
+  tool: string;
+  scenarioId: string;
+  status: string;
+  runId?: string;
+  requestId?: string;
+  startedAt: number;
+  finishedAt?: number;
+  durationMs?: number;
+  arguments: Record<string, unknown>;
+  events: readonly Record<string, unknown>[];
+  result?: unknown;
+  error?: string;
+}
+
+export interface DataAgentMcpCallStore {
+  save(call: DataAgentMcpCall, create?: boolean): Promise<void>;
+  list(limit?: number): Promise<readonly DataAgentMcpCall[]>;
+  get(id: string): Promise<DataAgentMcpCall | undefined>;
+}
+
 export async function createDataAgent(options: AgentOptions) {
   if (options.connection.dialect !== "tidb") throw new TypeError("问数 Agent 仅支持 TiDB 持久化");
   let lease: Awaited<ReturnType<typeof acquireLease>> | undefined;
@@ -28,6 +50,10 @@ export async function createDataAgent(options: AgentOptions) {
     const workspaceRoot = join(options.fileDirectory, "workspace");
     await mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
     const database = await AppDatabase.open({ connection: options.connection });
+    await database.exec(`CREATE TABLE IF NOT EXISTS data_agent_mcp_calls (
+      id VARCHAR(191) PRIMARY KEY, scenario_id VARCHAR(64) NOT NULL, started_at BIGINT NOT NULL,
+      payload_json LONGTEXT NOT NULL
+    )`);
     const skills = new SkillService(database, {
       skillPackageRoots: [resolve(options.skillRoot)],
       packageStoreRoot: join(options.fileDirectory, "skill-packages"),
@@ -95,8 +121,43 @@ export async function createDataAgent(options: AgentOptions) {
       queue = operation.then(() => undefined, () => undefined);
       return operation;
     }
+    const mcpCalls: DataAgentMcpCallStore = {
+      async save(call, create = false) {
+        let payload = JSON.stringify(call);
+        // MCP records are an audit projection. Keep large result bodies and
+        // caller payloads out of TiDB; the canonical Run and its file receipts
+        // remain the source of complete output evidence.
+        if (payload.length > 900_000) payload = JSON.stringify({
+          ...call,
+          arguments: { keys: Object.keys(call.arguments), truncated: true },
+          events: call.events.slice(-20),
+          result: undefined,
+          payload_truncated: true,
+        });
+        if (payload.length > 1_000_000) payload = JSON.stringify({ id: call.id, tool: call.tool, scenarioId: call.scenarioId, status: call.status,
+          runId: call.runId, startedAt: call.startedAt, finishedAt: call.finishedAt, durationMs: call.durationMs,
+          arguments: {}, events: [], payload_truncated: true });
+        if (create) {
+          await database.prepare("INSERT INTO data_agent_mcp_calls(id, scenario_id, started_at, payload_json) VALUES (?, ?, ?, ?)")
+            .run(call.id, call.scenarioId, call.startedAt, payload);
+        } else {
+          await database.prepare("UPDATE data_agent_mcp_calls SET payload_json = ? WHERE id = ? AND scenario_id = ?")
+            .run(payload, call.id, call.scenarioId);
+        }
+      },
+      async list(limit = 50) {
+        const bounded = Math.max(1, Math.min(100, Math.trunc(limit)));
+        const rows = await database.prepare("SELECT payload_json FROM data_agent_mcp_calls ORDER BY started_at DESC, id DESC LIMIT ?").all(bounded) as { payload_json: string }[];
+        return rows.map(row => JSON.parse(row.payload_json) as DataAgentMcpCall);
+      },
+      async get(id) {
+        const row = await database.prepare("SELECT payload_json FROM data_agent_mcp_calls WHERE id = ?").get(id) as { payload_json: string } | undefined;
+        return row ? JSON.parse(row.payload_json) as DataAgentMcpCall : undefined;
+      },
+    };
     return {
-      runs, start,
+      runs, start, mcpCalls,
+      get defaultModelKey() { return options.defaultModelKey; },
       get skill() { return { id: skill!.id, name: skill!.name, contentHash: skill!.contentHash }; },
       setModelKeys(keys: readonly string[]) { modelKeys = keys; runs.setModelKeys(keys); },
       /** Serialize host configuration with Run admission, including waiting HIL. */

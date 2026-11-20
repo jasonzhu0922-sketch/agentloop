@@ -16,9 +16,10 @@
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env src/main.ts",
-    "test": "node --test tests/fixed-planner.test.ts tests/server.test.ts tests/skill-policy.test.ts tests/model-configuration.test.ts tests/model-settings.test.ts tests/settings.test.ts",
+    "test": "node --test tests/fixed-planner.test.ts tests/server.test.ts tests/mcp.test.ts tests/skill-policy.test.ts tests/model-configuration.test.ts tests/model-settings.test.ts tests/settings.test.ts",
     "test:live": "node --env-file-if-exists=.env --test tests/tidb-live.test.ts",
     "verify:browser": "node scripts/verify-browser.mjs",
+    "verify:markdown": "node scripts/verify-markdown.mjs",
     "test:gateway": "python3 -m unittest discover -s skills/data-analysis/scripts -p 'test_*.py'",
     "typecheck": "tsc -p tsconfig.json",
     "test:catalog": "python3 -m unittest discover -s scripts -p test_manage_catalog.py",

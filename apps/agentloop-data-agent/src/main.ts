@@ -36,6 +36,10 @@ try {
   async function shutdown() {
     if (stopping) return;
     stopping = true;
+    // Close long-lived MCP SSE streams before waiting for the HTTP server and
+    // AgentLoop resources; otherwise a connected MCP client can keep shutdown
+    // open indefinitely.
+    server.closeAllConnections();
     server.close();
     await agent!.close();
   }

@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { join } from "node:path";
 import { AppError, MODEL_CONFIGURATION_EDITOR_SCHEMA } from "@zhujun/agentloop";
 import { OWNER, type DataAgent, type StartMessage } from "./agent.ts";
+import { createMcpService } from "./mcp.ts";
 import type { SettingsService } from "./settings.ts";
 
 function json(response: ServerResponse, status: number, body: unknown) {
@@ -82,9 +83,12 @@ export function createChatServer(agent: DataAgent, options: {
   settings?: SettingsService;
 }) {
   const session = randomBytes(32).toString("hex");
+  const mcp = createMcpService({ agent, defaultModelKey: options.settings?.models.defaultModelKey ?? options.defaultModelKey,
+    searchTables: options.settings ? async question => options.settings!.catalog("search", { query: question }) : undefined });
   const files: Record<string, [string, string]> = {
     "/": ["index.html", "text/html; charset=utf-8"],
     "/app.js": ["app.js", "text/javascript; charset=utf-8"],
+    "/markdown.js": ["markdown.js", "text/javascript; charset=utf-8"],
     "/style.css": ["style.css", "text/css; charset=utf-8"],
     "/settings": ["settings.html", "text/html; charset=utf-8"],
     "/settings.js": ["settings.js", "text/javascript; charset=utf-8"],
@@ -108,6 +112,7 @@ export function createChatServer(agent: DataAgent, options: {
         response.writeHead(200, { "Content-Type": staticFile[1], "Cache-Control": "no-store" });
         response.end(await readFile(join(options.webRoot, staticFile[0]))); return;
       }
+      if (await mcp.handle(request, response, url)) return;
       if (!request.headers.cookie?.split(/;\s*/).includes(`data_agent_session=${session}`)) {
         json(response, 403, { error: "请刷新对话页面" }); return;
       }
@@ -117,6 +122,29 @@ export function createChatServer(agent: DataAgent, options: {
       if (request.method === "GET" && url.pathname === "/api/config") {
         json(response, 200, { title: "经营问数", skill: "data-analysis", scenario: "group", models: options.settings?.models.registry.modelCatalog() ?? options.models,
           defaultModelKey: options.settings?.models.defaultModelKey ?? options.defaultModelKey }); return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/mcp/server") {
+        json(response, 200, mcp.describe(origin)); return;
+      }
+      const mcpCall = url.pathname.match(/^\/api\/mcp\/calls\/([^/]+)$/);
+      if (request.method === "GET" && mcpCall) {
+        const call = await agent.mcpCalls.get(decodeURIComponent(mcpCall[1]));
+        if (!call) { json(response, 404, { error: "MCP 调用不存在" }); return; }
+        json(response, 200, call); return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/mcp/calls") {
+        const limit = Number(url.searchParams.get("limit") ?? "50");
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new AppError("BAD_REQUEST", "MCP 调用数量无效", 400);
+        json(response, 200, { calls: await agent.mcpCalls.list(limit) }); return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/mcp/verify") {
+        const value = await body(request);
+        const tool = value.tool === undefined ? undefined : required(value, "tool", 191);
+        const args = value.arguments;
+        if (args !== undefined && (args === null || typeof args !== "object" || Array.isArray(args))) {
+          throw new AppError("BAD_REQUEST", "MCP 调用参数必须是 JSON 对象", 400);
+        }
+        json(response, 200, await mcp.verify(tool, (args ?? undefined) as Record<string, unknown> | undefined)); return;
       }
       if (request.method === "GET" && url.pathname === "/api/sample-questions" && options.settings) {
         const catalog = await options.settings.catalog("load");
@@ -148,6 +176,7 @@ export function createChatServer(agent: DataAgent, options: {
         }
         if (request.method === "GET" && route === "status") {
           json(response, 200, { service: "AgentLoop Data Agent", storage: "TiDB", skill: agent.skill, url: origin,
+            mcp: mcp.describe(origin),
             workflow: [
               { name: "固定能力计划", description: "由应用绑定 data-analysis 主 Skill，领域问题交给当前模型理解。" },
               { name: "读取业务目录", description: "读取授权数据表、表知识、实体、指标和期间定义。" },

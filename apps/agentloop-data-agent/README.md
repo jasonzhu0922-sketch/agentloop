@@ -55,6 +55,8 @@ npm run start:data-agent
 
 打开 [本机对话页](http://127.0.0.1:8810)。页面无需登录。支持新对话、历史恢复、进度与回答流、结构化澄清、停止查询；[知识与数据管理](http://127.0.0.1:8810/settings) 中可编辑业务连接、业务目录与模型配置。当前不提供用户管理、业务数据写入或公网部署。HttpOnly 本机页面 cookie 与同源检查用于阻止其他网页代发请求，不是账号系统。
 
+同一服务也提供 MCP SSE Server：`http://127.0.0.1:8810/mcp/sse`。MCP 客户端通过标准 `initialize`、`tools/list` 和 `tools/call` 使用 `query`、`search_tables`；`query` 复用当前 AgentLoop Run、HIL 和只读 Skill 执行链路，支持 `clarification_run_id` 与 `clarification_response` 继续澄清。调用进度通过 `notifications/progress` 推送，客户端断开后 Run 仍继续并在专用 TiDB Runtime 表 `data_agent_mcp_calls` 中保留终态记录。管理页同源接口 `/api/mcp/server`、`/api/mcp/calls` 只用于查看服务和调用记录，不暴露凭据、SQL 或完整大结果。
+
 同一 TiDB Runtime 只允许一个宿主实例，租约过期后才能接管。Ctrl-C 正常停止会取消正在执行的查询并等待退出，保留等待用户澄清的请求供重启后继续；异常退出后的未完成执行由内核按照持久化证据处理，不自动重放未知副作用。
 
 ## 知识与数据管理
