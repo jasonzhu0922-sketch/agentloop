@@ -33,6 +33,8 @@ const suites = Object.freeze({
     "tests/runtime-conversation-working-set-query-service.test.ts",
     "tests/runtime-event-query-service.test.ts",
     "tests/runtime-host-run-projection-query-service.test.ts",
+    "tests/model-streaming-persistence.test.ts",
+    "tests/tidb-run-event-performance.test.ts",
     "tests/runtime-plan-query-service.test.ts",
     "tests/runtime-workspace-service.test.ts",
   ],

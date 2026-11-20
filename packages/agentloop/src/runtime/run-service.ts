@@ -3926,6 +3926,7 @@ export class RunService {
         grant: stepGrant,
         availableSkills: stepSkills.map((skill) => ({ id: skill.id, name: skill.name, contentHash: skill.contentHash })),
         maxSteps: this.maxSteps,
+        streamFlushIntervalMs: this.database.dialect === "tidb" ? 2_000 : undefined,
         initialModelSteps: (await this.actions.list(input.runId)).filter(action => action.kind === "model_turn" && action.planId === plan.id && action.stepId === activeStep.id).length,
         ...(this.stepExecutionStrategy === undefined ? {} : { stepExecutionStrategy: this.stepExecutionStrategy }),
         ...(lookupEvidenceStep ? {

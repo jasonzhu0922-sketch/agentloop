@@ -45,10 +45,19 @@ async function appendTiDbFast(
   ).run(runId);
   let seq: number;
   if (Number(updated.changes) === 1) {
-    const allocated = await connection.prepare(
-      "SELECT LAST_INSERT_ID() - 1 AS seq",
-    ).get<{ seq: number }>();
-    seq = Number(allocated?.seq);
+    // TiDB returns LAST_INSERT_ID(expr) in the UPDATE OK packet, which mysql2
+    // exposes as insertId/lastInsertRowid. Avoid a full network round trip for
+    // the common path, while retaining a compatibility read for injected or
+    // older adapters that do not expose the OK-packet field.
+    const returnedNextSeq = Number(updated.lastInsertRowid);
+    if (Number.isSafeInteger(returnedNextSeq) && returnedNextSeq >= 2) {
+      seq = returnedNextSeq - 1;
+    } else {
+      const allocated = await connection.prepare(
+        "SELECT LAST_INSERT_ID() - 1 AS seq",
+      ).get<{ seq: number }>();
+      seq = Number(allocated?.seq);
+    }
   } else {
     // The first event of a newly-created or legacy Run has no counter row.
     // A concurrent creator may win this insert; the duplicate-key retry above

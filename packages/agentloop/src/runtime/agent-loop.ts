@@ -152,6 +152,7 @@ export interface AgentLoopOptions {
   readonly currentDecisionContext?: () => CurrentDecisionContext;
   readonly signal?: AbortSignal;
   readonly emit?: RuntimeEventSink;
+  readonly streamFlushIntervalMs?: number;
   readonly actionTracker?: {
     executeToolCall<T>(input: {
       step: number;
@@ -840,6 +841,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         // Do not publish an uncommitted report via normal assistant streaming.
         emit: (event) => emit(event.type === "assistant.streaming" ? { ...event, type: "failure_report.streaming" } : event),
         base: { phase: "execution", step: step + 1, purpose: "failure_report" },
+        streamFlushIntervalMs: options.streamFlushIntervalMs,
       });
       throwIfAborted(options.signal);
       if (response.finishReason !== "stop" || response.toolCalls.length > 0 || !response.content.trim()
@@ -1411,6 +1413,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         // execution and completion preparation. Do not discard a valid read
         // and spend another model turn requesting it again.
         allowEarlyDispatch: true,
+        streamFlushIntervalMs: options.streamFlushIntervalMs,
       }, earlyOutcomes);
       await options.checkpoint?.();
       if (
@@ -3043,6 +3046,7 @@ interface StreamingDispatchContext {
   readonly toolCallLimits: ReadonlyMap<string, number>;
   readonly priorToolCallCounts: ReadonlyMap<string, number>;
   readonly allowEarlyDispatch: boolean;
+  readonly streamFlushIntervalMs: number | undefined;
 }
 
 /**
@@ -3159,6 +3163,7 @@ async function completeWithStreamingAndDispatch(
         contextRevision: context.contextRevision,
         runtimePromptAugmentationIds: context.runtimePromptAugmentationIds,
       },
+      streamFlushIntervalMs: context.streamFlushIntervalMs,
       onToolCallReady: async (call) => {
         // When the turn was dispatched without tools (convergence) any tool call is
         // model misbehaviour and is never executed, so skip both commit and dispatch.

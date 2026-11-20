@@ -18,7 +18,7 @@ export type SqlDialect = "sqlite" | "postgres" | "tidb";
 export interface SqlRunResult {
   /** Number of rows affected by the statement (0 for non-mutating statements). */
   readonly changes: number | bigint;
-  /** Row id assigned by an INSERT when the engine exposes one. */
+  /** Last insert id exposed by the engine's statement result/OK packet. */
   readonly lastInsertRowid?: number | bigint;
 }
 

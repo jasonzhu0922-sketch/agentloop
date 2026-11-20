@@ -5,6 +5,7 @@ import type {
   ModelInvocation,
   ModelRequestLogContext,
   ModelResponse,
+  RuntimeEvent,
   ModelStreamEvent,
   ModelToolCall,
   RuntimeEventSink,
@@ -42,6 +43,8 @@ export interface ModelStreamingOptions {
   readonly suppressReasoningContent?: boolean;
   /** Invoked when one tool call's arguments are confirmed complete. */
   readonly onToolCallReady?: (call: ModelToolCall) => void | Promise<void>;
+  /** Deployment-specific cadence for durable cumulative stream snapshots. */
+  readonly streamFlushIntervalMs?: number;
 }
 
 export interface ModelRequestTelemetryOptions {
@@ -171,6 +174,36 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
   let partialReasoningContent = "";
   const partialToolCalls = new Map<number, { id?: string; name?: string; arguments: string }>();
   let lastFlush = 0;
+  const flushIntervalMs = options.streamFlushIntervalMs ?? STREAM_FLUSH_INTERVAL_MS;
+  if (!Number.isFinite(flushIntervalMs) || flushIntervalMs < 0) {
+    throw new TypeError("streamFlushIntervalMs must be a finite non-negative number");
+  }
+  let pendingStreamingEvent: RuntimeEvent | undefined;
+  let streamingWriter: Promise<void> | undefined;
+  let streamingWriteError: unknown;
+
+  const startStreamingWriter = (): void => {
+    if (streamingWriter !== undefined || pendingStreamingEvent === undefined || streamingWriteError !== undefined) return;
+    streamingWriter = (async () => {
+      while (pendingStreamingEvent !== undefined) {
+        const event = pendingStreamingEvent;
+        pendingStreamingEvent = undefined;
+        await emit(event);
+      }
+    })().catch((error: unknown) => {
+      streamingWriteError = error;
+      pendingStreamingEvent = undefined;
+    }).finally(() => {
+      streamingWriter = undefined;
+      startStreamingWriter();
+    });
+  };
+
+  const drainStreamingWriter = async (): Promise<void> => {
+    startStreamingWriter();
+    while (streamingWriter !== undefined) await streamingWriter;
+    if (streamingWriteError !== undefined) throw streamingWriteError;
+  };
 
   const snapshot = (): PartialStreamToolCall[] =>
     [...partialToolCalls.entries()]
@@ -185,10 +218,10 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
   const flush = async (force: boolean): Promise<void> => {
     if (internalResponse) return;
     const now = Date.now();
-    if (!force && now - lastFlush < STREAM_FLUSH_INTERVAL_MS) return;
+    if (!force && now - lastFlush < flushIntervalMs) return;
     if (partialContent.length === 0 && partialReasoningContent.length === 0 && partialToolCalls.size === 0) return;
     lastFlush = now;
-    await emit({
+    pendingStreamingEvent = {
       type: "assistant.streaming",
       data: {
         ...base,
@@ -196,7 +229,9 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
         ...(partialReasoningContent.length === 0 ? {} : { reasoningContent: partialReasoningContent }),
         toolCalls: snapshot(),
       },
-    });
+    };
+    startStreamingWriter();
+    if (force) await drainStreamingWriter();
   };
 
   try {
@@ -226,6 +261,9 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
         accumulated.arguments += event.argumentsDelta;
         partialToolCalls.set(event.index, accumulated);
       } else {
+        // Preserve the durable event order: all streamed arguments/text that
+        // preceded a ready call must be committed before its tool-call event.
+        await flush(true);
         await onToolCallReady?.({ id: event.id, name: event.name, arguments: event.arguments });
       }
       await flush(false);
@@ -234,6 +272,11 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
     await flush(true);
     return await completed(suppressResponseReasoning ? withoutReasoningContent(response) : response);
   } catch (error) {
+    try {
+      await drainStreamingWriter();
+    } catch (streamingError) {
+      return await failed(streamingError);
+    }
     return await failed(error);
   }
 }
