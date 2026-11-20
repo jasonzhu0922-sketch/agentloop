@@ -3,7 +3,8 @@ const esc = (value = '') => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':
 const labels = { connection: '数据连接', server: 'Server', workflow: '工作流', tables: '数据表', metrics: '指标定义', terms: '业务术语', skills: '分析 Skills', sample_questions: '案例问题', model: '模型管理' };
 let catalog, models, modelSchema, connection, status, current, epoch = 0, saving = false;
 async function request(path, data, method = 'PUT') {
-  const response = await fetch(`/api/settings/${path}`, { method: data === undefined ? 'GET' : method,
+  const endpoint = path.startsWith('/') ? path : `/api/settings/${path}`;
+  const response = await fetch(endpoint, { method: data === undefined ? 'GET' : method,
     headers: data === undefined ? {} : { 'Content-Type': 'application/json' }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   const value = await response.json();
   if (!response.ok) throw new Error(value.error || '请求失败');
@@ -114,7 +115,7 @@ function renderStatus(root, panel) {
     let args;
     try { args = JSON.parse(new FormData(currentForm).get('arguments')); } catch { throw new Error('调用参数需要有效 JSON'); }
     if (!args || Array.isArray(args) || typeof args !== 'object') throw new Error('调用参数必须是 JSON 对象');
-    const result = await request('mcp/verify', { tool: new FormData(currentForm).get('tool'), arguments: args }, 'POST');
+    const result = await request('/api/mcp/verify', { tool: new FormData(currentForm).get('tool'), arguments: args }, 'POST');
     const output = $('#mcp-verify-result'); output.hidden = false; output.textContent = JSON.stringify(result, null, 2);
     const message = $('#mcp-verify-feedback'); message.textContent = result.ok ? 'MCP 调用成功，服务端工具链可用。' : 'MCP 请求已到达服务端，但工具调用失败，请查看返回详情。';
     message.classList.toggle('error', !result.ok); feedback(result.ok ? 'MCP 调用验证成功。' : 'MCP 调用返回错误。', !result.ok);

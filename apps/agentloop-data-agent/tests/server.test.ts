@@ -20,6 +20,9 @@ test("chat opens without login and protects mutations from other origins", async
   const markdown = await fetch(`${url}/markdown.js`);
   assert.equal(markdown.status, 200);
   assert.match(await markdown.text(), /renderMarkdown/);
+  const settingsScript = await fetch(`${url}/settings.js`);
+  assert.equal(settingsScript.status, 200);
+  assert.match(await settingsScript.text(), /request\('\/api\/mcp\/verify'/);
   const cookie = root.headers.get("set-cookie")!.split(";")[0];
   assert.equal((await fetch(`${url}/api/config`)).status, 403);
   const config = await fetch(`${url}/api/config`, { headers: { Cookie: cookie } });
