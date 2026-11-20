@@ -28,6 +28,10 @@ services:
   tikv:
     container_name: agentloop-tidb-tikv
     image: pingcap/tikv:v8.5.0
+    ulimits:
+      nofile:
+        soft: 1000000
+        hard: 1000000
     command:
       - --addr=0.0.0.0:20160
       - --advertise-addr=tikv:20160
