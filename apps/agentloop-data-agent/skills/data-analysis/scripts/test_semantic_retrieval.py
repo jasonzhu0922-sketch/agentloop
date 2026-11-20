@@ -103,6 +103,16 @@ class SemanticRetrievalTest(unittest.TestCase):
             validate_plan(complete, 'SELECT SUM(s.amount) FROM business.staff_report s JOIN business.transactions t ON s.org_code=t.id WHERE s.item=%s', ['在岗员工人数'], plan)
         self.assertEqual(error.exception.code, 'query_source_unbound')
 
+    def test_context_includes_fields_named_by_metric_descriptions(self):
+        column = {'name': 'is_deleted', 'type': 'int', 'description': '删除标识'}
+        self.raw['tables'][0]['columns'].append(deepcopy(column))
+        self.live[0]['columns'].append(deepcopy(column))
+        self.raw['metrics'].append({'name': 'active_count', 'label': '有效记录数', 'table': 'staff_report',
+                                    'expression': 'COUNT(*)', 'description': '仅统计 is_deleted=0 的数据'})
+        result = self.read('get-query-context', question='有效记录数', source_ids=['staff_report'],
+                           metric_refs=[{'source_id': 'staff_report', 'metric_id': 'active_count'}])
+        self.assertIn('is_deleted', {item['name'] for item in result['tables'][0]['columns']})
+
     def test_column_search_and_batch_projection_exclude_unrelated_columns(self):
         for table in (self.raw['tables'][0], self.live[0]):
             table['columns'] += [{'name': 'irrelevant_' + str(i), 'type': 'text', 'description': '无关字段'} for i in range(100)]

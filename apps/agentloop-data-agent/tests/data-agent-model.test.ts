@@ -29,6 +29,53 @@ test("data questions use the fixed intent and Skill without model round trips", 
   assert.equal(calls.length, 0);
 });
 
+test("explicit file requests resolve to a workspace artifact and load its file Skill", async () => {
+  const calls: ModelInvocation[] = [];
+  const model = dataAgentModel(adapter({ content: "fallback", finishReason: "stop", toolCalls: [] }, calls));
+  const messages = [{ role: "user" as const, content: "查询钢联最近一个月的数据并导出 Excel 文件" }];
+  const intent = await model.complete({ ...baseInvocation, phase: "planning", messages,
+    tools: [{ name: "resolve_conversation_turn", description: "resolve", inputSchema: { type: "object" } }] });
+  const taskIntent = (intent.toolCalls[0]?.arguments as any).taskIntent;
+  assert.equal(taskIntent.operation, "create_artifact");
+  assert.deepEqual(taskIntent.deliverables[0], { targetId: "answer-file", purpose: messages[0].content, expectedArtifactCount: 1,
+    action: "create", kind: "spreadsheet", format: "xlsx", surface: "workspace_artifact" });
+  const load = await model.complete({ ...baseInvocation, phase: "execution", messages,
+    tools: [{ name: "load_skill", description: "load", inputSchema: { type: "object" } }] });
+  assert.deepEqual(load.toolCalls.map(call => call.arguments), [{ name: "data-analysis" }, { name: "xlsx" }]);
+  assert.equal(calls.length, 0);
+});
+
+test("document export formats select the matching file capability", async () => {
+  const cases = [
+    ["生成 Word 报告", "document", "docx", "docx"],
+    ["导出 PDF 文件", "document", "pdf", "pdf"],
+    ["制作 PPT 演示文稿", "presentation", "pptx", "pptx"],
+    ["生成 HTML 看板", "html", "html", "build-dashboard"],
+    ["输出 Markdown 文件", "document", "markdown", undefined],
+  ] as const;
+  for (const [input, kind, format, skillName] of cases) {
+    const model = dataAgentModel(adapter({ content: "fallback", finishReason: "stop", toolCalls: [] }));
+    const messages = [{ role: "user" as const, content: `查询经营指标并${input}` }];
+    const intent = await model.complete({ ...baseInvocation, phase: "planning", messages,
+      tools: [{ name: "resolve_conversation_turn", description: "resolve", inputSchema: { type: "object" } }] });
+    const target = (intent.toolCalls[0]?.arguments as any).taskIntent.deliverables[0];
+    assert.equal(target.kind, kind, input); assert.equal(target.format, format, input);
+    const load = await model.complete({ ...baseInvocation, phase: "execution", messages,
+      tools: [{ name: "load_skill", description: "load", inputSchema: { type: "object" } }] });
+    assert.deepEqual(load.toolCalls.map(call => (call.arguments as any).name), ["data-analysis", ...(skillName ? [skillName] : [])], input);
+  }
+});
+
+test("an explicit Excel format wins over the generic report word", async () => {
+  const model = dataAgentModel(adapter({ content: "fallback", finishReason: "stop", toolCalls: [] }));
+  const messages = [{ role: "user" as const, content: "查询收入并生成 Excel 报告" }];
+  const intent = await model.complete({ ...baseInvocation, phase: "planning", messages,
+    tools: [{ name: "resolve_conversation_turn", description: "resolve", inputSchema: { type: "object" } }] });
+  const target = (intent.toolCalls[0]?.arguments as any).taskIntent.deliverables[0];
+  assert.equal(target.kind, "spreadsheet");
+  assert.equal(target.format, "xlsx");
+});
+
 test("follow-up references keep the generic resolver path", async () => {
   const calls: ModelInvocation[] = [];
   const model = dataAgentModel(adapter({ content: "generic", finishReason: "stop", toolCalls: [] }, calls));

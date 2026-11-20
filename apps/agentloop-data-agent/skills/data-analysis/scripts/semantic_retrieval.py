@@ -265,6 +265,12 @@ def response(catalog, action, request):
         metrics = get_metrics(catalog, request.get('metric_refs', []))
         for metric in metrics:
             wanted[metric['source_id']].update(metric['required_fields'])
+            definition = metric.get('definition', {})
+            text = ' '.join(str(definition.get(key, '')) for key in ('expression', 'description'))
+            table = next((t for t in catalog['tables'] if t['name'] == metric['source_id']), None)
+            if table:
+                known = {column['name'] for column in table['columns']}
+                wanted[metric['source_id']].update(name for name in known if name in text)
         if action == 'get-query-context':
             for match in column_matches(catalog, question, sources)[:8]:
                 wanted[match['source_id']].add(match['name'])

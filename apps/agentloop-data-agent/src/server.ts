@@ -12,11 +12,16 @@ function json(response: ServerResponse, status: number, body: unknown) {
   response.end(JSON.stringify(body));
 }
 
+async function finalArtifacts(agent: DataAgent, runId: string) {
+  return (await agent.runs.processArtifacts(OWNER, runId)).filter(artifact => artifact.role === "final");
+}
+
 const sensitiveTechnicalKey = /(authorization|cookie|credential|password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|connection[_-]?string|dsn)/iu;
 const sqlTechnicalKey = /(?:^|[_-])(sql|statement)(?:$|[_-])/iu;
 const opaqueTechnicalKey = /^(body|content|input|messages?|prompt|systemPrompt)$/iu;
 const rowCollectionKey = /^(data|items|records|results|rows|values)$/iu;
 const sqlText = /^\s*(?:alter|create|delete|describe|drop|explain|insert|merge|replace|select|show|truncate|update|with)\b/iu;
+const embeddedSqlText = /(?:\bSQL\s*[：:]|\b(?:alter|create|delete|describe|drop|explain|insert|merge|replace|select|show|truncate|update|with)\b[\s\S]*\b(?:from|into|table|where|join|set)\b)/iu;
 function redactTechnicalText(value: string): string {
   return value
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+):([^@\s/]+)@/giu, "$1<redacted>@")
@@ -37,7 +42,7 @@ function collectionSummary(value: unknown[]): Record<string, unknown> {
 }
 function technicalString(value: string, mode: "argument" | "result", depth: number, key = ""): unknown {
   const redacted = redactTechnicalText(value);
-  if (sqlTechnicalKey.test(key) || sqlText.test(redacted)) return sqlSummary(redacted);
+  if (sqlTechnicalKey.test(key) || sqlText.test(redacted) || embeddedSqlText.test(redacted)) return sqlSummary(redacted);
   if (opaqueTechnicalKey.test(key)) return `[${key || "content"} omitted: ${redacted.length} characters]`;
   if ((redacted.startsWith("{") || redacted.startsWith("[")) && depth < 4) {
     try { return technicalValue(JSON.parse(redacted), mode, depth + 1, key); } catch { /* Keep non-JSON text. */ }
@@ -93,7 +98,7 @@ function publicNarration(value: unknown): string | undefined {
     .map(paragraph => paragraph.split(/\r?\n/u).filter(line => {
       const plain = line.replace(/^\s*(?:[-*>#]+|\d+[.)])\s*/u, "").trim();
       return plain && !/^(?:[{}\[\],]|(?:alter|create|delete|describe|drop|explain|insert|merge|replace|select|show|truncate|update|with)\b)/iu.test(plain)
-        && !/(?:\bSQL\s*[：:]|\b(?:alter|create|delete|describe|drop|explain|insert|merge|replace|select|show|truncate|update|with)\b[\s\S]*\b(?:from|into|table|where|join|set)\b)/iu.test(plain)
+        && !embeddedSqlText.test(plain)
         && !/(?:content_complete|plan_verification|query_plan|resultPointer|sourcePointer|stdout|stderr)/iu.test(plain);
     }).join(" ").replace(/\s+/gu, " ").trim())
     .filter(Boolean)
@@ -304,17 +309,38 @@ export function createChatServer(agent: DataAgent, options: {
         };
         json(response, 202, { run: await agent.start(message) }); return;
       }
+      const artifactDownload = url.pathname.match(/^\/api\/runs\/([^/]+)\/artifacts\/([^/]+)\/download$/);
+      if (request.method === "GET" && artifactDownload) {
+        const runId = decodeURIComponent(artifactDownload[1]);
+        const artifactId = decodeURIComponent(artifactDownload[2]);
+        const artifact = (await finalArtifacts(agent, runId)).find(item => item.id === artifactId);
+        if (!artifact) throw new AppError("NOT_FOUND", "交付文件不存在", 404);
+        const { content } = await agent.runs.readProcessArtifact(OWNER, runId, artifactId);
+        response.writeHead(200, {
+          "Content-Type": "application/octet-stream",
+          "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(artifact.name)}`,
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Cache-Control": "no-store",
+        });
+        response.end(content); return;
+      }
+      const artifactList = url.pathname.match(/^\/api\/runs\/([^/]+)\/artifacts$/);
+      if (request.method === "GET" && artifactList) {
+        json(response, 200, { artifacts: await finalArtifacts(agent, decodeURIComponent(artifactList[1])) }); return;
+      }
       const route = url.pathname.match(/^\/api\/runs\/([^/]+)(?:\/(cancel|human-loop))?$/);
       if (route) {
         const id = decodeURIComponent(route[1]);
         if (request.method === "GET" && !route[2]) {
           const after = Number(url.searchParams.get("after") ?? "0");
           if (!Number.isSafeInteger(after) || after < 0) throw new AppError("BAD_REQUEST", "事件游标无效", 400);
-          const [run, events, humanLoop] = await Promise.all([
-            agent.runs.get(OWNER, id), agent.runs.eventsAfter(OWNER, id, after), agent.runs.currentHumanLoop(OWNER, id),
+          const run = await agent.runs.get(OWNER, id);
+          const [events, humanLoop, artifacts] = await Promise.all([
+            agent.runs.eventsAfter(OWNER, id, after), agent.runs.currentHumanLoop(OWNER, id),
+            run.status === "running" ? Promise.resolve([]) : finalArtifacts(agent, id),
           ]);
           // UI projects persisted events; no second transcript or synthetic completion state.
-          json(response, 200, { run, humanLoop: humanLoop ?? null, events: events.map(publicEvent) }); return;
+          json(response, 200, { run, humanLoop: humanLoop ?? null, artifacts, events: events.map(publicEvent) }); return;
         }
         if (request.method === "POST" && route[2] === "cancel") {
           await body(request);

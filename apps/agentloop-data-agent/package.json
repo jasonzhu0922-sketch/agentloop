@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@zhujun/agentloop": "*",
+    "@zhujun/agentloop-skills": "*",
     "mysql2": "^3.24.4"
   },
   "devDependencies": {
@@ -20,9 +21,9 @@
     "test:live": "node --env-file-if-exists=.env --test tests/tidb-live.test.ts",
     "verify:browser": "node scripts/verify-browser.mjs",
     "verify:markdown": "node scripts/verify-markdown.mjs",
-    "test:gateway": "python3 -m unittest discover -s skills/data-analysis/scripts -p 'test_*.py'",
+    "test:gateway": "node scripts/run-python.mjs -m unittest discover -s skills/data-analysis/scripts -p test_*.py",
     "typecheck": "tsc -p tsconfig.json",
-    "test:catalog": "python3 -m unittest discover -s scripts -p test_manage_catalog.py",
+    "test:catalog": "node scripts/run-python.mjs -m unittest discover -s scripts -p test_manage_catalog.py",
     "verify:settings": "node --env-file-if-exists=.env scripts/verify-settings.mts"
   }
 }

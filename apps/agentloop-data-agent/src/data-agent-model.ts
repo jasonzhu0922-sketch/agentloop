@@ -1,5 +1,6 @@
 import type { ModelAdapter, ModelInvocation, ModelResponse, ModelStreamEvent, ModelToolCall } from "@zhujun/agentloop";
 import { basename } from "node:path";
+import { detectDataAgentFileExport } from "./file-export.ts";
 
 const BAD_RESULT_POINTERS = new Set(["/sql", "/sources"]);
 const DEFAULT_FIRST_EVENT_TIMEOUT_MS = 30_000;
@@ -30,6 +31,7 @@ function fixedConversationResolution(invocation: ModelInvocation): ModelResponse
   const input = latestUserInput(invocation);
   if (!input || !DATA_REQUEST.test(input) || FOLLOW_UP.test(input) || PRIOR_REFERENCE.test(input)) return undefined;
   const analytical = /(?:分析|对比|比较|趋势|排名|分布|差异|同比|环比|完成率|变化)/u.test(input);
+  const fileExport = detectDataAgentFileExport(input);
   return {
     content: "",
     finishReason: "tool_calls",
@@ -43,9 +45,12 @@ function fixedConversationResolution(invocation: ModelInvocation): ModelResponse
         effectiveGoal: input.slice(0, 2_000),
         taskIntent: {
           schema: "agentloop.conversationTaskIntent/v1",
-          operation: analytical ? "analysis" : "lookup",
+          operation: fileExport ? "create_artifact" : analytical ? "analysis" : "lookup",
           requiresExecution: true,
-          deliverables: [{
+          deliverables: fileExport ? [{
+            targetId: "answer-file", purpose: input.slice(0, 500), expectedArtifactCount: 1,
+            action: "create", kind: fileExport.kind, format: fileExport.format, surface: "workspace_artifact",
+          }] : [{
             targetId: "answer", purpose: input.slice(0, 500), expectedArtifactCount: 1,
             action: "none", kind: "none", surface: "conversation",
           }],
@@ -72,7 +77,8 @@ function fixedSkillLoad(invocation: ModelInvocation): ModelResponse | undefined 
       return typeof value?.name === "string" ? [value.name] : [];
     });
   }));
-  const required = ["data-analysis"];
+  const fileExport = detectDataAgentFileExport(latestUserInput(invocation) ?? "");
+  const required = ["data-analysis", ...(fileExport?.skillName ? [fileExport.skillName] : [])];
   const missing = required.filter(name => !loadedNames.has(name));
   if (missing.length === 0) return undefined;
   return {

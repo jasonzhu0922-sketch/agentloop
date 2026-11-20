@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AppDatabase, AppError, RunService, SkillService, type ModelFactory, type PrivateSkill, type SqlConnection } from "@zhujun/agentloop";
+import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { fixedDataAnalysisPlanner } from "./fixed-planner.ts";
 import { acquireLease } from "./tidb-state.ts";
 import { fixedSkillExecutionPolicy } from "./skill-policy.ts";
 import { dataAgentModel } from "./data-agent-model.ts";
+import { DATA_AGENT_FILE_SKILL_NAMES } from "./file-export.ts";
 
 export const OWNER = "data-agent-local-owner";
 export interface AgentOptions {
@@ -56,14 +58,19 @@ export async function createDataAgent(options: AgentOptions) {
       payload_json LONGTEXT NOT NULL
     )`);
     const skills = new SkillService(database, {
+      skillDirectories: bundledSkillDirectories(),
       skillPackageRoots: [resolve(options.skillRoot)],
       packageStoreRoot: join(options.fileDirectory, "skill-packages"),
-      selectVisibleSkills: ({ skills }) => skills.filter(s => s.name === "data-analysis"),
+      selectVisibleSkills: ({ skills }) => skills.filter(s =>
+        s.name === "data-analysis" || DATA_AGENT_FILE_SKILL_NAMES.includes(s.name as typeof DATA_AGENT_FILE_SKILL_NAMES[number])),
     });
     await skills.refreshSkillDirectory();
     const available = await skills.resolveForConversation(OWNER);
     let skill: PrivateSkill | undefined = available.find(s => s.name === "data-analysis");
     if (!skill) throw new Error("data-analysis Skill 无法加载，请检查应用内的 Skill 包。");
+    let fileSkills = available.filter(s => DATA_AGENT_FILE_SKILL_NAMES.includes(s.name as typeof DATA_AGENT_FILE_SKILL_NAMES[number]));
+    const missingFileSkills = DATA_AGENT_FILE_SKILL_NAMES.filter(name => !fileSkills.some(item => item.name === name));
+    if (missingFileSkills.length) throw new Error(`文件 Skill 无法加载：${missingFileSkills.join(", ")}`);
     const runs = new RunService({
       database, skills, workspaceRoot, sourceStorageRoot: join(workspaceRoot, "sources"),
       ownerScopedWorkspace: true,
@@ -71,14 +78,16 @@ export async function createDataAgent(options: AgentOptions) {
       modelKeys: options.modelKeys, defaultModelKey: options.defaultModelKey,
       requireExplicitModel: true, timeZone: "Asia/Shanghai",
       runEventLogSink: options.runEventLogSink,
-      plannerFactory: () => fixedDataAnalysisPlanner(skill!),
-      toolExecutionPlugins: [await fixedSkillExecutionPolicy(skill)],
+      plannerFactory: () => fixedDataAnalysisPlanner(skill!, fileSkills),
+      toolExecutionPlugins: [await fixedSkillExecutionPolicy(skill, fileSkills)],
       computerExecutableAliases: { python3: options.python },
       computerCommandEnvironment: { PYTHONDONTWRITEBYTECODE: "1", PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" },
       systemPrompt: [
-        "你是集团经营问数 Agent。应用已固定 data-analysis 主 Skill 和 group 场景，不选择或推荐其他 Skill。",
-        "先 load_skill 加载该 Skill，并按其 references 与正式执行动作完成领域推理、SQL、核对和回答。",
+        "你是集团经营问数 Agent。data-analysis 始终负责 group 场景的真实数据查询；文件 Skill 只在用户明确要求导出文件时启用。",
+        "先 load_skill 加载 data-analysis；明确要求 Excel/CSV、Word、PDF、PPT 或 HTML 看板时，再加载对应的 xlsx、docx、pdf、pptx 或 build-dashboard Skill。Markdown 使用安全工作区写文件工具，不虚构不存在的 Skill。",
         "目录和 SQL 查询只能通过此 Skill；不能自己建连接、读取凭据、调用另一个问数服务或使用记忆猜数据。",
+        "文件必须消费 data-analysis 的真实查询 Result，不得为了导出重新查询、改写口径或编造数据。把结果写成 data-agent.file-export/v1 JSON 规格，再调用 data-analysis 清单中的 scripts/file_export.py 固定生成器；禁止编写或运行临时 Python/Node 生成脚本。最终文件写入工作区并绑定 deliveryTargetId，完成 verify_artifact_acceptance 后再交付。",
+        "用户没有明确要求文件时，只返回聊天答案，不创建附件。用户要求文件时，最终回答简短说明文件已生成，下载入口由页面展示。",
         "用户只需看到答案和影响答案的口径；完整 SQL、参数、目录版本与回执留在当前 Run。",
         "过程正文每个阶段用一至三句自然语言说明当前判断、已确认的信息和下一步，保留对用户有用的真实来源、口径与阶段结论；避免 stdout、JSON、SQL、字段清单等内部细节，也避免‘让我先……’‘我先……’‘接下来我将……’等自言自语，不为前端展示编造过程。",
         "不支持的工作说明范围；实体、指标或期间歧义使用 request_human_loop。真实故障如实报告，不冒充无数据。",
@@ -88,7 +97,7 @@ export async function createDataAgent(options: AgentOptions) {
         "When the user asks for counts inside an explicitly named dataset, calculate them inside that dataset. Do not add a reference or master table merely because it defines a similarly named total.",
         "Do not run a second verification query when the successful result already directly answers the question and there is no concrete conflict, truncation, NULL, or execution warning.",
         "The final answer must start with the business result, avoid internal narration such as information is ready or can now be submitted, and state each result only once. For a simple lookup, use at most three short bullets plus one necessary scope sentence.",
-        "For data-analysis computer_run_command, command must be the string python3 and args must begin with scripts/data_client.py. Never place an object or array in command.",
+        "For data-analysis computer_run_command, command must be the string python3 and args must begin with scripts/data_client.py or scripts/file_export.py. File export may only use scripts/file_export.py with a data-agent.file-export/v1 JSON spec; never write or run a temporary executable script. Never place an object or array in command.",
         "For read_result, first read with resultId only. Never guess /sql or /sources; use only resultPointer from the Result envelope, and use computer_read_json for sourcePointer.",
       ].join("\n"),
     });
@@ -181,7 +190,9 @@ export async function createDataAgent(options: AgentOptions) {
           const result = await action();
           if (refreshPackage) {
             await skills.refreshSkillDirectory();
-            skill = (await skills.resolveForConversation(OWNER)).find(s => s.name === "data-analysis");
+            const refreshed = await skills.resolveForConversation(OWNER);
+            skill = refreshed.find(s => s.name === "data-analysis");
+            fileSkills = refreshed.filter(s => DATA_AGENT_FILE_SKILL_NAMES.includes(s.name as typeof DATA_AGENT_FILE_SKILL_NAMES[number]));
             if (!skill) throw new Error("data-analysis Skill 无法加载");
           }
           return result;

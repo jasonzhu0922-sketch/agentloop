@@ -19,3 +19,18 @@ test("fixed package policy admits declared entrypoints and keeps credentials pri
   for (const path of ["@skills/data-analysis/SKILL.md", "@skills/data-analysis/references/planning.md", "answer.json"])
     assert.equal(await check("computer_read_file", { path }), "allow", path);
 });
+
+test("file export only admits the application-owned declared generator", async () => {
+  const dataSkill = { id: "data", name: "data-analysis", package: { root: fileURLToPath(new URL("../skills/data-analysis", import.meta.url)) } } as PrivateSkill;
+  const xlsx = { id: "xlsx", name: "xlsx", package: { root: fileURLToPath(new URL("../../../packages/agentloop-skills/skills/xlsx", import.meta.url)) } } as PrivateSkill;
+  const policy = await fixedSkillExecutionPolicy(dataSkill, [xlsx]);
+  const check = async (input: unknown, roots: readonly { skillId: string }[] = [{ skillId: "data" }, { skillId: "xlsx" }]) => (await policy.evaluate({
+    tool: { name: "computer_run_command" }, input, context: { grant: { skillExecutionRoots: roots } },
+  } as never)).decision;
+  assert.equal(await check({ command: "python3", args: ["scripts/file_export.py", "build"], cwd: "@skills/data-analysis" }), "allow");
+  assert.equal(await check({ command: "python3", args: ["scripts/file_export.py", "build"], cwd: "@skills/data-analysis" }, [{ skillId: "data" }]), "deny");
+  assert.equal(await check({ command: "python3", args: ["scripts/file_export.py", "build", "--format", "markdown"], cwd: "@skills/data-analysis" }, [{ skillId: "data" }]), "allow");
+  assert.equal(await check({ command: "python3", args: ["make_report.py", "@workspace/report.xlsx"], cwd: "." }), "deny");
+  assert.equal(await check({ command: "node", args: ["scripts/build_report.cjs"], cwd: "@skills/docx" }), "deny");
+  assert.equal(await check({ command: "python3", args: ["-c", "print('bypass')"], cwd: "." }), "deny");
+});

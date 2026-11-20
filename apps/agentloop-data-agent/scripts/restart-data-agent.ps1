@@ -18,7 +18,7 @@ function Read-DotEnv([string]$Path) {
     if ($line -match '^\s*#' -or [string]::IsNullOrWhiteSpace($line)) { continue }
     if ($line -notmatch '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$') { continue }
     $value = $matches[2].Trim()
-    if (($value.StartsWith("'") -and $value.EndsWith("'")) -or ($value.StartsWith('\"') -and $value.EndsWith('\"'))) {
+    if (($value.StartsWith("'") -and $value.EndsWith("'")) -or ($value.StartsWith('"') -and $value.EndsWith('"'))) {
       $value = $value.Substring(1, $value.Length - 2)
     }
     $values[$matches[1]] = $value
@@ -159,6 +159,9 @@ do {
 } while ((Get-Date) -lt $takeoverDeadline)
 
 if (-not $ready) {
+  if ($process -and -not $process.HasExited) {
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+  }
   $tail = if (Test-Path -LiteralPath $errLog) { (Get-Content -LiteralPath $errLog -Tail 20) -join [Environment]::NewLine } else { '' }
   throw "Data Agent did not become ready. PID=$($process.Id)`n$tail"
 }

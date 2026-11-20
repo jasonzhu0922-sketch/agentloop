@@ -1,11 +1,24 @@
 import assert from 'node:assert/strict';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { access, mkdir, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { chromium } from 'playwright-core';
 
 const output = resolve('data/qa');
 await mkdir(output, { recursive: true });
-const browser = await chromium.launch({ executablePath: process.env.DATA_AGENT_CHROME ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
+async function browserExecutable() {
+  const candidates = [process.env.DATA_AGENT_CHROME,
+    ...(process.platform === 'win32' ? [
+      'C:/Program Files/Google/Chrome/Application/chrome.exe',
+      'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+      'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+      'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    ] : ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'])].filter(Boolean);
+  for (const candidate of candidates) {
+    try { await access(candidate); return candidate; } catch { /* Try the next installed browser. */ }
+  }
+  throw new Error('Chrome or Edge was not found; set DATA_AGENT_CHROME to its executable path');
+}
+const browser = await chromium.launch({ executablePath: await browserExecutable(), headless: true });
 const origin = process.env.DATA_AGENT_TEST_ORIGIN ?? 'http://127.0.0.1:8810';
 
 async function verifyIncrementalTechnicalDetails() {
@@ -60,8 +73,56 @@ async function verifyIncrementalTechnicalDetails() {
   } finally { await page.close(); }
 }
 
+async function verifyArtifactDownloads() {
+  const page = await browser.newPage({ viewport: { width: 1000, height: 700 } });
+  const createdAt = Date.now();
+  const runs = [
+    { id: 'file-run', conversationId: 'artifact-conversation', input: '生成 Excel 报告', modelKey: 'browser-test', status: 'completed', createdAt, finishedAt: createdAt + 1000, output: '文件已生成。' },
+    { id: 'plain-run', conversationId: 'artifact-conversation', input: '查询收入', modelKey: 'browser-test', status: 'completed', createdAt: createdAt + 2000, finishedAt: createdAt + 3000, output: '收入为 100 万元。' },
+  ];
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const respond = (body, status = 200, headers = {}) => route.fulfill({ status, headers, contentType: 'application/json; charset=utf-8', body: typeof body === 'string' ? body : JSON.stringify(body) });
+    if (url.pathname === '/api/config') { await respond({ defaultModelKey: 'browser-test', models: [{ key: 'browser-test', displayName: 'Browser Test' }] }); return; }
+    if (url.pathname === '/api/sample-questions') { await respond({ questions: [] }); return; }
+    if (url.pathname === '/api/conversations') { await respond({ conversations: [{ id: 'artifact-conversation', title: '附件验证' }] }); return; }
+    if (url.pathname === '/api/conversations/artifact-conversation') { await respond({ id: 'artifact-conversation', title: '附件验证', runs }); return; }
+    if (url.pathname === '/api/runs/file-run') { await respond({ run: runs[0], humanLoop: null, events: [], artifacts: [{ id: 'artifact-1', name: '经营报告.xlsx', bytes: 4096, role: 'final' }] }); return; }
+    if (url.pathname === '/api/runs/plain-run') { await respond({ run: runs[1], humanLoop: null, events: [], artifacts: [] }); return; }
+    if (url.pathname === '/api/runs/file-run/artifacts/artifact-1/download') {
+      await route.fulfill({ status: 200, headers: { 'Content-Type': 'application/octet-stream', 'Content-Disposition': "attachment; filename=report.xlsx; filename*=UTF-8''report.xlsx" }, body: 'xlsx-test' }); return;
+    }
+    await route.abort();
+  });
+  try {
+    await page.goto(origin);
+    await page.getByRole('button', { name: '附件验证' }).click();
+    const fileRun = page.locator('[data-run-id="file-run"]');
+    const plainRun = page.locator('[data-run-id="plain-run"]');
+    await fileRun.locator('.answer-artifact').waitFor();
+    assert.equal(await fileRun.locator('.answer-artifact').count(), 1);
+    assert.match(await fileRun.locator('.answer-artifact').textContent(), /经营报告\.xlsx/);
+    assert.equal(await plainRun.locator('.answer-artifact').count(), 0);
+    const href = await fileRun.locator('.answer-artifact').getAttribute('href');
+    assert.equal(href, '/api/runs/file-run/artifacts/artifact-1/download');
+    let requestedDownload = false;
+    await page.route('**/api/runs/file-run/artifacts/artifact-1/download', async route => {
+      requestedDownload = true;
+      await route.fulfill({ status: 204 });
+    });
+    await page.evaluate(path => fetch(path), href);
+    assert.equal(requestedDownload, true);
+    console.log('Artifact download browser check passed.');
+  } finally { await page.close(); }
+}
+
 try {
   await verifyIncrementalTechnicalDetails();
+  await verifyArtifactDownloads();
+  if (process.env.DATA_AGENT_SKIP_LIVE_BROWSER === '1') {
+    console.log('Mock browser checks passed; live database check skipped by DATA_AGENT_SKIP_LIVE_BROWSER.');
+  } else {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -126,4 +187,5 @@ try {
   assert.equal(await page.locator('#notice').textContent(), '');
   assert.deepEqual(errors, []);
   console.log('Browser, mobile, live answer and reload checks passed. Screenshots:', output);
+  }
 } finally { await browser.close(); }

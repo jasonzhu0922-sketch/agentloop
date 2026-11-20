@@ -43,6 +43,35 @@ test("chat opens without login and protects mutations from other origins", async
   assert.deepEqual(starts, [{ requestId: "request", conversationId: "conversation", input: "指标", modelKey: "test" }]);
 });
 
+test("final artifacts can be listed and downloaded while process files stay private", async t => {
+  const finalArtifact = { runId: "run-1", id: "artifact-final", path: "经营报表.xlsx", name: "经营报表.xlsx", bytes: 4,
+    mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", role: "final", sourceTool: "computer_run_command", previewable: true };
+  const processArtifact = { ...finalArtifact, id: "artifact-process", path: "query.json", name: "query.json", role: "process" };
+  const agent = { runs: {
+    listConversations: async () => [],
+    processArtifacts: async () => [processArtifact, finalArtifact],
+    readProcessArtifact: async (_owner: string, _runId: string, artifactId: string) => {
+      assert.equal(artifactId, finalArtifact.id); return { artifact: finalArtifact, content: Buffer.from("xlsx") };
+    },
+  } } as unknown as DataAgent;
+  const server = createChatServer(agent, { webRoot: resolve(import.meta.dirname, "../web"), models: [{ key: "test", displayName: "Test" }], defaultModelKey: "test" });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const root = await fetch(url);
+  const cookie = root.headers.get("set-cookie")!.split(";")[0];
+  assert.equal((await fetch(`${url}/api/runs/run-1/artifacts`)).status, 403);
+  const listed = await fetch(`${url}/api/runs/run-1/artifacts`, { headers: { Cookie: cookie } });
+  assert.equal(listed.status, 200);
+  assert.deepEqual((await listed.json()).artifacts.map((artifact: { id: string }) => artifact.id), [finalArtifact.id]);
+  const downloaded = await fetch(`${url}/api/runs/run-1/artifacts/${finalArtifact.id}/download`, { headers: { Cookie: cookie } });
+  assert.equal(downloaded.status, 200);
+  assert.equal(downloaded.headers.get("content-type"), "application/octet-stream");
+  assert.match(downloaded.headers.get("content-disposition") ?? "", /filename\*=UTF-8''/);
+  assert.equal(await downloaded.text(), "xlsx");
+  assert.equal((await fetch(`${url}/api/runs/run-1/artifacts/${processArtifact.id}/download`, { headers: { Cookie: cookie } })).status, 404);
+});
+
 test("browser technical events retain real summaries without exposing credentials, SQL or result rows", () => {
   const planned = publicEvent({ seq: 1, type: "tool.planned", createdAt: 10, data: {
     toolCallId: "call", toolName: "computer_run_command", arguments: {
@@ -87,4 +116,19 @@ test("browser technical events retain real summaries without exposing credential
   assert.equal(narration.content, "正在核对查询结果。");
   const skill = publicEvent({ seq: 5, type: "tool.completed", createdAt: 50, data: { toolName: "load_skill", result: "private Skill instructions" } });
   assert.equal((skill.data as Record<string, unknown>).resultPreview, "Skill package content omitted (26 persisted characters)");
+});
+
+test("browser narration removes SQL even when prose appears before the statement", () => {
+  const projected = publicEvent({ seq: 1, type: "assistant.streaming", createdAt: 1, data: {
+    content: "正在执行 SQL：SELECT salary, employee_name FROM secret_payroll WHERE company = 1",
+  } });
+  assert.equal(projected.content, undefined);
+});
+
+test("browser technical previews remove SQL embedded in error prose", () => {
+  const projected = publicEvent({ seq: 1, type: "tool.failed", createdAt: 1, data: {
+    toolName: "computer_run_command", error: "Query failed while running SELECT salary FROM secret_payroll WHERE company = 1",
+  } });
+  assert.doesNotMatch(String(projected.data.errorPreview), /secret_payroll|salary/);
+  assert.match(String(projected.data.errorPreview), /SQL omitted/);
 });

@@ -24,6 +24,24 @@ description: 面向集团经营分析（group），查询分析财务报表、�
 5. **核对与修正。** 检查状态、`plan_verification`、实际 SQL 和完整数据集。回执 `content_complete=true` 时响应在 `/content`；`dataset_complete=true` 时完整数据集在回执 `/dataset`。否则按 `read_contract.file_pointers` 读取保存文件：文件根就是原响应，行在 `/dataset/rows`，没有 `/content` 层。跨步骤首次读取 Runtime Result 时只传 `resultId`，先看返回的 Result 根结构；之后只能使用它明确给出的 `resultPointer`。`sourcePointer` 属于原始 JSON 文件，必须交给 `computer_read_json`，不能传给 `read_result`。不猜 `/sql`、`/sources`、`/fields` 等路径。空集合、NULL、策略拒绝和执行失败是不同结果。命令 `exitCode` 非零、`operationStatus=failed` 或 `isError=true` 都是失败，不能当作已完成步骤；先读 `error.diagnostic` 的阶段与代码，再做针对性修正。诊断不充分时标明未确定，不靠删除必要条件或反复更换占位符猜测。意外空值时核对对象、值域、期间与项目，必要时进行最小只读探查，依据证据修正 SQL。核对按任务与 JOIN 风险选择，优先在现有结果中完成；不固定追加全表计数、状态覆盖和总量查询。不要重复查询来恢复预览省略的数据，不把故障改写为无数据。
 6. **分析并交付。** 按下文回复规则直接回答用户问题。趋势、比较等任务再按需使用目录中的方法与 [分析方法](references/analysis-methodology.md)，通过可复核的代码或 SQL 计算；主动判断图形是否有助于理解，适合时在最终回复中直接使用 Runtime 声明支持的 Markdown 图表格式展示，不只描述“可以画图”或返回数据文件。每个数值和实体描述对应具体结果行或计算输出，无法定位的内容不作为事实交付。完整数据保存在结果文件中，以场景、`query_id`、目录版本、SQL 和文件引用在当前 Run 内保留证据链，按用户需要提供追溯信息。
 
+### 文件交付
+
+只有用户明确要求 Excel/CSV、Word、PDF、PPT、Markdown 或 HTML 文件时才生成附件。先完成并核对真实查询，再用 `computer_write_file` 写入一个纯数据 JSON 规格；禁止写入或运行临时 Python/Node 脚本。规格固定为：
+
+```json
+{
+  "schema": "data-agent.file-export/v1",
+  "title": "报告标题",
+  "subtitle": "可选副标题",
+  "summary": ["可选结论一"],
+  "tables": [
+    {"name": "数据表名称", "columns": ["列一", "列二"], "rows": [["值一", 123.4]]}
+  ]
+}
+```
+
+然后在 `cwd: "@skills/data-analysis"` 下调用 `python3 scripts/file_export.py build --format <xlsx|csv|docx|pdf|pptx|html|markdown> --spec <规格路径> --output <最终文件路径>`。CSV 只能包含一个表；PPT 最多 500 行、12 列；Word/PDF 最多 5000 行、30 列。生成器会校验行列、总大小、输出扩展名，并防止 Excel/CSV 公式注入。最后用 `outputBindings` 将文件绑定到当前交付目标，再执行 `verify_artifact_acceptance`。
+
 ### 应用效率补充规则
 
 - `retrieve-knowledge` 先做一次精确读取，覆盖 `sources/terms/metrics/ambiguities/gaps/selection_contract/relationships`；只有相关来源或定义确实不在已返回分页中时才继续翻页，不为读完整个目录而翻页。

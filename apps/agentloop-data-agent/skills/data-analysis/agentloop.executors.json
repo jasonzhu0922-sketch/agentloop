@@ -344,6 +344,27 @@
           ]
         }
       ]
+    },
+    {
+      "id": "file-export",
+      "description": "Create a bounded final file from an already returned and verified data-analysis Result. This executor never queries the database.",
+      "command": "python3",
+      "script": "scripts/file_export.py",
+      "actions": [
+        {
+          "id": "build-file",
+          "description": "Build the explicitly requested final file with the application-owned generator. First write one data-agent.file-export/v1 JSON spec from the existing query Result; never put SQL, credentials or executable code in the spec.",
+          "inputs": [
+            { "name": "format", "description": "One of xlsx, csv, docx, pdf, pptx, html or markdown.", "required": true },
+            { "name": "spec", "description": "Workspace data-agent.file-export/v1 JSON specification produced from the existing query Result.", "required": true },
+            { "name": "output", "description": "Final workspace output path whose extension matches the format.", "required": true }
+          ],
+          "args": [
+            "build", "--format", "{{format}}", "--spec", "{{spec}}", "--output", "{{output}}"
+          ],
+          "result": "Bounded file receipt with format, output path, byte size and SHA-256. Bind the same output path to the delivery target and run artifact acceptance."
+        }
+      ]
     }
   ]
 }
