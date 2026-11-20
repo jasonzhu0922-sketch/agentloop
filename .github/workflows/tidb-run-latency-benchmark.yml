@@ -1,0 +1,83 @@
+name: TiDB Run latency benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/nl2sql
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+
+      - run: npm ci
+
+      - name: Start TiDB 8.5
+        run: docker compose -f apps/agentloop-multi-runtime/compose.tidb-local.yaml up -d
+
+      - name: Wait for TiDB
+        run: |
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent http://127.0.0.1:10080/status >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          docker compose -f apps/agentloop-multi-runtime/compose.tidb-local.yaml logs
+          exit 1
+
+      - name: Benchmark before fix
+        shell: bash
+        run: |
+          git checkout b77d9a51c688a05ed3918ccc0d79516e02f3554b -- \
+            packages/agentloop/src/runtime/model-streaming.ts \
+            packages/agentloop/src/runtime/agent-loop.ts \
+            packages/agentloop/src/runtime/run-service.ts \
+            packages/agentloop/src/storage/connection.ts \
+            packages/agentloop/src/storage/repositories/run-event-sequencer.ts
+          BENCHMARK_COMMIT=b77d9a51c688a05ed3918ccc0d79516e02f3554b \
+            node scripts/tidb-run-latency-benchmark.ts --label=before > before.json
+
+      - name: Benchmark after fix
+        shell: bash
+        run: |
+          git checkout "$GITHUB_SHA" -- \
+            packages/agentloop/src/runtime/model-streaming.ts \
+            packages/agentloop/src/runtime/agent-loop.ts \
+            packages/agentloop/src/runtime/run-service.ts \
+            packages/agentloop/src/storage/connection.ts \
+            packages/agentloop/src/storage/repositories/run-event-sequencer.ts
+          BENCHMARK_COMMIT="$GITHUB_SHA" \
+            node scripts/tidb-run-latency-benchmark.ts --label=after > after.json
+
+      - name: Compare results
+        run: |
+          node scripts/compare-tidb-run-benchmarks.mjs before.json after.json tidb-run-benchmark-summary.md
+          cat tidb-run-benchmark-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tidb-run-latency-benchmark
+          path: |
+            before.json
+            after.json
+            tidb-run-benchmark-summary.md
+
+      - name: TiDB logs on failure
+        if: failure()
+        run: docker compose -f apps/agentloop-multi-runtime/compose.tidb-local.yaml logs
+
+      - name: Stop TiDB
+        if: always()
+        run: docker compose -f apps/agentloop-multi-runtime/compose.tidb-local.yaml down -v
