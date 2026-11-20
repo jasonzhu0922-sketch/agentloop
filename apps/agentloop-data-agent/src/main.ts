@@ -5,6 +5,7 @@ import { createChatServer } from "./server.ts";
 import { connectState } from "./tidb-state.ts";
 import { ModelSettings } from "./model-settings.ts";
 import { SettingsService } from "./settings.ts";
+import { describeStartupError } from "./startup-diagnostics.ts";
 import { colorizeTerminalLogLabel, colorizeTerminalLogLine } from "@zhujun/agentloop";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -47,7 +48,7 @@ try {
   process.once("SIGTERM", () => { void shutdown().catch(() => { process.exitCode = 1; }); });
 } catch (error) {
   await agent?.close();
-  console.error("问数 Agent 启动失败：请检查 TiDB、端口、模型配置和 Skill 包。", error instanceof Error ? error.name : "Error");
+  console.error("问数 Agent 启动失败：", describeStartupError(error, stateUrl));
   if (process.argv.includes("--diagnose") && error instanceof Error) console.error(error.message.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"']+/giu, "<url>"));
   process.exitCode = 1;
 }
