@@ -16,7 +16,7 @@ export class RuntimeEventQueryService {
   private readonly authorizeRun: (actorUserId: string, runId: string) => Promise<void>;
 
   constructor(input: {
-    readonly runs: Pick<RunRepository, "eventsByRun"> & Partial<Pick<RunRepository, "latestEventByRun">>;
+    readonly runs: Pick<RunRepository, "eventsByRun"> & Partial<Pick<RunRepository, "eventsByRunAfter" | "latestEventByRun">>;
     readonly authorizeRun: (actorUserId: string, runId: string) => Promise<void>;
   }) {
     this.runs = input.runs;
