@@ -5,6 +5,7 @@ import { AppDatabase, AppError, RunService, SkillService, type ModelFactory, typ
 import { fixedDataAnalysisPlanner } from "./fixed-planner.ts";
 import { acquireLease } from "./tidb-state.ts";
 import { fixedSkillExecutionPolicy } from "./skill-policy.ts";
+import { dataAgentModel } from "./data-agent-model.ts";
 
 export const OWNER = "data-agent-local-owner";
 export interface AgentOptions {
@@ -66,19 +67,29 @@ export async function createDataAgent(options: AgentOptions) {
     const runs = new RunService({
       database, skills, workspaceRoot, sourceStorageRoot: join(workspaceRoot, "sources"),
       ownerScopedWorkspace: true,
-      modelFactory: options.modelFactory, modelKeys: options.modelKeys, defaultModelKey: options.defaultModelKey,
+      modelFactory: (onRetry, modelKey) => dataAgentModel(options.modelFactory(onRetry, modelKey)),
+      modelKeys: options.modelKeys, defaultModelKey: options.defaultModelKey,
       requireExplicitModel: true, timeZone: "Asia/Shanghai",
       runEventLogSink: options.runEventLogSink,
       plannerFactory: () => fixedDataAnalysisPlanner(skill!),
       toolExecutionPlugins: [await fixedSkillExecutionPolicy(skill)],
       computerExecutableAliases: { python3: options.python },
-      computerCommandEnvironment: { PYTHONDONTWRITEBYTECODE: "1" },
+      computerCommandEnvironment: { PYTHONDONTWRITEBYTECODE: "1", PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" },
       systemPrompt: [
         "你是集团经营问数 Agent。应用已固定 data-analysis 主 Skill 和 group 场景，不选择或推荐其他 Skill。",
         "先 load_skill 加载该 Skill，并按其 references 与正式执行动作完成领域推理、SQL、核对和回答。",
         "目录和 SQL 查询只能通过此 Skill；不能自己建连接、读取凭据、调用另一个问数服务或使用记忆猜数据。",
         "用户只需看到答案和影响答案的口径；完整 SQL、参数、目录版本与回执留在当前 Run。",
+        "过程正文每个阶段用一至三句自然语言说明当前判断、已确认的信息和下一步，保留对用户有用的真实来源、口径与阶段结论；避免 stdout、JSON、SQL、字段清单等内部细节，也避免‘让我先……’‘我先……’‘接下来我将……’等自言自语，不为前端展示编造过程。",
         "不支持的工作说明范围；实体、指标或期间歧义使用 request_human_loop。真实故障如实报告，不冒充无数据。",
+        "After retrieve-knowledge, immediately request structured human confirmation when an ambiguity can change the metric, entity, period, source, aggregation, or SQL. Do not continue querying first.",
+        "Read each retrieve-knowledge output once initially using the focused fields supplied by the application. Paginate only when the relevant source or definition is actually missing; do not page merely to exhaust the catalog.",
+        "Once a source is selected, call get-query-context once with every already-known metric_ref and required column name. Do not follow it with get-metrics, search-columns, or get-columns for information that could have been requested in that same context call.",
+        "When the user asks for counts inside an explicitly named dataset, calculate them inside that dataset. Do not add a reference or master table merely because it defines a similarly named total.",
+        "Do not run a second verification query when the successful result already directly answers the question and there is no concrete conflict, truncation, NULL, or execution warning.",
+        "The final answer must start with the business result, avoid internal narration such as information is ready or can now be submitted, and state each result only once. For a simple lookup, use at most three short bullets plus one necessary scope sentence.",
+        "For data-analysis computer_run_command, command must be the string python3 and args must begin with scripts/data_client.py. Never place an object or array in command.",
+        "For read_result, first read with resultId only. Never guess /sql or /sources; use only resultPointer from the Result envelope, and use computer_read_json for sourcePointer.",
       ].join("\n"),
     });
     // This app's admission ledger binds client retries in the same transaction as the Kernel Run.

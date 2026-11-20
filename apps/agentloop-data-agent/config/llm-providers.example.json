@@ -9,8 +9,9 @@
       "defaultModel": "qwen-plus",
       "contextWindowTokens": 128000,
       "maxOutputTokens": 8192,
-      "timeoutMs": 180000,
+      "timeoutMs": 60000,
       "maxAttempts": 2,
+      "toolChoiceMode": "named-as-required",
       "protocol": "chat-completions"
     }
   },

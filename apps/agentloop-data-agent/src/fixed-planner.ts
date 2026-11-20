@@ -24,7 +24,10 @@ export function fixedDataAnalysisPlanner(skill: PrivateSkill): Planner {
           skillIds: [skill.id],
           requiredCapabilities: ["skill_instruction_load", "skill_local_script_execution", `skill_source_provider.database.${skill.id}`, "conversation_delivery"],
           targetIds: Object.values(task.canonicalState.targets).filter(t => t.status !== "accepted").map(t => t.targetId),
-          evidenceContract: { requiredKinds: task.responseOnly ? [] : ["source_summary"], caveatPolicy: "strict_fail_on_missing_source" },
+          // This application always answers from the governed business-data Skill.
+          // A conversational delivery target is still evidence-backed; an empty
+          // contract is invalid and previously caused PLAN_NOT_ADMITTED failures.
+          evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "strict_fail_on_missing_source" },
           successCriteria: [
             { id: "business-answer", description: "按用户要求直接回答；每个事实均有真实目录、查询结果或已绑定 Result 依据。没有数据、NULL、策略拒绝和故障如实区分。", source: "task", blocking: true },
             { id: "skill-contract", description: "遵循固定 Skill 的实体、指标、时间与 SQL 校验流程；歧义已经用户确认，不猜编码、不放宽必要条件。", source: "planner", blocking: true },

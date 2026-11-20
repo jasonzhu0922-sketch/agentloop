@@ -77,3 +77,27 @@ test("external configuration edits cannot be overwritten by a stale settings sna
   await assert.rejects(settings.save(input()), /配置文件已更新/);
   assert.equal(await readFile(path, "utf8"), external);
 });
+
+test("Data Agent exposes and applies its fixed runtime reliability policy without changing the exact provider model", async t => {
+  const { path, settings } = await fixture(t);
+  const publicConfig = settings.publicConfig();
+  assert.deepEqual(publicConfig.runtimePolicy, {
+    source: "application-policy", timeoutCapMs: 60_000, maxAttemptsFloor: 2, toolChoiceMode: "named-as-required",
+    description: "Data Agent 固定使用指定工具必选策略、至少两次模型尝试，并限制单次模型请求超时；配置中更严格的值仍会保留。",
+  });
+  const runtime = settings.registry.create("ds-pro") as any;
+  assert.equal(runtime.model, "deepseek-v4-pro");
+  assert.equal(runtime.timeoutMs, 60_000);
+  assert.equal(runtime.maxAttempts, 2);
+  assert.equal(runtime.toolChoiceMode, "named-as-required");
+
+  const strict = JSON.parse(await readFile(path, "utf8"));
+  strict.providers.bailian.timeoutMs = 30_000;
+  strict.providers.bailian.maxAttempts = 4;
+  await writeFile(path, JSON.stringify(strict));
+  const strictSettings = await new ModelSettings(path, { TEST_API_KEY: "private-model-key" }).load();
+  const strictRuntime = strictSettings.registry.create("ds-pro") as any;
+  assert.equal(strictRuntime.timeoutMs, 30_000);
+  assert.equal(strictRuntime.maxAttempts, 4);
+  assert.equal(strictRuntime.toolChoiceMode, "named-as-required");
+});

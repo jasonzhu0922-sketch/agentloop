@@ -123,7 +123,9 @@ function renderStatus(root, panel) {
 }
 function renderModels(root) {
   const items = [...models.models].sort((a, b) => Number(b.key === models.defaultModelKey) - Number(a.key === models.defaultModelKey));
-  root.innerHTML = header('模型管理', '配置当前 Agent 使用的模型与 API Key。', true) + items.map((model, i) => `<form class="form-card model-form" ${i === 0 ? 'id="model-form"' : ''} data-model-key="${esc(model.key)}"><h3>${esc(model.displayName)}${model.key === models.defaultModelKey ? ' · 默认模型' : ''}</h3><fieldset>${modelFields(model)}</fieldset>${actions('保存模型配置')}</form>`).join('');
+  const policy = models.runtimePolicy;
+  const policyHint = policy ? `<p class="form-hint">运行时固定策略：模型请求最多 ${Number(policy.timeoutCapMs).toLocaleString('zh-CN')} 毫秒、最多尝试次数至少 ${policy.maxAttemptsFloor} 次、工具选择使用 ${esc(policy.toolChoiceMode)}。配置中更严格的超时和重试值仍会生效。</p>` : '';
+  root.innerHTML = header('模型管理', '配置当前 Agent 使用的模型与 API Key。', true) + policyHint + items.map((model, i) => `<form class="form-card model-form" ${i === 0 ? 'id="model-form"' : ''} data-model-key="${esc(model.key)}"><h3>${esc(model.displayName)}${model.key === models.defaultModelKey ? ' · 默认模型' : ''}</h3><fieldset>${modelFields(model)}</fieldset>${actions('保存模型配置')}</form>`).join('');
   $('#add-record').onclick = () => {
     modal('新增模型', modelFields(), async data => { models = await request('models', modelPayload(data)); });
     wireModelForm($('#editor-form'));

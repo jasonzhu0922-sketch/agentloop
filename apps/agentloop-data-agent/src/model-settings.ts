@@ -5,6 +5,12 @@ import { AppError, LlmProviderRegistry, modelProviderDefinition } from "@zhujun/
 
 type RecordValue = Record<string, any>;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+export const DATA_AGENT_RUNTIME_MODEL_POLICY = {
+  source: "application-policy",
+  timeoutCapMs: 60_000,
+  maxAttemptsFloor: 2,
+  toolChoiceMode: "named-as-required",
+} as const;
 export async function atomicJson(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${randomUUID()}.tmp`;
@@ -12,6 +18,28 @@ export async function atomicJson(path: string, value: unknown) {
   await rename(temp, path);
 }
 function invalid(message: string): never { throw new AppError("BAD_REQUEST", message, 400); }
+function boundedTimeout(environment: NodeJS.ProcessEnv): number {
+  const value = Number(environment.DATA_AGENT_MODEL_TIMEOUT_MS ?? String(DATA_AGENT_RUNTIME_MODEL_POLICY.timeoutCapMs));
+  if (!Number.isSafeInteger(value) || value < 1_000 || value > 120_000) {
+    throw new AppError("BAD_REQUEST", "DATA_AGENT_MODEL_TIMEOUT_MS must be an integer from 1000 to 120000", 400);
+  }
+  return value;
+}
+function runtimeModelDocument(document: RecordValue, environment: NodeJS.ProcessEnv): RecordValue {
+  const next = structuredClone(document);
+  const timeoutMs = boundedTimeout(environment);
+  for (const provider of Object.values(next.providers ?? {}) as RecordValue[]) {
+    provider.timeoutMs = Math.min(typeof provider.timeoutMs === "number" ? provider.timeoutMs : timeoutMs, timeoutMs);
+    provider.maxAttempts = Math.max(typeof provider.maxAttempts === "number" ? provider.maxAttempts : 1, DATA_AGENT_RUNTIME_MODEL_POLICY.maxAttemptsFloor);
+    provider.toolChoiceMode = DATA_AGENT_RUNTIME_MODEL_POLICY.toolChoiceMode;
+  }
+  for (const model of Object.values(next.models ?? {}) as RecordValue[]) {
+    if (typeof model.timeoutMs === "number") model.timeoutMs = Math.min(model.timeoutMs, timeoutMs);
+    if (typeof model.maxAttempts === "number") model.maxAttempts = Math.max(model.maxAttempts, DATA_AGENT_RUNTIME_MODEL_POLICY.maxAttemptsFloor);
+    model.toolChoiceMode = DATA_AGENT_RUNTIME_MODEL_POLICY.toolChoiceMode;
+  }
+  return next;
+}
 function text(value: unknown, label: string, max = 256) {
   if (typeof value !== "string" || !value.trim() || value.length > max) invalid(`${label}无效`);
   return value.trim();
@@ -28,12 +56,15 @@ export class ModelSettings {
   }
   async load() {
     this.document = JSON.parse(await readFile(this.path, "utf8"));
-    this.registry = LlmProviderRegistry.fromConfigObject(this.document, this.environment);
+    this.registry = LlmProviderRegistry.fromConfigObject(runtimeModelDocument(this.document, this.environment), this.environment);
     return this;
   }
   get defaultModelKey() { return this.environment.DATA_AGENT_MODEL_KEY ?? this.registry.defaultModelKey; }
   publicConfig() {
-    return { revision: digest(this.document), defaultModelKey: this.defaultModelKey,
+    return { revision: digest(this.document), defaultModelKey: this.defaultModelKey, runtimePolicy: {
+      ...DATA_AGENT_RUNTIME_MODEL_POLICY, timeoutCapMs: boundedTimeout(this.environment),
+      description: "Data Agent 固定使用指定工具必选策略、至少两次模型尝试，并限制单次模型请求超时；配置中更严格的值仍会保留。",
+    },
       models: this.registry.modelCatalog().map(model => {
         const provider = this.document.providers[model.providerKey];
         const overrides = this.document.models?.[model.key] ?? {};
@@ -101,7 +132,7 @@ export class ModelSettings {
     next.defaultProvider = next.models[next.defaultModelKey].providerKey;
     let registry: LlmProviderRegistry;
     try {
-      registry = LlmProviderRegistry.fromConfigObject(next, this.environment);
+      registry = LlmProviderRegistry.fromConfigObject(runtimeModelDocument(next, this.environment), this.environment);
       registry.create(key === this.defaultModelKey && input.remove ? next.defaultModelKey : input.remove ? this.defaultModelKey : key);
     } catch { invalid("模型参数无效，请检查协议、上下文窗口、输出上限和 API Key"); }
     await atomicJson(this.path, next);

@@ -14,6 +14,7 @@ import { createChatServer } from '../src/server.ts';
 import { connectState } from '../src/tidb-state.ts';
 import { ModelSettings } from '../src/model-settings.ts';
 import { SettingsService } from '../src/settings.ts';
+import { pythonUtf8Environment } from '../src/python-environment.ts';
 
 const appRoot = resolve(import.meta.dirname, '..');
 const python = process.env.DATA_AGENT_PYTHON ?? 'python3';
@@ -80,7 +81,7 @@ try {
   await page.locator('#editor-dialog').waitFor({ state: 'hidden' });
   await page.reload();
   await page.getByText('配置回归测试词', { exact: true }).waitFor();
-  const readback = JSON.parse(execFileSync(python, ['-c', 'import sys,json;sys.path.insert(0,sys.argv[1]+"/scripts");from data_access import load_gateway;v=load_gateway().catalog("group",question="配置回归测试词");print(json.dumps({"terms":v["terms"]},ensure_ascii=False))', skillRoot], { encoding: 'utf8' }));
+  const readback = JSON.parse(execFileSync(python, ['-c', 'import sys,json;sys.path.insert(0,sys.argv[1]+"/scripts");from data_access import load_gateway;v=load_gateway().catalog("group",question="配置回归测试词");print(json.dumps({"terms":v["terms"]},ensure_ascii=False))', skillRoot], { encoding: 'utf8', env: pythonUtf8Environment() }));
   assert.ok(readback.terms.some((term: { term: string }) => term.term === '配置回归测试词'), 'Skill reads the saved definition');
   const saved = await settings.catalog('load');
   await assert.rejects(settings.catalog('save', { revision: originalCatalog.revision, changes: { terms: [] } }), /更新/);

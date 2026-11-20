@@ -12,11 +12,101 @@ function json(response: ServerResponse, status: number, body: unknown) {
   response.end(JSON.stringify(body));
 }
 
-/** Project operational fields for the browser without exposing prompts, SQL, rows or credentials. */
-function publicEvent(event: { seq: number; type: string; createdAt: number; data: Record<string, unknown> }) {
+const sensitiveTechnicalKey = /(authorization|cookie|credential|password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|connection[_-]?string|dsn)/iu;
+const sqlTechnicalKey = /(?:^|[_-])(sql|statement)(?:$|[_-])/iu;
+const opaqueTechnicalKey = /^(body|content|input|messages?|prompt|systemPrompt)$/iu;
+const rowCollectionKey = /^(data|items|records|results|rows|values)$/iu;
+const sqlText = /^\s*(?:alter|create|delete|describe|drop|explain|insert|merge|replace|select|show|truncate|update|with)\b/iu;
+function redactTechnicalText(value: string): string {
+  return value
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+):([^@\s/]+)@/giu, "$1<redacted>@")
+    .replace(/([?&](?:access[_-]?key|api[_-]?key|authorization|cookie|password|secret|token)=)[^&#\s]*/giu, "$1<redacted>")
+    .replace(/\b(Bearer)\s+[A-Za-z0-9._~+\/=-]+/giu, "$1 <redacted>")
+    .replace(/((?:--?|\/)(?:access[-_]?key|api[-_]?key|authorization|cookie|password|passwd|secret|token)\s*(?:=|:|\s)\s*)("[^"]*"|'[^']*'|[^\s]+)/giu, "$1<redacted>")
+    .replace(/\b((?:access[_-]?key|api[_-]?key|authorization|cookie|password|passwd|secret|token)\s*[:=]\s*)("[^"]*"|'[^']*'|[^,\s}\]]+)/giu, "$1<redacted>")
+    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/gu, "<redacted>");
+}
+function sqlSummary(value: string): string {
+  const operation = value.trim().match(/^([a-z]+)/iu)?.[1]?.toUpperCase() ?? "SQL";
+  return `[SQL omitted: ${operation} query, ${value.length} characters]`;
+}
+function collectionSummary(value: unknown[]): Record<string, unknown> {
+  const fields = [...new Set(value.slice(0, 20).flatMap(item => item && typeof item === "object" && !Array.isArray(item)
+    ? Object.keys(item as Record<string, unknown>) : []))].slice(0, 24);
+  return { itemCount: value.length, ...(fields.length ? { fields } : {}), itemsOmitted: true };
+}
+function technicalString(value: string, mode: "argument" | "result", depth: number, key = ""): unknown {
+  const redacted = redactTechnicalText(value);
+  if (sqlTechnicalKey.test(key) || sqlText.test(redacted)) return sqlSummary(redacted);
+  if (opaqueTechnicalKey.test(key)) return `[${key || "content"} omitted: ${redacted.length} characters]`;
+  if ((redacted.startsWith("{") || redacted.startsWith("[")) && depth < 4) {
+    try { return technicalValue(JSON.parse(redacted), mode, depth + 1, key); } catch { /* Keep non-JSON text. */ }
+  }
+  const limit = mode === "result" ? 800 : 1_200;
+  return redacted.length > limit ? `${redacted.slice(0, limit)}… [truncated]` : redacted;
+}
+function technicalArray(value: unknown[], mode: "argument" | "result", depth: number, key: string): unknown {
+  if (mode === "result" && (rowCollectionKey.test(key) || value.some(item => item && typeof item === "object"))) {
+    return collectionSummary(value);
+  }
+  const limit = mode === "result" ? 8 : 12;
+  const projected: unknown[] = [];
+  let redactNext = false;
+  for (const item of value.slice(0, limit)) {
+    if (redactNext) { projected.push("<redacted>"); redactNext = false; continue; }
+    if (key === "args" && typeof item === "string" && /^(?:--?|\/)(?:access[-_]?key|api[-_]?key|authorization|cookie|password|passwd|secret|token)$/iu.test(item)) {
+      projected.push(item); redactNext = true; continue;
+    }
+    projected.push(technicalValue(item, mode, depth + 1, key));
+  }
+  if (value.length > limit) projected.push(`… ${value.length - limit} more item(s)`);
+  return projected;
+}
+function technicalValue(value: unknown, mode: "argument" | "result" = "argument", depth = 0, key = ""): unknown {
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") return technicalString(value, mode, depth, key);
+  if (depth >= 4) return "[nested value omitted]";
+  if (Array.isArray(value)) return technicalArray(value, mode, depth, key);
+  if (!value || typeof value !== "object") return String(value);
+  const entries = Object.entries(value as Record<string, unknown>);
+  const projected: Record<string, unknown> = {};
+  for (const [field, item] of entries.slice(0, 24)) {
+    if (sensitiveTechnicalKey.test(field)) projected[field] = "<redacted>";
+    else if (sqlTechnicalKey.test(field) && typeof item === "string") projected[field] = sqlSummary(item);
+    else if (mode === "result" && rowCollectionKey.test(field) && Array.isArray(item)) projected[field] = collectionSummary(item);
+    else projected[field] = technicalValue(item, mode, depth + 1, field);
+  }
+  if (entries.length > 24) projected._truncated = `${entries.length - 24} more field(s)`;
+  return projected;
+}
+function technicalPreview(value: unknown, mode: "argument" | "result"): string | undefined {
+  if (value === undefined) return undefined;
+  const projected = technicalValue(value, mode);
+  const text = typeof projected === "string" ? projected : JSON.stringify(projected, null, 2);
+  return text.length > 5_000 ? `${text.slice(0, 5_000)}\n… [truncated]` : text;
+}
+function publicNarration(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const safe = redactTechnicalText(value)
+    .replace(/```[\s\S]*?```/gu, "")
+    .split(/\n{2,}/u)
+    .map(paragraph => paragraph.split(/\r?\n/u).filter(line => {
+      const plain = line.replace(/^\s*(?:[-*>#]+|\d+[.)])\s*/u, "").trim();
+      return plain && !/^(?:[{}\[\],]|(?:alter|create|delete|describe|drop|explain|insert|merge|replace|select|show|truncate|update|with)\b)/iu.test(plain)
+        && !/(?:\bSQL\s*[：:]|\b(?:alter|create|delete|describe|drop|explain|insert|merge|replace|select|show|truncate|update|with)\b[\s\S]*\b(?:from|into|table|where|join|set)\b)/iu.test(plain)
+        && !/(?:content_complete|plan_verification|query_plan|resultPointer|sourcePointer|stdout|stderr)/iu.test(plain);
+    }).join(" ").replace(/\s+/gu, " ").trim())
+    .filter(Boolean)
+    .slice(-3)
+    .join("\n\n");
+  return safe || undefined;
+}
+
+/** Browser projection of persisted events: real status and bounded summaries, never raw prompts, SQL, rows or credentials. */
+export function publicEvent(event: { seq: number; type: string; createdAt: number; data: Record<string, unknown> }) {
   const data = event.data;
   const safeKeys = [
-    "phase", "purpose", "step", "stepId", "turn", "toolName", "name", "status", "code",
+    "phase", "purpose", "step", "stepId", "turn", "toolCallId", "toolName", "name", "status", "code",
     "finishReason", "durationMs", "timeToFirstEventMs", "contentLength", "toolCallCount",
     "invocationStatus", "operationStatus", "exitCode", "isError", "approved", "assessmentMethod",
     "assessmentProfile", "model", "providerRequestId", "providerResponseId", "requestId",
@@ -53,8 +143,21 @@ function publicEvent(event: { seq: number; type: string; createdAt: number; data
       return { id: value.id, objective: value.objective, status: value.status };
     }).filter(Boolean);
   }
+  if (event.type === "tool.planned" && data.arguments && typeof data.arguments === "object") {
+    projected.arguments = technicalValue(data.arguments, "argument");
+  }
+  if (["tool.completed", "tool.failed", "tool.rejected"].includes(event.type)) {
+    const resultPreview = data.toolName === "load_skill" && typeof data.result === "string"
+      ? `Skill package content omitted (${data.result.length} persisted characters)`
+      : technicalPreview(data.result, "result");
+    const errorPreview = technicalPreview(data.error, "result");
+    if (resultPreview !== undefined) projected.resultPreview = resultPreview;
+    if (errorPreview !== undefined) projected.errorPreview = errorPreview;
+  }
+  const content = ["assistant.committed", "assistant.streaming"].includes(event.type)
+    ? publicNarration(data.content) : undefined;
   return { seq: event.seq, type: event.type, createdAt: event.createdAt, data: projected,
-    ...(typeof data.content === "string" ? { content: data.content } : {}) };
+    ...(content === undefined ? {} : { content }) };
 }
 function required(body: Record<string, unknown>, key: string, max = 256): string {
   const value = body[key];

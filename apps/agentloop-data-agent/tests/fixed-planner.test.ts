@@ -16,6 +16,7 @@ test("fixed application workflow binds its main Skill even outside lexical recom
   assert.equal(proposal.steps.length, 1);
   assert.deepEqual(proposal.steps[0].skillIds, [skill.id]);
   assert.deepEqual(proposal.steps[0].targetIds, ["answer"]);
+  assert.deepEqual(proposal.steps[0].evidenceContract?.requiredKinds, ["source_summary"]);
   assert.ok(proposal.steps[0].requiredCapabilities.includes(`skill_source_provider.database.${skill.id}`));
   assert.match(proposal.steps[0].objective, /实体、指标、期间和粒度/);
 });

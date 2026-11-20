@@ -53,7 +53,18 @@ python3 -m venv .venv
 npm run start:data-agent
 ```
 
-打开 [本机对话页](http://127.0.0.1:8810)。页面无需登录。支持新对话、历史恢复、进度与回答流、结构化澄清、停止查询；[知识与数据管理](http://127.0.0.1:8810/settings) 中可编辑业务连接、业务目录与模型配置。当前不提供用户管理、业务数据写入或公网部署。HttpOnly 本机页面 cookie 与同源检查用于阻止其他网页代发请求，不是账号系统。
+Windows 本机需要重启现有 8810 服务时，使用应用自带脚本：
+
+```powershell
+& .\apps\agentloop-data-agent\scripts\restart-data-agent.ps1
+```
+
+脚本会在停止旧进程前检查私有 `.env`、TiDB 连通性、Node 版本、模型密钥和精确模型 ID，并确认模型能返回可见正文；异常退出留下的 TiDB 单宿主租约会自动等待过期后接管。启动完成后脚本还会验证首页、模型配置和历史对话接口。不要用临时环境变量直接手工重启，以免丢失模型密钥或切换到错误的 provider model。
+如果 8810 端口由其他程序占用，脚本会校验进程命令行以及 Data Agent 的同源状态接口并明确报错，不会终止无法确认身份的进程。
+
+Data Agent 对模型调用应用一层公开的运行策略：单次模型请求默认最多 60 秒（可用 `DATA_AGENT_MODEL_TIMEOUT_MS` 在 1–120 秒内调整上限）、失败或缺失必需工具调用时至少尝试 2 次，并把指定工具选择转换为必选调用（`named-as-required`）。这些约束用于固定数据查询流程；管理页会显示实际策略，配置文件中更严格的超时或更高的尝试次数仍然生效。模型服务类型、精确 provider model ID、推理设置和 SDK 扩展参数不会被此策略替换。
+
+打开 [本机对话页](http://127.0.0.1:8810)。页面无需登录。支持新对话、历史恢复、进度与回答流、结构化澄清、停止查询；[知识与数据管理](http://127.0.0.1:8810/settings) 中可编辑业务连接、业务目录与模型配置。技术详情来自持久化 Run 事件，只投影真实工具名称、状态、耗时和有界摘要；凭据、带用户名密码的连接 URL、原始 SQL、完整数据行和超大结果不会发送到浏览器。当前不提供用户管理、业务数据写入或公网部署。HttpOnly 本机页面 cookie 与同源检查用于阻止其他网页代发请求，不是账号系统。
 
 同一服务也提供 MCP SSE Server：`http://127.0.0.1:8810/mcp/sse`。MCP 客户端通过标准 `initialize`、`tools/list` 和 `tools/call` 使用 `query`、`search_tables`；`query` 复用当前 AgentLoop Run、HIL 和只读 Skill 执行链路，支持 `clarification_run_id` 与 `clarification_response` 继续澄清。调用进度通过 `notifications/progress` 推送，客户端断开后 Run 仍继续并在专用 TiDB Runtime 表 `data_agent_mcp_calls` 中保留终态记录。管理页同源接口 `/api/mcp/server`、`/api/mcp/calls` 只用于查看服务和调用记录，不暴露凭据、SQL 或完整大结果。
 
