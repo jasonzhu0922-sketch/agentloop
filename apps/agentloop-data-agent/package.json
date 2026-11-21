@@ -15,8 +15,9 @@
     "playwright-core": "^1.62.1"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=.env src/main.ts",
-    "test": "node --test tests/fixed-planner.test.ts tests/server.test.ts tests/mcp.test.ts tests/skill-policy.test.ts tests/model-configuration.test.ts tests/model-settings.test.ts tests/settings.test.ts tests/startup-diagnostics.test.ts",
+    "start": "node --env-file-if-exists=.env scripts/start.mjs",
+    "start:raw": "node --env-file-if-exists=.env src/main.ts",
+    "test": "node --test tests/fixed-planner.test.ts tests/server.test.ts tests/mcp.test.ts tests/skill-policy.test.ts tests/model-configuration.test.ts tests/model-settings.test.ts tests/settings.test.ts tests/startup-diagnostics.test.ts tests/turn-budgets.test.ts",
     "test:live": "node --env-file-if-exists=.env --test tests/tidb-live.test.ts",
     "verify:browser": "node scripts/verify-browser.mjs",
     "verify:markdown": "node scripts/verify-markdown.mjs",

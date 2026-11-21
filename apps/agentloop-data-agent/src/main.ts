@@ -6,7 +6,8 @@ import { connectState } from "./tidb-state.ts";
 import { ModelSettings } from "./model-settings.ts";
 import { SettingsService } from "./settings.ts";
 import { describeStartupError } from "./startup-diagnostics.ts";
-import { colorizeTerminalLogLabel, colorizeTerminalLogLine } from "@zhujun/agentloop";
+import { colorizeTerminalLogLabel, colorizeTerminalLogLine, MAX_SUPPORTED_PLANNING_TURNS, MAX_SUPPORTED_STEP_TURNS } from "@zhujun/agentloop";
+import { parseTurnBudget } from "./turn-budgets.ts";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const port = Number(process.env.DATA_AGENT_PORT ?? "8810");
@@ -21,11 +22,15 @@ try {
   const models = await new ModelSettings(resolve(appRoot, process.env.DATA_AGENT_MODEL_CONFIG ?? "config/llm-providers.json")).load();
   const modelKey = models.defaultModelKey;
   if (!models.registry.modelKeys().includes(modelKey)) throw new Error("DATA_AGENT_MODEL_KEY 未在配置中声明");
+  const maxPlanningTurns = parseTurnBudget(process.env.PLANNING_MAX_TURNS, "PLANNING_MAX_TURNS", MAX_SUPPORTED_PLANNING_TURNS);
+  const stepMaxTurns = parseTurnBudget(process.env.STEP_MAX_TURNS, "STEP_MAX_TURNS", MAX_SUPPORTED_STEP_TURNS);
   agent = await createDataAgent({
     connection: await connectState(stateUrl), fileDirectory,
     skillRoot: join(appRoot, "skills", "data-analysis"), python: process.env.DATA_AGENT_PYTHON ?? "python3",
     modelFactory: (onRetry, key) => models.registry.create(key, onRetry),
     modelKeys: models.registry.modelKeys(), defaultModelKey: modelKey,
+    ...(maxPlanningTurns === undefined ? {} : { maxPlanningTurns }),
+    ...(stepMaxTurns === undefined ? {} : { stepMaxTurns }),
     runEventLogSink: log,
   });
   const settings = new SettingsService(models, { python: process.env.DATA_AGENT_PYTHON ?? "python3",
@@ -41,11 +46,22 @@ try {
     // AgentLoop resources; otherwise a connected MCP client can keep shutdown
     // open indefinitely.
     server.closeAllConnections();
-    server.close();
+    await new Promise<void>((resolve, reject) => {
+      server.close(error => error ? reject(error) : resolve());
+    });
     await agent!.close();
   }
-  process.once("SIGINT", () => { void shutdown().catch(() => { process.exitCode = 1; }); });
-  process.once("SIGTERM", () => { void shutdown().catch(() => { process.exitCode = 1; }); });
+  agent.onHostLeaseLost(error => {
+    console.error(`问数 Agent 宿主租约丢失：${error.message}，正在关闭服务。`);
+    process.exitCode = 1;
+    void shutdown().catch(() => { process.exitCode = 1; });
+  });
+  const handleSignal = () => { void shutdown().catch(() => { process.exitCode = 1; }); };
+  // npm, the start wrapper and the terminal can deliver the same signal.
+  // Keep the handler installed so a duplicate SIGINT cannot hard-exit before
+  // the TiDB host lease has been released.
+  process.on("SIGINT", handleSignal);
+  process.on("SIGTERM", handleSignal);
 } catch (error) {
   await agent?.close();
   console.error("问数 Agent 启动失败：", describeStartupError(error, stateUrl));

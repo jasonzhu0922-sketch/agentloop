@@ -164,6 +164,16 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(result["dataset"]["rows"], [{"amount": 2300}])
         self.assertIsNone(self.store.current)
 
+    def test_probe_values_returns_source_bound_observation(self):
+        result = self.gateway.probe_values('group', 'staff', 'amount', 3)
+        self.assertEqual(result['schema'], 'nl2sql.value-probe/v1')
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['source_id'], 'staff')
+        self.assertEqual(result['field'], 'amount')
+        self.assertEqual(result['semantic_binding']['scope']['source_id'], 'staff')
+        self.assertNotIn('global_coverage', result)
+        self.assertIn('GROUP BY', self.calls[-1][0])
+
     def test_rejection_and_driver_failure_are_distinct_from_empty_success(self):
         for error, status in [(PolicyError("Only SELECT"), "rejected"), (RuntimeError("password=SECRET"), "failed")]:
             def fail(*args):

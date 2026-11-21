@@ -63,17 +63,38 @@ try {
   await page.locator('#model-form button[type=submit]').click();
   assert.equal((await savedModel).status(), 200);
   await page.locator('#model-form').waitFor();
-  for (const panel of ['connection', 'server', 'workflow', 'tables', 'metrics', 'terms', 'skills', 'sample_questions']) {
+  for (const panel of ['connection', 'server', 'workflow', 'tables', 'metrics', 'terms', 'skills', 'sample_questions', 'semantic_objects', 'relationships', 'period_formats', 'semantic_gaps']) {
     await page.locator(`[data-panel="${panel}"]`).click();
     await page.waitForFunction(() => document.querySelector('#knowledge-panel')?.getAttribute('aria-busy') === 'false');
     assert.equal(await page.locator('#reload-panel').count(), 0, panel);
   }
+  await page.locator('[data-panel="semantic_objects"]').click();
+  await page.locator('.semantic-layer-summary').waitFor();
+  assert.ok(await page.locator('.semantic-layer-summary .semantic-layer-chip').count() > 0, 'semantic object summary is visible');
+  assert.ok(await page.locator('.semantic-layer-summary .semantic-layer-chip').count() > 0, 'semantic layer summary is visible');
+  await page.locator('.semantic-layer-chip[data-layer-panel="terms"]').click();
+  await page.waitForFunction(() => document.querySelector('#knowledge-panel h2')?.textContent === '业务术语');
+  await page.locator('[data-panel="semantic_objects"]').click();
+  await page.locator('.semantic-layer-summary').waitFor();
+  await page.locator('#add-record').click();
+  await page.locator('#editor-form [name=label]').fill('设置回归对象');
+  await page.locator('#editor-form [name=source_id]').selectOption(config.tables[0].name);
+  const firstColumn = config.tables[0].columns[0].name;
+  await page.locator('#editor-form [name=key_field]').selectOption(firstColumn);
+  await page.locator('#editor-form [name=name_fields]').selectOption(firstColumn);
+  const savedEntity = page.waitForResponse(r => r.url().endsWith('/api/settings/catalog') && r.request().method() === 'PUT');
+  await page.locator('#editor-form button[type=submit]').click();
+  assert.equal((await savedEntity).status(), 200);
+  await page.locator('#editor-dialog').waitFor({ state: 'hidden' });
+  assert.ok(await page.getByText('设置回归对象', { exact: true }).count() > 0, 'human object definition is saved');
   await page.locator('[data-panel="terms"]').click();
   await page.locator('#add-record').waitFor();
   await page.locator('#add-record').click();
   await page.locator('#editor-form [name=term]').fill('配置回归测试词');
+  await page.locator('#editor-form [name=source_id]').selectOption(config.tables[0].name);
   await page.locator('#editor-form [name=aliases]').fill('配置测试别名');
   await page.locator('#editor-form [name=meaning]').fill(`这是配置回归测试词，关联 ${config.tables[0].name}，仅存在于隔离测试库。`);
+  await page.locator('#editor-form [name=evidence_ids]').fill('settings:e2e');
   const savedTerm = page.waitForResponse(r => r.url().endsWith('/api/settings/catalog') && r.request().method() === 'PUT');
   await page.locator('#editor-form button[type=submit]').click();
   assert.equal((await savedTerm).status(), 200);
@@ -85,6 +106,9 @@ try {
   const saved = await settings.catalog('load');
   await assert.rejects(settings.catalog('save', { revision: originalCatalog.revision, changes: { terms: [] } }), /更新/);
   assert.ok(saved.terms.some((term: { term: string }) => term.term === '配置回归测试词'));
+  const projectedTerm = saved.semantic_objects.find((item: { kind: string; identity: string }) => item.kind === 'term' && item.identity === '配置回归测试词');
+  assert.deepEqual(projectedTerm?.projection_of, { collection: 'terms', key: 'term', value: '配置回归测试词' });
+  assert.equal(projectedTerm?.source_id, config.tables[0].name);
   await page.locator('[data-panel="tables"]').click();
   await page.locator('[data-edit="0"]').waitFor();
   await page.screenshot({ path: join(output, 'tables-desktop.png'), fullPage: true });
@@ -116,7 +140,7 @@ try {
   // Real source configuration is untouched throughout the write tests.
   assert.equal((await originalSettings.catalog('load')).revision, revision);
   assert.deepEqual(errors, []);
-  console.log('PASS: all 9 panels, real TiDB saves, Skill readback, model save, stale-version rejection, connection/package refresh, reload and mobile layouts.');
+  console.log('PASS: all 12 knowledge panels, grouped semantic layers, real TiDB saves, Skill readback, model save, stale-version rejection, connection/package refresh, reload and mobile layouts.');
   console.log('Screenshots:', output);
 } finally {
   await browser?.close();

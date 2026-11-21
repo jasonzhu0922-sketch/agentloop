@@ -1653,6 +1653,9 @@ export class ComputerExecutor {
           // input or a process-global workspace. Generated scripts use it to
           // compose their own task paths while a package Skill is their CWD.
           AGENTLOOP_WORKSPACE_ROOT: this.workspaceRoot,
+          // Trusted Run identity for Run-local Skill caches. This value comes
+          // from the Runtime grant, never from model-provided command args.
+          ...(this.fileRevisionScope === undefined ? {} : { AGENTLOOP_RUN_ID: this.fileRevisionScope }),
           ...launch?.environment,
         }),
         stdio: ["ignore", "pipe", "pipe"],

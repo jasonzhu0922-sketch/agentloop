@@ -59,6 +59,49 @@ class SemanticRetrievalTest(unittest.TestCase):
         self.assertEqual(set(metric['required_fields']), {'amount', 'period', 'org_code', 'item'})
         self.assertEqual(self.physical_calls, [])
 
+    def test_entity_recall_identifies_manufacturing_base_before_identity_probe(self):
+        source = 'staff_report'
+        for table in (self.raw['tables'][0], self.live[0]):
+            table['columns'].append({'name': 'index_name', 'type': 'text', 'description': ''})
+        self.raw['terms'].append({'term': '制造基地', 'aliases': ['基地'],
+                                  'meaning': 'account/account_name 是基地代码和名称；index_name 命中基地类指标时成立。',
+                                  'source_id': source})
+        self.raw['entities'].append({'id': 'entity:staff_report:account:scope:index_name', 'source_id': source,
+                                     'label': '制造基地', 'key_field': 'account',
+                                     'name_fields': ['account_name'], 'recall_terms': ['制造基地', '基地'],
+                                     'scope_filter': {'field': 'index_name', 'operator': 'like_any',
+                                                      'patterns': ['%制造基地%', '基地%']},
+                                     'definition_status': 'current'})
+        result = self.read('retrieve-knowledge', question='查询八钢制造基地指标')
+        self.assertEqual(result['entities']['items'][0]['entity_id'], 'entity:staff_report:account:scope:index_name')
+        self.assertEqual(result['entities']['items'][0]['match_stage'], 'object_first')
+        self.assertEqual(result['entity_recall']['order'][0], 'semantic_object')
+        self.assertEqual(result['retrieval']['stages'][0], 'semantic_object_first')
+        self.assertEqual(self.physical_calls, [])
+
+    def test_generic_semantic_object_is_recalled_without_domain_type_registry(self):
+        self.raw['semantic_objects'] = [{
+            'object_id': 'entity:staff_report:account_code',
+            'kind': 'entity',
+            'identity': 'account_code',
+            'source_id': 'staff_report',
+            'semantic_role': 'dimension_key',
+            'labels': ['任意对象'],
+            'aliases': ['对象简称'],
+            'status': 'confirmed',
+            'completeness': 'complete',
+            'evidence': ['manual:fixture'],
+        }]
+        self.raw['entities'].append({
+            'id': 'account_code', 'source_id': 'staff_report', 'label': '任意对象',
+            'key_field': 'org_code', 'name_fields': ['org_name'],
+            'semantic_ref': 'entity:staff_report:account_code', 'definition_status': 'current',
+        })
+        result = self.read('retrieve-knowledge', question='查询任意对象')
+        self.assertEqual(result['semantic_objects']['items'][0]['kind'], 'entity')
+        self.assertEqual(result['semantic_objects']['items'][0]['semantic_role'], 'dimension_key')
+        self.assertEqual(result['entities']['items'][0]['semantic_object_refs'], ['entity:staff_report:account_code'])
+
     def test_retrieval_can_expand_and_does_not_hide_zero_rank_sources(self):
         first = self.read('search-tables', question='未知问题', limit=1)
         second = self.read('search-tables', question='未知问题', limit=1, offset=first['sources']['next_offset'])
@@ -85,6 +128,20 @@ class SemanticRetrievalTest(unittest.TestCase):
         self.assertEqual(context['catalog_revision'], index['catalog_revision'])
         self.assertEqual(context['metrics'][0]['definition']['project'], {'field': 'item', 'value': '在岗员工人数'})
         self.assertEqual(context['metrics'][0]['definition']['grain'], ['period', 'org_code', 'item'])
+
+    def test_source_gap_with_specific_term_does_not_block_unrelated_source_query(self):
+        self.raw['semantic_gaps'] = [{
+            'gap_id': 'price_binding_missing', 'code': 'binding_missing', 'status': 'unresolved',
+            'blocking': True, 'source_ids': ['staff_report'],
+            'affected_refs': ['source:staff_report:staff_report', 'term:staff_report:日照钢铁'],
+            'trigger_terms': ['日照钢铁'], 'meaning': '需要确认价格口径',
+        }]
+        context = self.context()
+        self.assertEqual(context['semantic_gaps'], [])
+        plan = context['plan_seed']
+        result = self.gateway.execute_sql('group', 'SELECT SUM(amount) AS n FROM business.staff_report WHERE item=%s',
+                                          ['在岗员工人数'], plan)
+        self.assertEqual(result['status'], 'completed')
         self.assertEqual(context['relationships'][0]['right']['source_id'], 'transactions')
         self.assertEqual(context['plan_seed']['metric_bindings'], [{'source_id': 'staff_report', 'metric_id': 'headcount'}])
         self.assertIn('staff_report', context['plan_seed']['source_signatures'])
@@ -102,6 +159,46 @@ class SemanticRetrievalTest(unittest.TestCase):
         with self.assertRaises(EntityBindingError) as error:
             validate_plan(complete, 'SELECT SUM(s.amount) FROM business.staff_report s JOIN business.transactions t ON s.org_code=t.id WHERE s.item=%s', ['在岗员工人数'], plan)
         self.assertEqual(error.exception.code, 'query_source_unbound')
+
+    def test_legacy_runtime_gap_is_not_projected_into_query_context(self):
+        self.raw['semantic_gaps'] = [{
+            'gap_id': 'no_company_price_binding',
+            'code': 'entity_metric_binding_missing',
+            'meaning': 'query-time company/price observation',
+            'status': 'unresolved', 'blocking': True,
+            'source_ids': ['staff_report'],
+            'affected_refs': ['source:staff_report:staff_report'],
+            'evidence': ['catalog_diagnostic:no_company_price_binding'],
+        }]
+        projected = catalog_config(self.raw)
+        self.assertEqual(projected['semantic_gaps'], [])
+        context = self.context()
+        self.assertEqual(context['semantic_gaps'], [])
+        self.assertNotIn('no_company_price_binding', json.dumps(context, ensure_ascii=False))
+
+    def test_context_compresses_duplicate_source_semantics_without_changing_plan_seed(self):
+        self.raw['semantic_objects'] = [
+            {'object_id': 'source:staff_report', 'kind': 'source', 'source_id': 'staff_report',
+             'identity': 'staff_report', 'status': 'confirmed', 'evidence': ['source_probe']},
+            {'object_id': 'metric:staff_report:headcount', 'kind': 'metric', 'source_id': 'staff_report',
+             'identity': 'headcount', 'status': 'confirmed', 'evidence': ['metric_probe']},
+            {'object_id': 'metric:staff_report:unrelated', 'kind': 'metric', 'source_id': 'staff_report',
+             'identity': 'unrelated', 'status': 'confirmed', 'evidence': ['unrelated_probe']},
+        ]
+        self.raw['source_bindings'] = [
+            {'source_id': 'staff_report', 'semantic_ref': 'source:staff_report'},
+            {'source_id': 'staff_report', 'semantic_ref': 'metric:staff_report:headcount'},
+            {'source_id': 'staff_report', 'semantic_ref': 'metric:staff_report:unrelated'},
+        ]
+        context = self.context()
+        self.assertEqual(context['context_compression']['plan_seed_unchanged'], True)
+        self.assertEqual({row['object_id'] for row in context['semantic_objects']},
+                         {'source:staff_report', 'metric:staff_report:headcount'})
+        self.assertEqual({row['semantic_ref'] for row in context['source_bindings']},
+                         {'source:staff_report', 'metric:staff_report:headcount'})
+        self.assertNotIn('metric_clues', context['table_summaries'][0])
+        self.assertEqual(context['plan_seed']['semantic_bindings'],
+                         context['semantic_bindings'])
 
     def test_column_search_and_batch_projection_exclude_unrelated_columns(self):
         for table in (self.raw['tables'][0], self.live[0]):
@@ -205,6 +302,26 @@ class SemanticRetrievalTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.read_snapshot('demo')
             self.assertEqual(cursor.execute.call_count, 1)
+
+    def test_run_snapshot_is_reused_only_inside_one_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            configured = {'query_databases': {'group': {'allowed_relations': ['business.staff_report']}}}
+            store = store_module.CatalogStore(configured, snapshot_root=temporary, run_id='run_a')
+            with patch.object(store, 'connect') as opened:
+                cursor = opened.return_value.__enter__.return_value
+                cursor.fetchone.return_value = {
+                    'id': 'group', 'name': '集团', 'description': '业务', 'config': json.dumps(self.raw)}
+                first = store.read_snapshot('group')
+                second = store.read_snapshot('group', verify_current=False)
+                self.assertEqual(first, second)
+                self.assertEqual(cursor.execute.call_count, 1)
+            other = store_module.CatalogStore(configured, snapshot_root=temporary, run_id='run_b')
+            with patch.object(other, 'connect') as opened:
+                cursor = opened.return_value.__enter__.return_value
+                cursor.fetchone.return_value = {
+                    'id': 'group', 'name': '集团', 'description': '业务', 'config': json.dumps(self.raw)}
+                other.read_snapshot('group', verify_current=False)
+                self.assertEqual(cursor.execute.call_count, 1)
 
     def test_broken_catalog_connection_preserves_original_error(self):
         from gateway.store import CatalogStore

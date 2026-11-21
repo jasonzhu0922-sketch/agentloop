@@ -22,3 +22,10 @@ test("startup diagnostics distinguishes a refused TiDB listener", () => {
   );
 });
 
+test("startup diagnostics explains an active TiDB Runtime host lease", () => {
+  const error = Object.assign(new Error("该 TiDB Runtime 已有活动宿主，当前租约预计还剩 42 秒"), { code: "DATA_AGENT_HOST_ACTIVE" });
+  const message = describeStartupError(error, "mysql://root@example.invalid:6000/runtime");
+  assert.match(message, /租约预计还剩 42 秒/);
+  assert.match(message, /等待租约自动过期/);
+});
+

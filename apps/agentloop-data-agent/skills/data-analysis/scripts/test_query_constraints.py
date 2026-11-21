@@ -78,6 +78,8 @@ class QueryConstraintsTest(unittest.TestCase):
         self.assertEqual(result['status'], 'rejected', result)
         self.assertEqual(result['error']['diagnostic']['code'], code)
         self.assertEqual(result['error']['diagnostic']['phase'], 'query.plan')
+        self.assertEqual(result['error']['diagnostic']['human_loop_allowed'], False)
+        self.assertEqual(result['error']['diagnostic']['recovery'], 'repair_plan_once')
         self.assertNotIn('dataset', result)
         self.assertEqual(len(self.executions), before)
         self.assertEqual(self.audits[-1]['reason'], code)
@@ -178,6 +180,52 @@ class QueryConstraintsTest(unittest.TestCase):
                     validate_plan(catalog, self.sql, self.params, plan)
                 self.assertEqual(error.exception.code, 'time_sql_mismatch')
 
+    def test_field_level_format_is_authoritative_for_string_dates(self):
+        self.config['period_formats'] = []
+        self.config['tables'][0]['columns'][2].update(format='YYYYMMDD', granularity='day', type='varchar(8)')
+        plan = self.plan()
+        catalog = self.gateway.catalog('group', ['staff_report'])
+        sql = self.sql
+        params = ['A', '在岗员工人数', '20260101', '20260301']
+        verified = validate_plan(catalog, sql, params, plan)
+        self.assertEqual(verified['time_checks'][0]['format'], '%Y%m%d')
+        self.assertEqual(verified['time_checks'][0]['storage_start'], '20260101')
+        self.config['tables'][0]['columns'][2]['format'] = 'YYYY-MM-DD'
+        plan = self.plan()
+        with self.assertRaises(EntityBindingError) as error:
+            validate_plan(self.gateway.catalog('group', ['staff_report']), sql, params, plan)
+        self.assertEqual(error.exception.code, 'time_sql_mismatch')
+
+    def test_time_binding_storage_metadata_is_checked_but_not_treated_as_unknown_field(self):
+        plan = self.plan()
+        plan['time_bindings'][0].update(format='YYYYMM', granularity='month')
+        verified = validate_plan(self.gateway.catalog('group', ['staff_report']), self.sql, self.params, plan)
+        self.assertEqual(verified['time_checks'][0]['format'], '%Y%m')
+        plan['time_bindings'][0]['format'] = 'YYYY-MM'
+        with self.assertRaises(EntityBindingError) as error:
+            validate_plan(self.gateway.catalog('group', ['staff_report']), self.sql, self.params, plan)
+        self.assertEqual(error.exception.code, 'time_definition_conflict')
+
+    def test_multiple_period_variants_require_and_verify_selected_variant(self):
+        self.config['period_formats'] = [
+            {'source_id': 'staff_report', 'field': 'period', 'variant_id': 'month_compact',
+             'format': '%Y%m', 'granularity': 'month', 'status': 'confirmed'},
+            {'source_id': 'staff_report', 'field': 'period', 'variant_id': 'day_compact',
+             'format': '%Y%m%d', 'granularity': 'day', 'status': 'confirmed'},
+        ]
+        plan = self.plan()
+        catalog = self.gateway.catalog('group', ['staff_report'])
+        with self.assertRaises(EntityBindingError) as error:
+            validate_plan(catalog, self.sql, self.params, plan)
+        self.assertEqual(error.exception.code, 'time_variant_required')
+        plan['time_bindings'][0]['variant_id'] = 'month_compact'
+        verified = validate_plan(catalog, self.sql, self.params, plan)
+        self.assertEqual(verified['time_checks'][0]['definition']['variant_id'], 'month_compact')
+        plan['time_bindings'][0]['variant_id'] = 'day_compact'
+        with self.assertRaises(EntityBindingError) as error:
+            validate_plan(catalog, self.sql, self.params, plan)
+        self.assertEqual(error.exception.code, 'time_sql_mismatch')
+
     def test_metric_without_project_has_only_definition_verification(self):
         self.config['metrics'][0].pop('project')
         plan = self.plan(); plan.pop('time_bindings')
@@ -211,6 +259,32 @@ class QueryConstraintsTest(unittest.TestCase):
         plan = self.plan(); plan.pop('time_bindings'); plan.pop('metric_bindings')
         self.rejected(self.sql, self.params, 'query_plan_invalid', plan)
 
+    def test_plan_shape_diagnostic_names_unknown_fields_and_missing_semantic_fields(self):
+        plan = self.plan()
+        plan['resolution_notes'] = [{'gap_id': 'example'}]
+        with self.assertRaises(EntityBindingError) as error:
+            validate_plan(self.gateway.catalog('group'), self.sql, self.params, plan)
+        self.assertEqual(error.exception.code, 'query_plan_invalid')
+        self.assertIn('resolution_notes', str(error.exception))
+
+        config = fixture()
+        config['semantic_model_version'] = 'nl2sql.semantic-model/v1'
+        original = self.config
+        self.config = config
+        try:
+            plan = self.plan()
+            plan.update({
+                'semantic_model_version': config['semantic_model_version'],
+                'source_signatures': {'staff_report': 'fixture-signature'},
+                'semantic_bindings': [{'kind': 'source', 'source_id': 'staff_report', 'id': 'staff_report'}],
+            })
+            with self.assertRaises(EntityBindingError) as error:
+                validate_plan(self.gateway.catalog('group'), self.sql, self.params, plan)
+            self.assertEqual(error.exception.code, 'semantic_binding_invalid')
+            self.assertIn('definition_ref', str(error.exception))
+        finally:
+            self.config = original
+
     def test_same_inline_plan_runs_through_cli_and_http_with_unambiguous_file_pointers(self):
         body = {'sql': self.sql, 'params': self.params, 'query_plan': self.plan()}
         with tempfile.TemporaryDirectory() as directory:
@@ -232,6 +306,85 @@ class QueryConstraintsTest(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()['plan_verification'], saved['plan_verification'])
         asyncio.run(check())
+
+    def test_cli_unwraps_a_saved_execute_request_before_plan_validation(self):
+        """A wrapper artifact must not cause a second query_plan repair turn."""
+        body = {'sql': self.sql, 'params': self.params, 'query_plan': self.plan()}
+        with tempfile.TemporaryDirectory() as directory, patch.object(data_client, 'load_gateway', return_value=self.gateway):
+            request_file = Path(directory) / 'request.json'
+            output = Path(directory) / 'result.json'
+            request_file.write_text(json.dumps(body, ensure_ascii=False))
+            with redirect_stdout(io.StringIO()) as stream:
+                code = data_client.main(['execute', '--scenario-id', 'group',
+                                         '--request-json', json.dumps({'sql': self.sql, 'params': self.params}),
+                                         '--query-plan', str(request_file), '--output', str(output)])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.read_text())['plan_verification']['status'], 'verified')
+            self.assertEqual(json.loads(stream.getvalue())['plan_verification']['status'], 'verified')
+
+    def test_cli_unwraps_get_query_context_plan_seed(self):
+        body = {'sql': self.sql, 'params': self.params,
+                'plan_seed': self.plan()}
+        with tempfile.TemporaryDirectory() as directory, patch.object(data_client, 'load_gateway', return_value=self.gateway):
+            context_file = Path(directory) / 'query_context.json'
+            output = Path(directory) / 'result.json'
+            context_file.write_text(json.dumps(body, ensure_ascii=False))
+            with redirect_stdout(io.StringIO()):
+                code = data_client.main(['execute', '--scenario-id', 'group',
+                                         '--request-json', json.dumps({'sql': self.sql, 'params': self.params}),
+                                         '--query-plan', str(context_file), '--output', str(output)])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.read_text())['plan_verification']['status'], 'verified')
+
+    def test_cli_unwraps_inline_query_context_plan_seed(self):
+        body = {'sql': self.sql, 'params': self.params,
+                'query_plan': {'plan_seed': self.plan(), 'ui_note': 'wrapper metadata'}}
+        with tempfile.TemporaryDirectory() as directory, patch.object(data_client, 'load_gateway', return_value=self.gateway):
+            output = Path(directory) / 'result.json'
+            with redirect_stdout(io.StringIO()):
+                code = data_client.main(['execute', '--scenario-id', 'group',
+                                         '--request-json', json.dumps(body), '--output', str(output)])
+            self.assertEqual(code, 0)
+            result = json.loads(output.read_text())
+            self.assertEqual(result['plan_verification']['status'], 'verified')
+            self.assertEqual(result['query_plan'], self.plan())
+
+    def test_cli_merges_bindings_appended_to_get_query_context_seed(self):
+        seed = deepcopy(self.plan())
+        seed['metric_bindings'] = []
+        seed['time_bindings'] = []
+        artifact = {
+            'plan_seed': seed,
+            'metric_bindings': self.plan()['metric_bindings'],
+            'time_bindings': self.plan()['time_bindings'],
+            'ui_note': 'ignored context metadata',
+        }
+        with tempfile.TemporaryDirectory() as directory, patch.object(data_client, 'load_gateway', return_value=self.gateway):
+            context_file = Path(directory) / 'query_context.json'
+            output = Path(directory) / 'result.json'
+            context_file.write_text(json.dumps(artifact, ensure_ascii=False))
+            with redirect_stdout(io.StringIO()):
+                code = data_client.main(['execute', '--scenario-id', 'group',
+                                         '--request-json', json.dumps({'sql': self.sql, 'params': self.params}),
+                                         '--query-plan', str(context_file), '--output', str(output)])
+            self.assertEqual(code, 0)
+            result = json.loads(output.read_text())
+            self.assertEqual(result['plan_verification']['status'], 'verified')
+            self.assertEqual(result['query_plan']['metric_bindings'], self.plan()['metric_bindings'])
+            self.assertEqual(result['query_plan']['time_bindings'], self.plan()['time_bindings'])
+
+    def test_cli_reads_workspace_request_json_alias(self):
+        body = {'sql': self.sql, 'params': self.params, 'query_plan': self.plan()}
+        with tempfile.TemporaryDirectory() as directory, patch.object(data_client, 'load_gateway', return_value=self.gateway), \
+                patch.dict(data_client.os.environ, {'AGENTLOOP_WORKSPACE_ROOT': directory}):
+            request_file = Path(directory) / 'request.json'
+            output = Path(directory) / 'result.json'
+            request_file.write_text(json.dumps(body, ensure_ascii=False))
+            with redirect_stdout(io.StringIO()):
+                code = data_client.main(['execute', '--scenario-id', 'group',
+                                         '--request-json', '@workspace/request.json', '--output', str(output)])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.read_text())['plan_verification']['status'], 'verified')
 
 
 if __name__ == '__main__':

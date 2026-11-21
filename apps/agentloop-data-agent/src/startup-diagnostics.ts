@@ -33,6 +33,10 @@ export function describeStartupError(error: unknown, stateUrl?: string): string 
     ? `${detail.address}${detail.port ? `:${detail.port}` : ""}`
     : endpointFromUrl(stateUrl) ?? "configured TiDB";
 
+  if (code === "DATA_AGENT_HOST_ACTIVE") {
+    return `${redactMessage(message)}。请确认没有另一个 data-agent 进程使用同一 TiDB Runtime；如果刚刚异常退出，请等待租约自动过期后重试。`;
+  }
+
   if (isConnectFailure && code === "EPERM") {
     return `TiDB 连接被当前进程拒绝（EPERM）：${endpoint}。请在允许 Node 出站网络的终端运行，或检查本机网络安全策略。`;
   }

@@ -7,6 +7,17 @@ from entity_binding import require, scalar
 from sql_evidence import merge_ranges
 
 
+FORMAT_ALIASES = {
+    'YYYY': '%Y', 'YYYYMM': '%Y%m', 'YYYY-MM': '%Y-%m',
+    'YYYYMMDD': '%Y%m%d', 'YYYY-MM-DD': '%Y-%m-%d',
+}
+
+
+def canonical_format(value):
+    """Accept the human field-definition spelling and one internal spelling."""
+    return FORMAT_ALIASES.get(value, value)
+
+
 def binding_object(binding, fields, kind):
     require(isinstance(binding, dict) and set(binding) == set(fields)
             and all(isinstance(binding.get(k), str) and binding[k].strip() for k in fields),
@@ -48,18 +59,50 @@ def constraint_checks(catalog, plan, evidence):
 
     ranges = {}
     for binding in plan.get('time_bindings', []):
-        binding_object(binding, ('source_id', 'field', 'start', 'end'), 'time')
+        require(isinstance(binding, dict), 'time_binding_invalid', 'Time binding must be an object')
+        # Models sometimes carry the already-read storage contract alongside
+        # the executable range. Keep those declared facts as consistency
+        # evidence instead of turning an internal packaging detail into a
+        # user HIL; the catalog remains authoritative below.
+        require(set(binding) <= {'source_id', 'field', 'start', 'end', 'variant_id',
+                                 'format', 'period_format', 'storage_format', 'granularity'},
+                'time_binding_invalid', 'Unknown time binding field')
+        require({'source_id', 'field', 'start', 'end'} <= set(binding),
+                'time_binding_invalid', 'Supply source_id, field, start and end')
+        require(all(isinstance(binding.get(k), str) and binding[k].strip()
+                    for k in ('source_id', 'field', 'start', 'end')),
+                'time_binding_invalid', 'Time binding fields must be nonempty strings')
+        if 'variant_id' in binding:
+            require(isinstance(binding['variant_id'], str) and binding['variant_id'].strip(),
+                    'time_variant_invalid', 'variant_id must be a nonempty string')
         source, field = binding['source_id'], binding['field']
         table = tables.get(source, {})
         columns = [c for c in table.get('columns', []) if c['name'] == field]
         require(len(columns) == 1, 'time_definition_invalid', 'Time field must exist on its bound source')
         policies = [p for p in catalog['period_formats'] if p['source_id'] == source and p['field'] == field]
-        require(len(policies) <= 1, 'time_definition_invalid', 'Time field has conflicting period definitions')
+        if binding.get('variant_id'):
+            policies = [p for p in policies if p.get('variant_id') == binding['variant_id']]
+            require(len(policies) == 1, 'time_variant_not_found', 'Selected time format variant is not defined on this source field')
+        else:
+            require(len(policies) <= 1, 'time_variant_required',
+                    'Multiple time format variants exist; select one by variant_id before binding a range')
         native = str(columns[0].get('type', '')).lower()
         policy = policies[0] if policies else None
+        column_format = columns[0].get('format')
+        column_granularity = columns[0].get('granularity')
+        if column_format:
+            # A field-level format is the canonical location. A legacy
+            # period_formats row may coexist only when it agrees exactly.
+            if policy and canonical_format(policy.get('format')) != canonical_format(column_format):
+                require(False, 'time_definition_conflict',
+                        'Field format conflicts with the period definition; correct the field definition before binding')
+            if policy is None:
+                policy = {'source_id': source, 'field': field, 'format': column_format,
+                          'granularity': column_granularity, 'definition_source': 'column'}
         if policy:
-            require(policy.get('definition_status') == 'current', 'time_definition_invalid', 'Use a current period definition')
-            fmt, grain = policy.get('format'), policy.get('granularity')
+            require(policy.get('definition_status', 'current') == 'current', 'time_definition_missing',
+                    'Period storage format is unresolved; inspect the field definition or run a bounded value probe')
+            fmt, grain = canonical_format(policy.get('format')), policy.get('granularity')
         else:
             require(native == 'date' or native.startswith(('datetime', 'timestamp')),
                     'time_definition_missing', 'Text/numeric time fields require an explicit period_formats definition')
@@ -68,6 +111,14 @@ def constraint_checks(catalog, plan, evidence):
                      '%Y%m%d': 'day', '%Y-%m-%d': 'day'}
         require(fmt in supported and grain == supported[fmt], 'time_definition_invalid',
                 'Use an ordered year, month or day storage format with matching granularity')
+        declared_formats = [binding.get(key) for key in ('format', 'period_format', 'storage_format')
+                            if binding.get(key) is not None]
+        require(all(isinstance(value, str) and canonical_format(value) == fmt for value in declared_formats),
+                'time_definition_conflict',
+                'Time binding storage format conflicts with the current field definition')
+        if binding.get('granularity') is not None:
+            require(binding['granularity'] == grain, 'time_definition_conflict',
+                    'Time binding granularity conflicts with the current field definition')
         native_date = native == 'date' or native.startswith(('datetime', 'timestamp'))
         require(not native_date or fmt == '%Y-%m-%d', 'time_definition_invalid',
                 'Native date fields require ISO date boundaries')

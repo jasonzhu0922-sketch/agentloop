@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { admitPlan, createCanonicalRunState, understandTask, type PrivateSkill, type TaskSpec } from "@zhujun/agentloop";
+import { admitPlan, createCanonicalRunState, understandTask, type PrivateSkill, type RuntimeEvent, type TaskSpec } from "@zhujun/agentloop";
 import { fixedDataAnalysisPlanner } from "../src/fixed-planner.ts";
 import { createDataAgent } from "../src/agent.ts";
 
@@ -11,13 +11,28 @@ test("fixed application workflow binds its main Skill even outside lexical recom
     deliverables: [{ targetId: "answer", purpose: "回答指标", expectedArtifactCount: 1, action: "none", kind: "none", surface: "conversation" }],
   } });
   const canonicalState = createCanonicalRunState({ runId: "fixed-run", userInput: "查询经营指标", understanding, now: 1 });
-  const proposal = await fixedDataAnalysisPlanner(skill).plan({ canonicalState, availableSkills: [], availableToolNames: [] } as unknown as TaskSpec);
+  const events: RuntimeEvent[] = [];
+  const proposal = await fixedDataAnalysisPlanner(skill, { maxPlanningTurns: 8 }).plan(
+    { canonicalState, availableSkills: [], availableToolNames: [] } as unknown as TaskSpec,
+    undefined,
+    event => { events.push(event); },
+  );
+  assert.equal(events[0]?.type, "planning.started");
+  assert.equal(events[0]?.data.maxPlanningTurns, 8);
+  assert.equal(events[1]?.type, "planning.turn.started");
+  assert.equal(events[1]?.data.deterministic, true);
+  assert.equal(events[2]?.type, "planning.turn.completed");
+  assert.equal(events[2]?.data.deterministic, true);
   assert.deepEqual(proposal.selectedSkillIds, [skill.id]);
   assert.equal(proposal.steps.length, 1);
   assert.deepEqual(proposal.steps[0].skillIds, [skill.id]);
   assert.deepEqual(proposal.steps[0].targetIds, ["answer"]);
   assert.ok(proposal.steps[0].requiredCapabilities.includes(`skill_source_provider.database.${skill.id}`));
   assert.match(proposal.steps[0].objective, /实体、指标、期间和粒度/);
+  assert.match(proposal.steps[0].objective, /semantic_bindings/);
+  assert.match(proposal.steps[0].objective, /用户直接给出物理编码时可直接在 SQL 中参数化使用/);
+  assert.match(proposal.steps[0].objective, /计划包装或 schema 错误重复时报告技术阻塞/);
+  assert.equal(proposal.steps[0].successCriteria.find(criteria => criteria.id === "semantic-plan-contract")?.blocking, true);
 });
 test("fixed planner uses the kernel response-only plan contract for conversational follow-ups", async () => {
   const taskIntent = {
