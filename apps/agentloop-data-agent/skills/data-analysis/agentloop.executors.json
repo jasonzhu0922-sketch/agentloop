@@ -9,7 +9,7 @@
       "actions": [
         {
           "id": "retrieve-knowledge",
-          "description": "Start data questions here: retrieve maintained business terms, source/metric candidates, reasons, ambiguities and gaps before domain planning. No live schema scan or business SQL.",
+          "description": "Start data questions here: retrieve maintained business terms, source-bound entity objects, source/metric candidates, reasons, ambiguities and gaps before domain planning. Model hypotheses may drive bounded read-only probes; a user-supplied physical code does not require name resolution. No live schema scan or business SQL.",
           "inputs": [
             {
               "name": "request-json",
@@ -187,7 +187,7 @@
           "inputs": [
             {
               "name": "request-json",
-              "description": "Metadata JSON: question, source_ids:[id]; optional metric_refs:[{source_id,metric_id}], columns:[{source_id,names:[field]}], catalog_revision. See references/retrieval-contract.md.",
+              "description": "Metadata JSON: question, source_ids:[id]; optional metric_refs:[{source_id,metric_id}], term_refs:[{term_id,binding_id}], columns:[{source_id,names:[field]}], catalog_revision. See references/retrieval-contract.md.",
               "required": true
             },
             {
@@ -206,6 +206,56 @@
             "{{output}}"
           ],
           "result": "nl2sql.semantic-metadata/v1 with catalog_revision and explicit schema_verification. Full result saved on disk. Read the small inline content, otherwise use exact file pointers.",
+          "producesEvidenceKinds": [
+            "source_summary"
+          ]
+        },
+        {
+          "id": "probe-values",
+          "description": "Autonomously inspect bounded source-local values and frequencies, optionally within entity/metric filters and grouped with related fields (e.g. time type and unit). Use current live fields. Only entity-identity probes require identifying the entity object first. Observations are exploration evidence, never a global definition or a final business answer.",
+          "inputs": [
+            {
+              "name": "source-id",
+              "description": "Source ID from the current catalog.",
+              "required": true
+            },
+            {
+              "name": "field",
+              "description": "Physical field name from the current source schema.",
+              "required": true
+            },
+            {
+              "name": "limit",
+              "description": "Maximum distinct values to observe, 1..200.",
+              "required": false
+            },
+            {
+              "name": "request-json",
+              "description": "Optional JSON: filters:[{field,operator:eq|in|like,values:[scalar]}] combined with AND; group_by:[up to 3 related physical fields]. All fields belong to this source, SQL is built by the gateway.",
+              "required": false
+            },
+            {
+              "name": "output",
+              "description": "Workspace value-probe JSON path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "probe-values",
+            "--scenario-id",
+            "group",
+            "--source-id",
+            "{{source-id}}",
+            "--field",
+            "{{field}}",
+            "--limit",
+            "{{limit}}",
+            "--request-json",
+            "{{request-json}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "Source-local observations with probe_ref, source signature, filters, truncated and query evidence. For a declared missing period encoding, pass a complete probe_ref in query_plan.probe_refs; the gateway refreshes and validates exact scope. Never use machine observations as HIL decision_refs.",
           "producesEvidenceKinds": [
             "source_summary"
           ]
@@ -250,6 +300,25 @@
           ]
         },
         {
+          "id": "candidate-lookup",
+          "description": "探查当前来源中与用户提及相符的实体候选。结果只作为 candidate_lookup 证据，不生成精确绑定、selection_evidence 或 selected_codes；确认候选后再调用 resolve-entity 做规范名称精确查证。",
+          "inputs": [
+            {
+              "name": "request-json",
+              "description": "JSON with mention, source_id and entity_id from current catalog; optional limit 1..100.",
+              "required": true
+            }
+          ],
+          "args": [
+            "candidate-lookup",
+            "--scenario-id",
+            "group",
+            "--request-json",
+            "{{request-json}}"
+          ],
+          "result": "nl2sql.entity-candidates/v1 with fuzzy candidate_lookup evidence and empty selected_codes."
+        },
+        {
           "id": "resolve-entity",
           "description": "Bind a matched business term and its interpreted canonical name to a source-specific entity definition. Query the exact canonical name and return all candidate codes, lookup evidence and an entity query_plan. Do not retry with the original short-name LIKE.",
           "inputs": [
@@ -276,17 +345,17 @@
           "result": "resolved, ambiguous or unmatched; complete candidates and lookup query evidence. Ambiguous plans have no selected codes and require an explicit selection."
         },
         {
-          "id": "execute-entity-sql",
-          "description": "Execute SQL with a saved combined entity/metric/time query plan. Verify exact entity codes, metric project values and declared time ranges in each physical source WHERE before execution.",
+          "id": "execute",
+          "description": "Execute SQL with query_plan. Verify source, metric and time bindings; verify entity codes only when entity_bindings are present. SQL may filter entities with entity_bindings empty. get-query-context, entity-resolution and execute-wrapper JSON are deterministically unwrapped.",
           "inputs": [
             {
               "name": "request-json",
-              "description": "JSON with SQL and separate params generated by the current Agent.",
+              "description": "JSON {sql,params,query_plan:{context_id:returned_id,...optional_bindings}}. Do not rebuild plan_seed. For missing period encoding add probe_refs:[returned_probe_ref] from a complete scoped probe and preserve its exact filters. Human decisions only in decision_refs. Do not also pass --query-plan.",
               "required": true
             },
             {
               "name": "query-plan",
-              "description": "Workspace entity-resolution or combined query-plan JSON preserving all applicable entity, metric and time bindings.",
+              "description": "Workspace query-plan, entity-resolution, or get-query-context JSON. Context artifacts expose context_id; preserve that immutable context instead of rebuilding semantic bindings.",
               "required": true,
               "evidenceInput": "immutable_workspace_artifact"
             },
@@ -312,34 +381,39 @@
             "source_summary",
             "record_counts"
           ]
-        },
+        }
+      ]
+    },
+    {
+      "id": "result-computation",
+      "description": "Run bounded, deterministic post-processing over an existing query result. No database, credential, network or caller-code access.",
+      "command": "python3",
+      "script": "scripts/result_compute.py",
+      "actions": [
         {
-          "id": "execute-sql",
-          "description": "Execute caller SQL with inline query_plan binding selected metric names, source time ranges and resolved entities. Combine plan and SQL in this call; do not omit existing bindings. Definition probes may run without a plan.",
+          "id": "compute-result",
+          "description": "对同一 Run 已成功保存的查询结果做有限、确定性的分组后处理。只允许 group_summary 及声明式 count/sum/min/max/avg/median/distinct_count；不连接数据库、不读取凭据、不修改输入结果、不执行模型或调用者代码。",
           "inputs": [
             {
               "name": "request-json",
-              "description": "JSON with sql, separate params, and query_plan (schema, scenario_id, catalog_revision, metric_bindings, time_bindings, entity_bindings as applicable). See references/input-contract.md.",
+              "description": "JSON：input 为 @workspace 下已有查询结果，operation=group_summary，group_by 为 1..4 个字段，aggregations 为声明式聚合，limit 不超过 2000。",
               "required": true
             },
             {
               "name": "output",
-              "description": "Workspace JSON result path.",
+              "description": "Workspace JSON 结果路径。",
               "required": true
             }
           ],
           "args": [
-            "execute",
-            "--scenario-id",
-            "group",
+            "compute-result",
             "--request-json",
             "{{request-json}}",
             "--output",
             "{{output}}"
           ],
-          "result": "Complete query file, status and audit identity, explicit file-root pointers, plan verification, and complete small answers inline. Consume the Runtime Result and reuse it; do not requery to read saved data.",
+          "result": "nl2sql.data-file/v1 with bounded computed rows and an input hash; this is derived evidence and never replaces the source query result.",
           "producesEvidenceKinds": [
-            "source_summary",
             "record_counts"
           ]
         }
@@ -355,12 +429,30 @@
           "id": "build-file",
           "description": "Build the explicitly requested final file with the application-owned generator. First write one data-agent.file-export/v1 JSON spec from the existing query Result; never put SQL, credentials or executable code in the spec.",
           "inputs": [
-            { "name": "format", "description": "One of xlsx, csv, docx, pdf, pptx, html or markdown.", "required": true },
-            { "name": "spec", "description": "Workspace data-agent.file-export/v1 JSON specification produced from the existing query Result.", "required": true },
-            { "name": "output", "description": "Final workspace output path whose extension matches the format.", "required": true }
+            {
+              "name": "format",
+              "description": "One of xlsx, csv, docx, pdf, pptx, html or markdown.",
+              "required": true
+            },
+            {
+              "name": "spec",
+              "description": "Workspace data-agent.file-export/v1 JSON specification produced from the existing query Result.",
+              "required": true
+            },
+            {
+              "name": "output",
+              "description": "Final workspace output path whose extension matches the format.",
+              "required": true
+            }
           ],
           "args": [
-            "build", "--format", "{{format}}", "--spec", "{{spec}}", "--output", "{{output}}"
+            "build",
+            "--format",
+            "{{format}}",
+            "--spec",
+            "{{spec}}",
+            "--output",
+            "{{output}}"
           ],
           "result": "Bounded file receipt with format, output path, byte size and SHA-256. Bind the same output path to the delivery target and run artifact acceptance."
         }

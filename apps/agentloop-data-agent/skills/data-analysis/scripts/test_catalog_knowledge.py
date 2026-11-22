@@ -12,7 +12,7 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 
 import httpx
-from catalog_knowledge import table_signature
+from catalog_knowledge import table_signature, prepare_knowledge
 from data_access import Gateway
 from data_api import create_app
 import data_client
@@ -224,6 +224,21 @@ class KnowledgeTest(unittest.TestCase):
             for question in ('', '  ', 'x' * 4001):
                 with self.assertRaises(ValueError):
                     self.gateway.catalog('group', question=question)
+
+    def test_semantic_graph_requires_generic_layers_and_parent_closure(self):
+        self.raw['semantic_objects'] = [
+            {'object_id': 'source:staff_report:staff_report', 'kind': 'source',
+             'source_id': 'staff_report', 'identity': 'staff_report', 'layer': 'source'},
+            {'object_id': 'entity:staff_report:org_code', 'kind': 'entity',
+             'source_id': 'staff_report', 'identity': 'org_code', 'layer': 'object',
+             'parent_ref': 'source:staff_report:staff_report'},
+        ]
+        prepared = prepare_knowledge(self.raw)
+        self.assertFalse(prepared.get('knowledge_diagnostics'))
+        self.raw['semantic_objects'][1]['parent_ref'] = 'source:missing:missing'
+        prepared = prepare_knowledge(self.raw)
+        self.assertTrue(any('parent_ref:source:missing:missing' in d['missing_fields']
+                            for d in prepared['knowledge_diagnostics']))
 
 
 if __name__ == '__main__':

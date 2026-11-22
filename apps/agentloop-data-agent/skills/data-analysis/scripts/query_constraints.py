@@ -5,6 +5,18 @@ from copy import deepcopy
 
 from entity_binding import require, scalar
 from sql_evidence import merge_ranges
+from knowledge_definitions import resolve_term_binding, validate_filters
+
+
+FORMAT_ALIASES = {
+    'YYYY': '%Y', 'YYYYMM': '%Y%m', 'YYYY-MM': '%Y-%m',
+    'YYYYMMDD': '%Y%m%d', 'YYYY-MM-DD': '%Y-%m-%d',
+}
+
+
+def canonical_format(value):
+    """Accept the human field-definition spelling and one internal spelling."""
+    return FORMAT_ALIASES.get(value, value)
 
 
 def binding_object(binding, fields, kind):
@@ -16,6 +28,33 @@ def binding_object(binding, fields, kind):
 def constraint_checks(catalog, plan, evidence):
     tables = {t['name']: t for t in catalog['tables']}
     metric_checks, time_checks = [], []
+    term_checks, declared_filters = [], {}
+
+    def register_filters(source, filters):
+        try:
+            validate_filters(filters, {c['name'] for c in tables[source]['columns']})
+        except (ValueError, KeyError) as exc:
+            require(False, 'definition_filter_invalid', str(exc))
+        for item in filters:
+            key, values = (source, item['field']), {scalar(v) for v in item['values']}
+            require(key not in declared_filters or declared_filters[key] == values,
+                    'definition_filter_conflict', 'Selected definitions need incompatible source filters; query them separately')
+            declared_filters[key] = values
+
+    refs = plan.get('term_bindings', [])
+    require(isinstance(refs, list), 'term_data_binding_invalid', 'term_bindings must be a list')
+    for ref in refs:
+        try:
+            term, binding = resolve_term_binding(catalog, ref)
+        except ValueError as exc:
+            require(False, 'term_data_binding_invalid', str(exc))
+        source = binding['source_id']
+        require(bool(list(evidence.scans(tables[source]))), 'term_sql_mismatch', 'Bound term source is absent from SQL')
+        register_filters(source, binding.get('filters', []))
+        if binding.get('value_field'):
+            require(evidence.references(tables[source], binding['value_field']), 'term_sql_mismatch', 'Bound value field is absent from SQL')
+        term_checks.append({**ref, 'source_id': source, 'definition': deepcopy(binding),
+                            'status': 'verified', 'verification_scope': 'source_fields_and_filters'})
     projects = defaultdict(set)
     for binding in plan.get('metric_bindings', []):
         binding_object(binding, ('source_id', 'metric_id'), 'metric')
@@ -24,6 +63,9 @@ def constraint_checks(catalog, plan, evidence):
         require(len(matches) == 1 and binding['source_id'] in tables,
                 'metric_definition_invalid', 'Bind one current metric name on its declared source')
         metric = matches[0]
+        require(metric.get('status') not in {'stale', 'invalid', 'unresolved'},
+                'metric_definition_invalid', 'Metric is not active')
+        register_filters(binding['source_id'], metric.get('filters', []))
         project = metric.get('project')
         if project is not None:
             require(isinstance(project, dict) and isinstance(project.get('field'), str)
@@ -45,21 +87,65 @@ def constraint_checks(catalog, plan, evidence):
         scans = list(evidence.scans(tables[check['source_id']]))
         require(bool(scans), 'metric_sql_mismatch', 'Bound metric source is absent from SQL')
         check['table_aliases'] = [scan[0] for scan in scans]
+    for (source, field), selected in declared_filters.items():
+        scans = list(evidence.scans(tables[source]))
+        require(bool(scans), 'definition_filter_mismatch', 'Bound filter source is absent')
+        for alias, where, single in scans:
+            require(evidence.selector(where, alias, field, single) == selected,
+                    'definition_filter_mismatch', 'SQL must preserve the declared filter on ' + source + '.' + field)
 
     ranges = {}
     for binding in plan.get('time_bindings', []):
-        binding_object(binding, ('source_id', 'field', 'start', 'end'), 'time')
+        require(isinstance(binding, dict), 'time_binding_invalid', 'Time binding must be an object')
+        # Models sometimes carry the already-read storage contract alongside
+        # the executable range. Keep those declared facts as consistency
+        # evidence instead of turning an internal packaging detail into a
+        # user HIL; the catalog remains authoritative below.
+        require(set(binding) <= {'source_id', 'field', 'start', 'end', 'variant_id',
+                                 'format', 'period_format', 'storage_format', 'granularity'},
+                'time_binding_invalid', 'Unknown time binding field')
+        require({'source_id', 'field', 'start', 'end'} <= set(binding),
+                'time_binding_invalid', 'Supply source_id, field, start and end')
+        require(all(isinstance(binding.get(k), str) and binding[k].strip()
+                    for k in ('source_id', 'field', 'start', 'end')),
+                'time_binding_invalid', 'Time binding fields must be nonempty strings')
+        if 'variant_id' in binding:
+            require(isinstance(binding['variant_id'], str) and binding['variant_id'].strip(),
+                    'time_variant_invalid', 'variant_id must be a nonempty string')
         source, field = binding['source_id'], binding['field']
         table = tables.get(source, {})
         columns = [c for c in table.get('columns', []) if c['name'] == field]
         require(len(columns) == 1, 'time_definition_invalid', 'Time field must exist on its bound source')
         policies = [p for p in catalog['period_formats'] if p['source_id'] == source and p['field'] == field]
-        require(len(policies) <= 1, 'time_definition_invalid', 'Time field has conflicting period definitions')
+        if binding.get('variant_id'):
+            policies = [p for p in policies if p.get('variant_id') == binding['variant_id']]
+            require(len(policies) == 1, 'time_variant_not_found', 'Selected time format variant is not defined on this source field')
+        else:
+            require(len(policies) <= 1, 'time_variant_required',
+                    'Multiple time format variants exist; select one by variant_id before binding a range')
         native = str(columns[0].get('type', '')).lower()
         policy = policies[0] if policies else None
+        column_format = columns[0].get('format')
+        column_granularity = columns[0].get('granularity')
+        if column_format:
+            require(columns[0].get('format_status') in {None, 'confirmed'}, 'time_definition_missing',
+                    'Field format is not confirmed; resolve its definition before binding a time range')
+            # A field-level format is the canonical location. A legacy
+            # period_formats row may coexist only when it agrees exactly.
+            if policy and canonical_format(policy.get('format')) != canonical_format(column_format):
+                require(False, 'time_definition_conflict',
+                        'Field format conflicts with the period definition; correct the field definition before binding')
+            if policy is None:
+                policy = {'source_id': source, 'field': field, 'format': column_format,
+                          'granularity': column_granularity, 'definition_source': 'column'}
         if policy:
-            require(policy.get('definition_status') == 'current', 'time_definition_invalid', 'Use a current period definition')
-            fmt, grain = policy.get('format'), policy.get('granularity')
+            require(policy.get('definition_status', 'current') == 'current', 'time_definition_missing',
+                    'Period storage format is unresolved; inspect the field definition or run a bounded value probe')
+            scoped = (f'time:{source}:{field}' in catalog.get('_scoped_periods', [])
+                      and policy.get('definition_source') == 'scoped_observation')
+            require(policy.get('status') in {None, 'confirmed'} or scoped, 'time_definition_missing',
+                    'Period format is not confirmed; resolve its definition before binding a time range')
+            fmt, grain = canonical_format(policy.get('format')), policy.get('granularity')
         else:
             require(native == 'date' or native.startswith(('datetime', 'timestamp')),
                     'time_definition_missing', 'Text/numeric time fields require an explicit period_formats definition')
@@ -68,6 +154,14 @@ def constraint_checks(catalog, plan, evidence):
                      '%Y%m%d': 'day', '%Y-%m-%d': 'day'}
         require(fmt in supported and grain == supported[fmt], 'time_definition_invalid',
                 'Use an ordered year, month or day storage format with matching granularity')
+        declared_formats = [binding.get(key) for key in ('format', 'period_format', 'storage_format')
+                            if binding.get(key) is not None]
+        require(all(isinstance(value, str) and canonical_format(value) == fmt for value in declared_formats),
+                'time_definition_conflict',
+                'Time binding storage format conflicts with the current field definition')
+        if binding.get('granularity') is not None:
+            require(binding['granularity'] == grain, 'time_definition_conflict',
+                    'Time binding granularity conflicts with the current field definition')
         native_date = native == 'date' or native.startswith(('datetime', 'timestamp'))
         require(not native_date or fmt == '%Y-%m-%d', 'time_definition_invalid',
                 'Native date fields require ISO date boundaries')
@@ -114,4 +208,4 @@ def constraint_checks(catalog, plan, evidence):
                     'time_sql_mismatch', 'Each physical source WHERE must implement exactly the union of bound [start,end) ranges')
         for check in group['checks']:
             check['table_aliases'] = [s[0] for s in scans]
-    return {'metric_checks': metric_checks, 'time_checks': time_checks}
+    return {'metric_checks': metric_checks, 'time_checks': time_checks, 'term_checks': term_checks}

@@ -17,13 +17,13 @@
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env src/main.ts",
-    "test": "node --test tests/data-agent-model.test.ts tests/fixed-planner.test.ts tests/server.test.ts tests/mcp.test.ts tests/skill-policy.test.ts tests/model-configuration.test.ts tests/model-settings.test.ts tests/settings.test.ts tests/startup-diagnostics.test.ts",
+    "test": "node --test tests/data-agent-model.test.ts tests/fixed-planner.test.ts tests/server.test.ts tests/mcp.test.ts tests/skill-policy.test.ts tests/model-configuration.test.ts tests/model-settings.test.ts tests/settings.test.ts tests/startup-diagnostics.test.ts tests/turn-budgets.test.ts",
     "test:live": "node --env-file-if-exists=.env --test tests/tidb-live.test.ts",
     "verify:browser": "node scripts/verify-browser.mjs",
     "verify:markdown": "node scripts/verify-markdown.mjs",
     "test:gateway": "node scripts/run-python.mjs -m unittest discover -s skills/data-analysis/scripts -p test_*.py",
     "typecheck": "tsc -p tsconfig.json",
-    "test:catalog": "node scripts/run-python.mjs -m unittest discover -s scripts -p test_manage_catalog.py",
+    "test:catalog": "node scripts/run-python.mjs -m unittest discover -s scripts -p test_*.py",
     "verify:settings": "node --env-file-if-exists=.env scripts/verify-settings.mts"
   }
 }

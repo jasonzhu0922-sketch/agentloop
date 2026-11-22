@@ -13,7 +13,7 @@ import tempfile
 sys.dont_write_bytecode = True
 from data_access import load_gateway
 from runtime_config import ConnectionConfigurationError
-from entity_binding import EntityBindingError
+from entity_binding import EntityBindingError, query_plan_from_artifact as _query_plan_from_artifact
 from semantic_retrieval import METADATA_ACTIONS, KnowledgeRequestError, validate_request
 
 
@@ -22,6 +22,149 @@ def text_arg(value):
     if not value:
         raise argparse.ArgumentTypeError("must not be empty")
     return value
+
+
+def workspace_path(value):
+    """Resolve the Runtime's workspace alias without allowing path escapes."""
+    if not isinstance(value, str):
+        return None
+    if value.startswith("@workspace/"):
+        root = os.environ.get("AGENTLOOP_WORKSPACE_ROOT")
+        if root:
+            candidate = (Path(root) / value[len("@workspace/"):]).resolve()
+            root_path = Path(root).resolve()
+            if candidate == root_path or root_path in candidate.parents:
+                return candidate
+    if value.startswith("@/workspace/"):
+        root = os.environ.get("AGENTLOOP_WORKSPACE_ROOT")
+        if root:
+            candidate = (Path(root) / value[len("@/workspace/"):]).resolve()
+            root_path = Path(root).resolve()
+            if candidate == root_path or root_path in candidate.parents:
+                return candidate
+    candidate = Path(value)
+    try:
+        return candidate if candidate.is_file() else None
+    except OSError:
+        # Inline JSON can be larger than the platform's maximum pathname.
+        # Treat it as JSON input; do not turn a packaging probe into a CLI
+        # failure before json.loads gets a chance to parse it.
+        return None
+
+
+def json_argument(value, label):
+    """Load inline JSON or a Runtime workspace JSON artifact."""
+    path = workspace_path(value)
+    if path is not None:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            raise ValueError(f"{label} file is not valid JSON: {exc}") from exc
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be inline JSON or a workspace JSON file") from exc
+
+
+def query_plan_from_artifact(plan):
+    """Extract one executable plan from a plan or context artifact."""
+    return _query_plan_from_artifact(plan)
+
+
+def _compact_definition(item):
+    if not isinstance(item, dict):
+        return item
+    definition = item.get('definition') if isinstance(item.get('definition'), dict) else {}
+    return {key: value for key, value in {
+        'source_id': item.get('source_id'),
+        'id': item.get('metric_id') or item.get('entity_id') or item.get('id'),
+        'label': item.get('label') or definition.get('label'),
+        'score': item.get('score'),
+        'expression': definition.get('expression'),
+        'description': definition.get('description'),
+        'required_fields': item.get('required_fields'),
+        'match_stage': item.get('match_stage'),
+        'definition_ref': item.get('definition_ref'),
+    }.items() if value not in (None, '', [], {})}
+
+
+def _compact_source(item):
+    if not isinstance(item, dict):
+        return item
+    context = item.get('business_context') if isinstance(item.get('business_context'), dict) else {}
+    return {key: value for key, value in {
+        'source_id': item.get('source_id') or item.get('id'),
+        'schema': item.get('schema'),
+        'label': item.get('label'),
+        'score': item.get('score'),
+        'matched_clues': item.get('matched_clues'),
+        'metric_refs': item.get('metric_refs'),
+        'purpose': context.get('purpose'),
+        'record_semantics': context.get('record_semantics'),
+        'row_grain': context.get('row_grain'),
+        'gaps': item.get('gaps'),
+    }.items() if value not in (None, '', [], {})}
+
+
+def _compact_page(value, limit):
+    if not isinstance(value, dict):
+        return {'items': [], 'total': 0, 'shown': 0, 'more': False}
+    items = value.get('items') if isinstance(value.get('items'), list) else []
+    return {'items': items[:limit], 'total': value.get('total', len(items)),
+            'shown': min(limit, len(items)),
+            'more': len(items) > limit or value.get('next_offset') is not None}
+
+
+def model_summary(value):
+    """Return a bounded decision summary while preserving the full file artifact."""
+    if not isinstance(value, dict):
+        return None
+    if value.get('operation') == 'retrieve-knowledge':
+        sources = _compact_page(value.get('sources'), 3)
+        sources['items'] = [_compact_source(item) for item in sources['items']]
+        metrics = _compact_page(value.get('metrics'), 5)
+        metrics['items'] = [_compact_definition(item) for item in metrics['items']]
+        entities = _compact_page(value.get('entities'), 5)
+        entities['items'] = [_compact_definition(item) for item in entities['items']]
+        return {key: item for key, item in {
+            'schema': 'nl2sql.model-summary/v1', 'kind': 'knowledge',
+            'catalog_revision': value.get('catalog_revision'),
+            'sources': sources, 'metrics': metrics, 'entities': entities,
+            'terms': _compact_page(value.get('terms'), 5),
+            'ambiguities': value.get('ambiguities', [])[:5] if isinstance(value.get('ambiguities'), list) else value.get('ambiguities'),
+            'gaps': value.get('gaps', [])[:5] if isinstance(value.get('gaps'), list) else value.get('gaps'),
+            'selection_contract': value.get('selection_contract'),
+        }.items() if item not in (None, '', [], {})}
+    if value.get('schema') == 'nl2sql.semantic-metadata/v1' and value.get('operation') == 'get-query-context':
+        tables = []
+        for table in value.get('tables', []) if isinstance(value.get('tables'), list) else []:
+            if not isinstance(table, dict):
+                continue
+            columns = []
+            for column in table.get('columns', []) if isinstance(table.get('columns'), list) else []:
+                if not isinstance(column, dict):
+                    continue
+                columns.append({key: item for key, item in {
+                    'name': column.get('name'), 'label': column.get('label'),
+                    'type': column.get('type'), 'allow_output': column.get('allow_output'),
+                    'format': column.get('format'), 'granularity': column.get('granularity'),
+                    'semantic_roles': column.get('semantic_roles'), 'metric_refs': column.get('metric_refs'),
+                }.items() if item not in (None, '', [], {})})
+            tables.append({key: item for key, item in {
+                'source_id': table.get('name'), 'schema': table.get('schema'),
+                'label': table.get('label'), 'description': table.get('description'),
+                'columns': columns, 'columns_complete': table.get('columns_complete'),
+            }.items() if item not in (None, '', [], {})})
+        return {key: item for key, item in {
+            'schema': 'nl2sql.model-summary/v1', 'kind': 'query-context',
+            'context_id': value.get('context_id'), 'catalog_revision': value.get('catalog_revision'),
+            'tables': tables,
+            'metrics': [_compact_definition(item) for item in value.get('metrics', []) if isinstance(item, dict)],
+            'entities': [_compact_definition(item) for item in value.get('entities', []) if isinstance(item, dict)],
+            'period_formats': value.get('period_formats'), 'terms': value.get('terms'),
+            'semantic_gaps': value.get('semantic_gaps'),
+        }.items() if item not in (None, '', [], {})}
+    return None
 
 
 def save_result(value, output):
@@ -42,6 +185,7 @@ def save_result(value, output):
     receipt = {"schema": "nl2sql.data-file/v1", "path": str(path), "bytes": len(content),
                "sha256": hashlib.sha256(content).hexdigest()}
     if isinstance(value, dict):
+        save_context_reference(value)
         pointers = {key: '/' + key.replace('~', '~0').replace('/', '~1') for key in value}
         if isinstance(value.get('dataset'), dict):
             pointers.update({'rows': '/dataset/rows', 'columns': '/dataset/columns',
@@ -58,6 +202,7 @@ def save_result(value, output):
                                 for column_index, column in enumerate(table['columns'])}
                 for index, table in enumerate(value['tables']) if 'columns' in table}
         receipt.update({k: value[k] for k in ("scenario_id", "query_id", "catalog_revision", "status") if k in value})
+        receipt.update({k: value[k] for k in ("context_id", "context_ref", "probe_ref") if k in value})
         if isinstance(value.get("dataset"), dict):
             receipt["row_count"] = value["dataset"]["row_count"]
             receipt["columns"] = value["dataset"]["columns"]
@@ -67,6 +212,12 @@ def save_result(value, output):
             receipt['matched_terms_pointer'] = '/matched_terms'
             if len(json.dumps(value['matched_terms'], ensure_ascii=False)) <= 4000:
                 receipt['matched_terms'] = value['matched_terms']
+        summary = model_summary(value)
+        if summary is not None:
+            receipt['model_summary'] = summary
+            receipt['read_contract']['model_summary_root'] = '/model_summary'
+            receipt['read_contract']['instruction'] = ('Use model_summary first. Read the saved file only when the summary '
+                                                       'explicitly omits a required candidate or field.')
     # Small facts must reach the calling model in the same tool result as the
     # file receipt. Large datasets stay intact in the referenced file, with no
     # partial list that could be mistaken for complete source coverage.
@@ -86,7 +237,7 @@ def save_result(value, output):
             "schema": "agentloop.toolEvidenceReceipt/v1",
             "evidenceKinds": {"satisfied": ["source_summary", "record_counts"], "caveated": [], "failed": []},
         }
-    elif isinstance(value, dict) and value.get("schema") in ("nl2sql.data-catalog/v1", "nl2sql.semantic-metadata/v1"):
+    elif isinstance(value, dict) and value.get("schema") in ("nl2sql.data-catalog/v1", "nl2sql.semantic-metadata/v1", "nl2sql.value-probe/v1"):
         # Catalog questions are grounded in actual metadata, not a needless SQL query.
         # This attests metadata acquisition only, never record counts or business correctness.
         receipt["evidenceReceipt"] = {
@@ -94,6 +245,52 @@ def save_result(value, output):
             "evidenceKinds": {"satisfied": ["source_summary"], "caveated": [], "failed": []},
         }
     print(json.dumps(receipt, ensure_ascii=False))
+
+
+def save_context_reference(value):
+    """Persist the canonical query context under the Run workspace.
+
+    The model receives only the opaque context id.  The full plan seed remains
+    an immutable workspace artifact and is expanded by the Skill gateway.
+    """
+    if not isinstance(value, dict) or value.get('schema') != 'nl2sql.semantic-metadata/v1':
+        return
+    context_id = value.get('context_id')
+    plan_seed = value.get('plan_seed')
+    if (not isinstance(context_id, str) or not context_id.startswith('ctx_')
+            or len(context_id) != 68 or any(ch not in '0123456789abcdef' for ch in context_id[4:])
+            or not isinstance(plan_seed, dict)):
+        return
+    root = os.environ.get('AGENTLOOP_WORKSPACE_ROOT')
+    if not root:
+        return
+    directory = (Path(root).resolve() / '.data-agent-contexts').resolve()
+    try:
+        directory.relative_to(Path(root).resolve())
+    except ValueError:
+        return
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f'{context_id}.json'
+    payload = {'schema': 'nl2sql.query-context/v1', 'context_id': context_id,
+               'scenario_id': value.get('scenario_id'),
+               'catalog_revision': value.get('catalog_revision'),
+               'plan_seed': plan_seed}
+    content = (json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode('utf-8')
+    fd, temporary = tempfile.mkstemp(prefix='.query-context-', dir=directory)
+    try:
+        if hasattr(os, 'fchmod'):
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'wb') as stream:
+            fd = None
+            stream.write(content)
+        if os.name == 'nt':
+            os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def main(argv=None):
@@ -106,13 +303,20 @@ def main(argv=None):
         command.add_argument('--scenario-id', required=True, type=text_arg)
         command.add_argument('--request-json', required=True)
         command.add_argument('--output', required=True)
-    for name in ("catalog", "execute", "resolve-entity"):
+    for name in ("catalog", "execute", "resolve-entity", "candidate-lookup", "probe-values"):
         command = actions.add_parser(name)
         command.add_argument("--scenario-id", required=True, type=text_arg)
         command.add_argument("--output", required=name in ('execute', 'resolve-entity'))
         if name == "catalog":
             command.add_argument("--source-id", action="append", type=text_arg)
             command.add_argument("--question", type=text_arg, help="Rank authorized sources using business knowledge")
+        elif name == "probe-values":
+            command.add_argument("--source-id", required=True, type=text_arg)
+            command.add_argument("--field", required=True, type=text_arg)
+            command.add_argument("--limit", type=int, default=50)
+            command.add_argument("--request-json", help='Optional filters and related grouping fields for a source-local probe')
+        elif name == "candidate-lookup":
+            command.add_argument("--request-json", required=True)
         else:
             command.add_argument("--request-json", required=True)
         if name == 'execute':
@@ -121,36 +325,74 @@ def main(argv=None):
     body = None
     if args.action in METADATA_ACTIONS:
         try:
-            body = json.loads(args.request_json)
+            body = json_argument(args.request_json, 'metadata request')
             validate_request(args.action, body)
         except ValueError as exc:
             parser.error('invalid metadata request: ' + str(exc))
     if args.action == 'resolve-entity':
         try:
-            body = json.loads(args.request_json)
+            body = json_argument(args.request_json, 'entity request')
             if not isinstance(body, dict):
                 raise ValueError('expected an entity lookup object')
         except ValueError as exc:
             parser.error('invalid entity request JSON: ' + str(exc))
+    if args.action == 'candidate-lookup':
+        try:
+            body = json_argument(args.request_json, 'candidate lookup')
+            if not isinstance(body, dict):
+                raise ValueError('expected a candidate lookup object')
+        except ValueError as exc:
+            parser.error('invalid candidate lookup JSON: ' + str(exc))
+    if args.action == 'probe-values' and args.request_json:
+        try:
+            body = json_argument(args.request_json, 'value probe')
+            if not isinstance(body, dict):
+                raise ValueError('expected a probe options object')
+        except ValueError as exc:
+            parser.error('invalid value probe JSON: ' + str(exc))
     if args.action == "execute":
         try:
-            body = json.loads(args.request_json)
+            body = json_argument(args.request_json, 'SQL request')
             if not isinstance(body, dict):
                 raise ValueError('expected a SQL request object')
             if args.query_plan:
                 if 'query_plan' in body:
                     raise ValueError('supply query_plan inline or by file, not both')
-                with open(args.query_plan, encoding='utf-8') as stream:
+                plan_path = workspace_path(args.query_plan) or Path(args.query_plan)
+                with open(plan_path, encoding='utf-8') as stream:
                     plan = json.load(stream)
                 if not isinstance(plan, dict):
                     raise ValueError('query plan file must contain an object')
-                body['query_plan'] = plan['query_plan'] if plan.get('schema') == 'nl2sql.entity-resolution/v1' else plan
+                # Models frequently persist a complete execute request as an
+                # artifact (sql/params/query_plan) and then pass that artifact
+                # to --query-plan.  Treat that deterministic wrapper like the
+                # already-supported entity-resolution envelope instead of
+                # sending the wrapper into plan validation and making the
+                # model repair a packaging mistake.
+                plan = query_plan_from_artifact(plan)
+                if not isinstance(plan, dict):
+                    raise ValueError('query plan file must contain a query-plan object')
+                body['query_plan'] = plan
+            elif isinstance(body.get('query_plan'), dict):
+                # Inline execute requests use the same deterministic envelope
+                # as --query-plan files (entity-resolution, query-context or
+                # a saved execute wrapper). Normalize it before shape checks.
+                body['query_plan'] = query_plan_from_artifact(body['query_plan'])
+            elif isinstance(body.get('plan_seed'), dict):
+                # Some model/tool adapters place the context envelope beside
+                # sql and params. Consume only its declared plan fields.
+                body['query_plan'] = query_plan_from_artifact(body)
+                body.pop('plan_seed', None)
+                for key in ('entity_bindings', 'metric_bindings', 'time_bindings',
+                            'source_signatures', 'semantic_model_version',
+                            'semantic_bindings', 'semantic_gap_refs', 'decision_refs'):
+                    body.pop(key, None)
             if (not isinstance(body, dict) or set(body) - {"sql", "params", "query_plan"}
                     or not isinstance(body.get("sql"), str) or not body["sql"].strip()
                     or len(body["sql"].encode("utf-8")) > 65536
                     or not isinstance(body.get("params", []), list)
                     or len(body.get("params", [])) > 1000):
-                raise ValueError("expected SQL, a parameter array and an optional query_plan")
+                raise ValueError("expected SQL, a parameter array and optional query_plan; fixed Agent execution requires query_plan")
             if 'query_plan' in body and not isinstance(body['query_plan'], dict):
                 raise ValueError('query_plan must be an object')
             if any(not (v is None or type(v) in (str, int, float, bool))
@@ -175,6 +417,17 @@ def main(argv=None):
             phase = 'entity.resolve'
             result = gateway.resolve_entity(args.scenario_id, body)
             if result.get('status') == 'failed':
+                exit_code = 1
+        elif args.action == 'candidate-lookup':
+            phase = 'entity.candidate_lookup'
+            result = gateway.candidate_lookup(args.scenario_id, body)
+            if result.get('status') != 'completed':
+                exit_code = 1
+        elif args.action == 'probe-values':
+            phase = 'catalog.probe_values'
+            result = gateway.probe_values(args.scenario_id, args.source_id, args.field, args.limit,
+                                          **({'request': body} if body is not None else {}))
+            if result.get('status') != 'completed':
                 exit_code = 1
         else:
             phase = "query.dispatch"
@@ -208,9 +461,11 @@ def main(argv=None):
                   "execution_state": ("unknown" if phase == "query.dispatch" else "not_started")
                       if args.action == "execute" else "not_applicable"}
         exit_code = 1
-    if exit_code == 0 and args.action in {"catalog", "execute"} | METADATA_ACTIONS:
+    if exit_code == 0 and args.action in {"catalog", "execute", "probe-values"} | METADATA_ACTIONS:
         expected_schema = ("nl2sql.semantic-metadata/v1" if args.action in METADATA_ACTIONS else
-                           "nl2sql.data-catalog/v1" if args.action == "catalog" else "nl2sql.query-result/v1")
+                           "nl2sql.data-catalog/v1" if args.action == "catalog" else
+                           "nl2sql.value-probe/v1" if args.action == "probe-values" else
+                           "nl2sql.query-result/v1")
         if (not isinstance(result, dict) or result.get("scenario_id") != args.scenario_id
                 or result.get("schema") != expected_schema):
             result = {"status": "response_mismatch", "error": "Data interface schema or scenario does not match the request"}

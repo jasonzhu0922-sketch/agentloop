@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { describeStartupError } from "../src/startup-diagnostics.ts";
+import { ActiveHostLeaseError } from "../src/tidb-state.ts";
 
 test("startup diagnostics identifies a network permission boundary without exposing credentials", () => {
   const error = Object.assign(new Error("connect EPERM 10.251.40.47:6000"), {
@@ -20,5 +21,12 @@ test("startup diagnostics distinguishes a refused TiDB listener", () => {
     describeStartupError(error, "mysql://root@example.invalid:6000/runtime"),
     "TiDB 拒绝连接（ECONNREFUSED）：example.invalid:6000。请确认 TiDB 正在监听该地址和端口。",
   );
+});
+
+test("startup diagnostics explains an active host lease in plain language", () => {
+  const message = describeStartupError(new ActiveHostLeaseError(91_000, 1_000), "mysql://root:secret@example.invalid/runtime");
+  assert.match(message, /另一个 data-agent 进程/);
+  assert.match(message, /等待租约自动过期/);
+  assert.doesNotMatch(message, /secret|example\.invalid/);
 });
 

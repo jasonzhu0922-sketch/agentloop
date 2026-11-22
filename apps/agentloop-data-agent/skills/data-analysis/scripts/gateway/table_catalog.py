@@ -3,6 +3,7 @@ from copy import deepcopy
 
 from .database import query_connection
 from .query_policy import allowed_relations
+from table_semantics import FIELD_DEFINITIONS
 
 
 
@@ -25,7 +26,10 @@ def physical_catalog(config, source_ids=None):
         with conn.cursor() as cursor:
             cursor.execute(f"""
                 SELECT c.table_schema AS schema_name, c.table_name AS name,
-                       c.column_name, c.column_type AS type,
+                       c.column_name, c.column_type AS type, c.data_type,
+                       c.character_maximum_length, c.numeric_precision,
+                       c.numeric_scale, c.datetime_precision, c.is_nullable,
+                       c.ordinal_position, c.column_key,
                        t.table_comment AS description, c.column_comment AS column_description
                 FROM information_schema.columns c
                 JOIN information_schema.tables t
@@ -71,10 +75,31 @@ def physical_catalog(config, source_ids=None):
                                           'label': previous.get('label') or name,
                                           'description': previous.get('description') or row['description'] or '', 'columns': []})
         saved = saved_columns.get(row['column_name'], {})
-        table['columns'].append({'name': row['column_name'], 'type': row['type'],
+        table['columns'].append({**{key: deepcopy(saved[key]) for key in FIELD_DEFINITIONS if key in saved},
+                                 'name': row['column_name'], 'type': row['type'],
+                                 # These values come directly from
+                                 # information_schema. They describe the
+                                 # physical field and are not inferred from
+                                 # labels or sampled values.
+                                 'data_type': row.get('data_type', ''),
+                                 'character_maximum_length': row.get('character_maximum_length'),
+                                 'numeric_precision': row.get('numeric_precision'),
+                                 'numeric_scale': row.get('numeric_scale'),
+                                 'datetime_precision': row.get('datetime_precision'),
+                                 'is_nullable': row.get('is_nullable'),
+                                 'ordinal_position': row.get('ordinal_position'),
+                                 'column_key': row.get('column_key'),
                                  'label': saved.get('label', ''),
                                  'description': saved.get('description') or row['column_description'] or '',
                                  'value_domain': saved.get('value_domain', ''),
+                                 # Optional semantic storage format belongs to
+                                 # the field definition (for example
+                                 # YYYYMMDD for a VARCHAR date), never to a
+                                 # table-name heuristic.
+                                 'format': saved.get('format', ''),
+                                 'granularity': saved.get('granularity', ''),
+                                 'format_status': saved.get('format_status'),
+                                 'format_observed_shapes': saved.get('format_observed_shapes'),
                                  'allow_output': saved.get('allow_output', True)})
     config['tables'] = list(tables.values())
     configured_relationships = config.get('relationships', [])

@@ -112,6 +112,30 @@ test("data-client query plans drop unsupported metric binding fields", async () 
   assert.deepEqual(normalized.query_plan.metric_bindings, [{ source_id: "mb_index_main_data", metric_id: "market_record_count" }]);
 });
 
+test("an inline query plan removes a duplicate query-plan file argument", async () => {
+  const request = { sql: "SELECT MAX(period) FROM business.monthly", params: [], query_plan: { context_id: "ctx_" + "a".repeat(64) } };
+  const model = dataAgentModel(adapter({ content: "", finishReason: "tool_calls", toolCalls: [{
+    id: "execute", name: "computer_run_command", arguments: { command: "python3", cwd: "@skills/data-analysis",
+      args: ["scripts/data_client.py", "execute", "--request-json", JSON.stringify(request),
+        "--query-plan", "@workspace/query-context.json", "--output", "@workspace/result.json"] },
+  }] }));
+  const response = await model.complete({ ...baseInvocation, phase: "execution" });
+  const args = (response.toolCalls[0]?.arguments as any).args as string[];
+  assert.equal(args.includes("--query-plan"), false);
+  assert.deepEqual(JSON.parse(args[args.indexOf("--request-json") + 1]), request);
+});
+
+test("a query-plan file remains when the SQL request has no inline plan", async () => {
+  const request = { sql: "SELECT MAX(period) FROM business.monthly", params: [] };
+  const expected = ["scripts/data_client.py", "execute", "--request-json", JSON.stringify(request),
+    "--query-plan", "@workspace/query-context.json", "--output", "@workspace/result.json"];
+  const model = dataAgentModel(adapter({ content: "", finishReason: "tool_calls", toolCalls: [{
+    id: "execute", name: "computer_run_command", arguments: { command: "python3", cwd: "@skills/data-analysis", args: expected },
+  }] }));
+  const response = await model.complete({ ...baseInvocation, phase: "execution" });
+  assert.deepEqual((response.toolCalls[0]?.arguments as any).args, expected);
+});
+
 test("the first retrieve-knowledge file read selects the useful fields once", async () => {
   const prior = { id: "retrieve", name: "computer_run_command", arguments: { command: "python3", cwd: "@skills/data-analysis",
     args: ["scripts/data_client.py", "retrieve-knowledge", "--output", "@workspace/steel_knowledge.json"] } };
@@ -121,8 +145,10 @@ test("the first retrieve-knowledge file read selects the useful fields once", as
   const response = await model.complete({ ...baseInvocation, phase: "execution", messages: [{ role: "assistant", content: "", toolCalls: [prior] }] });
   const value = response.toolCalls[0]?.arguments as any;
   assert.deepEqual(value.queries.map((query: any) => query.pointer), [
-    "/sources", "/terms", "/metrics", "/ambiguities", "/gaps", "/selection_contract", "/relationships",
+    "/sources", "/terms", "/metrics", "/entities", "/ambiguities", "/gaps", "/selection_contract",
   ]);
+  assert.deepEqual(value.queries[0], { pointer: "/sources", offset: 0, limit: 3 });
+  assert.deepEqual(value.queries[2], { pointer: "/metrics", offset: 0, limit: 5 });
 });
 
 test("later pagination reads of the same knowledge file are preserved", async () => {
@@ -157,6 +183,27 @@ test("absolute knowledge file paths are recognized as the same workspace output"
   const response = await model.complete({ ...baseInvocation, phase: "execution", messages: [{ role: "assistant", content: "", toolCalls: [retrieve] }] });
   assert.equal((response.toolCalls[0]?.arguments as any).path, "steel_knowledge.json");
   assert.equal((response.toolCalls[0]?.arguments as any).queries.length, 7);
+});
+
+test("query-context reads use the declared workspace output instead of guessed aliases or hidden refs", async () => {
+  const context = { id: "context", name: "computer_run_command", arguments: { command: "python3",
+    args: ["scripts/data_client.py", "get-query-context", "--output", "@workspace/hr_ctx.json"] } };
+  for (const path of ["@workspace/hr_ctx.json", `@workspace/.data-agent-contexts/ctx_${"a".repeat(64)}.json`]) {
+    const model = dataAgentModel(adapter({ content: "", finishReason: "tool_calls", toolCalls: [{
+      id: "read", name: "computer_read_json", arguments: { path, queries: [{ pointer: "/plan_seed" }] },
+    }] }));
+    const response = await model.complete({ ...baseInvocation, phase: "execution", messages: [{ role: "assistant", content: "", toolCalls: [context] }] });
+    assert.deepEqual(response.toolCalls[0]?.arguments, { path: "hr_ctx.json", queries: [{ pointer: "/plan_seed" }] });
+  }
+});
+
+test("unknown JSON paths are not silently redirected to a context file", async () => {
+  const context = { id: "context", name: "computer_run_command", arguments: { command: "python3",
+    args: ["scripts/data_client.py", "get-query-context", "--output", "@workspace/hr_ctx.json"] } };
+  const original = { path: "@workspace/other.json", queries: [{ pointer: "" }] };
+  const model = dataAgentModel(adapter({ content: "", finishReason: "tool_calls", toolCalls: [{ id: "read", name: "computer_read_json", arguments: original }] }));
+  const response = await model.complete({ ...baseInvocation, phase: "execution", messages: [{ role: "assistant", content: "", toolCalls: [context] }] });
+  assert.deepEqual(response.toolCalls[0]?.arguments, original);
 });
 
 test("final delivery drops internal narration before the last divider", async () => {
@@ -209,4 +256,83 @@ test("assessment is forced to its only tool and a silent first stream is retried
   const response = await model.streamComplete!({ ...baseInvocation, phase: "execution" }, () => undefined);
   assert.equal(response.content, "ok");
   assert.equal(streams, 2);
+});
+
+test("successful simple numeric lookups use deterministic assessment", async () => {
+  const calls: ModelInvocation[] = [];
+  const model = dataAgentModel(adapter({ content: "fallback", finishReason: "stop", toolCalls: [] }, calls));
+  const context = {
+    canonicalIntent: { userInput: "查询人力月报数据中最新的月份" },
+    openEvidenceConcerns: [], assessmentGaps: [], temporalEvidenceGap: false,
+    step: { successCriteria: [{ id: "business-answer" }, { id: "skill-contract" }] },
+    skills: [{ id: "discovered:data-analysis" }],
+    evidence: {
+      candidateOutput: "最新月份是 2025 年 3 月（202503）。",
+      toolCalls: [{ toolCallId: "sql-call", toolName: "computer_run_command", isError: false,
+        result: JSON.stringify({ stdout: { content: { schema: "nl2sql.query-result/v1", status: "completed",
+          dataset: { columns: ["latest_month"], rows: [["202503"]] } } } }) }],
+    },
+  };
+  const runtimeContext = {
+    id: "assessment", phase: "assessment" as const,
+    content: '<assessment_context source="server">' + JSON.stringify(context) + '</assessment_context>',
+  };
+  const response = await model.complete({ ...baseInvocation, phase: "assessment", runtimeContext,
+    tools: [{ name: "submit_assessment", description: "assess", inputSchema: { type: "object" } }] });
+  assert.equal(calls.length, 0);
+  assert.equal(response.toolCalls[0]?.name, "submit_assessment");
+  const args = response.toolCalls[0]?.arguments as any;
+  assert.deepEqual(args.criteria.map((item: any) => item.criterionId), ["business-answer", "skill-contract"]);
+  assert.equal(args.criteria.every((item: any) => item.satisfied), true);
+  assert.equal(args.skills[0].skillId, "discovered:data-analysis");
+  assert.equal(args.failedBoundary, null);
+});
+
+test("empty temporal evidence gap objects do not force model assessment", async () => {
+  for (const temporalEvidenceGap of [null, { hasGap: false }, { status: "clear" }]) {
+    const calls: ModelInvocation[] = [];
+    const model = dataAgentModel(adapter({ content: "fallback", finishReason: "stop", toolCalls: [] }, calls));
+    const context = {
+      canonicalIntent: { userInput: "查询人力月报最新月份" },
+      openEvidenceConcerns: [], assessmentGaps: [], temporalEvidenceGap,
+      step: { successCriteria: [{ id: "business-answer" }] },
+      skills: [{ id: "discovered:data-analysis" }],
+      evidence: {
+        candidateOutput: "最新月份是 2025 年 3 月（202503）。",
+        toolCalls: [{ toolCallId: "sql-call", isError: false, result: JSON.stringify({
+          schema: "nl2sql.query-result/v1", status: "completed", dataset: { rows: [["202503"]] },
+        }) }],
+      },
+    };
+    const response = await model.complete({ ...baseInvocation, phase: "assessment", runtimeContext: {
+      id: "assessment", phase: "assessment",
+      content: '<assessment_context>' + JSON.stringify(context) + '</assessment_context>',
+    }, tools: [{ name: "submit_assessment", description: "assess", inputSchema: { type: "object" } }] });
+    assert.equal(calls.length, 0, JSON.stringify(temporalEvidenceGap));
+    assert.equal(response.toolCalls[0]?.name, "submit_assessment");
+  }
+});
+
+test("analysis requests and ungrounded lookup values keep model assessment", async () => {
+  const cases = [
+    ["分析各月人力变化趋势", "2025 年 3 月为最高值。", "202503"],
+    ["查询人力月报最新月份", "最新月份是 2025 年 4 月（202504）。", "202503"],
+  ];
+  for (const [input, candidate, row] of cases) {
+    const calls: ModelInvocation[] = [];
+    const model = dataAgentModel(adapter({ content: "", finishReason: "tool_calls", toolCalls: [{
+      id: "assessment", name: "submit_assessment", arguments: { criteria: [], skills: [], feedback: "", failedBoundary: null, concernResolutions: [] },
+    }] }, calls));
+    const context = { canonicalIntent: { userInput: input }, openEvidenceConcerns: [], assessmentGaps: [],
+      step: { successCriteria: [{ id: "business-answer" }] }, skills: [], evidence: { candidateOutput: candidate,
+        toolCalls: [{ toolCallId: "sql-call", isError: false,
+          result: JSON.stringify({ schema: "nl2sql.query-result/v1", status: "completed", dataset: { rows: [[row]] } }) }] } };
+    const runtimeContext = {
+      id: "assessment", phase: "assessment" as const,
+      content: '<assessment_context>' + JSON.stringify(context) + '</assessment_context>',
+    };
+    await model.complete({ ...baseInvocation, phase: "assessment", runtimeContext,
+      tools: [{ name: "submit_assessment", description: "assess", inputSchema: { type: "object" } }] });
+    assert.equal(calls.length, 1, input);
+  }
 });

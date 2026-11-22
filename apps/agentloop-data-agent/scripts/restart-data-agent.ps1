@@ -126,10 +126,19 @@ Assert-TiDb $values
 Assert-Model $values
 
 if ($listenerProcess) {
-  Stop-Process -Id $listenerProcess.ProcessId -ErrorAction Stop
-  $deadline = (Get-Date).AddSeconds(15)
+  try {
+    $shutdownSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -WebSession $shutdownSession -UseBasicParsing -TimeoutSec 3 | Out-Null
+    Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/shutdown" -Method Post -WebSession $shutdownSession -Headers @{ Origin = "http://127.0.0.1:$Port" } -ContentType 'application/json' -Body '{}' -TimeoutSec 5 | Out-Null
+  } catch {
+    Write-Warning "Data Agent graceful shutdown request failed: $($_.Exception.Message)"
+  }
+  $deadline = (Get-Date).AddSeconds(75)
   do { Start-Sleep -Milliseconds 250 } while ((Get-Process -Id $listenerProcess.ProcessId -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline)
-  if (Get-Process -Id $listenerProcess.ProcessId -ErrorAction SilentlyContinue) { throw "Old process did not exit: $($listenerProcess.ProcessId)" }
+  if (Get-Process -Id $listenerProcess.ProcessId -ErrorAction SilentlyContinue) {
+    Write-Warning "Data Agent did not stop gracefully within 75 seconds; forcing PID $($listenerProcess.ProcessId)."
+    Stop-Process -Id $listenerProcess.ProcessId -Force -ErrorAction Stop
+  }
 }
 
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null

@@ -34,13 +34,13 @@ class EntityBindingTest(unittest.TestCase):
                        ('company_code', 'company_name', 'period', 'amount')]} for name in ('finance', 'other')],
             'terms': [{'term': '宝钢股份', 'aliases': ['股份', '宝钢', '宝山钢铁'],
                        'meaning': '是宝山钢铁股份有限公司的简称'}],
-            'entities': [{'id': 'finance.organization', 'source_id': 'finance',
+            'entities': [{'id': 'entity:finance:company_code', 'source_id': 'finance',
                           'key_field': 'company_code', 'name_fields': ['company_name'], 'aliases': {}}]}
         self.audits, self.executions = [], []
         self.gateway = Gateway(self, self.scope, deepcopy, self.execute, QueryPolicyError)
         self.request = {'mention': '宝钢股份', 'matched_term': '宝钢股份',
                         'canonical_name': '宝山钢铁股份有限公司', 'source_id': 'finance',
-                        'entity_id': 'finance.organization'}
+                        'entity_id': 'entity:finance:company_code'}
 
     def tearDown(self):
         self.db.close()
@@ -107,12 +107,158 @@ class EntityBindingTest(unittest.TestCase):
         self.assertEqual(check['canonical_name'], self.request['canonical_name'])
         self.assertEqual(self.executions[-1], (sql, ['1001', '202601']))
 
+    def test_physical_entity_filter_is_allowed_without_entity_bindings(self):
+        plan = self.plan()
+        plan['entity_bindings'] = []
+        sql = 'SELECT amount FROM business.finance WHERE company_code=%s'
+        result = self.run_query(sql, ['1001'], plan)
+        self.assertEqual(result['status'], 'completed', result)
+        self.assertEqual(result['dataset']['row_count'], 2)
+        self.assertEqual(result['plan_verification']['entity_checks'], [])
+
+    def test_explicit_code_evidence_does_not_require_name_lookup(self):
+        plan = self.plan()
+        binding = plan['entity_bindings'][0]
+        binding.pop('lookup')
+        binding.pop('canonical_name')
+        binding.pop('matched_term')
+        binding.pop('mention')
+        binding['selected_codes'] = ['1001']
+        binding['selection_evidence'] = 'user-supplied physical org code'
+        sql = 'SELECT amount FROM business.finance WHERE company_code=%s'
+        result = self.run_query(sql, ['1001'], plan)
+        self.assertEqual(result['status'], 'completed', result)
+        self.assertEqual(result['plan_verification']['entity_checks'][0]['lookup_query_id'], None)
+
+    def test_candidate_lookup_is_fuzzy_evidence_without_selected_codes(self):
+        result = self.gateway.candidate_lookup('group', {
+            'mention': '宝山', 'source_id': 'finance', 'entity_id': 'entity:finance:company_code'})
+        self.assertEqual(result['schema'], 'nl2sql.entity-candidates/v1')
+        self.assertEqual(result['candidate_lookup']['mode'], 'candidate_lookup')
+        self.assertEqual(result['selected_codes'], [])
+        self.assertIsNone(result['selection_evidence'])
+        self.assertEqual(result['candidates'][0]['company_code'], '1001')
+
     def test_original_short_name_like_is_rejected_before_execution(self):
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM business.finance WHERE company_name LIKE '%宝钢%'").fetchone()[0], 0)
         self.assert_rejected('SELECT amount FROM business.finance WHERE company_name LIKE %s', ['%宝钢%'])
         self.assert_rejected('SELECT amount FROM business.finance WHERE company_code LIKE %s', ['1001'])
         self.assert_rejected('SELECT amount FROM business.finance WHERE company_code=%s', ['9000'])
         self.assert_rejected('SELECT amount FROM business.finance', [])
+
+    def test_derived_entity_scope_is_bound_to_indicator_filter(self):
+        self.db.execute('ALTER TABLE business.finance ADD COLUMN index_name TEXT')
+        self.db.execute("UPDATE business.finance SET index_name='吨钢EBITDA-制造基地' WHERE company_code='1001'")
+        self.db.execute("UPDATE business.finance SET index_name='吨钢EBITDA' WHERE company_code='9000'")
+        self.config['tables'][0]['columns'].append({'name': 'index_name'})
+        self.config['entities'][0].update({
+            'id': 'entity:finance:company_code:scope:index_name', 'label': '制造基地',
+            'scope_filter': {'field': 'index_name', 'operator': 'like_any',
+                             'patterns': ['%制造基地%', '基地%']},
+        })
+        request = {**self.request, 'entity_id': 'entity:finance:company_code:scope:index_name'}
+        resolution = self.gateway.resolve_entity('group', request)
+        self.assertEqual(resolution['status'], 'resolved')
+        binding = resolution['query_plan']['entity_bindings'][0]
+        self.assertEqual(binding['lookup']['params'], [request['canonical_name'], '%制造基地%', '基地%'])
+        self.assertIn('`index_name` LIKE %s', binding['lookup']['sql'])
+        sql = ('SELECT amount FROM business.finance WHERE company_code=%s '
+               'AND (index_name LIKE %s OR index_name LIKE %s)')
+        result = self.run_query(sql, ['1001', '%制造基地%', '基地%'], resolution['query_plan'])
+        self.assertEqual(result['status'], 'completed', result)
+        self.assert_rejected('SELECT amount FROM business.finance WHERE company_code=%s', ['1001'],
+                             'entity_scope_sql_mismatch', resolution['query_plan'])
+
+    def test_unrelated_entity_query_is_not_blocked_by_period_gap(self):
+        self.config.update({
+            'semantic_model_version': 'nl2sql.semantic-model/v1',
+            'semantic_gaps': [{
+                'gap_id': 'definition_gap:time:finance:period',
+                'code': 'time_format_unresolved', 'status': 'unresolved',
+                'blocking': True, 'affected_refs': ['time:finance:period'],
+                'source_ids': ['finance'], 'evidence': [],
+            }],
+        })
+        plan = self.plan()
+        result = self.run_query(
+            'SELECT amount FROM business.finance WHERE company_code=%s', ['1001'], plan)
+        self.assertEqual(result['status'], 'completed', result)
+
+        rejected = self.run_query(
+            'SELECT amount FROM business.finance WHERE company_code=%s AND period>=%s',
+            ['1001', '202601'], plan)
+        self.assertEqual(rejected['status'], 'rejected', rejected)
+        self.assertEqual(rejected['error']['diagnostic']['code'], 'semantic_gap_blocking')
+
+    def test_hil_resolved_gap_is_carried_into_plan_verification(self):
+        self.config.update({
+            'semantic_model_version': 'nl2sql.semantic-model/v1',
+            'semantic_gaps': [{
+                'gap_id': 'no_company_price_binding',
+                'code': 'entity_metric_binding_missing', 'status': 'unresolved',
+                'blocking': True, 'affected_refs': ['source:finance:finance'],
+                'source_ids': ['finance'], 'evidence': [],
+            }],
+        })
+        plan = self.plan()
+        plan['resolved_gap_refs'] = ['no_company_price_binding']
+        plan['decision_refs'] = [{'request_id': 'hil-1', 'selected_option_id': 'market_price'}]
+        result = self.run_query(
+            'SELECT amount FROM business.finance WHERE company_code=%s AND period>=%s',
+            ['1001', '202601'], plan)
+        self.assertEqual(result['status'], 'completed', result)
+
+    def test_term_scoped_source_gap_does_not_block_query_without_entity_predicate(self):
+        self.config.update({
+            'semantic_model_version': 'nl2sql.semantic-model/v1',
+            'semantic_gaps': [{
+                'gap_id': 'no_company_price_binding',
+                'code': 'entity_metric_binding_missing', 'status': 'unresolved',
+                'blocking': True,
+                # This mirrors the persisted catalog shape from 70508a5f:
+                # source refs plus a term/trigger, with no explicit term ref.
+                'affected_refs': ['source:finance:finance'],
+                'source_ids': ['finance'], 'term': '日照钢铁',
+                'trigger_terms': ['日照钢铁'], 'evidence': [],
+            }],
+        })
+        plan = self.plan()
+        gap = self.config['semantic_gaps'][0]
+        plan['semantic_gap_refs'] = [gap['gap_id']]
+        for binding in plan['semantic_bindings']:
+            binding['gaps'] = [deepcopy(gap)]
+        # The context can retain the question-triggered gap.  Once the user
+        # selected market price, the executable SQL has no company predicate;
+        # the source gap must therefore be scoped out without a synthetic HIL
+        # resolution field.
+        plan['entity_bindings'] = []
+        result = self.run_query(
+            'SELECT amount FROM business.finance WHERE period=%s', ['202601'], plan)
+        self.assertEqual(result['status'], 'completed', result)
+        blocked = self.run_query(
+            'SELECT amount FROM business.finance WHERE company_code=%s', ['1001'], plan)
+        self.assertEqual(blocked['status'], 'rejected', blocked)
+        self.assertEqual(blocked['error']['diagnostic']['code'], 'semantic_gap_blocking')
+
+    def test_full_entity_name_containing_object_alias_can_be_checked_exactly(self):
+        self.db.execute('ALTER TABLE business.finance ADD COLUMN index_name TEXT')
+        self.db.execute("UPDATE business.finance SET company_name='安宁基地', index_name='基地吨钢综合能耗' WHERE company_code='1001'")
+        self.db.execute("UPDATE business.finance SET index_name='吨钢EBITDA' WHERE company_code='9000'")
+        self.config['tables'][0]['columns'].append({'name': 'index_name'})
+        self.config['terms'].append({'term': '制造基地', 'aliases': ['基地'],
+                                     'meaning': '制造基地对象；account/account_name 分别是基地代码和基地名称'})
+        self.config['entities'][0].update({
+            'id': 'entity:finance:company_code:scope:index_name', 'label': '制造基地',
+            'scope_filter': {'field': 'index_name', 'operator': 'like_any',
+                             'patterns': ['%制造基地%', '基地%']},
+        })
+        request = {'mention': '安宁基地', 'canonical_name': '安宁基地',
+                   'source_id': 'finance', 'entity_id': 'entity:finance:company_code:scope:index_name'}
+        resolution = self.gateway.resolve_entity('group', request)
+        self.assertEqual(resolution['status'], 'resolved')
+        binding = resolution['query_plan']['entity_bindings'][0]
+        self.assertEqual(binding['selected_codes'], ['1001'])
+        self.assertEqual(binding['lookup']['params'], ['安宁基地', '%制造基地%', '基地%'])
 
     def test_only_actual_source_predicates_count_not_text_projection_or_bypassed_or(self):
         for sql, params in [

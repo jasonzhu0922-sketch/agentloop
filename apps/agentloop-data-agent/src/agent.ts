@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { AppDatabase, AppError, RunService, SkillService, type ModelFactory, type PrivateSkill, type SqlConnection } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { fixedDataAnalysisPlanner } from "./fixed-planner.ts";
-import { acquireLease } from "./tidb-state.ts";
+import { acquireLease, type HostLeaseOptions } from "./tidb-state.ts";
 import { fixedSkillExecutionPolicy } from "./skill-policy.ts";
 import { dataAgentModel } from "./data-agent-model.ts";
 import { DATA_AGENT_FILE_SKILL_NAMES } from "./file-export.ts";
@@ -18,6 +18,10 @@ export interface AgentOptions {
   modelFactory: ModelFactory;
   modelKeys: readonly string[];
   defaultModelKey: string;
+  /** Deployment-owned Planner contract-repair budget. */
+  maxPlanningTurns?: number;
+  /** Deployment-owned model-turn budget for each executable Plan step. */
+  stepMaxTurns?: number;
   runEventLogSink?: (line: string) => void;
 }
 export interface StartMessage { requestId: string; conversationId: string; input: string; modelKey: string }
@@ -47,8 +51,15 @@ export interface DataAgentMcpCallStore {
 export async function createDataAgent(options: AgentOptions) {
   if (options.connection.dialect !== "tidb") throw new TypeError("问数 Agent 仅支持 TiDB 持久化");
   let lease: Awaited<ReturnType<typeof acquireLease>> | undefined;
+  let leaseLostError: Error | undefined;
+  const leaseLostHandlers = new Set<(error: Error) => void>();
+  const onLeaseLost: HostLeaseOptions["onLost"] = error => {
+    if (leaseLostError) return;
+    leaseLostError = error;
+    for (const handler of leaseLostHandlers) handler(error);
+  };
   try {
-    lease = await acquireLease(options.connection);
+    lease = await acquireLease(options.connection, { onLost: onLeaseLost });
     const hostLease = lease;
     const workspaceRoot = join(options.fileDirectory, "workspace");
     await mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
@@ -77,8 +88,12 @@ export async function createDataAgent(options: AgentOptions) {
       modelFactory: (onRetry, modelKey) => dataAgentModel(options.modelFactory(onRetry, modelKey)),
       modelKeys: options.modelKeys, defaultModelKey: options.defaultModelKey,
       requireExplicitModel: true, timeZone: "Asia/Shanghai",
+      ...(options.maxPlanningTurns === undefined ? {} : { maxPlanningTurns: options.maxPlanningTurns }),
+      ...(options.stepMaxTurns === undefined ? {} : { maxSteps: options.stepMaxTurns }),
       runEventLogSink: options.runEventLogSink,
-      plannerFactory: () => fixedDataAnalysisPlanner(skill!, fileSkills),
+      plannerFactory: () => fixedDataAnalysisPlanner(skill!, fileSkills, {
+        ...(options.maxPlanningTurns === undefined ? {} : { maxPlanningTurns: options.maxPlanningTurns }),
+      }),
       toolExecutionPlugins: [await fixedSkillExecutionPolicy(skill, fileSkills)],
       computerExecutableAliases: { python3: options.python },
       computerCommandEnvironment: { PYTHONDONTWRITEBYTECODE: "1", PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" },
@@ -90,9 +105,11 @@ export async function createDataAgent(options: AgentOptions) {
         "用户没有明确要求文件时，只返回聊天答案，不创建附件。用户要求文件时，最终回答简短说明文件已生成，下载入口由页面展示。",
         "用户只需看到答案和影响答案的口径；完整 SQL、参数、目录版本与回执留在当前 Run。",
         "过程正文每个阶段用一至三句自然语言说明当前判断、已确认的信息和下一步，保留对用户有用的真实来源、口径与阶段结论；避免 stdout、JSON、SQL、字段清单等内部细节，也避免‘让我先……’‘我先……’‘接下来我将……’等自言自语，不为前端展示编造过程。",
-        "不支持的工作说明范围；实体、指标或期间歧义使用 request_human_loop。真实故障如实报告，不冒充无数据。",
-        "After retrieve-knowledge, immediately request structured human confirmation when an ambiguity can change the metric, entity, period, source, aggregation, or SQL. Do not continue querying first.",
+        "知识未命中、多个候选、字段格式未知或 SQL 失败先自主检索与有界只读探查；这些现象本身不触发 HIL。只有查证后仍有多个合理业务解释且答案不同、需要用户决定时才澄清。编码格式与内部计划错误由系统处理，不交给用户选择。",
+        "执行 SQL 优先在 --request-json 内传 query_plan:{context_id:返回值}，服务端恢复完整证据，不手写 plan_seed，也不要再传 --query-plan。context_id 是不透明引用，禁止读取或猜测 .data-agent-contexts 隐藏文件；需要核对字段时只读取 get-query-context 命令自己声明的 --output 文件，并使用不带 @workspace/ 的相对文件名。期间编码缺失时先做完整的范围探查，将返回的 probe_ref 放入 query_plan.probe_refs，保留同样精确筛选，由执行器重新验证并承接技术编码；机器探查不填 HIL decision_refs 或 resolved_gap_refs。计划结构错误按诊断修复一次，仍失败就报告技术阻塞。",
+        "不支持的工作说明范围；真实故障如实报告，不冒充无数据。同一失败命令和参数组合不得原样重复提交。",
         "Read each retrieve-knowledge output once initially using the focused fields supplied by the application. Paginate only when the relevant source or definition is actually missing; do not page merely to exhaust the catalog.",
+        "When a data_client receipt contains model_summary, treat it as the primary decision view for the shown candidates and fields. Do not read the saved JSON or call read_result unless model_summary.more is true and the required source, definition, or field is actually absent.",
         "Once a source is selected, call get-query-context once with every already-known metric_ref and required column name. Do not follow it with get-metrics, search-columns, or get-columns for information that could have been requested in that same context call.",
         "When the user asks for counts inside an explicitly named dataset, calculate them inside that dataset. Do not add a reference or master table merely because it defines a similarly named total.",
         "Do not run a second verification query when the successful result already directly answers the question and there is no concrete conflict, truncation, NULL, or execution warning.",
@@ -180,6 +197,11 @@ export async function createDataAgent(options: AgentOptions) {
       get defaultModelKey() { return options.defaultModelKey; },
       get skill() { return { id: skill!.id, name: skill!.name, contentHash: skill!.contentHash }; },
       setModelKeys(keys: readonly string[]) { modelKeys = keys; runs.setModelKeys(keys); },
+      onHostLeaseLost(handler: (error: Error) => void) {
+        if (leaseLostError) queueMicrotask(() => handler(leaseLostError!));
+        else leaseLostHandlers.add(handler);
+        return () => leaseLostHandlers.delete(handler);
+      },
       /** Serialize host configuration with Run admission, including waiting HIL. */
       configure<T>(action: () => Promise<T>, refreshPackage = false): Promise<T> {
         const operation = queue.then(async () => {
@@ -213,8 +235,15 @@ export async function createDataAgent(options: AgentOptions) {
             else if (row.status === "running" && runs.isRunExecuting(row.id)) await runs.cancel(OWNER, row.id);
           }
           await Promise.all([...new Set([...inFlight, ...rows.map(r => r.id)])].map(id => runs.whenRunIdle(id)));
-          await hostLease.release();
-          await database.close();
+          let releaseError: unknown;
+          try { await hostLease.release(); } catch (error) { releaseError = error; }
+          try { await database.close(); } catch (error) {
+            // Always attempt both cleanup phases. A lost lease commonly means
+            // the release UPDATE can fail for the same database outage; that
+            // must not leave the pool alive and keep shutdown hanging.
+            if (releaseError === undefined) throw error;
+          }
+          if (releaseError !== undefined) throw releaseError;
         })();
       },
     };

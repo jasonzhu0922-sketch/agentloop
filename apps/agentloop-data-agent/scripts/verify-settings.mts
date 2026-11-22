@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { cp, mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { access, cp, mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { once } from 'node:events';
@@ -21,6 +21,19 @@ const python = process.env.DATA_AGENT_PYTHON ?? 'python3';
 const root = await mkdtemp(join(tmpdir(), 'data-agent-settings-'));
 const output = join(appRoot, 'data/qa/settings');
 await mkdir(output, { recursive: true });
+async function browserExecutable() {
+  const candidates = [process.env.DATA_AGENT_CHROME,
+    ...(process.platform === 'win32' ? [
+      'C:/Program Files/Google/Chrome/Application/chrome.exe',
+      'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+      'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+      'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    ] : ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'])].filter((candidate): candidate is string => Boolean(candidate));
+  for (const candidate of candidates) {
+    try { await access(candidate); return candidate; } catch { /* Try the next installed browser. */ }
+  }
+  throw new Error('Chrome or Edge was not found; set DATA_AGENT_CHROME to its executable path');
+}
 const url = new URL(process.env.DATA_AGENT_TIDB_URL!);
 const admin = await mysql.createConnection({ host: url.hostname, port: Number(url.port || 4000), user: decodeURIComponent(url.username), password: decodeURIComponent(url.password) });
 const schema = `data_agent_settings_test_${randomUUID().replaceAll('-', '')}`;
@@ -51,7 +64,7 @@ try {
   server = createChatServer(agent, { webRoot: join(appRoot, 'web'), models: models.registry.modelCatalog(), defaultModelKey: models.defaultModelKey, settings });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  browser = await chromium.launch({ executablePath: process.env.DATA_AGENT_CHROME ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
+  browser = await chromium.launch({ executablePath: await browserExecutable(), headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -64,7 +77,8 @@ try {
   await page.locator('#model-form button[type=submit]').click();
   assert.equal((await savedModel).status(), 200);
   await page.locator('#model-form').waitFor();
-  for (const panel of ['connection', 'server', 'workflow', 'tables', 'metrics', 'terms', 'skills', 'sample_questions']) {
+  const catalogPanels = ['tables', 'metrics', 'terms', 'semantic_objects', 'relationships', 'period_formats', 'semantic_gaps', 'skills', 'sample_questions'];
+  for (const panel of ['connection', 'server', 'workflow', ...catalogPanels]) {
     await page.locator(`[data-panel="${panel}"]`).click();
     await page.waitForFunction(() => document.querySelector('#knowledge-panel')?.getAttribute('aria-busy') === 'false');
     assert.equal(await page.locator('#reload-panel').count(), 0, panel);
@@ -80,22 +94,25 @@ try {
   assert.equal((await savedTerm).status(), 200);
   await page.locator('#editor-dialog').waitFor({ state: 'hidden' });
   await page.reload();
-  await page.getByText('配置回归测试词', { exact: true }).waitFor();
+  await page.locator('#definition-search').fill('配置回归测试词');
+  await page.locator('[data-edit-definition]', { hasText: '配置回归测试词' }).waitFor();
   const readback = JSON.parse(execFileSync(python, ['-c', 'import sys,json;sys.path.insert(0,sys.argv[1]+"/scripts");from data_access import load_gateway;v=load_gateway().catalog("group",question="配置回归测试词");print(json.dumps({"terms":v["terms"]},ensure_ascii=False))', skillRoot], { encoding: 'utf8', env: pythonUtf8Environment() }));
   assert.ok(readback.terms.some((term: { term: string }) => term.term === '配置回归测试词'), 'Skill reads the saved definition');
   const saved = await settings.catalog('load');
   await assert.rejects(settings.catalog('save', { revision: originalCatalog.revision, changes: { terms: [] } }), /更新/);
   assert.ok(saved.terms.some((term: { term: string }) => term.term === '配置回归测试词'));
   await page.locator('[data-panel="tables"]').click();
-  await page.locator('[data-edit="0"]').waitFor();
+  const firstTable = page.locator('[data-open-table]').first();
+  await firstTable.waitFor();
   await page.screenshot({ path: join(output, 'tables-desktop.png'), fullPage: true });
-  await page.locator('[data-edit="0"]').click();
-  await page.locator('#editor-form [name=label]').fill(config.tables[0].label || config.tables[0].name);
+  await firstTable.click();
+  await page.locator('#table-definition-form').waitFor();
+  await page.locator('#table-definition-form [name=label]').fill(config.tables[0].label || config.tables[0].name);
   const savedTable = page.waitForResponse(r => r.url().endsWith('/api/settings/catalog') && r.request().method() === 'PUT');
-  await page.locator('#editor-form button[type=submit]').click();
+  await page.locator('#table-definition-form button[type=submit]').click();
   const tableResponse = await savedTable;
   assert.equal(tableResponse.status(), 200, await tableResponse.text());
-  await page.locator('#editor-dialog').waitFor({ state: 'hidden' });
+  await page.locator('#table-definition-form').waitFor();
   await page.locator('[data-panel="connection"]').click();
   await page.locator('#connection-form').waitFor();
   const tested = page.waitForResponse(r => r.url().endsWith('/api/settings/connection/test'));
@@ -117,7 +134,7 @@ try {
   // Real source configuration is untouched throughout the write tests.
   assert.equal((await originalSettings.catalog('load')).revision, revision);
   assert.deepEqual(errors, []);
-  console.log('PASS: all 9 panels, real TiDB saves, Skill readback, model save, stale-version rejection, connection/package refresh, reload and mobile layouts.');
+  console.log(`PASS: all ${catalogPanels.length + 4} settings panels, real TiDB saves, Skill readback, model save, stale-version rejection, connection/package refresh, reload and mobile layouts.`);
   console.log('Screenshots:', output);
 } finally {
   await browser?.close();

@@ -15,11 +15,31 @@ export async function fixedSkillExecutionPolicy(skill: PrivateSkill, fileSkills:
         if (value.cwd === root) {
           const allowed = entries.some(entry => entry.command === value.command && value.args?.[0] === entry.script);
           if (!allowed) return { decision: "deny", code: "FIXED_SKILL_COMMAND_REQUIRED", reason: "data-analysis 只执行声明的查询入口。" };
+          const args = value.args ?? [];
+          if (args[0] === "scripts/data_client.py" && args[1] === "execute") {
+            const hasPlanFile = args.includes("--query-plan");
+            const requestIndex = args.indexOf("--request-json");
+            const requestValue = requestIndex >= 0 ? args[requestIndex + 1] : undefined;
+            const hasWorkspaceRequest = typeof requestValue === "string"
+              && (requestValue.startsWith("@workspace/") || requestValue.startsWith("@/workspace/"));
+            let hasInlinePlan = false;
+            if (typeof requestValue === "string") {
+              try {
+                const request = JSON.parse(requestValue) as Record<string, unknown>;
+                hasInlinePlan = request.query_plan !== undefined && request.query_plan !== null;
+              } catch {
+                // Workspace request files are parsed by the fixed executor.
+              }
+            }
+            if (!hasPlanFile && !hasInlinePlan && !hasWorkspaceRequest) {
+              return { decision: "deny", code: "SEMANTIC_QUERY_PLAN_REQUIRED", reason: "业务查询必须携带 get-query-context 生成并补充后的 query_plan。" };
+            }
+          }
           const formatIndex = value.args?.indexOf("--format") ?? -1;
           const markdownExport = value.args?.[0] === "scripts/file_export.py" && formatIndex >= 0
             && value.args?.[formatIndex + 1] === "markdown";
           if (value.args?.[0] === "scripts/file_export.py" && !markdownExport
-            && !fileSkills.some(item => context.grant.skillExecutionRoots.some(grant => grant.skillId === item.id))) {
+            && !fileSkills.some(item => context?.grant.skillExecutionRoots.some(grant => grant.skillId === item.id))) {
             return { decision: "deny", code: "FILE_SKILL_REQUIRED", reason: "只有明确的文件交付步骤可以运行固定生成器。" };
           }
           return { decision: "allow" };

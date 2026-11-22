@@ -7,6 +7,7 @@ const DEFAULT_FIRST_EVENT_TIMEOUT_MS = 30_000;
 const DATA_REQUEST = /(?:查询|查一下|统计|分析|对比|比较|趋势|排名|分布|差异|同比|环比|完成率|财务|经营|指标|计划|实际|人力|员工|人数|采购|合同|金额|行情|月份|季度|年度|多少|最高|最低|平均|合计)/u;
 const FOLLOW_UP = /^(?:继续|再|然后|另外|刚才|上面|上述|前面|之前|这个|那个|改成|换成|同样|还是|那么|那就|也查|再查)/u;
 const PRIOR_REFERENCE = /(?:刚才|上面|上述|前面|之前|上次|上一轮|这个结果|那个结果|previous|prior|earlier|above)/iu;
+const ANALYTICAL_REQUEST = /(?:分析|对比|比较|趋势|排名|分布|差异|同比|环比|完成率|变化|原因|结构|占比|预测|建议)/u;
 
 function workspaceFileName(path: string): string {
   return basename(path.replaceAll("\\", "/").replace(/^@workspace\//, ""));
@@ -87,6 +88,100 @@ function fixedSkillLoad(invocation: ModelInvocation): ModelResponse | undefined 
     toolCalls: missing.map((name, index) => ({
       id: `data-agent-fixed-skill-load-${index + 1}`, name: "load_skill", arguments: { name },
     })),
+  };
+}
+
+function assessmentContext(invocation: ModelInvocation): Record<string, unknown> | undefined {
+  if (invocation.phase !== "assessment" || typeof invocation.runtimeContext?.content !== "string") return undefined;
+  const match = invocation.runtimeContext.content.match(/<assessment_context[^>]*>\s*([\s\S]*?)\s*<\/assessment_context>/u);
+  if (!match?.[1]) return undefined;
+  try { return record(JSON.parse(match[1])); } catch { return undefined; }
+}
+
+function stringField(value: unknown, key: string): string | undefined {
+  const item = record(value)?.[key];
+  return typeof item === "string" ? item : undefined;
+}
+
+function arrayField(value: unknown, key: string): unknown[] {
+  const item = record(value)?.[key];
+  return Array.isArray(item) ? item : [];
+}
+
+function hasEvidenceGap(value: unknown): boolean {
+  if (value === undefined || value === null || value === false || value === "") return false;
+  if (Array.isArray(value)) return value.length > 0;
+  const item = record(value);
+  if (!item) return true;
+  if (typeof item.hasGap === "boolean") return item.hasGap;
+  if (typeof item.present === "boolean") return item.present;
+  if (typeof item.status === "string") return !/^(?:none|clear|resolved|satisfied|ok)$/iu.test(item.status);
+  return Object.keys(item).length > 0;
+}
+
+function fixedSimpleLookupAssessment(invocation: ModelInvocation): ModelResponse | undefined {
+  if (invocation.phase !== "assessment" || invocation.tools.length !== 1
+    || invocation.tools[0]?.name !== "submit_assessment") return undefined;
+  const context = assessmentContext(invocation);
+  if (!context) return undefined;
+  const canonicalIntent = record(context.canonicalIntent);
+  const input = typeof canonicalIntent?.userInput === "string" ? canonicalIntent.userInput.trim() : "";
+  if (!input || ANALYTICAL_REQUEST.test(input) || FOLLOW_UP.test(input) || PRIOR_REFERENCE.test(input)
+    || detectDataAgentFileExport(input) !== undefined) return undefined;
+  if (arrayField(context, "openEvidenceConcerns").length > 0
+    || arrayField(context, "assessmentGaps").length > 0
+    || hasEvidenceGap(context.temporalEvidenceGap)) return undefined;
+  const evidence = record(context.evidence);
+  const candidate = typeof evidence?.candidateOutput === "string" ? evidence.candidateOutput.trim() : "";
+  const toolCalls = Array.isArray(evidence?.toolCalls)
+    ? evidence.toolCalls.map(record).filter((item): item is Record<string, unknown> => item !== undefined)
+    : [];
+  if (!candidate || toolCalls.length === 0 || toolCalls.some(call => call.isError === true)) return undefined;
+  const successful = toolCalls.filter(call => call.isError !== true && typeof call.toolCallId === "string");
+  const toolEvidence = JSON.stringify(successful).replaceAll("\\", "").replace(/[\s,]/gu, "");
+  if (!/nl2sql\.query-result\/v1/iu.test(toolEvidence)
+    || !/["']?status["']?:["']?completed/iu.test(toolEvidence)
+    || !/dataset/iu.test(toolEvidence)) return undefined;
+  const numericTokens = [...candidate.matchAll(/-?\d[\d,.:%/\-]*/gu)]
+    .map(match => match[0].replace(/[^\d.%-]/gu, ""))
+    .filter(Boolean);
+  if (numericTokens.length === 0 || !numericTokens.every(token => toolEvidence.includes(token.replaceAll(",", "")))) {
+    return undefined;
+  }
+  const step = record(context.step);
+  const criteria = arrayField(step, "successCriteria").map(item => stringField(item, "id"))
+    .filter((id): id is string => id !== undefined);
+  const skills = arrayField(context, "skills").map(item => stringField(item, "id"))
+    .filter((id): id is string => id !== undefined);
+  if (criteria.length === 0) return undefined;
+  const evidenceRefs = ["candidateOutput", ...successful.flatMap(call =>
+    typeof call.toolCallId === "string" ? [call.toolCallId] : [])];
+  return {
+    content: "",
+    finishReason: "tool_calls",
+    toolCalls: [{
+      id: "data-agent-fixed-lookup-assessment",
+      name: "submit_assessment",
+      arguments: {
+        criteria: criteria.map(criterionId => ({
+          criterionId,
+          satisfied: true,
+          rationale: "简单单值查询已产生非空答案，且答案中的关键值可在成功的受控 SQL 结果中定位。",
+          evidenceRefs,
+          contractCheck: { status: "valid", rationale: "该条件属于用户请求的直接回答范围。" },
+        })),
+        skills: skills.map(skillId => ({
+          skillId,
+          status: "followed",
+          followed: true,
+          rationale: "查询通过已绑定的 data-agent Skill 工作流成功完成。",
+          evidenceRefs,
+        })),
+        feedback: "",
+        failedBoundary: null,
+        concernResolutions: [],
+      },
+    }],
   };
 }
 
@@ -175,34 +270,47 @@ function normalizeDataClientRequest(value: Record<string, unknown>): Record<stri
   try {
     const requestRecord = record(JSON.parse(value.args[requestIndex + 1]));
     const queryPlan = record(requestRecord?.query_plan);
-    if (!requestRecord || !queryPlan || !Array.isArray(queryPlan.metric_bindings)) return value;
-    const metricBindings = queryPlan.metric_bindings.map(binding => {
-      const item = record(binding);
-      return typeof item?.source_id === "string" && typeof item.metric_id === "string"
-        ? { source_id: item.source_id, metric_id: item.metric_id } : binding;
-    });
     const args = [...value.args];
-    args[requestIndex + 1] = JSON.stringify({ ...requestRecord, query_plan: { ...queryPlan, metric_bindings: metricBindings } });
+    if (!requestRecord || !queryPlan) return value;
+    const planIndex = args.indexOf("--query-plan");
+    if (planIndex >= 0) args.splice(planIndex, 2);
+    if (Array.isArray(queryPlan.metric_bindings)) {
+      const metricBindings = queryPlan.metric_bindings.map(binding => {
+        const item = record(binding);
+        return typeof item?.source_id === "string" && typeof item.metric_id === "string"
+          ? { source_id: item.source_id, metric_id: item.metric_id } : binding;
+      });
+      args[requestIndex + 1] = JSON.stringify({ ...requestRecord, query_plan: { ...queryPlan, metric_bindings: metricBindings } });
+    }
     return { ...value, args };
   } catch {
     return value;
   }
 }
 
-function retrieveKnowledgeOutputs(invocation: ModelInvocation): Set<string> {
+function dataClientOutputs(invocation: ModelInvocation, action?: string): Set<string> {
   const paths = new Set<string>();
   for (const message of invocation.messages) {
     if (message.role !== "assistant") continue;
     for (const call of message.toolCalls ?? []) {
       if (call.name !== "computer_run_command") continue;
       const value = record(normalizeCommand(call.arguments));
-      if (!Array.isArray(value?.args) || value.args[0] !== "scripts/data_client.py" || value.args[1] !== "retrieve-knowledge") continue;
+      if (!Array.isArray(value?.args) || value.args[0] !== "scripts/data_client.py"
+        || (action !== undefined && value.args[1] !== action)) continue;
       const outputIndex = value.args.indexOf("--output");
       const output = outputIndex >= 0 ? value.args[outputIndex + 1] : undefined;
       if (typeof output === "string") paths.add(workspaceFileName(output));
     }
   }
   return paths;
+}
+
+function retrieveKnowledgeOutputs(invocation: ModelInvocation): Set<string> {
+  return dataClientOutputs(invocation, "retrieve-knowledge");
+}
+
+function queryContextOutputs(invocation: ModelInvocation): Set<string> {
+  return dataClientOutputs(invocation, "get-query-context");
 }
 
 function priorJsonReads(invocation: ModelInvocation): Set<string> {
@@ -218,16 +326,21 @@ function priorJsonReads(invocation: ModelInvocation): Set<string> {
   return paths;
 }
 
-function normalizeJsonRead(argumentsValue: unknown, knowledgeOutputs: Set<string>, jsonReads: Set<string>): unknown {
+function normalizeJsonRead(argumentsValue: unknown, knowledgeOutputs: Set<string>, contextOutputs: Set<string>, jsonReads: Set<string>): unknown {
   const value = record(argumentsValue);
   if (!value || typeof value.path !== "string") return argumentsValue;
-  const path = workspaceFileName(value.path);
+  let path = workspaceFileName(value.path);
+  const knownOutput = knowledgeOutputs.has(path) || contextOutputs.has(path);
+  if (!knownOutput && /(?:^|[\/])\.data-agent-contexts[\/]+ctx_[0-9a-f]{64}\.json$/iu.test(value.path) && contextOutputs.size === 1) {
+    path = [...contextOutputs][0]!;
+  }
+  if (contextOutputs.has(path)) return { ...value, path };
   if (!knowledgeOutputs.has(path) || jsonReads.has(path)) return argumentsValue;
   jsonReads.add(path);
   return { ...value, path, queries: [
-    { pointer: "/sources" }, { pointer: "/terms" }, { pointer: "/metrics" },
+    { pointer: "/sources", offset: 0, limit: 3 }, { pointer: "/terms", offset: 0, limit: 5 },
+    { pointer: "/metrics", offset: 0, limit: 5 }, { pointer: "/entities", offset: 0, limit: 5 },
     { pointer: "/ambiguities" }, { pointer: "/gaps" }, { pointer: "/selection_contract" },
-    { pointer: "/relationships" },
   ] };
 }
 
@@ -242,14 +355,14 @@ function normalizeReadResult(argumentsValue: unknown, readResultIds: Set<string>
   return rootRead;
 }
 
-function normalizeCall(call: ModelToolCall, readResultIds: Set<string>, knowledgeOutputs: Set<string>, jsonReads: Set<string>): ModelToolCall {
+function normalizeCall(call: ModelToolCall, readResultIds: Set<string>, knowledgeOutputs: Set<string>, contextOutputs: Set<string>, jsonReads: Set<string>): ModelToolCall {
   if (call.name === "computer_run_command") return { ...call, arguments: normalizeCommand(call.arguments) };
-  if (call.name === "computer_read_json") return { ...call, arguments: normalizeJsonRead(call.arguments, knowledgeOutputs, jsonReads) };
+  if (call.name === "computer_read_json") return { ...call, arguments: normalizeJsonRead(call.arguments, knowledgeOutputs, contextOutputs, jsonReads) };
   if (call.name === "computer_read_file") {
     const value = record(call.arguments);
     const path = typeof value?.path === "string" ? workspaceFileName(value.path) : undefined;
     if (path && knowledgeOutputs.has(path)) {
-      return { ...call, name: "computer_read_json", arguments: normalizeJsonRead({ ...value, path }, knowledgeOutputs, new Set()) };
+      return { ...call, name: "computer_read_json", arguments: normalizeJsonRead({ ...value, path }, knowledgeOutputs, contextOutputs, new Set()) };
     }
   }
   if (call.name === "read_result") return { ...call, arguments: normalizeReadResult(call.arguments, readResultIds) };
@@ -260,11 +373,11 @@ function signature(call: ModelToolCall): string {
   return `${call.name}:${JSON.stringify(call.arguments)}`;
 }
 
-function normalizeCalls(calls: readonly ModelToolCall[], readResultIds: Set<string>, knowledgeOutputs: Set<string>, jsonReads: Set<string>): ModelToolCall[] {
+function normalizeCalls(calls: readonly ModelToolCall[], readResultIds: Set<string>, knowledgeOutputs: Set<string>, contextOutputs: Set<string>, jsonReads: Set<string>): ModelToolCall[] {
   const seen = new Set<string>();
   const output: ModelToolCall[] = [];
   for (const original of calls) {
-    const call = normalizeCall(original, readResultIds, knowledgeOutputs, jsonReads);
+    const call = normalizeCall(original, readResultIds, knowledgeOutputs, contextOutputs, jsonReads);
     const key = signature(call);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -303,30 +416,31 @@ export function dataAgentModel(
     estimateInputTokens: model.estimateInputTokens?.bind(model),
     requestLogContext: model.requestLogContext?.bind(model),
     async complete(invocation, signal) {
-      const fixed = fixedConversationResolution(invocation) ?? fixedSkillLoad(invocation);
+      const fixed = fixedConversationResolution(invocation) ?? fixedSkillLoad(invocation) ?? fixedSimpleLookupAssessment(invocation);
       if (fixed) return fixed;
       const response = await model.complete(withRequiredAssessmentTool(invocation), signal);
-      const normalized = { ...response, toolCalls: normalizeCalls(response.toolCalls, priorResultReads(invocation), retrieveKnowledgeOutputs(invocation), priorJsonReads(invocation)) };
+      const normalized = { ...response, toolCalls: normalizeCalls(response.toolCalls, priorResultReads(invocation), retrieveKnowledgeOutputs(invocation), queryContextOutputs(invocation), priorJsonReads(invocation)) };
       return cleanFinalResponse(invocation, normalized);
     },
     ...(model.streamComplete === undefined ? {} : {
       async streamComplete(invocation: ModelInvocation, sink: (event: ModelStreamEvent) => void | Promise<void>, signal?: AbortSignal): Promise<ModelResponse> {
-        const fixed = fixedConversationResolution(invocation) ?? fixedSkillLoad(invocation);
+        const fixed = fixedConversationResolution(invocation) ?? fixedSkillLoad(invocation) ?? fixedSimpleLookupAssessment(invocation);
         if (fixed) return fixed;
         const readResultIds = priorResultReads(invocation);
         const knowledgeOutputs = retrieveKnowledgeOutputs(invocation);
+        const contextOutputs = queryContextOutputs(invocation);
         const jsonReads = priorJsonReads(invocation);
         const seenReady = new Set<string>();
         const request = withRequiredAssessmentTool(invocation);
         const response = await streamWithFirstEventRetry(model, request, async event => {
           if (event.type !== "tool_call_ready") return sink(event);
-          const call = normalizeCall({ id: event.id, name: event.name, arguments: event.arguments }, readResultIds, knowledgeOutputs, jsonReads);
+          const call = normalizeCall({ id: event.id, name: event.name, arguments: event.arguments }, readResultIds, knowledgeOutputs, contextOutputs, jsonReads);
           const key = signature(call);
           if (seenReady.has(key)) return;
           seenReady.add(key);
           await sink({ ...event, name: call.name, arguments: call.arguments });
         }, signal, firstEventTimeoutMs);
-        const normalized = { ...response, toolCalls: normalizeCalls(response.toolCalls, priorResultReads(invocation), knowledgeOutputs, jsonReads) };
+        const normalized = { ...response, toolCalls: normalizeCalls(response.toolCalls, priorResultReads(invocation), knowledgeOutputs, contextOutputs, jsonReads) };
         return cleanFinalResponse(invocation, normalized);
       },
     }),

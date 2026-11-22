@@ -35,6 +35,15 @@ class EntityRequest(BaseModel):
     entity_id: str = Field(min_length=1, max_length=200)
 
 
+class CandidateRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    scenario_id: str = Field(min_length=1, max_length=200, pattern=r'^\S+$')
+    mention: str = Field(min_length=1, max_length=1000)
+    source_id: str = Field(min_length=1, max_length=200)
+    entity_id: str = Field(min_length=1, max_length=200)
+    limit: int = Field(default=20, ge=1, le=100)
+
+
 def create_app(*, gateway=None):
     gateway = gateway or load_gateway()
     app = FastAPI(title="data-analysis Skill deterministic data access", version="1.0.0")
@@ -80,6 +89,10 @@ def create_app(*, gateway=None):
     @app.post('/api/data/resolve-entity')
     def resolve_entity(payload: EntityRequest):
         return call(gateway.resolve_entity, payload.scenario_id, payload.model_dump(exclude={'scenario_id'}))
+
+    @app.post('/api/data/candidate-lookup')
+    def candidate_lookup(payload: CandidateRequest):
+        return call(gateway.candidate_lookup, payload.scenario_id, payload.model_dump(exclude={'scenario_id'}))
 
     return app
 

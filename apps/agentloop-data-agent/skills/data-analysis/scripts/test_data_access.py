@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -163,6 +164,71 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(result["query_id"], self.store.audits[0]["run_id"])
         self.assertEqual(result["dataset"]["rows"], [{"amount": 2300}])
         self.assertIsNone(self.store.current)
+
+    def test_probe_values_returns_source_bound_observation(self):
+        result = self.gateway.probe_values('group', 'staff', 'amount', 3)
+        self.assertEqual(result['schema'], 'nl2sql.value-probe/v1')
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['source_id'], 'staff')
+        self.assertEqual(result['field'], 'amount')
+        self.assertEqual(result['semantic_binding']['scope']['source_id'], 'staff')
+        self.assertNotIn('global_coverage', result)
+        self.assertIn('GROUP BY', self.calls[-1][0])
+
+    def test_scoped_probe_observes_period_shapes_without_mixing_entities_or_metrics(self):
+        original = self.store.load_config
+        def config():
+            value = original()
+            value['tables'][0]['columns'] = [{'name': name} for name in
+                ('account', 'item', 'period', 'time_type', 'unit')]
+            return value
+        self.store.load_config = config
+        with sqlite3.connect(':memory:') as db:
+            db.row_factory = sqlite3.Row
+            db.execute("ATTACH DATABASE ':memory:' AS `group`")
+            db.execute('CREATE TABLE `group`.staff (account TEXT, item TEXT, period TEXT, time_type TEXT, unit TEXT)')
+            db.executemany('INSERT INTO `group`.staff VALUES (?,?,?,?,?)', [
+                ('A', '利润', '202601', 'M', '元/吨'),
+                ('A', '利润', '202601', 'M', '元/吨'),
+                ('A', '利润', '20260101', 'D', '元/吨'),
+                ('B', '利润', '20260102', 'D', '万元'),
+                ('A', '成本', '202501', 'M', '元/吨'),
+            ])
+            def execute(sql, params, config):
+                rows = [dict(row) for row in db.execute(sql.replace('%s', '?'), params)]
+                return {'rows': rows, 'row_count': len(rows)}
+            self.gateway.execute = execute
+            filters = [{'field': 'account', 'operator': 'eq', 'values': ['A']},
+                       {'field': 'item', 'operator': 'in', 'values': ['利润']}]
+            options = {'filters': filters, 'group_by': ['time_type', 'unit']}
+            with tempfile.TemporaryDirectory() as temporary, patch.object(data_client, 'load_gateway', return_value=self.gateway), redirect_stdout(io.StringIO()):
+                output = Path(temporary) / 'probe.json'
+                code = data_client.main(['probe-values', '--scenario-id', 'group', '--source-id', 'staff',
+                                        '--field', 'period', '--limit', '10',
+                                        '--request-json', json.dumps(options), '--output', str(output)])
+                result = json.loads(output.read_text())
+            self.assertEqual(code, 0)
+            self.assertEqual(result['values'], [
+                {'value': '202601', 'time_type': 'M', 'unit': '元/吨', 'frequency': 2},
+                {'value': '20260101', 'time_type': 'D', 'unit': '元/吨', 'frequency': 1},
+            ])
+            self.assertEqual(result['filters'], filters)
+            self.assertEqual(result['evidence']['params'], ['A', '利润'])
+            self.assertEqual(result['semantic_binding']['status'], 'observed_only')
+            self.assertFalse(result['truncated'])
+
+    def test_probe_refuses_unknown_fields_sql_fragments_and_unbounded_options(self):
+        for options in (
+            {'sql': 'SELECT amount FROM staff'},
+            {'group_by': ['unknown']},
+            {'group_by': ['a', 'b', 'c', 'd']},
+            {'filters': [{'field': 'amount; DROP TABLE staff', 'operator': 'eq', 'values': [1]}]},
+            {'filters': [{'field': 'amount', 'operator': 'raw', 'values': [1]}]},
+            {'filters': [{'field': 'amount', 'operator': 'eq', 'values': [1, 2]}]},
+        ):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self.gateway.probe_values('group', 'staff', 'amount', 3, options)
+        self.assertEqual(self.calls, [])
 
     def test_rejection_and_driver_failure_are_distinct_from_empty_success(self):
         for error, status in [(PolicyError("Only SELECT"), "rejected"), (RuntimeError("password=SECRET"), "failed")]:

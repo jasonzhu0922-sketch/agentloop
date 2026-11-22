@@ -73,7 +73,7 @@ async function verifyIncrementalTechnicalDetails() {
   } finally { await page.close(); }
 }
 
-async function verifyArtifactDownloads() {
+async function verifyArtifactWorkspace() {
   const page = await browser.newPage({ viewport: { width: 1000, height: 700 } });
   const createdAt = Date.now();
   const runs = [
@@ -88,10 +88,13 @@ async function verifyArtifactDownloads() {
     if (url.pathname === '/api/sample-questions') { await respond({ questions: [] }); return; }
     if (url.pathname === '/api/conversations') { await respond({ conversations: [{ id: 'artifact-conversation', title: '附件验证' }] }); return; }
     if (url.pathname === '/api/conversations/artifact-conversation') { await respond({ id: 'artifact-conversation', title: '附件验证', runs }); return; }
-    if (url.pathname === '/api/runs/file-run') { await respond({ run: runs[0], humanLoop: null, events: [], artifacts: [{ id: 'artifact-1', name: '经营报告.xlsx', bytes: 4096, role: 'final' }] }); return; }
+    if (url.pathname === '/api/runs/file-run') { await respond({ run: runs[0], humanLoop: null, events: [], artifacts: [{ id: 'artifact-1', name: '经营报告.html', bytes: 4096, mimeType: 'text/html', role: 'final' }] }); return; }
     if (url.pathname === '/api/runs/plain-run') { await respond({ run: runs[1], humanLoop: null, events: [], artifacts: [] }); return; }
+    if (url.pathname === '/api/runs/file-run/artifacts/artifact-1/content') {
+      await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: '<!doctype html><title>经营报告</title><h1>经营报告预览</h1>' }); return;
+    }
     if (url.pathname === '/api/runs/file-run/artifacts/artifact-1/download') {
-      await route.fulfill({ status: 200, headers: { 'Content-Type': 'application/octet-stream', 'Content-Disposition': "attachment; filename=report.xlsx; filename*=UTF-8''report.xlsx" }, body: 'xlsx-test' }); return;
+      await route.fulfill({ status: 200, headers: { 'Content-Type': 'application/octet-stream', 'Content-Disposition': "attachment; filename=report.html; filename*=UTF-8''report.html" }, body: '<h1>经营报告预览</h1>' }); return;
     }
     await route.abort();
   });
@@ -100,12 +103,23 @@ async function verifyArtifactDownloads() {
     await page.getByRole('button', { name: '附件验证' }).click();
     const fileRun = page.locator('[data-run-id="file-run"]');
     const plainRun = page.locator('[data-run-id="plain-run"]');
-    await fileRun.locator('.answer-artifact').waitFor();
-    assert.equal(await fileRun.locator('.answer-artifact').count(), 1);
-    assert.match(await fileRun.locator('.answer-artifact').textContent(), /经营报告\.xlsx/);
-    assert.equal(await plainRun.locator('.answer-artifact').count(), 0);
-    const href = await fileRun.locator('.answer-artifact').getAttribute('href');
+    const artifact = fileRun.locator('[data-artifact-id="artifact-1"]');
+    await artifact.waitFor();
+    assert.equal(await fileRun.locator('[data-artifact-id]').count(), 1);
+    assert.match(await artifact.textContent(), /经营报告\.html/);
+    assert.equal(await plainRun.locator('[data-artifact-id]').count(), 0);
+    await artifact.click();
+    assert.equal(await page.locator('#details').isVisible(), true);
+    assert.equal(await page.locator('#artifact-title').textContent(), '经营报告.html');
+    await page.locator('#artifact-preview iframe.preview-html').waitFor();
+    const previewSrc = await page.locator('#artifact-preview iframe.preview-html').getAttribute('src');
+    assert.equal(previewSrc, '/api/runs/file-run/artifacts/artifact-1/content');
+    const href = await page.locator('#artifact-download').getAttribute('href');
     assert.equal(href, '/api/runs/file-run/artifacts/artifact-1/download');
+    await page.locator('#artifact-maximize').click();
+    assert.equal(await page.locator('#details').getAttribute('class'), 'artifact-workspace maximized');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#details').isHidden(), true);
     let requestedDownload = false;
     await page.route('**/api/runs/file-run/artifacts/artifact-1/download', async route => {
       requestedDownload = true;
@@ -113,13 +127,13 @@ async function verifyArtifactDownloads() {
     });
     await page.evaluate(path => fetch(path), href);
     assert.equal(requestedDownload, true);
-    console.log('Artifact download browser check passed.');
+    console.log('Artifact preview and download browser check passed.');
   } finally { await page.close(); }
 }
 
 try {
   await verifyIncrementalTechnicalDetails();
-  await verifyArtifactDownloads();
+  await verifyArtifactWorkspace();
   if (process.env.DATA_AGENT_SKIP_LIVE_BROWSER === '1') {
     console.log('Mock browser checks passed; live database check skipped by DATA_AGENT_SKIP_LIVE_BROWSER.');
   } else {

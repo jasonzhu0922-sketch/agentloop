@@ -189,6 +189,7 @@ async function body(request: IncomingMessage): Promise<Record<string, unknown>> 
 export function createChatServer(agent: DataAgent, options: {
   webRoot: string; models: readonly { key: string; displayName: string }[]; defaultModelKey: string;
   settings?: SettingsService;
+  onShutdown?: () => void;
 }) {
   const session = randomBytes(32).toString("hex");
   const mcp = createMcpService({ agent, defaultModelKey: options.settings?.models.defaultModelKey ?? options.defaultModelKey,
@@ -197,15 +198,23 @@ export function createChatServer(agent: DataAgent, options: {
     "/": ["index.html", "text/html; charset=utf-8"],
     "/app.js": ["app.js", "text/javascript; charset=utf-8"],
     "/markdown.js": ["markdown.js", "text/javascript; charset=utf-8"],
+    "/artifact-preview.js": ["artifact-preview.js", "text/javascript; charset=utf-8"],
+    "/artifact-preview.css": ["artifact-preview.css", "text/css; charset=utf-8"],
+    "/artifact-workspace.js": ["artifact-workspace.js", "text/javascript; charset=utf-8"],
+    "/artifact-workspace.css": ["artifact-workspace.css", "text/css; charset=utf-8"],
     "/style.css": ["style.css", "text/css; charset=utf-8"],
     "/settings": ["settings.html", "text/html; charset=utf-8"],
     "/settings.js": ["settings.js", "text/javascript; charset=utf-8"],
     "/settings.css": ["settings.css", "text/css; charset=utf-8"],
+    "/table-settings.js": ["table-settings.js", "text/javascript; charset=utf-8"],
+    "/table-settings.css": ["table-settings.css", "text/css; charset=utf-8"],
+    "/definitions-settings.js": ["definitions-settings.js", "text/javascript; charset=utf-8"],
+    "/definitions-settings.css": ["definitions-settings.css", "text/css; charset=utf-8"],
   };
   return createServer(async (request, response) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "no-referrer");
-    response.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    response.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
       const port = (response.socket?.localPort ?? 0).toString();
       if (!["127.0.0.1", "localhost"].some(host => request.headers.host === `${host}:${port}`)) {
@@ -230,6 +239,14 @@ export function createChatServer(agent: DataAgent, options: {
       if (request.method === "GET" && url.pathname === "/api/config") {
         json(response, 200, { title: "经营问数", skill: "data-analysis", scenario: "group", models: options.settings?.models.registry.modelCatalog() ?? options.models,
           defaultModelKey: options.settings?.models.defaultModelKey ?? options.defaultModelKey }); return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/shutdown") {
+        await body(request);
+        if (!options.onShutdown) throw new AppError("NOT_FOUND", "关闭接口未启用", 404);
+        json(response, 202, { stopping: true });
+        const timer = setTimeout(() => options.onShutdown?.(), 25);
+        timer.unref();
+        return;
       }
       if (request.method === "GET" && url.pathname === "/api/mcp/server") {
         json(response, 200, mcp.describe(origin)); return;
@@ -309,24 +326,30 @@ export function createChatServer(agent: DataAgent, options: {
         };
         json(response, 202, { run: await agent.start(message) }); return;
       }
-      const artifactDownload = url.pathname.match(/^\/api\/runs\/([^/]+)\/artifacts\/([^/]+)\/download$/);
-      if (request.method === "GET" && artifactDownload) {
-        const runId = decodeURIComponent(artifactDownload[1]);
-        const artifactId = decodeURIComponent(artifactDownload[2]);
+      const artifactRoute = url.pathname.match(/^\/api\/runs\/([^/]+)\/artifacts(?:\/([^/]+)\/(content|preview|download))?$/);
+      if (request.method === "GET" && artifactRoute) {
+        const runId = decodeURIComponent(artifactRoute[1]);
+        if (!artifactRoute[2]) {
+          json(response, 200, { artifacts: await finalArtifacts(agent, runId) }); return;
+        }
+        const artifactId = decodeURIComponent(artifactRoute[2]);
         const artifact = (await finalArtifacts(agent, runId)).find(item => item.id === artifactId);
         if (!artifact) throw new AppError("NOT_FOUND", "交付文件不存在", 404);
+        if (artifactRoute[3] === "preview") {
+          json(response, 200, await agent.runs.previewProcessArtifact(OWNER, runId, artifactId)); return;
+        }
         const { content } = await agent.runs.readProcessArtifact(OWNER, runId, artifactId);
-        response.writeHead(200, {
-          "Content-Type": "application/octet-stream",
-          "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(artifact.name)}`,
-          "Content-Security-Policy": "sandbox; default-src 'none'",
-          "Cache-Control": "no-store",
-        });
+        if (artifactRoute[3] === "download") {
+          response.writeHead(200, { "Content-Type": "application/octet-stream", "Cache-Control": "no-store",
+            "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(artifact.name)}`,
+            "Content-Security-Policy": "sandbox; default-src 'none'" });
+        } else {
+          // Run HTML in an opaque origin: it cannot read the parent page,
+          // cookies or APIs even when its own inline presentation code runs.
+          response.writeHead(200, { "Content-Type": artifact.mimeType, "Cache-Control": "no-store", "Content-Disposition": "inline",
+            "Content-Security-Policy": "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'" });
+        }
         response.end(content); return;
-      }
-      const artifactList = url.pathname.match(/^\/api\/runs\/([^/]+)\/artifacts$/);
-      if (request.method === "GET" && artifactList) {
-        json(response, 200, { artifacts: await finalArtifacts(agent, decodeURIComponent(artifactList[1])) }); return;
       }
       const route = url.pathname.match(/^\/api\/runs\/([^/]+)(?:\/(cancel|human-loop))?$/);
       if (route) {

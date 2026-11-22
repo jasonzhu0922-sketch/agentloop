@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>经营问数 · AgentLoop</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/artifact-preview.css">
+  <link rel="stylesheet" href="/artifact-workspace.css">
   <script type="module" src="/app.js"></script>
 </head>
 <body>
@@ -34,8 +36,22 @@
       <form id="composer"><label class="sr-only" for="prompt">输入业务问题</label><textarea id="prompt" placeholder="输入你的业务问题，例如：比较近三个月的经营指标…" rows="2" maxlength="20000" required></textarea>
         <div class="composer-bottom"><span id="status">从真实业务数据开始</span><button id="stop" type="button" hidden>停止</button><button id="send" type="submit" aria-label="发送问题">发送 ↑</button></div>
       </form>
-      <p class="footnote">答案依据当前业务目录与查询结果 · 有歧义时会向你确认</p>
+      <p class="footnote">答案依据当前业务目录与查询结果 · 系统会先自主查证，确需业务选择时再向你确认</p>
     </div>
   </main>
+  <aside id="details" class="artifact-workspace" aria-label="产物预览" hidden>
+    <div class="details-head">
+      <div class="artifact-heading"><strong id="artifact-title">产物预览</strong><small id="artifact-subtitle">选择回复中的产物进行预览</small></div>
+      <div class="artifact-head-actions">
+        <a id="artifact-download" class="artifact-head-button" hidden>下载</a>
+        <button id="artifact-maximize" class="artifact-head-button" type="button" aria-label="最大化产物区" aria-pressed="false">⛶</button>
+        <button id="artifact-close" class="artifact-head-button" type="button" aria-label="关闭产物预览">×</button>
+      </div>
+    </div>
+    <div class="artifact-workspace-body">
+      <div id="artifact-preview" class="desktop-artifact-preview" hidden></div>
+      <section class="desktop-artifact-picker"><h2>最终产物</h2><div id="artifacts" class="artifact-empty"></div></section>
+    </div>
+  </aside>
 </body>
 </html>

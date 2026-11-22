@@ -4,6 +4,7 @@ from contextlib import contextmanager, redirect_stdout
 from copy import deepcopy
 import io
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -14,7 +15,8 @@ import httpx
 import data_client
 from data_access import Gateway
 from data_api import create_app
-from entity_binding import validate_plan, EntityBindingError
+from entity_binding import validate_plan, EntityBindingError, context_identifier
+from catalog_knowledge import table_signature
 from test_catalog_knowledge import fixture
 
 
@@ -71,16 +73,47 @@ class QueryConstraintsTest(unittest.TestCase):
             plan['entity_bindings'] = resolved['query_plan']['entity_bindings']
         return plan
 
-    def rejected(self, sql, params, code, plan=None):
+    def rejected(self, sql, params, code, plan=None, recovery='repair_plan_once'):
         plan = self.plan() if plan is None else plan
         before = len(self.executions)
         result = self.gateway.execute_sql('group', sql, params, plan)
         self.assertEqual(result['status'], 'rejected', result)
         self.assertEqual(result['error']['diagnostic']['code'], code)
         self.assertEqual(result['error']['diagnostic']['phase'], 'query.plan')
+        self.assertEqual(result['error']['diagnostic']['human_loop_allowed'], False)
+        self.assertEqual(result['error']['diagnostic']['recovery'], recovery)
         self.assertNotIn('dataset', result)
         self.assertEqual(len(self.executions), before)
         self.assertEqual(self.audits[-1]['reason'], code)
+
+    def test_direct_term_binding_enforces_saved_filters_and_source_value(self):
+        self.config['terms'].append({'id': 'direct_term', 'term': '在岗原值', 'meaning': '报表原始人数',
+            'data_bindings': [{'id': 'actual', 'kind': 'direct', 'source_id': 'staff_report',
+                              'value_field': 'amount', 'filters': [
+                                  {'field': 'item', 'operator': 'eq', 'values': ['在岗员工人数']}]}]})
+        plan = self.plan()
+        plan['metric_bindings'] = []
+        plan['term_bindings'] = [{'term_id': 'direct_term', 'binding_id': 'actual'}]
+        result = self.gateway.execute_sql('group', self.sql.replace('SUM(amount)', 'amount'), self.params, plan)
+        self.assertEqual(result['status'], 'completed', result)
+        self.assertEqual(result['plan_verification']['term_checks'][0]['definition']['value_field'], 'amount')
+        self.rejected(self.sql.replace(' AND item=%s', ''), [self.params[0], *self.params[2:]],
+                      'definition_filter_mismatch', plan)
+        self.rejected(self.sql.replace('item=%s', 'item IN (%s,%s)'),
+                      [*self.params[:2], '离岗人数', *self.params[2:]], 'definition_filter_mismatch', plan)
+        self.rejected(self.sql.replace('SUM(amount)', 'COUNT(*)'), self.params, 'term_sql_mismatch', plan)
+        self.config['terms'][-1]['status'] = 'stale'
+        plan['catalog_revision'] = self.gateway.catalog('group')['catalog_revision']
+        self.rejected(self.sql, self.params, 'term_data_binding_invalid', plan)
+
+    def test_calculated_metric_enforces_structured_filters(self):
+        metric = self.config['metrics'][0]
+        del metric['project']
+        metric['filters'] = [{'field': 'item', 'operator': 'eq', 'values': ['在岗员工人数']}]
+        result = self.gateway.execute_sql('group', self.sql, self.params, self.plan())
+        self.assertEqual(result['status'], 'completed', result)
+        self.rejected(self.sql.replace(' AND item=%s', ''), [self.params[0], *self.params[2:]],
+                      'definition_filter_mismatch')
 
     def test_combined_plan_filters_real_rows_and_retains_definitions_and_evidence(self):
         plan = self.plan(entity=True)
@@ -93,6 +126,179 @@ class QueryConstraintsTest(unittest.TestCase):
         self.assertEqual(verification['metric_checks'][0]['definition'], self.config['metrics'][0])
         self.assertEqual(verification['time_checks'][0]['storage_end'], '202603')
         self.assertIn('metric_expression', verification['agent_review_required'])
+
+    def test_compact_context_reference_expands_from_run_workspace(self):
+        plan = self.plan()
+        context_id = context_identifier(plan)
+        compact = {'context_id': context_id,
+                   'schema': plan['schema'], 'scenario_id': plan['scenario_id'],
+                   'catalog_revision': plan['catalog_revision'],
+                   'metric_bindings': plan['metric_bindings'],
+                   'time_bindings': plan['time_bindings']}
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'AGENTLOOP_WORKSPACE_ROOT': temporary}):
+            context_dir = Path(temporary) / '.data-agent-contexts'
+            context_dir.mkdir()
+            (context_dir / f'{context_id}.json').write_text(json.dumps({
+                'schema': 'nl2sql.query-context/v1', 'context_id': context_id,
+                'scenario_id': 'group', 'catalog_revision': self.gateway.catalog('group')['catalog_revision'],
+                'plan_seed': plan,
+            }), encoding='utf-8')
+            result = self.gateway.execute_sql('group', self.sql, self.params, compact)
+        self.assertEqual(result['status'], 'completed', result)
+        self.assertEqual(result['query_plan'], plan)
+
+    def test_full_query_context_envelope_extracts_plan_seed_before_outer_context_id(self):
+        plan = self.plan()
+        context_id = context_identifier(plan)
+        envelope = {
+            'schema': 'nl2sql.semantic-metadata/v1', 'operation': 'get-query-context',
+            'context_id': context_id, 'scenario_id': 'group',
+            'catalog_revision': plan['catalog_revision'], 'plan_seed': plan,
+            'tables': [{'name': 'wrapper-only metadata must not become a plan override'}],
+        }
+        self.assertEqual(data_client.query_plan_from_artifact(envelope), plan)
+
+    def test_missing_context_reference_is_a_bounded_plan_error(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'AGENTLOOP_WORKSPACE_ROOT': temporary}):
+            result = self.gateway.execute_sql('group', self.sql, self.params,
+                                              {'context_id': 'ctx_' + '0' * 64})
+        self.assertEqual(result['status'], 'rejected', result)
+        self.assertEqual(result['error']['diagnostic']['code'], 'query_context_missing')
+
+    def unresolved_period(self):
+        self.config['period_formats'] = []
+        self.config.setdefault('coverage', [])
+        self.config.setdefault('observed_probes', [])
+        self.config['tables'][0]['columns'][2]['format_status'] = 'ambiguous'
+        self.config['semantic_gaps'] = [{
+            'gap_id': 'period-format', 'code': 'time_format_unresolved', 'blocking': True,
+            'affected_refs': ['time:staff_report:period'], 'source_ids': ['staff_report']}]
+
+    def scoped_probe(self, limit=50):
+        return self.gateway.probe_values('group', 'staff_report', 'period', limit, {'filters': [
+            {'field': 'org_code', 'operator': 'eq', 'values': ['A']},
+            {'field': 'item', 'operator': 'eq', 'values': ['在岗员工人数']}], 'group_by': []})
+
+    def test_scoped_probe_reaches_execution_without_hil_or_global_catalog_change(self):
+        self.unresolved_period()
+        # Other organizations and metrics deliberately use incompatible encodings.
+        self.db.execute("INSERT INTO business.staff_report VALUES ('B','华南','2026-01-01','在岗员工人数',99)")
+        self.db.execute("INSERT INTO business.staff_report VALUES ('A','华北','unknown','离岗人数',99)")
+        before = deepcopy(self.config)
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'AGENTLOOP_WORKSPACE_ROOT': temporary}):
+            with patch('gateway.query_policy.allowed_relations', return_value={'business.staff_report', 'business.transactions'}), \
+                    patch.object(self.gateway, 'physical_catalog', side_effect=lambda raw, **kw: deepcopy(raw)):
+                context = self.gateway.knowledge('get-query-context', 'group', {
+                    'question': '华北员工人数', 'source_ids': ['staff_report']})
+            data_client.save_context_reference(context)
+            probe = self.scoped_probe()
+            plan = {'context_id': context['context_id'], 'probe_refs': [probe['probe_ref']],
+                    'time_bindings': self.plan()['time_bindings']}
+            result = self.gateway.execute_sql('group', self.sql, self.params, plan)
+        self.assertEqual(result['status'], 'completed', result)
+        self.assertEqual(result['dataset']['rows'], [{'value': 5.0}])
+        self.assertEqual(result['plan_verification']['probe_checks'][0]['status'], 'observed_only')
+        self.assertEqual(result['plan_verification']['time_checks'][0]['format'], '%Y%m')
+        self.assertNotIn('resolved_gap_refs', result['query_plan'])
+        self.assertEqual(self.config, before)
+
+    def test_probe_cannot_authorize_a_different_scope_or_an_or_bypass(self):
+        self.unresolved_period()
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'AGENTLOOP_WORKSPACE_ROOT': temporary}):
+            probe = self.scoped_probe()
+            plan = {**self.plan(), 'probe_refs': [probe['probe_ref']]}
+            for sql, params in [(self.sql, ['B', *self.params[1:]]),
+                                (self.sql.replace('org_code=%s AND ', ''), self.params[1:]),
+                                (self.sql + ' OR amount>0', self.params)]:
+                self.rejected(sql, params, 'probe_scope_mismatch', plan)
+
+    def test_truncation_null_and_mixed_formats_cannot_close_a_gap(self):
+        self.unresolved_period()
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'AGENTLOOP_WORKSPACE_ROOT': temporary}):
+            truncated = self.scoped_probe(limit=2)
+            self.rejected(self.sql, self.params, 'probe_incomplete',
+                          {**self.plan(), 'probe_refs': [truncated['probe_ref']]}, recovery='inspect_source')
+            for bad in (None, '2026-01-01', '202613'):
+                self.db.execute('INSERT INTO business.staff_report VALUES (?,?,?,?,?)',
+                                ('A', '华北', bad, '在岗员工人数', 100))
+                probe = self.scoped_probe()
+                self.rejected(self.sql, self.params, 'probe_encoding_unresolved',
+                              {**self.plan(), 'probe_refs': [probe['probe_ref']]}, recovery='inspect_source')
+                self.db.execute('DELETE FROM business.staff_report WHERE period IS ? AND amount=100', (bad,))
+
+    def test_probe_is_refreshed_and_cannot_hide_new_mixed_data(self):
+        self.unresolved_period()
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'AGENTLOOP_WORKSPACE_ROOT': temporary}):
+            probe = self.scoped_probe()
+            self.db.execute("INSERT INTO business.staff_report VALUES ('A','华北','2026-01-01','在岗员工人数',100)")
+            result = self.gateway.execute_sql('group', self.sql, self.params,
+                                             {**self.plan(), 'probe_refs': [probe['probe_ref']]})
+        self.assertEqual(result['status'], 'rejected', result)
+        self.assertEqual(result['error']['diagnostic']['code'], 'probe_encoding_unresolved')
+        self.assertNotIn('dataset', result)
+
+    def test_probe_cannot_be_tampered_or_used_after_catalog_changes(self):
+        self.unresolved_period()
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'AGENTLOOP_WORKSPACE_ROOT': temporary}):
+            probe = self.scoped_probe()
+            path = Path(temporary) / '.data-agent-contexts' / (probe['probe_ref'] + '.json')
+            original = path.read_text()
+            path.write_text(original.replace('202601', '202501'))
+            self.rejected(self.sql, self.params, 'probe_reference_invalid',
+                          {**self.plan(), 'probe_refs': [probe['probe_ref']]})
+            path.write_text(original)
+            self.config['terms'][0]['meaning'] += ' changed'
+            self.rejected(self.sql, self.params, 'probe_stale',
+                          {**self.plan(), 'probe_refs': [probe['probe_ref']]}, recovery='inspect_source')
+
+    def test_probe_does_not_resolve_a_business_gap(self):
+        self.unresolved_period()
+        self.config['semantic_model_version'] = 'nl2sql.semantic-model/v1'
+        self.config['semantic_gaps'].append({
+            'gap_id': 'metric-meaning', 'code': 'business_definition_missing', 'blocking': True,
+            'source_ids': ['staff_report'], 'affected_refs': ['source:staff_report']})
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'AGENTLOOP_WORKSPACE_ROOT': temporary}):
+            probe = self.scoped_probe()
+            catalog = self.gateway.catalog('group')
+            from catalog_knowledge import semantic_metadata
+            plan = {**self.plan(), 'probe_refs': [probe['probe_ref']],
+                    'semantic_model_version': catalog['semantic_model_version'],
+                    'semantic_bindings': [semantic_metadata(catalog, 'source', 'staff_report', 'staff_report')]}
+            result = self.gateway.execute_sql('group', self.sql, self.params, plan)
+        self.assertEqual(result['status'], 'rejected', result)
+        self.assertEqual(result['error']['diagnostic']['code'], 'semantic_gap_blocking')
+
+    def test_context_reference_rejects_tampered_workspace_plan(self):
+        plan = self.plan()
+        context_id = context_identifier(plan)
+        tampered = dict(plan)
+        tampered['catalog_revision'] = '0' * 64
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'AGENTLOOP_WORKSPACE_ROOT': temporary}):
+            context_dir = Path(temporary) / '.data-agent-contexts'
+            context_dir.mkdir()
+            (context_dir / f'{context_id}.json').write_text(json.dumps({
+                'schema': 'nl2sql.query-context/v1', 'context_id': context_id,
+                'plan_seed': tampered,
+            }), encoding='utf-8')
+            result = self.gateway.execute_sql('group', self.sql, self.params,
+                                              {'context_id': context_id})
+        self.assertEqual(result['status'], 'rejected', result)
+        self.assertEqual(result['error']['diagnostic']['code'], 'query_context_missing')
+
+    def test_context_reference_cannot_override_immutable_evidence(self):
+        plan = self.plan()
+        context_id = context_identifier(plan)
+        compact = {'context_id': context_id, 'source_signatures': {'staff_report': 'forged'}}
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'AGENTLOOP_WORKSPACE_ROOT': temporary}):
+            context_dir = Path(temporary) / '.data-agent-contexts'
+            context_dir.mkdir()
+            (context_dir / f'{context_id}.json').write_text(json.dumps({
+                'schema': 'nl2sql.query-context/v1', 'context_id': context_id,
+                'plan_seed': plan,
+            }), encoding='utf-8')
+            result = self.gateway.execute_sql('group', self.sql, self.params, compact)
+        self.assertEqual(result['status'], 'rejected', result)
+        self.assertEqual(result['error']['diagnostic']['code'], 'query_context_invalid')
 
     def test_wrong_project_and_bypasses_are_rejected_before_execution(self):
         for sql, params in [
@@ -149,10 +355,19 @@ class QueryConstraintsTest(unittest.TestCase):
         self.config['period_formats'] = []
         column = self.config['tables'][0]['columns'][2]
         column['description'] = '年月编码 YYYYMM，如202601'
-        self.rejected(self.sql, self.params, 'time_definition_missing')
+        self.rejected(self.sql, self.params, 'time_definition_missing', recovery='inspect_source')
         self.config['period_formats'] = fixture()['period_formats']
         plan = self.plan(); plan['time_bindings'][0]['start'] = '2026-01-02'
         self.rejected(self.sql, self.params, 'time_binding_invalid', plan)
+
+    def test_saving_a_format_draft_does_not_authorize_time_queries(self):
+        column = self.config['tables'][0]['columns'][2]
+        column.update(format='YYYYMM', granularity='month', format_status='provisional')
+        self.rejected(self.sql, self.params, 'time_definition_missing', recovery='inspect_source')
+        column['format_status'] = 'confirmed'
+        result = self.gateway.execute_sql('group', self.sql, self.params, self.plan())
+        self.assertEqual(result['status'], 'completed', result)
+        self.assertEqual(result['dataset']['rows'], [{'value': 5.0}])
 
     def test_native_date_boundary_casts_are_checked_without_claiming_formula_verification(self):
         self.config['period_formats'] = []
@@ -177,6 +392,52 @@ class QueryConstraintsTest(unittest.TestCase):
                 with self.assertRaises(EntityBindingError) as error:
                     validate_plan(catalog, self.sql, self.params, plan)
                 self.assertEqual(error.exception.code, 'time_sql_mismatch')
+
+    def test_field_level_format_is_authoritative_for_string_dates(self):
+        self.config['period_formats'] = []
+        self.config['tables'][0]['columns'][2].update(format='YYYYMMDD', granularity='day', type='varchar(8)')
+        plan = self.plan()
+        catalog = self.gateway.catalog('group', ['staff_report'])
+        sql = self.sql
+        params = ['A', '在岗员工人数', '20260101', '20260301']
+        verified = validate_plan(catalog, sql, params, plan)
+        self.assertEqual(verified['time_checks'][0]['format'], '%Y%m%d')
+        self.assertEqual(verified['time_checks'][0]['storage_start'], '20260101')
+        self.config['tables'][0]['columns'][2]['format'] = 'YYYY-MM-DD'
+        plan = self.plan()
+        with self.assertRaises(EntityBindingError) as error:
+            validate_plan(self.gateway.catalog('group', ['staff_report']), sql, params, plan)
+        self.assertEqual(error.exception.code, 'time_sql_mismatch')
+
+    def test_time_binding_storage_metadata_is_checked_but_not_treated_as_unknown_field(self):
+        plan = self.plan()
+        plan['time_bindings'][0].update(format='YYYYMM', granularity='month')
+        verified = validate_plan(self.gateway.catalog('group', ['staff_report']), self.sql, self.params, plan)
+        self.assertEqual(verified['time_checks'][0]['format'], '%Y%m')
+        plan['time_bindings'][0]['format'] = 'YYYY-MM'
+        with self.assertRaises(EntityBindingError) as error:
+            validate_plan(self.gateway.catalog('group', ['staff_report']), self.sql, self.params, plan)
+        self.assertEqual(error.exception.code, 'time_definition_conflict')
+
+    def test_multiple_period_variants_require_and_verify_selected_variant(self):
+        self.config['period_formats'] = [
+            {'source_id': 'staff_report', 'field': 'period', 'variant_id': 'month_compact',
+             'format': '%Y%m', 'granularity': 'month', 'status': 'confirmed'},
+            {'source_id': 'staff_report', 'field': 'period', 'variant_id': 'day_compact',
+             'format': '%Y%m%d', 'granularity': 'day', 'status': 'confirmed'},
+        ]
+        plan = self.plan()
+        catalog = self.gateway.catalog('group', ['staff_report'])
+        with self.assertRaises(EntityBindingError) as error:
+            validate_plan(catalog, self.sql, self.params, plan)
+        self.assertEqual(error.exception.code, 'time_variant_required')
+        plan['time_bindings'][0]['variant_id'] = 'month_compact'
+        verified = validate_plan(catalog, self.sql, self.params, plan)
+        self.assertEqual(verified['time_checks'][0]['definition']['variant_id'], 'month_compact')
+        plan['time_bindings'][0]['variant_id'] = 'day_compact'
+        with self.assertRaises(EntityBindingError) as error:
+            validate_plan(catalog, self.sql, self.params, plan)
+        self.assertEqual(error.exception.code, 'time_sql_mismatch')
 
     def test_metric_without_project_has_only_definition_verification(self):
         self.config['metrics'][0].pop('project')
@@ -211,6 +472,76 @@ class QueryConstraintsTest(unittest.TestCase):
         plan = self.plan(); plan.pop('time_bindings'); plan.pop('metric_bindings')
         self.rejected(self.sql, self.params, 'query_plan_invalid', plan)
 
+    def test_plan_shape_diagnostic_names_unknown_fields_and_missing_semantic_fields(self):
+        plan = self.plan()
+        plan['resolution_notes'] = [{'gap_id': 'example'}]
+        with self.assertRaises(EntityBindingError) as error:
+            validate_plan(self.gateway.catalog('group'), self.sql, self.params, plan)
+        self.assertEqual(error.exception.code, 'query_plan_invalid')
+        self.assertIn('resolution_notes', str(error.exception))
+
+        config = fixture()
+        config['semantic_model_version'] = 'nl2sql.semantic-model/v1'
+        original = self.config
+        self.config = config
+        try:
+            plan = self.plan()
+            plan.update({
+                'semantic_model_version': config['semantic_model_version'],
+                'source_signatures': {'staff_report': 'fixture-signature'},
+                'semantic_bindings': [{'kind': 'source', 'source_id': 'staff_report', 'id': 'staff_report'}],
+            })
+            with self.assertRaises(EntityBindingError) as error:
+                validate_plan(self.gateway.catalog('group'), self.sql, self.params, plan)
+            self.assertEqual(error.exception.code, 'semantic_binding_invalid')
+            self.assertIn('definition_ref', str(error.exception))
+        finally:
+            self.config = original
+
+    def test_period_column_binding_satisfies_time_binding(self):
+        """A context field binding must not be rebuilt as a second kind=time object."""
+        config = fixture()
+        config['semantic_model_version'] = 'nl2sql.semantic-model/v1'
+        original = self.config
+        self.config = config
+        try:
+            catalog = self.gateway.catalog('group', ['staff_report'])
+            revision = catalog['catalog_revision']
+            source = {
+                'kind': 'source', 'source_id': 'staff_report', 'id': 'staff_report',
+                'definition_ref': {'kind': 'source', 'source_id': 'staff_report',
+                                   'id': 'staff_report', 'catalog_revision': revision},
+                'scope': {'kind': 'source', 'scenario_id': 'group', 'source_id': 'staff_report'},
+                'status': 'confirmed', 'evidence': ['fixture'], 'gaps': [],
+            }
+            metric = {
+                'kind': 'metric', 'source_id': 'staff_report', 'id': 'headcount',
+                'definition_ref': {'kind': 'metric', 'source_id': 'staff_report',
+                                   'id': 'headcount', 'catalog_revision': revision},
+                'scope': {'kind': 'source', 'scenario_id': 'group', 'source_id': 'staff_report'},
+                'status': 'confirmed', 'evidence': ['fixture'], 'gaps': [],
+            }
+            period_column = {
+                'kind': 'column', 'source_id': 'staff_report', 'id': 'period',
+                'semantic_role': 'period',
+                'definition_ref': {'kind': 'column', 'source_id': 'staff_report',
+                                   'id': 'period', 'catalog_revision': revision},
+                'scope': {'kind': 'source', 'scenario_id': 'group', 'source_id': 'staff_report'},
+                'status': 'confirmed', 'evidence': ['fixture'], 'gaps': [],
+            }
+            plan = self.plan()
+            plan.update({
+                'catalog_revision': revision,
+                'source_signatures': {'staff_report': table_signature(catalog['tables'][0])},
+                'semantic_model_version': config['semantic_model_version'],
+                'semantic_bindings': [source, metric, period_column],
+            })
+            result = self.gateway.execute_sql('group', self.sql, self.params, plan)
+            self.assertEqual(result['status'], 'completed', result)
+            self.assertEqual(result['plan_verification']['time_checks'][0]['status'], 'verified')
+        finally:
+            self.config = original
+
     def test_same_inline_plan_runs_through_cli_and_http_with_unambiguous_file_pointers(self):
         body = {'sql': self.sql, 'params': self.params, 'query_plan': self.plan()}
         with tempfile.TemporaryDirectory() as directory:
@@ -232,6 +563,85 @@ class QueryConstraintsTest(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()['plan_verification'], saved['plan_verification'])
         asyncio.run(check())
+
+    def test_cli_unwraps_a_saved_execute_request_before_plan_validation(self):
+        """A wrapper artifact must not cause a second query_plan repair turn."""
+        body = {'sql': self.sql, 'params': self.params, 'query_plan': self.plan()}
+        with tempfile.TemporaryDirectory() as directory, patch.object(data_client, 'load_gateway', return_value=self.gateway):
+            request_file = Path(directory) / 'request.json'
+            output = Path(directory) / 'result.json'
+            request_file.write_text(json.dumps(body, ensure_ascii=False))
+            with redirect_stdout(io.StringIO()) as stream:
+                code = data_client.main(['execute', '--scenario-id', 'group',
+                                         '--request-json', json.dumps({'sql': self.sql, 'params': self.params}),
+                                         '--query-plan', str(request_file), '--output', str(output)])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.read_text())['plan_verification']['status'], 'verified')
+            self.assertEqual(json.loads(stream.getvalue())['plan_verification']['status'], 'verified')
+
+    def test_cli_unwraps_get_query_context_plan_seed(self):
+        body = {'sql': self.sql, 'params': self.params,
+                'plan_seed': self.plan()}
+        with tempfile.TemporaryDirectory() as directory, patch.object(data_client, 'load_gateway', return_value=self.gateway):
+            context_file = Path(directory) / 'query_context.json'
+            output = Path(directory) / 'result.json'
+            context_file.write_text(json.dumps(body, ensure_ascii=False))
+            with redirect_stdout(io.StringIO()):
+                code = data_client.main(['execute', '--scenario-id', 'group',
+                                         '--request-json', json.dumps({'sql': self.sql, 'params': self.params}),
+                                         '--query-plan', str(context_file), '--output', str(output)])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.read_text())['plan_verification']['status'], 'verified')
+
+    def test_cli_unwraps_inline_query_context_plan_seed(self):
+        body = {'sql': self.sql, 'params': self.params,
+                'query_plan': {'plan_seed': self.plan(), 'ui_note': 'wrapper metadata'}}
+        with tempfile.TemporaryDirectory() as directory, patch.object(data_client, 'load_gateway', return_value=self.gateway):
+            output = Path(directory) / 'result.json'
+            with redirect_stdout(io.StringIO()):
+                code = data_client.main(['execute', '--scenario-id', 'group',
+                                         '--request-json', json.dumps(body), '--output', str(output)])
+            self.assertEqual(code, 0)
+            result = json.loads(output.read_text())
+            self.assertEqual(result['plan_verification']['status'], 'verified')
+            self.assertEqual(result['query_plan'], self.plan())
+
+    def test_cli_merges_bindings_appended_to_get_query_context_seed(self):
+        seed = deepcopy(self.plan())
+        seed['metric_bindings'] = []
+        seed['time_bindings'] = []
+        artifact = {
+            'plan_seed': seed,
+            'metric_bindings': self.plan()['metric_bindings'],
+            'time_bindings': self.plan()['time_bindings'],
+            'ui_note': 'ignored context metadata',
+        }
+        with tempfile.TemporaryDirectory() as directory, patch.object(data_client, 'load_gateway', return_value=self.gateway):
+            context_file = Path(directory) / 'query_context.json'
+            output = Path(directory) / 'result.json'
+            context_file.write_text(json.dumps(artifact, ensure_ascii=False))
+            with redirect_stdout(io.StringIO()):
+                code = data_client.main(['execute', '--scenario-id', 'group',
+                                         '--request-json', json.dumps({'sql': self.sql, 'params': self.params}),
+                                         '--query-plan', str(context_file), '--output', str(output)])
+            self.assertEqual(code, 0)
+            result = json.loads(output.read_text())
+            self.assertEqual(result['plan_verification']['status'], 'verified')
+            self.assertEqual(result['query_plan']['metric_bindings'], self.plan()['metric_bindings'])
+            self.assertEqual(result['query_plan']['time_bindings'], self.plan()['time_bindings'])
+
+    def test_cli_reads_workspace_request_json_alias(self):
+        body = {'sql': self.sql, 'params': self.params, 'query_plan': self.plan()}
+        with tempfile.TemporaryDirectory() as directory, patch.object(data_client, 'load_gateway', return_value=self.gateway), \
+                patch.dict(data_client.os.environ, {'AGENTLOOP_WORKSPACE_ROOT': directory}):
+            request_file = Path(directory) / 'request.json'
+            output = Path(directory) / 'result.json'
+            request_file.write_text(json.dumps(body, ensure_ascii=False))
+            with redirect_stdout(io.StringIO()):
+                code = data_client.main(['execute', '--scenario-id', 'group',
+                                         '--request-json', '@workspace/request.json', '--output', str(output)])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.read_text())['plan_verification']['status'], 'verified')
 
 
 if __name__ == '__main__':

@@ -53,6 +53,32 @@ class SqlEvidence:
                     where = scope.expression.args.get('where')
                     yield alias, where.this if where else None, len(sources) == 1
 
+    def references(self, table, field):
+        """Return whether a parsed query references ``table.field``.
+
+        This is used to scope source-level semantic gaps. A gap attached to a
+        period field must remain blocking when that field participates in the
+        query, but must not block a query that only reads other dimensions.
+        Parsing here keeps the decision independent of quoted identifiers,
+        aliases, comments, and string literals.
+        """
+        for scope in self.scopes:
+            sources = {alias: pair[1] for alias, pair in scope.selected_sources.items()}
+            matching = [(alias, source) for alias, source in sources.items()
+                        if (isinstance(source, exp.Table)
+                            and source.name.lower() == table['name'].lower()
+                            and (source.db or '').lower() == table['schema'].lower())]
+            if not matching:
+                continue
+            aliases = {alias.lower() for alias, _ in matching}
+            single = len(sources) == 1
+            for column in scope.expression.find_all(exp.Column):
+                if column.name.lower() != field.lower():
+                    continue
+                if not column.table or column.table.lower() in aliases or single:
+                    return True
+        return False
+
     def parameter(self, node):
         if isinstance(node, exp.Placeholder) and node.name.startswith('__bound_param_'):
             return self.params[int(node.name[len('__bound_param_'):])]
@@ -83,6 +109,26 @@ class SqlEvidence:
             values = [value(n) for n in node.expressions]
             if values and all(v is not None for v in values):
                 return set(values)
+        return None
+
+    def pattern_selector(self, node, alias, key, single):
+        """Return parameterized LIKE patterns applied to one physical field."""
+        def value(n):
+            parameter = self.parameter(n)
+            return parameter if isinstance(parameter, str) and parameter else None
+        column = lambda n: self.column(n, alias, key, single)
+        if isinstance(node, exp.Paren):
+            return self.pattern_selector(node.this, alias, key, single)
+        if isinstance(node, (exp.And, exp.Or)):
+            left = self.pattern_selector(node.this, alias, key, single)
+            right = self.pattern_selector(node.expression, alias, key, single)
+            if isinstance(node, exp.Or):
+                return left | right if left is not None and right is not None else left or right
+            return right if left is None else left if right is None else left & right
+        if isinstance(node, exp.Like):
+            for left, right in ((node.this, node.expression), (node.expression, node.this)):
+                if column(left) and value(right) is not None:
+                    return {value(right)}
         return None
 
     def time_range(self, node, alias, key, single, canonical_value, allow_date_cast=False):

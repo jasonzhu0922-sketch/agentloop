@@ -3,66 +3,49 @@ name: data-analysis
 description: 面向集团经营分析（group），查询分析财务报表、经营指标实际与计划、人力月报、钢联行情和采购合同；支持指标问数、计划完成与差异分析、趋势、排名、分布和对比，按业务口径提供可追溯的数据与结论。仅访问 group 场景的已授权数据，不用于数据写入或数据库管理。
 ---
 
-# 数据查询与分析
+# 集团经营问数
 
-## 业务范围
+本 Skill 固定使用 `group` 场景，只能通过声明的 `scripts/data_client.py` 动作读取目录、探查和执行 SQL。禁止自行连接数据库、读取凭据、调用其他问数服务或运行临时脚本。完整证据保存在当前 Run；默认只向用户展示业务答案。
 
-- **集团经营分析（`group`）**：财务报表项目查询与组织、期间对比；经营指标实际值、计划值、完成情况与差异分析；人力月报项目及员工人数查询、趋势与组织对比；钢联行情指标和历史走势；采购合同数量、金额与分布分析。
+## 最短流程
 
-本 Skill 固定服务 `group`（集团经营分析）。实际可用表、指标、组织层级、时间粒度和关联关系以 group 的当前目录为准，不承诺目录未提供的指标。
+1. 调用一次 `retrieve-knowledge`，请求中使用用户原始问题。
+2. 优先使用回执中的 `model_summary` 选择来源、指标、实体、术语和歧义。只有 `more=true` 且所需候选确实缺失时，才分页读取保存的 JSON；不得为了看全而读取大文件或调用 `read_result`。
+3. 对选中的来源调用一次 `get-query-context`，同时传入已知的 `catalog_revision`、`metric_refs`、`term_refs` 和必要字段。优先使用其 `model_summary` 中的 `context_id`、表、列、指标和期间格式；摘要缺少写 SQL 所需字段时才读取上下文文件。
+4. 生成参数化、单条、只读、有限结果的 TiDB/MySQL SQL。聚合在数据库侧完成，不拉明细给模型自行汇总。
+5. 执行时首选在 `--request-json` 内传 `query_plan:{"context_id":"ctx_..."}`，不要同时传 `--query-plan`，也不要复制或重建 `plan_seed`。执行成功且结果直接回答问题时不要追加验证查询。
+6. 先给业务结论。单值问题通常一两句话；只补充会改变答案的期间、主体或口径。
 
-完整问数链路属于本 Skill，由当前 Agent 使用当前会话模型完成业务判断。包内包含目录读取、SQL 校验、场景隔离、只读执行、审计、结果保存和可选 HTTP 接口的全部实现；不依赖另一个项目的代码或服务，不启动另一套模型流程。不调用自然语言整链路 `/api/runs`、`/api/runs/stream` 或 MCP `query`。规划、SQL、修正、工具结果和结论保留在当前 Runtime Run 中。
+已有同版本上下文时直接复用，不重复检索。请求结构见 [输入契约](references/input-contract.md)，知识动作见 [检索契约](references/retrieval-contract.md)，业务绑定规则见 [规划与口径](references/planning.md)。仅在当前问题确实需要相应细节时读取这些 references。
 
-场景目录、指标、术语、关系、分析方法与查询审计均存于 TiDB；业务查询也直接访问 TiDB。数据源定义与凭据由宿主在 Skill 根目录 `connections.json` 配置，连接使用 `tidb://`。使用 Runtime 提供的 `python3` 直接执行本包 `scripts/data_client.py`；脚本沿用启动它的解释器，依赖见 `requirements.txt`。无需用户提供项目路径或设置 `NL2SQL_PROJECT_ROOT`。配置仅由脚本读取，不回显凭据，不要求用户粘贴连接密码。通常无需启动 HTTP 服务。
+## 自主查证与 HIL
 
-## 工作流
+- 知识未命中、多个候选、字段格式未知、样本编码混合或一次 SQL 失败，都先由系统查证，不直接询问用户。
+- 缺字段或定义时批量补取；实体名称用 `candidate-lookup` 查候选，确认规范名称时用 `resolve-entity`；字段实际编码用有界 `probe-values`。探查证据只适用于当前来源，不能升级为全局定义。
+- 用户已给出物理编码时可直接参数化过滤，不强制生成 `entity_bindings`。
+- 只有查证后仍存在多个合理业务解释、且不同选择会改变答案并必须由用户决定时，才请求结构化 HIL。
+- 技术错误读取 `error.diagnostic` 后针对性修复一次；相同命令、参数和错误组合不得重复提交。不得把故障说成没有数据。
 
-1. **直接使用集团经营分析。** 本 Skill 的场景范围已固定为 `group`，用户无需在提问中重复指定场景，也不再触发场景选择 HIL。目录、实体解析和 SQL 执行统一传 `--scenario-id group`；声明的执行动作已绑定该参数。若用户明确要求其他场景，说明当前 Skill 仅支持集团经营分析，不自行更换连接或扩展查询范围。实体、指标或口径有歧义时，仍按后续规则确认。
-2. **先检索知识并定位数据源。** 明确用户的指标、对象、期间和输出粒度，用 `retrieve-knowledge --scenario-id group --request-json '{"question":"原始问题"}' --output <workspace-file>` 检索 TiDB 中维护的业务目录；先看 `sources.items`、`terms`、`metrics.items`、`ambiguities/gaps`。**第一次检索后立即处理歧义：如果存在两个以上会改变指标、实体、期间、来源、聚合方式或 SQL 的合理候选，马上调用 `request_human_loop` 让用户选择；不要先继续读取元数据、尝试 SQL 或完成其他分析。** 结合术语解释、命中理由与业务适用范围选择候选表，检索结果不自动确认口径。需要扩展时使用 `search-tables`，找指标使用 `search-metrics/get-metrics`，查表内列使用 `search-columns/get-columns`；分页未读完不证明对象或指标不存在。选源后优先一次调用 `get-query-context`，请求含 `question`、`source_ids`、检索返回的 `catalog_revision`，使用正式指标时同时传 `metric_refs:[{source_id,metric_id}]`，需要特定字段时传 `columns:[{source_id,names:[字段名]}]`。该动作只核对选中表的真实结构，补齐指标依赖、实体、期间、关系与必要字段，返回完整定义、来源、表签名和 `plan_seed`。已有版本一致的上下文直接复用；缺少字段再批量补取，不读取全部表、全部列或全部定义。`stored_snapshot_only` 表示仅检索了维护目录，SQL 前使用 `selected_sources_live` 的上下文。表摘要、业务定义或字段缺失时按诊断核实；不要把未命中当成无数据。动作与 JSON 示例见 [知识检索与精准元数据接口](references/retrieval-contract.md)，业务解释见 [规划与口径](references/planning.md)。
-3. **制定领域计划。** 依据 [规划与口径](references/planning.md) 将问题绑定到表、字段、时间编码、指标公式、项目条件、组织编码和输出粒度；使用指标的 `expression/project/grain`、术语的 `meaning/aliases`、`entities` 和 `period_formats`，保留来源及核验状态。针对具体组织/对象问数时，把 `matched_terms` 中命中的术语解释成规范名称，使用 `resolve-entity` 按本表实体定义查证编码，将返回的 `query_plan` 随实际取数 SQL 提交（可用 `--query-plan <解析结果文件>`）；取数回执的 `plan_verification` 必须确认 SQL 的本表编码条件与所选编码一致。没有实体定义时按规划参考中的缺定义路径核查，不能伪造绑定。摘要线索不能覆盖人工口径或用户明确要求，目录可读不代表生成的 SQL 已满足定义。用户指标只有相近候选且选择会改变口径时，先通过结构化 HIL 确认，不静默替换指标。采用正式指标或明确期间时，在同一个 `query_plan` 加入 `metric_bindings` 和 `time_bindings`，随 SQL 同次提交；执行器按当前定义核对项目值与存储期间边界。从 `get-query-context.plan_seed` 继续领域绑定，原样保留 `catalog_revision/source_signatures`；仅采用正式指标时保留相应 `metric_bindings`，有具体对象和期间时再补实体及时间绑定。`period_formats` 是字段编码定义，不能直接复制为 `time_bindings`；查询最新月份这样的探查只需签名绑定。计划无需独立模型轮或新增工具调用。只按已确认的关系与粒度 JOIN；独立来源分别查询。缺失业务定义才澄清，目录或小范围探查能确定的事实由你查证。
-4. **生成并执行 SQL。** 由你按目录声明的 TiDB/MySQL 方言生成 SQL，通过 `scripts/data_client.py execute --request-json` 在同一次工具调用中传入 SQL 和独立参数数组，无需中间请求文件。统一使用 `%s` 占位符；日期需要转换时使用 `CAST(%s AS DATE)`，不使用 PostgreSQL 的 `::date`、`$n` 或 `DATE %s`，不因一次绑定失败改为拼接值。执行前确认筛选值和聚合含义，使用目录中的 `database.table`。包内执行器强制执行单条只读 SQL 策略、场景授权表范围、输出字段限制、超时、结果大小限制与审计；连接账号的权限范围由宿主配置，不因其具有写权限、角色或转授权权限而拒绝目录读取和查询。不自行写另一套数据库连接或读取连接密码来绕过执行器。
-5. **核对与修正。** 检查状态、`plan_verification`、实际 SQL 和完整数据集。回执 `content_complete=true` 时响应在 `/content`；`dataset_complete=true` 时完整数据集在回执 `/dataset`。否则按 `read_contract.file_pointers` 读取保存文件：文件根就是原响应，行在 `/dataset/rows`，没有 `/content` 层。跨步骤首次读取 Runtime Result 时只传 `resultId`，先看返回的 Result 根结构；之后只能使用它明确给出的 `resultPointer`。`sourcePointer` 属于原始 JSON 文件，必须交给 `computer_read_json`，不能传给 `read_result`。不猜 `/sql`、`/sources`、`/fields` 等路径。空集合、NULL、策略拒绝和执行失败是不同结果。命令 `exitCode` 非零、`operationStatus=failed` 或 `isError=true` 都是失败，不能当作已完成步骤；先读 `error.diagnostic` 的阶段与代码，再做针对性修正。诊断不充分时标明未确定，不靠删除必要条件或反复更换占位符猜测。意外空值时核对对象、值域、期间与项目，必要时进行最小只读探查，依据证据修正 SQL。核对按任务与 JOIN 风险选择，优先在现有结果中完成；不固定追加全表计数、状态覆盖和总量查询。不要重复查询来恢复预览省略的数据，不把故障改写为无数据。
-6. **分析并交付。** 按下文回复规则直接回答用户问题。趋势、比较等任务再按需使用目录中的方法与 [分析方法](references/analysis-methodology.md)，通过可复核的代码或 SQL 计算；主动判断图形是否有助于理解，适合时在最终回复中直接使用 Runtime 声明支持的 Markdown 图表格式展示，不只描述“可以画图”或返回数据文件。每个数值和实体描述对应具体结果行或计算输出，无法定位的内容不作为事实交付。完整数据保存在结果文件中，以场景、`query_id`、目录版本、SQL 和文件引用在当前 Run 内保留证据链，按用户需要提供追溯信息。
+## 查询约束
 
-### 文件交付
+- 使用目录中的真实 `database.table`、字段、指标定义、关系和期间格式；不得从字段名或模型记忆猜口径。
+- 时间筛选使用参数化半开区间；统一 `%s` 占位符，不把值拼进 SQL。
+- `context_id` 是不透明引用。只读取 `get-query-context` 自己声明的输出文件，不猜 `.data-agent-contexts` 路径。
+- 指标、时间、术语、实体和探查绑定必须与当前 SQL 一致；执行器会校验目录版本、来源签名和语义证据，不能靠删绑定、换表或降低粒度绕过。
+- 成功回执含完整 `content` 或 `dataset` 时直接使用；否则只按 `read_contract` 指针读取所需部分。不猜 `/sql`、`/sources` 等路径。
+- 结果需要有限派生汇总时使用 `compute-result`；不得用临时 Python/Node 脚本处理查询结果。
 
-只有用户明确要求 Excel/CSV、Word、PDF、PPT、Markdown 或 HTML 文件时才生成附件。先完成并核对真实查询，再用 `computer_write_file` 写入一个纯数据 JSON 规格；禁止写入或运行临时 Python/Node 脚本。规格固定为：
+## 文件交付
 
-```json
-{
-  "schema": "data-agent.file-export/v1",
-  "title": "报告标题",
-  "subtitle": "可选副标题",
-  "summary": ["可选结论一"],
-  "tables": [
-    {"name": "数据表名称", "columns": ["列一", "列二"], "rows": [["值一", 123.4]]}
-  ]
-}
-```
+只有用户明确要求文件时才生成。先完成并核对查询，再从真实结果写一个 `data-agent.file-export/v1` JSON 规格，并调用固定生成器：
 
-然后在 `cwd: "@skills/data-analysis"` 下调用 `python3 scripts/file_export.py build --format <xlsx|csv|docx|pdf|pptx|html|markdown> --spec <规格路径> --output <最终文件路径>`。CSV 只能包含一个表；PPT 最多 500 行、12 列；Word/PDF 最多 5000 行、30 列。生成器会校验行列、总大小、输出扩展名，并防止 Excel/CSV 公式注入。最后用 `outputBindings` 将文件绑定到当前交付目标，再执行 `verify_artifact_acceptance`。
+`python3 scripts/file_export.py build --format <xlsx|csv|docx|pdf|pptx|html|markdown> --spec <规格> --output <文件>`
 
-### 应用效率补充规则
+不得为了导出重新查询、改口径或编造数据，不得写临时可执行脚本。生成后绑定交付目标并完成文件验收。
 
-- `retrieve-knowledge` 先做一次精确读取，覆盖 `sources/terms/metrics/ambiguities/gaps/selection_contract/relationships`；只有相关来源或定义确实不在已返回分页中时才继续翻页，不为读完整个目录而翻页。
-- 选定来源后，把已经知道的正式指标引用和必需字段名一次性放进 `get-query-context` 的 `metric_refs` 与 `columns`；同一次上下文可以返回的内容，不再追加 `get-metrics`、`search-columns` 或 `get-columns`。
-- 用户明确限定“某张表/某类数据中的数量、去重数或覆盖范围”时，在该数据集内计算；不要仅因为另一张主数据表存在相似的总量指标就额外加入它。
-- 成功结果已经直接回答问题，且不存在冲突、截断、NULL 或执行警告时，不追加第二条验证 SQL。
+## 回复
 
-## 回复规则
-
-- 最终回答从结果直接开始，不写“信息已齐备”“现在可以回答”“可以提交最终结果”等内部旁白，不重复罗列同一组数字。简单查询最多使用三个短要点，再补一句确实影响理解的口径说明。
-
-- 默认先给业务结论，详略随问题复杂度决定。单值问数通常一两句话，包含数值、单位、日期和必要的主体限定；来源用简短业务名称即可。用户要求明细、趋势或对比时再展开表格或图表。
-- 只解释会改变答案或影响解读的口径、歧义和限制，例如价格类型不同、多个主体数值不同、缺失目标日期或采用替代日期。多项指标数值相同不能据此认定口径相同或互相验证；保留有业务意义的区别即可。
-- 查询过程与核对留在内部，不默认附加“口径说明”“数据可得性”“证据链”“局限”等固定章节，也不罗列排除的候选、无关覆盖期或通用免责声明。确有影响结论的问题时，在答案旁简短说明。
-- `query_id`、`catalog_revision`、SQL、物理表名、结果文件路径及工具回执属于内部追溯信息；用户要求 SQL、来源明细、审计或排障时再按所需范围提供。用户要求的数据文件或报告仍正常交付。
-
-## 证据与执行边界
-
-- 用户问题决定目标，元数据和查询结果约束事实。目录中的方法建议不能自行增加用户未要求的业务条件。
-- 字段值域与本次 DISTINCT 观测范围不同；组织别名、层级与合并口径需要证据，不猜等价、不混加报表项目或层级。
-- 工具结果通过 Runtime 正式 Result 保留；跨步骤消费继承的 ResultRef 时使用 `read_result`，不要靠步骤摘要重建证据。完整响应或完整小数据集已内联时直接使用；其他情况按回执指针读取完整文件或确定性计算，不因读取预览省略而重复查询。只看部分排序记录不能证明对象不存在。
-- `dataset.row_count` 必须与完整 `rows` 一致；超过结果上限时明确失败，不交付未声明的部分成功。查询回执只证明执行事实，不能证明业务回答正确。
-- `connections.json` 只作为脚本配置输入，不加入报告、工具参数或日志。连接或依赖不可用时指出具体阻塞，不询问无关项目路径、不改宿主授权、不启动替代服务、不降级直连。
-- 本包按场景隔离，不提供用户级认证。连接账号及权限由宿主决定，允许使用 root 等高权限账号，不检查 `SHOW GRANTS`、不要求独立只读账号。业务查询仍只允许访问当前场景授权表的单条 SELECT，拒绝写入、越界读取和危险函数；真实连接或权限不足错误正常报告。TiDB 不支持 `START TRANSACTION READ ONLY`，不启用伪实现的 no-op 开关，使用 SQL 策略、查询超时和结果限制约束执行。HTTP 接口仅监听本机；只有用户明确要求 HTTP 形式时才启动包内服务。数据源业务数据只读，唯一数据库写入是配置目录数据库的查询审计表，不写业务表、不修改配置、不初始化数据库。
+- 开头直接给结果，避免描述内部步骤、SQL、物理表、文件路径、目录版本和工具回执。
+- 未指定期间时查明最新可得一期，并写清具体日期或月份。
+- 趋势、对比、排名等复杂问题按用户要求展开；不自动添加无关趋势、极值或免责声明。
+- 空集合、NULL、策略拒绝和执行失败必须区分。只有确实影响结论的限制才简短说明。
