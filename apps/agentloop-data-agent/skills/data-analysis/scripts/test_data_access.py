@@ -157,6 +157,125 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(sql.count('UNION ALL'), 1)
         self.assertIn('COUNT(DISTINCT `employee_code`)', sql)
 
+    def test_question_group_counts_bind_catalog_dimensions_and_count_entity(self):
+        original = self.store.load_config
+        def config():
+            value = original()
+            value['tables'][0].update(label='员工信息')
+            value['tables'][0]['columns'] = [
+                {'name': 'employee_code', 'label': '员工编码', 'allow_output': True,
+                 'semantic_roles': ['entity_key']},
+                {'name': 'unit_name', 'label': '单位', 'allow_output': True,
+                 'semantic_roles': ['dimension']},
+                {'name': 'position_name', 'label': '岗位', 'allow_output': True,
+                 'semantic_roles': ['dimension']},
+            ]
+            value['entities'] = [{
+                'id': 'employee', 'source_id': 'staff', 'label': '员工',
+                'key_field': 'employee_code', 'name_fields': [],
+            }]
+            return value
+        self.store.load_config = config
+        result = self.gateway.quick_query('group', {
+            'kind': 'question_group_counts',
+            'question': '员工信息中有哪些单位和岗位？各有多少名员工？',
+        })
+        sql = self.calls[-1][0]
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['quick_query_request_kind'], 'question_group_counts')
+        self.assertEqual(result['count_label'], '员工数')
+        self.assertEqual(sql.count('UNION ALL'), 1)
+        self.assertIn('COUNT(DISTINCT `employee_code`)', sql)
+        self.assertIn('`unit_name`', sql)
+        self.assertIn('`position_name`', sql)
+
+    def test_question_group_counts_decline_when_count_entity_is_not_proven(self):
+        original = self.store.load_config
+        def config():
+            value = original()
+            value['tables'][0].update(label='员工信息')
+            value['tables'][0]['columns'] = [
+                {'name': 'employee_code', 'label': '员工编码', 'allow_output': True},
+                {'name': 'unit_name', 'label': '单位', 'allow_output': True,
+                 'semantic_roles': ['dimension']},
+            ]
+            return value
+        self.store.load_config = config
+        call_count = len(self.calls)
+        result = self.gateway.quick_query('group', {
+            'kind': 'question_group_counts',
+            'question': '员工信息中有哪些单位？各有多少名员工？',
+        })
+        self.assertEqual(result['status'], 'not_applicable')
+        self.assertFalse(result['quick_query_applicable'])
+        self.assertEqual(result['reason_code'], 'count_entity_not_unique')
+        self.assertEqual(len(self.calls), call_count)
+
+        with tempfile.TemporaryDirectory() as temporary, redirect_stdout(io.StringIO()) as stream:
+            data_client.save_result(result, Path(temporary) / 'quick-query.json')
+            receipt = json.loads(stream.getvalue())
+        self.assertEqual(receipt['status'], 'not_applicable')
+        self.assertFalse(receipt['quick_query_applicable'])
+        self.assertTrue(receipt['content_complete'])
+        self.assertEqual(receipt['content']['reason_code'], 'count_entity_not_unique')
+
+    def test_question_group_counts_decline_unrepresented_filters(self):
+        original = self.store.load_config
+        def config():
+            value = original()
+            value['tables'][0].update(label='员工信息')
+            value['tables'][0]['columns'] = [
+                {'name': 'employee_code', 'label': '员工编码', 'allow_output': True,
+                 'semantic_roles': ['entity_key']},
+                {'name': 'unit_name', 'label': '单位', 'allow_output': True,
+                 'semantic_roles': ['dimension']},
+            ]
+            value['entities'] = [{
+                'id': 'employee', 'source_id': 'staff', 'label': '员工',
+                'key_field': 'employee_code', 'name_fields': [],
+            }]
+            return value
+        self.store.load_config = config
+        result = self.gateway.quick_query('group', {
+            'kind': 'question_group_counts',
+            'question': '员工信息中各单位有多少名在职员工？',
+        })
+        self.assertEqual(result['status'], 'not_applicable')
+        self.assertEqual(result['reason_code'], 'count_entity_not_unique')
+
+    def test_question_group_counts_use_the_entity_in_the_count_slot(self):
+        original = self.store.load_config
+        def config():
+            value = original()
+            value['tables'][0].update(label='采购合同')
+            value['tables'][0]['columns'] = [
+                {'name': 'contract_id', 'label': '合同编号', 'allow_output': True,
+                 'semantic_roles': ['entity_key']},
+                {'name': 'supplier_id', 'label': '供应商编码', 'allow_output': True,
+                 'semantic_roles': ['entity_key']},
+                {'name': 'supplier_name', 'label': '供应商', 'allow_output': True,
+                 'semantic_roles': ['entity_name', 'dimension']},
+                {'name': 'contract_type', 'label': '合同类型', 'allow_output': True,
+                 'semantic_roles': ['dimension']},
+            ]
+            value['entities'] = [
+                {'id': 'contract', 'source_id': 'staff', 'label': '合同',
+                 'key_field': 'contract_id', 'name_fields': []},
+                {'id': 'supplier', 'source_id': 'staff', 'label': '供应商',
+                 'key_field': 'supplier_id', 'name_fields': ['supplier_name']},
+            ]
+            return value
+        self.store.load_config = config
+        result = self.gateway.quick_query('group', {
+            'kind': 'question_group_counts',
+            'question': '采购合同中有哪些合同类型和供应商？各有多少份合同？',
+        })
+        sql = self.calls[-1][0]
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['count_label'], '合同数')
+        self.assertIn('COUNT(DISTINCT `contract_id`)', sql)
+        self.assertNotIn('COUNT(DISTINCT `supplier_id`)', sql)
+
     def test_catalog_receipt_navigates_exact_fields_without_reading_all_columns(self):
         original = self.store.load_config
         def config():

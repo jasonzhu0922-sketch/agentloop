@@ -190,7 +190,8 @@ def deterministic_answer_markdown(value):
             group['rows'].append(row)
         output = [f"{value.get('source_label') or '所选数据表'}的分类统计如下：", '']
         for group in groups.values():
-            output.extend([f"**{group['label']}**", '', '| 取值 | 指标数 |', '|---|---:|'])
+            output.extend([f"**{group['label']}**", '',
+                           f"| 取值 | {value.get('count_label') or '数量'} |", '|---|---:|'])
             output.extend(f"| {row.get('dimension_value') if row.get('dimension_value') not in (None, '') else '（空）'} "
                           f"| {int(row.get('item_count') or 0):,} |" for row in group['rows'])
             output.append('')
@@ -215,11 +216,23 @@ def save_result(value, output):
             os.unlink(temporary)
     receipt = {"schema": "nl2sql.data-file/v1", "path": str(path), "bytes": len(content),
                "sha256": hashlib.sha256(content).hexdigest()}
+    if (isinstance(value, dict)
+            and value.get('status') == 'not_applicable'
+            and value.get('quick_query_applicable') is False):
+        receipt.update({key: value[key] for key in (
+            'scenario_id', 'catalog_revision', 'status', 'quick_query_kind',
+            'quick_query_applicable', 'deterministic_answer', 'reason_code',
+        ) if key in value})
+        receipt['content_complete'] = True
+        receipt['content'] = value
+        print(json.dumps(receipt, ensure_ascii=False))
+        return
     if isinstance(value, dict) and value.get('deterministic_answer') is True:
         dataset = value.get('dataset') if isinstance(value.get('dataset'), dict) else {}
         receipt.update({key: value[key] for key in
                         ('scenario_id', 'query_id', 'catalog_revision', 'status', 'quick_query_kind',
-                         'source_id', 'source_label') if key in value})
+                         'quick_query_request_kind', 'quick_query_applicable',
+                         'source_id', 'source_label', 'count_label', 'reason_code') if key in value})
         receipt.update({
             'source_schema': value.get('schema'),
             'deterministic_answer': True,

@@ -107,18 +107,59 @@ test("scenario table counts use one deterministic quick-query call", async () =>
   assert.deepEqual(JSON.parse(args[args.indexOf("--request-json") + 1]), { kind: "scenario_table_counts" });
 });
 
-test("steel unit and frequency counts use one combined deterministic query", async () => {
+test("group-count query structures use the same catalog-driven quick-query route", async () => {
+  const questions = [
+    "钢联指标信息中有哪些计量单位和数据频度？各有多少个指标？",
+    "采购合同中有哪些合同类型和供应商？各有多少份合同？",
+    "员工信息中有哪些单位和岗位？各有多少名员工？",
+    "按单位、岗位统计员工数量",
+    "每个供应商的合同数量",
+  ];
+  for (const question of questions) {
+    const calls: ModelInvocation[] = [];
+    const model = dataAgentModel(adapter({ content: "fallback", finishReason: "stop", toolCalls: [] }, calls));
+    const response = await model.complete({ ...baseInvocation, phase: "execution",
+      messages: [{ role: "user", content: question }],
+      tools: [{ name: "computer_run_command", description: "run", inputSchema: { type: "object" } }] });
+    assert.equal(calls.length, 0, question);
+    const args = (response.toolCalls[0]?.arguments as any).args as string[];
+    assert.deepEqual(JSON.parse(args[args.indexOf("--request-json") + 1]), {
+      kind: "question_group_counts", question,
+    }, question);
+  }
+});
+
+test("complex filters and measures stay on the full semantic query path", async () => {
+  const questions = [
+    "统计今年各单位员工数量",
+    "按供应商统计采购合同金额",
+    "分析各岗位员工数量变化趋势",
+  ];
+  for (const question of questions) {
+    const calls: ModelInvocation[] = [];
+    const model = dataAgentModel(adapter({ content: "semantic-fallback", finishReason: "stop", toolCalls: [] }, calls));
+    const response = await model.complete({ ...baseInvocation, phase: "execution",
+      messages: [{ role: "user", content: question }],
+      tools: [{ name: "computer_run_command", description: "run", inputSchema: { type: "object" } }] });
+    assert.equal(calls.length, 1, question);
+    assert.equal(response.content, "semantic-fallback", question);
+  }
+});
+
+test("an unproven catalog binding falls back without repeating the quick query", async () => {
   const calls: ModelInvocation[] = [];
-  const model = dataAgentModel(adapter({ content: "fallback", finishReason: "stop", toolCalls: [] }, calls));
-  const response = await model.complete({ ...baseInvocation, phase: "execution",
-    messages: [{ role: "user", content: "钢联指标信息中有哪些计量单位和数据频度？各有多少个指标？" }],
-    tools: [{ name: "computer_run_command", description: "run", inputSchema: { type: "object" } }] });
-  assert.equal(calls.length, 0);
-  const args = (response.toolCalls[0]?.arguments as any).args as string[];
-  assert.deepEqual(JSON.parse(args[args.indexOf("--request-json") + 1]), {
-    kind: "source_dimension_counts", source_label: "钢联指标信息",
-    dimension_labels: ["单位名称", "频度名称"], count_label: "指标编码",
-  });
+  const model = dataAgentModel(adapter({ content: "semantic-fallback", finishReason: "stop", toolCalls: [] }, calls));
+  const response = await model.complete({ ...baseInvocation, phase: "execution", messages: [
+    { role: "user", content: "员工信息中有哪些单位和岗位？各有多少名员工？" },
+    { role: "tool", toolCallId: "data-agent-quick-query", name: "computer_run_command", isError: false,
+      content: JSON.stringify({ stdout: JSON.stringify({
+        status: "not_applicable", quick_query_applicable: false,
+        quick_query_kind: "question_group_counts", reason_code: "count_entity_not_unique",
+      }) }) },
+  ], tools: [{ name: "computer_run_command", description: "run", inputSchema: { type: "object" } }] });
+  assert.equal(calls.length, 1);
+  assert.equal(response.content, "semantic-fallback");
+  assert.equal(response.toolCalls.length, 0);
 });
 
 test("a completed quick-query returns its deterministic answer without another model call", async () => {

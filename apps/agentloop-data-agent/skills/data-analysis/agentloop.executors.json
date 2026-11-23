@@ -350,7 +350,7 @@
           "inputs": [
             {
               "name": "request-json",
-              "description": "JSON kind=scenario_table_counts, or kind=source_dimension_counts with source_label, dimension_labels and count_label. Caller SQL and physical identifiers are not accepted.",
+              "description": "JSON kind=scenario_table_counts, or kind=question_group_counts with the original question. The gateway binds one source, dimensions and count entity from the catalog. Caller SQL and physical identifiers are forbidden; ambiguous bindings return not_applicable.",
               "required": true
             },
             {
@@ -368,7 +368,7 @@
             "--output",
             "{{output}}"
           ],
-          "result": "Complete nl2sql.query-result/v1 with deterministic_answer=true, verified query plan and one combined SQL result.",
+          "result": "Complete nl2sql.query-result/v1 with deterministic_answer=true, verified query plan and one combined SQL result, or a bounded nl2sql.quick-query-decision/v1 not_applicable receipt when source, dimensions or count entity are not uniquely proven by the catalog.",
           "producesEvidenceKinds": [
             "source_summary",
             "record_counts"

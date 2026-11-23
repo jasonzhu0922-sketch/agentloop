@@ -9,8 +9,8 @@ from time import monotonic
 from datetime import datetime, timezone
 from uuid import uuid4
 from query_errors import QueryParameterError, query_diagnostic
-from catalog_knowledge import (catalog_config, prepare_knowledge, project_sources, semantic_metadata,
-                               table_signature)
+from catalog_knowledge import (catalog_config, prepare_knowledge, project_sources, rank_sources,
+                               semantic_metadata, table_signature)
 from entity_binding import (EntityBindingError, lookup_spec, query_plan_from_artifact,
                             resolution_result, validate_plan)
 
@@ -74,7 +74,8 @@ class Gateway:
 
     def quick_query(self, scenario_id, request):
         """Execute one whitelisted catalog-derived lookup without model-authored SQL."""
-        if not isinstance(request, dict) or set(request) - {'kind', 'source_label', 'dimension_labels', 'count_label'}:
+        if not isinstance(request, dict) or set(request) - {
+                'kind', 'question', 'source_label', 'dimension_labels', 'count_label'}:
             raise ValueError('Quick query only accepts its declared request fields')
         kind = request.get('kind')
         scenario, raw = self._snapshot(scenario_id, verify_current=True)
@@ -103,6 +104,142 @@ class Gateway:
                     'semantic_model_version': catalog.get('semantic_model_version'),
                     'metric_bindings': [], 'entity_bindings': [], 'time_bindings': [],
                     'semantic_bindings': bindings, 'semantic_gap_refs': []}
+
+        def not_applicable(code):
+            return {'schema': 'nl2sql.quick-query-decision/v1', 'scenario_id': scenario_id,
+                    'catalog_revision': catalog['catalog_revision'], 'status': 'not_applicable',
+                    'quick_query_kind': kind, 'quick_query_applicable': False,
+                    'deterministic_answer': False, 'reason_code': code}
+
+        def column_roles(table, column):
+            roles = set(column.get('semantic_roles') or [])
+            name = column['name']
+            for summary in catalog.get('table_summaries', []):
+                if summary.get('source_id') != table['name']:
+                    continue
+                for key, role in (('dimension_fields', 'dimension'), ('time_fields', 'period'),
+                                  ('metric_fields', 'measure'), ('entity_fields', 'entity_key'),
+                                  ('row_grain', 'grain')):
+                    if name in summary.get(key, []):
+                        roles.add(role)
+            for entity in catalog.get('entities', []):
+                if entity.get('source_id') != table['name'] or entity.get('definition_status') == 'invalid':
+                    continue
+                if entity.get('key_field') == name:
+                    roles.add('entity_key')
+                if name in entity.get('name_fields', []):
+                    roles.add('entity_name')
+            return roles
+
+        def source_from_question(question):
+            exact = [table for table in catalog['tables'] if any(
+                isinstance(value, str) and value and value in question
+                for value in (table.get('label'), table.get('name')))]
+            if len(exact) == 1:
+                return exact[0]
+            if len(exact) > 1:
+                return None
+            ranked = [item for item in rank_sources(catalog, question) if item.get('score', 0) > 0]
+            if not ranked:
+                return None
+            first = ranked[0]
+            second = ranked[1] if len(ranked) > 1 else None
+            if second and (first['score'] < second['score'] * 1.5 or first['score'] - second['score'] < 3):
+                return None
+            return next((table for table in catalog['tables']
+                         if table['name'] == first['source_id']), None)
+
+        def group_count_slots(question):
+            import re
+            patterns = [
+                r'(?:中|里|内)(?:有哪些|有哪(?:些|几种))(?P<dimensions>.+?)'
+                r'[？?，,。；;]+\s*(?:各|分别|每(?:个|种)?)?(?:有|包含)?'
+                r'多少(?:个|名|份|条|项|笔|家|种|类)?(?P<count>[^？?，,。；;]+)',
+                r'(?:按|根据)(?P<dimensions>.+?)(?:统计|汇总|分组|分类)'
+                r'(?P<count>.+?)(?:人数|数量|数|分布)[？?。]?$' ,
+                r'每(?:个|种)?(?P<dimensions>.+?)的(?P<count>.+?)(?:人数|数量|数)[？?。]?$',
+                r'(?:中|里|内)?各(?P<dimensions>.+?)(?:有|包含)?'
+                r'多少(?:个|名|份|条|项|笔|家|种|类)?(?P<count>[^？?，,。；;]+)',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, question)
+                if not match:
+                    continue
+                dimensions = [value.strip() for value in re.split(
+                    r'(?:以及|和|与|及|、|,|，)', match.group('dimensions')) if value.strip()]
+                count = match.group('count').strip()
+                if dimensions and count:
+                    return dimensions, count
+            return None
+
+        def count_binding(table, count_text):
+            from semantic_retrieval import entity_matches, semantic_object_matches
+            entities = entity_matches(catalog, count_text, {table['name']},
+                                      semantic_object_matches(catalog, count_text, {table['name']}))
+            usable = [item for item in entities
+                      if item.get('definition', {}).get('definition_status') != 'invalid'
+                      and item.get('definition', {}).get('key_field')]
+            if usable:
+                import re
+                def anchors(item):
+                    definition = item['definition']
+                    aliases = definition.get('aliases', {})
+                    alias_values = [value for key, values in aliases.items()
+                                    for value in [key, *(values if isinstance(values, list) else [])]
+                                    if isinstance(value, str)] if isinstance(aliases, dict) else []
+                    return [item.get('label'), item.get('entity_id'), definition.get('description'),
+                            *(definition.get('recall_terms', []) or []), *alias_values]
+
+                exact = [(item, value) for item in usable for value in anchors(item)
+                         if isinstance(value, str) and value and value in count_text]
+                matched_entities = {item['entity_id'] for item, _ in exact}
+                if len(matched_entities) != 1:
+                    return None
+                first = next(item for item, _ in exact if item['entity_id'] in matched_entities)
+                residual = count_text
+                for value in sorted({value for item, value in exact
+                                     if item['entity_id'] == first['entity_id']}, key=len, reverse=True):
+                    residual = residual.replace(value, ' ')
+                residual = re.sub(r'(?:的|总|全部|个|名|份|条|项|笔|家|种|类|记录)', ' ', residual)
+                if re.search(r'[\u4e00-\u9fffA-Za-z0-9_]', residual):
+                    return None
+                column = next((column for column in table.get('columns', [])
+                               if column['name'] == first['definition']['key_field']
+                               and column.get('allow_output') is not False), None)
+                if column:
+                    return column, first.get('label') or first['entity_id']
+            if count_text in {'记录', '行', '数据', '记录数', '行数', '数据量'}:
+                return None, '记录'
+            return None
+
+        def dimension_bindings(table, dimension_terms, count_column):
+            from semantic_retrieval import column_matches
+            unique = []
+            for term in dimension_terms:
+                candidates = []
+                for match in column_matches(catalog, term, {table['name']}):
+                    column = match['definition']
+                    if (column.get('allow_output') is False
+                            or (count_column and column.get('name') == count_column.get('name'))):
+                        continue
+                    roles = column_roles(table, column)
+                    if (roles.intersection({'period', 'measure', 'entity_key'})
+                            or not roles.intersection({'dimension', 'entity_name', 'grain'})):
+                        continue
+                    anchors = [column.get('label'), column.get('name')]
+                    exact = any(isinstance(value, str) and value and value in term for value in anchors)
+                    candidates.append((column, match['score'], exact))
+                exact = [item for item in candidates if item[2]]
+                if len(exact) > 1 or not (exact or candidates):
+                    return []
+                selected = exact[0] if exact else candidates[0]
+                if not exact and len(candidates) > 1 and selected[1] <= candidates[1][1]:
+                    return []
+                column = selected[0]
+                if column['name'] in {item['name'] for item in unique}:
+                    return []
+                unique.append(column)
+            return unique
 
         if kind == 'scenario_table_counts':
             tables = catalog['tables']
@@ -160,6 +297,46 @@ class Gateway:
             result = self.execute_sql(scenario_id, sql, params, source_plan([table]))
             result.update(quick_query_kind=kind, deterministic_answer=True,
                           source_id=table['name'], source_label=table.get('label') or table['name'])
+            return result
+
+        if kind == 'question_group_counts':
+            question = request.get('question')
+            if not isinstance(question, str) or not question.strip() or len(question) > 4000:
+                raise ValueError('Quick group counts need a question')
+            table = source_from_question(question)
+            if table is None:
+                return not_applicable('source_not_unique')
+            slots = group_count_slots(question)
+            if slots is None:
+                return not_applicable('query_shape_not_supported')
+            dimension_terms, count_text = slots
+            binding = count_binding(table, count_text)
+            if binding is None:
+                return not_applicable('count_entity_not_unique')
+            count_column, count_entity_label = binding
+            dimensions = dimension_bindings(table, dimension_terms, count_column)
+            if not dimensions:
+                return not_applicable('dimension_not_unique')
+            sql_parts, params = [], []
+            for column in dimensions:
+                name = identifier(column['name'])
+                if count_column is None:
+                    count_expression = 'COUNT(*)'
+                else:
+                    count_expression = 'COUNT(DISTINCT ' + quote(identifier(count_column['name'])) + ')'
+                sql_parts.append(
+                    "SELECT %s AS dimension_field, %s AS dimension_label, "
+                    + quote(name) + " AS dimension_value, " + count_expression
+                    + " AS item_count FROM " + table_ref(table) + " WHERE " + quote(name)
+                    + " IS NOT NULL AND TRIM(CAST(" + quote(name) + " AS CHAR)) <> '' GROUP BY "
+                    + quote(name))
+                params.extend([name, column.get('label') or name])
+            sql = ' UNION ALL '.join(sql_parts) + ' ORDER BY dimension_field, item_count DESC, dimension_value'
+            result = self.execute_sql(scenario_id, sql, params, source_plan([table]))
+            result.update(quick_query_kind='source_dimension_counts', quick_query_request_kind=kind,
+                          quick_query_applicable=True, deterministic_answer=True,
+                          source_id=table['name'], source_label=table.get('label') or table['name'],
+                          count_label=(count_entity_label or '记录') + '数')
             return result
 
         raise ValueError('Unsupported quick query kind')

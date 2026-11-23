@@ -8,7 +8,12 @@ const DATA_REQUEST = /(?:查询|查一下|统计|分析|对比|比较|趋势|排
 const FOLLOW_UP = /^(?:继续|再|然后|另外|刚才|上面|上述|前面|之前|这个|那个|改成|换成|同样|还是|那么|那就|也查|再查)/u;
 const PRIOR_REFERENCE = /(?:刚才|上面|上述|前面|之前|上次|上一轮|这个结果|那个结果|previous|prior|earlier|above)/iu;
 const TABLE_COUNT_REQUEST = /(?:(?:这个|当前|该)?场景|数据源|数据表).*?(?:哪些|所有|分别|各).*?(?:多少条|记录数|行数|数据量)|(?:哪些|所有).*?(?:数据表|表).*?(?:多少条|记录数|行数)/u;
-const STEEL_DIMENSION_COUNT_REQUEST = /钢联指标信息.*?(?:计量单位|单位).*?(?:数据频度|频度).*?(?:多少个指标|指标数)/u;
+const GROUP_COUNT_REQUEST = /(?:有哪些.+(?:各|分别|每).*(?:多少|数量|数)|(?:按|根据).+?(?:多少|数量|数|分布)|(?:各|每).+?(?:多少|数量|数))/u;
+const GROUP_COUNT_EXCLUSIONS = /(?:原因|预测|建议|同比|环比|趋势|变化|平均|合计|金额|占比|比例|最大|最小|最高|最低|前\s*\d+|排名|20\d{2}[年/-]|今年|去年|本月|上月|本季度|上季度|最近\s*\d+|每(?:日|周|月|季|年))/u;
+
+function isGenericGroupCountRequest(input: string): boolean {
+  return GROUP_COUNT_REQUEST.test(input) && !GROUP_COUNT_EXCLUSIONS.test(input);
+}
 
 function workspaceFileName(path: string): string {
   return basename(path.replaceAll("\\", "/").replace(/^@workspace\//, ""));
@@ -32,7 +37,7 @@ function fixedConversationResolution(invocation: ModelInvocation): ModelResponse
     || invocation.tools[0]?.name !== "resolve_conversation_turn") return undefined;
   const input = latestUserInput(invocation);
   const standaloneQuickQuery = input !== undefined
-    && (TABLE_COUNT_REQUEST.test(input) || STEEL_DIMENSION_COUNT_REQUEST.test(input));
+    && (TABLE_COUNT_REQUEST.test(input) || isGenericGroupCountRequest(input));
   if (!input || !DATA_REQUEST.test(input)
     || (!standaloneQuickQuery && (FOLLOW_UP.test(input) || PRIOR_REFERENCE.test(input)))) return undefined;
   const analytical = /(?:分析|对比|比较|趋势|排名|分布|差异|同比|环比|完成率|变化)/u.test(input);
@@ -117,6 +122,24 @@ function successfulQuickQueryReceipt(invocation: ModelInvocation): Record<string
   return undefined;
 }
 
+function quickQueryNotApplicable(invocation: ModelInvocation): boolean {
+  for (let index = invocation.messages.length - 1; index >= 0; index -= 1) {
+    const message = invocation.messages[index];
+    if (message.role !== "tool" || message.toolCallId !== "data-agent-quick-query"
+      || typeof message.content !== "string") continue;
+    try {
+      const parsed = record(JSON.parse(message.content));
+      const stdoutValue = parsed?.stdout;
+      const stdout = typeof stdoutValue === "string" ? record(JSON.parse(stdoutValue)) : record(stdoutValue);
+      const content = record(stdout?.content) ?? record(parsed?.content) ?? stdout ?? parsed;
+      return content?.status === "not_applicable" && content.quick_query_applicable === false;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 function failedQuickQuery(invocation: ModelInvocation): boolean {
   return invocation.messages.some(message =>
     message.role === "tool"
@@ -147,7 +170,7 @@ function fixedQuickQuery(invocation: ModelInvocation): ModelResponse | undefined
         group.rows.push(row); groups.set(key, group);
       }
       const blocks = [...groups.values()].flatMap(group => [
-        `**${group.label}**`, "", "| 取值 | 指标数 |", "|---|---:|",
+        `**${group.label}**`, "", `| 取值 | ${String(receipt.count_label ?? "数量")} |`, "|---|---:|",
         ...group.rows.map(row => `| ${String(row.dimension_value ?? "（空）")} | ${Number(row.item_count ?? 0).toLocaleString("zh-CN")} |`), "",
       ]);
       return { content: [`${String(receipt.source_label ?? "所选数据表")}的分类统计如下：`, "", ...blocks].join("\n").trim(), finishReason: "stop", toolCalls: [] };
@@ -160,16 +183,16 @@ function fixedQuickQuery(invocation: ModelInvocation): ModelResponse | undefined
       toolCalls: [],
     };
   }
+  if (quickQueryNotApplicable(invocation)) return undefined;
   const tableCountRequest = TABLE_COUNT_REQUEST.test(input);
-  const steelDimensionRequest = STEEL_DIMENSION_COUNT_REQUEST.test(input);
-  if (!tableCountRequest && !steelDimensionRequest
+  const groupCountRequest = isGenericGroupCountRequest(input);
+  if (!tableCountRequest && !groupCountRequest
     && (FOLLOW_UP.test(input) || PRIOR_REFERENCE.test(input))) return undefined;
   if (!invocation.tools.some(tool => tool.name === "computer_run_command")) return undefined;
   const request = tableCountRequest
     ? { kind: "scenario_table_counts" }
-    : steelDimensionRequest
-      ? { kind: "source_dimension_counts", source_label: "钢联指标信息",
-          dimension_labels: ["单位名称", "频度名称"], count_label: "指标编码" }
+    : groupCountRequest
+      ? { kind: "question_group_counts", question: input }
       : undefined;
   if (!request) return undefined;
   return {
