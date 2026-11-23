@@ -15,7 +15,7 @@ const baseInvocation = {
   messages: [], tools: [],
 } satisfies Omit<ModelInvocation, "phase">;
 
-test("data questions use the fixed intent and Skill without model round trips", async () => {
+test("data questions use the fixed intent while data-analysis is preactivated", async () => {
   const calls: ModelInvocation[] = [];
   const model = dataAgentModel(adapter({ content: "fallback", finishReason: "stop", toolCalls: [] }, calls));
   const intent = await model.complete({ ...baseInvocation, phase: "planning",
@@ -25,8 +25,8 @@ test("data questions use the fixed intent and Skill without model round trips", 
   assert.equal((intent.toolCalls[0]?.arguments as any).mode, "execute");
   const load = await model.complete({ ...baseInvocation, phase: "execution",
     tools: [{ name: "load_skill", description: "load", inputSchema: { type: "object" } }] });
-  assert.deepEqual(load.toolCalls[0]?.arguments, { name: "data-analysis" });
-  assert.equal(calls.length, 0);
+  assert.equal(load.content, "fallback");
+  assert.equal(calls.length, 1);
 });
 
 test("explicit file requests resolve to a workspace artifact and load its file Skill", async () => {
@@ -41,7 +41,7 @@ test("explicit file requests resolve to a workspace artifact and load its file S
     action: "create", kind: "spreadsheet", format: "xlsx", surface: "workspace_artifact" });
   const load = await model.complete({ ...baseInvocation, phase: "execution", messages,
     tools: [{ name: "load_skill", description: "load", inputSchema: { type: "object" } }] });
-  assert.deepEqual(load.toolCalls.map(call => call.arguments), [{ name: "data-analysis" }, { name: "xlsx" }]);
+  assert.deepEqual(load.toolCalls.map(call => call.arguments), [{ name: "xlsx" }]);
   assert.equal(calls.length, 0);
 });
 
@@ -62,7 +62,7 @@ test("document export formats select the matching file capability", async () => 
     assert.equal(target.kind, kind, input); assert.equal(target.format, format, input);
     const load = await model.complete({ ...baseInvocation, phase: "execution", messages,
       tools: [{ name: "load_skill", description: "load", inputSchema: { type: "object" } }] });
-    assert.deepEqual(load.toolCalls.map(call => (call.arguments as any).name), ["data-analysis", ...(skillName ? [skillName] : [])], input);
+    assert.deepEqual(load.toolCalls.map(call => (call.arguments as any).name), [...(skillName ? [skillName] : [])], input);
   }
 });
 
@@ -83,6 +83,72 @@ test("follow-up references keep the generic resolver path", async () => {
     messages: [{ role: "user", content: "把刚才的查询改成同比分析" }],
     tools: [{ name: "resolve_conversation_turn", description: "resolve", inputSchema: { type: "object" } }] });
   assert.equal(calls.length, 1);
+});
+
+test("standalone quick queries beginning with this still use fixed intent resolution", async () => {
+  const calls: ModelInvocation[] = [];
+  const model = dataAgentModel(adapter({ content: "fallback", finishReason: "stop", toolCalls: [] }, calls));
+  const response = await model.complete({ ...baseInvocation, phase: "planning",
+    messages: [{ role: "user", content: "这个场景有哪些数据表？分别有多少条记录？" }],
+    tools: [{ name: "resolve_conversation_turn", description: "resolve", inputSchema: { type: "object" } }] });
+  assert.equal(calls.length, 0);
+  assert.equal(response.toolCalls[0]?.name, "resolve_conversation_turn");
+});
+
+test("scenario table counts use one deterministic quick-query call", async () => {
+  const calls: ModelInvocation[] = [];
+  const model = dataAgentModel(adapter({ content: "fallback", finishReason: "stop", toolCalls: [] }, calls));
+  const response = await model.complete({ ...baseInvocation, phase: "execution",
+    messages: [{ role: "user", content: "这个场景有哪些数据表？分别有多少条记录？" }],
+    tools: [{ name: "computer_run_command", description: "run", inputSchema: { type: "object" } }] });
+  assert.equal(calls.length, 0);
+  const args = (response.toolCalls[0]?.arguments as any).args as string[];
+  assert.equal(args[1], "quick-query");
+  assert.deepEqual(JSON.parse(args[args.indexOf("--request-json") + 1]), { kind: "scenario_table_counts" });
+});
+
+test("steel unit and frequency counts use one combined deterministic query", async () => {
+  const calls: ModelInvocation[] = [];
+  const model = dataAgentModel(adapter({ content: "fallback", finishReason: "stop", toolCalls: [] }, calls));
+  const response = await model.complete({ ...baseInvocation, phase: "execution",
+    messages: [{ role: "user", content: "钢联指标信息中有哪些计量单位和数据频度？各有多少个指标？" }],
+    tools: [{ name: "computer_run_command", description: "run", inputSchema: { type: "object" } }] });
+  assert.equal(calls.length, 0);
+  const args = (response.toolCalls[0]?.arguments as any).args as string[];
+  assert.deepEqual(JSON.parse(args[args.indexOf("--request-json") + 1]), {
+    kind: "source_dimension_counts", source_label: "钢联指标信息",
+    dimension_labels: ["单位名称", "频度名称"], count_label: "指标编码",
+  });
+});
+
+test("a completed quick-query returns its deterministic answer without another model call", async () => {
+  const calls: ModelInvocation[] = [];
+  const model = dataAgentModel(adapter({ content: "fallback", finishReason: "stop", toolCalls: [] }, calls));
+  const markdown = "共 2 张数据表。\n\n| 数据表 | 来源 ID | 记录数 |\n|---|---|---:|\n| A | a | 10 |\n| B | b | 20 |";
+  const response = await model.complete({ ...baseInvocation, phase: "execution", messages: [
+    { role: "user", content: "这个场景有哪些数据表？分别有多少条记录？" },
+    { role: "tool", toolCallId: "quick", name: "computer_run_command", isError: false, content: JSON.stringify({
+      stdout: JSON.stringify({ deterministic_answer: true, quick_query_kind: "scenario_table_counts",
+        status: "completed", delivery_markdown: markdown, dataset: { rows: [{ source_id: "a", row_count: 10 }] } }),
+    }) },
+  ], tools: [{ name: "computer_run_command", description: "run", inputSchema: { type: "object" } }] });
+  assert.equal(calls.length, 0);
+  assert.equal(response.content, markdown);
+  assert.equal(response.finishReason, "stop");
+});
+
+test("a failed quick-query stops instead of repeating the same command", async () => {
+  const calls: ModelInvocation[] = [];
+  const model = dataAgentModel(adapter({ content: "fallback", finishReason: "stop", toolCalls: [] }, calls));
+  const response = await model.complete({ ...baseInvocation, phase: "execution", messages: [
+    { role: "user", content: "这个场景有哪些数据表？分别有多少条记录？" },
+    { role: "tool", toolCallId: "data-agent-quick-query", name: "computer_run_command",
+      isError: true, content: "INTERNAL_ERROR: Tool execution failed" },
+  ], tools: [{ name: "computer_run_command", description: "run", inputSchema: { type: "object" } }] });
+  assert.equal(calls.length, 0);
+  assert.equal(response.finishReason, "stop");
+  assert.equal(response.toolCalls.length, 0);
+  assert.match(response.content, /停止自动重试/u);
 });
 
 test("invalid command shapes and guessed Result pointers are corrected before execution", async () => {
@@ -134,6 +200,22 @@ test("a query-plan file remains when the SQL request has no inline plan", async 
   }] }));
   const response = await model.complete({ ...baseInvocation, phase: "execution" });
   assert.deepEqual((response.toolCalls[0]?.arguments as any).args, expected);
+});
+
+test("execute inherits the latest successful query context when the model omits query_plan", async () => {
+  const contextId = "ctx_" + "b".repeat(64);
+  const request = { sql: "SELECT unit_name, COUNT(*) FROM business.metrics GROUP BY unit_name", params: [] };
+  const model = dataAgentModel(adapter({ content: "", finishReason: "tool_calls", toolCalls: [{
+    id: "execute", name: "computer_run_command", arguments: { command: "python3", cwd: "@skills/data-analysis",
+      args: ["scripts/data_client.py", "execute", "--request-json", JSON.stringify(request)] },
+  }] }));
+  const response = await model.complete({ ...baseInvocation, phase: "execution", messages: [{
+    role: "tool", toolCallId: "context-call", name: "computer_run_command", isError: false,
+    content: JSON.stringify({ stdout: { content: { schema: "nl2sql.query-context/v1", context_id: contextId } } }),
+  }] });
+  const args = (response.toolCalls[0]?.arguments as any).args as string[];
+  const normalized = JSON.parse(args[args.indexOf("--request-json") + 1]);
+  assert.deepEqual(normalized.query_plan, { context_id: contextId });
 });
 
 test("the first retrieve-knowledge file read selects the useful fields once", async () => {
@@ -286,6 +368,29 @@ test("successful simple numeric lookups use deterministic assessment", async () 
   assert.equal(args.criteria.every((item: any) => item.satisfied), true);
   assert.equal(args.skills[0].skillId, "discovered:data-analysis");
   assert.equal(args.failedBoundary, null);
+});
+
+test("deterministically rendered multi-row quick queries skip model assessment", async () => {
+  const calls: ModelInvocation[] = [];
+  const model = dataAgentModel(adapter({ content: "fallback", finishReason: "stop", toolCalls: [] }, calls));
+  const context = {
+    canonicalIntent: { userInput: "这个场景有哪些数据表？分别有多少条记录？" },
+    openEvidenceConcerns: [], assessmentGaps: [], temporalEvidenceGap: false,
+    step: { successCriteria: [{ id: "business-answer" }] },
+    skills: [{ id: "discovered:data-analysis" }],
+    evidence: { candidateOutput: "| A | 10 |\n| B | 20 |", toolCalls: [{
+      toolCallId: "quick", isError: false, result: JSON.stringify({
+        schema: "nl2sql.data-file/v1", source_schema: "nl2sql.query-result/v1",
+        status: "completed", deterministic_answer: true, dataset: { rows: [{ count: 10 }, { count: 20 }] },
+      }),
+    }] },
+  };
+  const response = await model.complete({ ...baseInvocation, phase: "assessment", runtimeContext: {
+    id: "assessment", phase: "assessment", content: '<assessment_context>' + JSON.stringify(context) + '</assessment_context>',
+  }, tools: [{ name: "submit_assessment", description: "assess", inputSchema: { type: "object" } }] });
+  assert.equal(calls.length, 0);
+  assert.equal(response.toolCalls[0]?.name, "submit_assessment");
+  assert.equal((response.toolCalls[0]?.arguments as any).criteria[0].satisfied, true);
 });
 
 test("empty temporal evidence gap objects do not force model assessment", async () => {

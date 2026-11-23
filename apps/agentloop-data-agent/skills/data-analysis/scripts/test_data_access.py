@@ -129,6 +129,34 @@ class GatewayTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.gateway.catalog("group", ["not_authorized"])
 
+    def test_quick_table_counts_use_one_union_query_and_verified_sources(self):
+        result = self.gateway.quick_query('group', {'kind': 'scenario_table_counts'})
+        self.assertEqual(result['status'], 'completed')
+        self.assertTrue(result['deterministic_answer'])
+        self.assertIn('COUNT(*)', self.calls[-1][0])
+        self.assertEqual(result['query_plan']['source_signatures'].keys(), {'staff'})
+
+    def test_quick_dimension_counts_combine_dimensions_into_one_query(self):
+        original = self.store.load_config
+        def config():
+            value = original()
+            value['tables'][0].update(label='员工信息')
+            value['tables'][0]['columns'] = [
+                {'name': 'employee_code', 'label': '员工编码', 'allow_output': True},
+                {'name': 'unit_name', 'label': '单位名称', 'allow_output': True},
+                {'name': 'frequency_name', 'label': '频度名称', 'allow_output': True},
+            ]
+            return value
+        self.store.load_config = config
+        result = self.gateway.quick_query('group', {
+            'kind': 'source_dimension_counts', 'source_label': '员工信息',
+            'dimension_labels': ['单位名称', '频度名称'], 'count_label': '员工编码',
+        })
+        sql = self.calls[-1][0]
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(sql.count('UNION ALL'), 1)
+        self.assertIn('COUNT(DISTINCT `employee_code`)', sql)
+
     def test_catalog_receipt_navigates_exact_fields_without_reading_all_columns(self):
         original = self.store.load_config
         def config():

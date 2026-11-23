@@ -332,6 +332,57 @@ test("execution turns use the model-declared output budget", async () => {
   assert.equal(observedMaxOutputTokens, 32_768);
 });
 
+test("preactivated Skills are available on the first model turn without load_skill", async () => {
+  const events: RuntimeEvent[] = [];
+  let captured: ModelInvocation | undefined;
+  const grant = makeGrant([]);
+  const result = await runAgentLoop({
+    runId: grant.runId, systemPrompt: "Use the bound Skill.", input: "answer", grant,
+    tools: new ToolRegistry([]), maxSteps: 1,
+    availableSkills: [{ id: "skill-1", name: "data-analysis", contentHash: "hash-1" }],
+    preactivatedSkills: [{ id: "skill-1", name: "data-analysis", contentHash: "hash-1",
+      content: "<skill_content>FAST SKILL BODY</skill_content>" }],
+    emit: event => { events.push(event); },
+    model: { limits: TEST_MODEL_LIMITS, complete: async request => {
+      captured = request;
+      return { content: "done", finishReason: "stop", toolCalls: [] };
+    } },
+  });
+  assert.equal(result.output, "done");
+  assert.deepEqual(result.activatedSkillNames, ["data-analysis"]);
+  assert.match(captured!.runtimeContext!.content, /FAST SKILL BODY/);
+  assert.equal(captured!.tools.some(tool => tool.name === "load_skill"), false);
+  const activation = events.find(event => event.type === "skill.activated");
+  assert.equal(activation?.data.name, "data-analysis");
+  assert.equal(activation?.data.activationMode, "preactivated");
+});
+
+test("host-authenticated deterministic structured candidates bypass synthesis", async () => {
+  let modelTurns = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "quick_query", description: "Run quick query", inputSchema: { type: "object" },
+    parse: value => value, execute: async () => ({
+      schema: "nl2sql.data-file/v1", sourceSchema: "nl2sql.query-result/v1",
+      deterministic_answer: true, status: "completed", delivery_markdown: "Fast answer",
+      dataset: { rows: [{ count: 1 }] },
+      evidenceReceipt: { evidenceKinds: { satisfied: ["source_summary", "record_counts"], caveated: [], failed: [] } },
+    }),
+  };
+  const grant = makeGrant([tool.name]);
+  const result = await runAgentLoop({
+    runId: grant.runId, systemPrompt: "Answer.", input: "count", grant,
+    tools: new ToolRegistry([tool]), maxSteps: 3, requireStructuredCandidateSynthesis: true,
+    allowDeterministicStructuredCandidates: true,
+    evaluateCandidate: async candidate => ({ approved: candidate.output === "Fast answer", feedback: "" }),
+    model: { limits: TEST_MODEL_LIMITS, complete: async () => {
+      modelTurns += 1;
+      return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "quick", name: tool.name, arguments: {} }] };
+    } },
+  });
+  assert.equal(result.output, "Fast answer");
+  assert.equal(modelTurns, 1);
+});
+
 test("single leaf execution carries loop step handoff across model steps", async () => {
   const contexts: string[] = [];
   let calls = 0;

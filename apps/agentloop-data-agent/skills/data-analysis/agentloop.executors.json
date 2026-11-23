@@ -345,6 +345,36 @@
           "result": "resolved, ambiguous or unmatched; complete candidates and lookup query evidence. Ambiguous plans have no selected codes and require an explicit selection."
         },
         {
+          "id": "quick-query",
+          "description": "Execute a whitelisted, catalog-derived fast lookup for scenario table row counts or one source's multiple dimension counts. The gateway selects authorized tables and fields, creates the query plan, combines dimensions into one SQL, and returns complete evidence.",
+          "inputs": [
+            {
+              "name": "request-json",
+              "description": "JSON kind=scenario_table_counts, or kind=source_dimension_counts with source_label, dimension_labels and count_label. Caller SQL and physical identifiers are not accepted.",
+              "required": true
+            },
+            {
+              "name": "output",
+              "description": "Workspace query result JSON path.",
+              "required": true
+            }
+          ],
+          "args": [
+            "quick-query",
+            "--scenario-id",
+            "group",
+            "--request-json",
+            "{{request-json}}",
+            "--output",
+            "{{output}}"
+          ],
+          "result": "Complete nl2sql.query-result/v1 with deterministic_answer=true, verified query plan and one combined SQL result.",
+          "producesEvidenceKinds": [
+            "source_summary",
+            "record_counts"
+          ]
+        },
+        {
           "id": "execute",
           "description": "Execute SQL with query_plan. Verify source, metric and time bindings; verify entity codes only when entity_bindings are present. SQL may filter entities with entity_bindings empty. get-query-context, entity-resolution and execute-wrapper JSON are deterministically unwrapped.",
           "inputs": [

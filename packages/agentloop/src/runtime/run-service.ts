@@ -72,6 +72,7 @@ import {
 } from "../planning/step-execution-binding.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import { readSkillExecutionManifest } from "../skills/skill-execution-manifest.ts";
+import { formatLoadedSkill } from "../skills/skill-context.ts";
 import type { PrivateSkill, SkillService } from "../skills/skill-service.ts";
 import type { SkillLoadDiagnostic } from "../skills/skill-directory.ts";
 import { hasSkillSourceContract } from "../skills/agentloop-metadata.ts";
@@ -82,6 +83,7 @@ import { AppError, forbidden, notFound } from "../shared/errors.ts";
 import { artifactFormatFamilyForPath, canonicalArtifactFormatFamily, isConcreteArtifactFormat, semanticArtifactFamily } from "../shared/artifact-format.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
 import { runAgentLoop, type ToolStepConvergenceContext } from "./agent-loop.ts";
+import type { ContextPolicy } from "./context-assembler.ts";
 import { completeWithRequestTelemetry } from "./model-streaming.ts";
 import { createCapabilityGrant } from "./capability-grant.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatPracticePromptAugmentation, type ArtifactKind, type DynamicPromptProfile, type TaskProfile } from "./dynamic-prompt.ts";
@@ -125,6 +127,7 @@ import {
   DANGEROUS_COMPUTER_TOOL_NAMES,
   SKILL_LOADER_TOOL_NAME,
   skillExecutionCwd,
+  skillExecutionRootEnvName,
   ToolRegistry,
   type RuntimeTool,
 } from "../tools/index.ts";
@@ -443,6 +446,11 @@ export class RunService {
   private readonly planRevisionAssessorFactory: PlanRevisionAssessorFactory;
   private readonly systemPrompt: string;
   private readonly maxSteps: number;
+  private readonly preactivateSkillNames: ReadonlySet<string>;
+  private readonly contextPolicy?: ContextPolicy;
+  private readonly maxToolResultCharacters?: number;
+  private readonly maxParallelToolCalls?: number;
+  private readonly allowDeterministicStructuredCandidates: boolean;
   private readonly maxRounds: number;
   private readonly defaultModelKey?: string;
   private readonly requireExplicitModel: boolean;
@@ -525,6 +533,13 @@ export class RunService {
     systemPrompt?: string;
     /** Bounded model-turn budget per executable Plan step. */
     maxSteps?: number;
+    /** Exact Skill names whose authoritative bodies are active at step start. */
+    preactivateSkillNames?: readonly string[];
+    /** Host-specific prompt compaction policy. */
+    contextPolicy?: ContextPolicy;
+    maxToolResultCharacters?: number;
+    maxParallelToolCalls?: number;
+    allowDeterministicStructuredCandidates?: boolean;
     /** Bounded goal-level Round budget; each Round owns one admitted Plan. */
     maxRounds?: number;
     defaultModelKey?: string;
@@ -556,6 +571,11 @@ export class RunService {
     this.planRevisionAssessorFactory = options.planRevisionAssessorFactory ?? ((model) => new ModelPlanRevisionAssessor(model));
     this.systemPrompt = options.systemPrompt ?? DEFAULT_RUNNER_SYSTEM_PROMPT;
     this.maxSteps = stepTurnLimit(options.maxSteps);
+    this.preactivateSkillNames = new Set(options.preactivateSkillNames ?? []);
+    this.contextPolicy = options.contextPolicy;
+    this.maxToolResultCharacters = options.maxToolResultCharacters;
+    this.maxParallelToolCalls = options.maxParallelToolCalls;
+    this.allowDeterministicStructuredCandidates = options.allowDeterministicStructuredCandidates === true;
     this.maxRounds = roundLimit(options.maxRounds);
     this.defaultModelKey = options.defaultModelKey;
     this.requireExplicitModel = options.requireExplicitModel === true;
@@ -3593,6 +3613,18 @@ export class RunService {
         if (skill.package === undefined) continue;
         skillManifests.set(skill.id, await readSkillExecutionManifest(skill.package.root));
       }
+      const preactivatedSkills = stepSkills
+        .filter((skill) => this.preactivateSkillNames.has(skill.name))
+        .map((skill) => ({
+          id: skill.id,
+          name: skill.name,
+          contentHash: skill.contentHash,
+          content: formatLoadedSkill(skill, {
+            executionCwd: skillExecutionCwd,
+            executionRootEnvName: skillExecutionRootEnvName,
+            executionEntrypoints: skillManifests.get(skill.id) ?? [],
+          }),
+        }));
       const resolvedOperationBindings = resolveOperationBindings({
         skills: stepSkills,
         manifests: skillManifests,
@@ -3611,12 +3643,13 @@ export class RunService {
         }),
         requiredEvidenceKinds: activeStep.evidenceContract?.requiredKinds ?? [],
       });
+      const needsSkillLoader = stepSkills.some((skill) => !this.preactivateSkillNames.has(skill.name));
       // The Run grant is the execution authorization boundary. A Plan leaf
       // describes the current objective and its evidence contract, but must
       // not revoke a Tool that the user already authorized for the Run.
       // Resource and Skill grants below remain leaf-scoped.
       const stepAllowedToolNames = [...input.rootGrant.allowedToolNames].filter((name) =>
-        name !== SKILL_LOADER_TOOL_NAME || stepSkillIds.length > 0
+        name !== SKILL_LOADER_TOOL_NAME || needsSkillLoader
       );
       const stepVisibleDirectories = visibleDirectoriesForStep(
         input.visibleDirectories,
@@ -3818,6 +3851,7 @@ export class RunService {
         ),
         stepSemanticFrame,
         ...(requiresSourceBackedSynthesis ? { requireStructuredCandidateSynthesis: true } : {}),
+        ...(this.allowDeterministicStructuredCandidates ? { allowDeterministicStructuredCandidates: true } : {}),
         ...(stepTaskProfile.artifactAction === "modify"
           ? { artifactWritePolicy: "overwrite_observed_existing" as const }
           : {}),
@@ -3925,7 +3959,11 @@ export class RunService {
         tools: input.registry,
         grant: stepGrant,
         availableSkills: stepSkills.map((skill) => ({ id: skill.id, name: skill.name, contentHash: skill.contentHash })),
+        ...(preactivatedSkills.length === 0 ? {} : { preactivatedSkills }),
         maxSteps: this.maxSteps,
+        ...(this.contextPolicy === undefined ? {} : { contextPolicy: this.contextPolicy }),
+        ...(this.maxToolResultCharacters === undefined ? {} : { maxToolResultCharacters: this.maxToolResultCharacters }),
+        ...(this.maxParallelToolCalls === undefined ? {} : { maxParallelToolCalls: this.maxParallelToolCalls }),
         streamFlushIntervalMs: this.database.dialect === "tidb" ? 2_000 : undefined,
         initialModelSteps: (await this.actions.list(input.runId)).filter(action => action.kind === "model_turn" && action.planId === plan.id && action.stepId === activeStep.id).length,
         ...(this.stepExecutionStrategy === undefined ? {} : { stepExecutionStrategy: this.stepExecutionStrategy }),

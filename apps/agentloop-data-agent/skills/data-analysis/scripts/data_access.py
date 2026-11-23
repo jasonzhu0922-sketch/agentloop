@@ -9,7 +9,8 @@ from time import monotonic
 from datetime import datetime, timezone
 from uuid import uuid4
 from query_errors import QueryParameterError, query_diagnostic
-from catalog_knowledge import catalog_config, prepare_knowledge, project_sources, semantic_metadata
+from catalog_knowledge import (catalog_config, prepare_knowledge, project_sources, semantic_metadata,
+                               table_signature)
 from entity_binding import (EntityBindingError, lookup_spec, query_plan_from_artifact,
                             resolution_result, validate_plan)
 
@@ -70,6 +71,98 @@ class Gateway:
         if requested - {table["name"] for table in tables}:
             raise ValueError("Source is absent from the selected scenario")
         return project_sources(value, requested, question)
+
+    def quick_query(self, scenario_id, request):
+        """Execute one whitelisted catalog-derived lookup without model-authored SQL."""
+        if not isinstance(request, dict) or set(request) - {'kind', 'source_label', 'dimension_labels', 'count_label'}:
+            raise ValueError('Quick query only accepts its declared request fields')
+        kind = request.get('kind')
+        scenario, raw = self._snapshot(scenario_id, verify_current=True)
+        with self.scope(scenario):
+            revision = catalog_projection(raw, scenario_id)['catalog_revision']
+            catalog = catalog_projection(self.physical_catalog(raw), scenario_id, revision)
+        quote = lambda value: '`' + value + '`'
+
+        def identifier(value):
+            if not isinstance(value, str) or not value.isidentifier() or not value.isascii():
+                raise ValueError('Quick query requires valid physical identifiers')
+            return value
+
+        def table_ref(table):
+            return quote(identifier(table['schema'])) + '.' + quote(identifier(table['name']))
+
+        def source_plan(tables):
+            bindings = [semantic_metadata(
+                catalog, 'source', table['name'], table['name'],
+                definition=next((item for item in catalog.get('table_summaries', [])
+                                 if item.get('source_id') == table['name']), None),
+            ) for table in tables]
+            return {'schema': 'nl2sql.query-plan/v1', 'scenario_id': scenario_id,
+                    'catalog_revision': catalog['catalog_revision'],
+                    'source_signatures': {table['name']: table_signature(table) for table in tables},
+                    'semantic_model_version': catalog.get('semantic_model_version'),
+                    'metric_bindings': [], 'entity_bindings': [], 'time_bindings': [],
+                    'semantic_bindings': bindings, 'semantic_gap_refs': []}
+
+        if kind == 'scenario_table_counts':
+            tables = catalog['tables']
+            if not tables:
+                raise ValueError('Selected scenario has no authorized tables')
+            sql = ' UNION ALL '.join(
+                "SELECT %s AS source_id, %s AS source_label, COUNT(*) AS row_count FROM " + table_ref(table)
+                for table in tables)
+            params = [value for table in tables
+                      for value in (table['name'], table.get('label') or table['name'])]
+            result = self.execute_sql(scenario_id, sql, params, source_plan(tables))
+            result.update(quick_query_kind=kind, deterministic_answer=True)
+            return result
+
+        if kind == 'source_dimension_counts':
+            source_label = request.get('source_label')
+            dimension_labels = request.get('dimension_labels')
+            count_label = request.get('count_label')
+            if (not isinstance(source_label, str) or not source_label.strip()
+                    or not isinstance(dimension_labels, list) or not 1 <= len(dimension_labels) <= 4
+                    or any(not isinstance(value, str) or not value.strip() for value in dimension_labels)
+                    or not isinstance(count_label, str) or not count_label.strip()):
+                raise ValueError('Quick dimension counts need source_label, dimension_labels and count_label')
+            sources = [table for table in catalog['tables']
+                       if source_label in {table['name'], table.get('label')}
+                       or source_label in (table.get('label') or '')]
+            if len(sources) != 1:
+                raise ValueError('Quick query source label must identify exactly one table')
+            table = sources[0]
+            columns = table.get('columns', [])
+
+            def match_column(label):
+                exact = [column for column in columns if label in {column.get('name'), column.get('label')}]
+                partial = [column for column in columns if label in (column.get('label') or '')
+                           or (column.get('label') or '') in label]
+                matches = exact or partial
+                if len(matches) != 1 or matches[0].get('allow_output') is False:
+                    raise ValueError('Quick query field label must identify exactly one output column')
+                return matches[0]
+
+            dimensions = [match_column(label) for label in dimension_labels]
+            count_column = match_column(count_label)
+            sql_parts, params = [], []
+            for column in dimensions:
+                name = identifier(column['name'])
+                count_name = identifier(count_column['name'])
+                sql_parts.append(
+                    "SELECT %s AS dimension_field, %s AS dimension_label, "
+                    + quote(name) + " AS dimension_value, COUNT(DISTINCT " + quote(count_name)
+                    + ") AS item_count FROM " + table_ref(table) + " WHERE " + quote(name)
+                    + " IS NOT NULL AND TRIM(CAST(" + quote(name) + " AS CHAR)) <> '' GROUP BY "
+                    + quote(name))
+                params.extend([name, column.get('label') or name])
+            sql = ' UNION ALL '.join(sql_parts) + ' ORDER BY dimension_field, item_count DESC, dimension_value'
+            result = self.execute_sql(scenario_id, sql, params, source_plan([table]))
+            result.update(quick_query_kind=kind, deterministic_answer=True,
+                          source_id=table['name'], source_label=table.get('label') or table['name'])
+            return result
+
+        raise ValueError('Unsupported quick query kind')
 
     def knowledge(self, action, scenario_id, request):
         from semantic_retrieval import validate_request, selected_sources, configured_scope, response, check

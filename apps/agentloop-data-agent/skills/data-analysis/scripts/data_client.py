@@ -167,6 +167,37 @@ def model_summary(value):
     return None
 
 
+def deterministic_answer_markdown(value):
+    if not isinstance(value, dict) or value.get('deterministic_answer') is not True:
+        return None
+    dataset = value.get('dataset')
+    rows = dataset.get('rows') if isinstance(dataset, dict) else None
+    if not isinstance(rows, list):
+        return None
+    if value.get('quick_query_kind') == 'scenario_table_counts':
+        lines = [f"| {row.get('source_label') or row.get('source_id') or ''} | "
+                 f"{row.get('source_id') or ''} | {int(row.get('row_count') or 0):,} |"
+                 for row in rows if isinstance(row, dict)]
+        return '\n'.join([f'共 {len(lines)} 张数据表。', '', '| 数据表 | 来源 ID | 记录数 |',
+                          '|---|---|---:|', *lines])
+    if value.get('quick_query_kind') == 'source_dimension_counts':
+        groups = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get('dimension_field') or '')
+            group = groups.setdefault(key, {'label': row.get('dimension_label') or key, 'rows': []})
+            group['rows'].append(row)
+        output = [f"{value.get('source_label') or '所选数据表'}的分类统计如下：", '']
+        for group in groups.values():
+            output.extend([f"**{group['label']}**", '', '| 取值 | 指标数 |', '|---|---:|'])
+            output.extend(f"| {row.get('dimension_value') if row.get('dimension_value') not in (None, '') else '（空）'} "
+                          f"| {int(row.get('item_count') or 0):,} |" for row in group['rows'])
+            output.append('')
+        return '\n'.join(output).strip()
+    return None
+
+
 def save_result(value, output):
     content = (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
     if not output:
@@ -184,6 +215,32 @@ def save_result(value, output):
             os.unlink(temporary)
     receipt = {"schema": "nl2sql.data-file/v1", "path": str(path), "bytes": len(content),
                "sha256": hashlib.sha256(content).hexdigest()}
+    if isinstance(value, dict) and value.get('deterministic_answer') is True:
+        dataset = value.get('dataset') if isinstance(value.get('dataset'), dict) else {}
+        receipt.update({key: value[key] for key in
+                        ('scenario_id', 'query_id', 'catalog_revision', 'status', 'quick_query_kind',
+                         'source_id', 'source_label') if key in value})
+        receipt.update({
+            'source_schema': value.get('schema'),
+            'deterministic_answer': True,
+            'row_count': dataset.get('row_count'),
+            'columns': dataset.get('columns'),
+            'dataset_complete': True,
+            'dataset': dataset,
+            'plan_verification': {key: value.get('plan_verification', {}).get(key) for key in
+                                  ('status', 'plan_sha256', 'verification_scope')
+                                  if key in value.get('plan_verification', {})},
+            'evidenceReceipt': {
+                'schema': 'agentloop.toolEvidenceReceipt/v1',
+                'evidenceKinds': {'satisfied': ['source_summary', 'record_counts'],
+                                  'caveated': [], 'failed': []},
+            },
+        })
+        delivery = deterministic_answer_markdown(value)
+        if delivery:
+            receipt['delivery_markdown'] = delivery
+        print(json.dumps(receipt, ensure_ascii=False))
+        return
     if isinstance(value, dict):
         save_context_reference(value)
         pointers = {key: '/' + key.replace('~', '~0').replace('/', '~1') for key in value}
@@ -208,6 +265,12 @@ def save_result(value, output):
             receipt["columns"] = value["dataset"]["columns"]
         if 'plan_verification' in value:
             receipt['plan_verification'] = value['plan_verification']
+        if value.get('deterministic_answer') is True:
+            receipt['deterministic_answer'] = True
+            receipt['quick_query_kind'] = value.get('quick_query_kind')
+            delivery = deterministic_answer_markdown(value)
+            if delivery:
+                receipt['delivery_markdown'] = delivery
         if 'matched_terms' in value:
             receipt['matched_terms_pointer'] = '/matched_terms'
             if len(json.dumps(value['matched_terms'], ensure_ascii=False)) <= 4000:
@@ -228,7 +291,8 @@ def save_result(value, output):
     elif isinstance(value, dict) and isinstance(value.get('dataset'), dict):
         # A small answer must not require another read just because its plan
         # evidence is large. Only inline whole datasets, never truncated rows.
-        if len(json.dumps(value['dataset'], ensure_ascii=False)) <= 3000:
+        dataset_limit = 10000 if value.get('deterministic_answer') is True else 3000
+        if len(json.dumps(value['dataset'], ensure_ascii=False)) <= dataset_limit:
             receipt['dataset_complete'] = True
             receipt['dataset'] = value['dataset']
             receipt['read_contract']['inline_dataset_root'] = '/dataset'
@@ -303,7 +367,7 @@ def main(argv=None):
         command.add_argument('--scenario-id', required=True, type=text_arg)
         command.add_argument('--request-json', required=True)
         command.add_argument('--output', required=True)
-    for name in ("catalog", "execute", "resolve-entity", "candidate-lookup", "probe-values"):
+    for name in ("catalog", "execute", "quick-query", "resolve-entity", "candidate-lookup", "probe-values"):
         command = actions.add_parser(name)
         command.add_argument("--scenario-id", required=True, type=text_arg)
         command.add_argument("--output", required=name in ('execute', 'resolve-entity'))
@@ -315,7 +379,7 @@ def main(argv=None):
             command.add_argument("--field", required=True, type=text_arg)
             command.add_argument("--limit", type=int, default=50)
             command.add_argument("--request-json", help='Optional filters and related grouping fields for a source-local probe')
-        elif name == "candidate-lookup":
+        elif name in ("candidate-lookup", "quick-query"):
             command.add_argument("--request-json", required=True)
         else:
             command.add_argument("--request-json", required=True)
@@ -343,6 +407,13 @@ def main(argv=None):
                 raise ValueError('expected a candidate lookup object')
         except ValueError as exc:
             parser.error('invalid candidate lookup JSON: ' + str(exc))
+    if args.action == 'quick-query':
+        try:
+            body = json_argument(args.request_json, 'quick query request')
+            if not isinstance(body, dict):
+                raise ValueError('expected a quick query object')
+        except ValueError as exc:
+            parser.error('invalid quick query JSON: ' + str(exc))
     if args.action == 'probe-values' and args.request_json:
         try:
             body = json_argument(args.request_json, 'value probe')
@@ -413,6 +484,11 @@ def main(argv=None):
         elif args.action == "catalog":
             phase = "catalog.read"
             result = gateway.catalog(args.scenario_id, args.source_id, args.question)
+        elif args.action == 'quick-query':
+            phase = 'query.quick'
+            result = gateway.quick_query(args.scenario_id, body)
+            if result.get('status') != 'completed':
+                exit_code = 1
         elif args.action == 'resolve-entity':
             phase = 'entity.resolve'
             result = gateway.resolve_entity(args.scenario_id, body)
@@ -461,7 +537,7 @@ def main(argv=None):
                   "execution_state": ("unknown" if phase == "query.dispatch" else "not_started")
                       if args.action == "execute" else "not_applicable"}
         exit_code = 1
-    if exit_code == 0 and args.action in {"catalog", "execute", "probe-values"} | METADATA_ACTIONS:
+    if exit_code == 0 and args.action in {"catalog", "execute", "quick-query", "probe-values"} | METADATA_ACTIONS:
         expected_schema = ("nl2sql.semantic-metadata/v1" if args.action in METADATA_ACTIONS else
                            "nl2sql.data-catalog/v1" if args.action == "catalog" else
                            "nl2sql.value-probe/v1" if args.action == "probe-values" else
@@ -470,7 +546,7 @@ def main(argv=None):
                 or result.get("schema") != expected_schema):
             result = {"status": "response_mismatch", "error": "Data interface schema or scenario does not match the request"}
             exit_code = 1
-        elif args.action == "execute":
+        elif args.action in {"execute", "quick-query"}:
             if result.get("status") != "completed":
                 exit_code = 1
             else:

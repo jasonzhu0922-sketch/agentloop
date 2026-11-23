@@ -95,6 +95,13 @@ export interface AgentLoopOptions {
     readonly name: string;
     readonly contentHash: string;
   }[];
+  /** Host-authorized Skill bodies already active before the first model turn. */
+  readonly preactivatedSkills?: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly contentHash: string;
+    readonly content: string;
+  }[];
   readonly maxSteps: number;
   readonly initialModelSteps?: number;
   /** Additional tool-enabled steps allowed after `maxSteps` when the model is still working. */
@@ -124,6 +131,8 @@ export interface AgentLoopOptions {
   readonly stepSemanticFrame?: Pick<StepSemanticFrame, "completionBoundary" | "evidenceMode" | "phaseRole">;
   /** Source-backed facts and delivery require Agent synthesis within their owned scope. */
   readonly requireStructuredCandidateSynthesis?: boolean;
+  /** Allow host-authenticated deterministic Tool renderings to bypass a model synthesis turn. */
+  readonly allowDeterministicStructuredCandidates?: boolean;
   /** Durable rejection decisions for this same Step, restored on recovery. */
   readonly initialCandidateRejections?: readonly { readonly output: string; readonly feedback: string; readonly decisionBasisDigest?: string }[];
   readonly convergencePrompt?: string;
@@ -230,6 +239,7 @@ interface StructuredToolCandidate {
   readonly sourceToolCallIds: readonly string[];
   readonly schema?: string;
   readonly aggregation?: StructuredCandidateAggregation;
+  readonly deterministic: boolean;
 }
 
 interface StructuredCandidateAggregation {
@@ -602,7 +612,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const availableSkillList = options.availableSkills ?? [];
   const availableSkills = buildSkillReferenceMap(availableSkillList);
   const activatedSkillNames = new Set(
-    collectActivatedSkillNames(options.initialMessages ?? [], availableSkills),
+    [
+      ...collectActivatedSkillNames(options.initialMessages ?? [], availableSkills),
+      ...(options.preactivatedSkills ?? []).map((skill) => skill.name),
+    ],
   );
   const contextAssembler = new ContextAssembler({
     runId: options.runId,
@@ -615,8 +628,22 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     policy: options.contextPolicy,
     emit,
   });
+  const preactivatedSkillAugmentations: RuntimePromptAugmentation[] = (options.preactivatedSkills ?? []).map((skill) => ({
+    schema: "agentloop.promptAugmentation/v1",
+    id: `preactivated-skill:${skill.id}:${skill.contentHash}`,
+    source: "preactivated_skill",
+    content: [
+      `Skill ${skill.name} is already activated by the host for this Plan step. Do not call load_skill for it again.`,
+      skill.content,
+    ].join("\n\n"),
+    provenance: { skillId: skill.id, skillName: skill.name, contentHash: skill.contentHash },
+  }));
+  const initialRuntimePromptAugmentations = [
+    ...(options.initialRuntimePromptAugmentations ?? []),
+    ...preactivatedSkillAugmentations,
+  ];
   const initialPromptAugmentations = contextAssembler.applyRuntimePromptAugmentations(
-    options.initialRuntimePromptAugmentations ?? [],
+    initialRuntimePromptAugmentations,
   );
 
   await emit({
@@ -631,7 +658,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         ...(options.currentDecisionContext === undefined ? {} : { stepId: options.currentDecisionContext().stepId }),
         augmentationIds: initialPromptAugmentations,
         contextRevision: contextAssembler.runtimeContextRevision,
-        augmentations: (options.initialRuntimePromptAugmentations ?? [])
+        augmentations: initialRuntimePromptAugmentations
           .filter((item) => initialPromptAugmentations.includes(item.id))
           .map((item) => ({
             id: item.id,
@@ -650,6 +677,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           name: skill.name,
           contentHash: skill.contentHash,
         })),
+      },
+    });
+  }
+  for (const skill of options.preactivatedSkills ?? []) {
+    await emit({
+      type: "skill.activated",
+      data: {
+        step: 0,
+        skillId: skill.id,
+        name: skill.name,
+        contentHash: skill.contentHash,
+        activationMode: "preactivated",
       },
     });
   }
@@ -2231,7 +2270,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const structuredCandidates = options.evaluateCandidate === undefined
       || structuredCandidateIsBlockedByPendingArtifactEvidence(options.progressPolicy, toolEvidence)
       ? undefined
-      : selectStructuredToolCandidate(toolEvidence, options.requireStructuredCandidateSynthesis !== true);
+      : selectStructuredToolCandidate(
+        toolEvidence,
+        options.requireStructuredCandidateSynthesis !== true,
+        options.allowDeterministicStructuredCandidates === true,
+      );
     if (structuredCandidates?.directCandidate !== undefined
       && !rejectedStructuredCandidateOutputs.has(structuredCandidates.directCandidate.deliveryCandidate.output)) {
       const structuredCandidate = structuredCandidates.directCandidate;
@@ -2624,6 +2667,7 @@ async function evaluateToolStepConvergence(
 function selectStructuredToolCandidate(
   evidence: readonly AgentLoopToolEvidence[],
   allowDirectCandidate = true,
+  allowDeterministicCandidate = false,
 ): StructuredToolCandidateSelection | undefined {
   const observations: StructuredToolCandidate[] = [];
   for (const item of evidence) {
@@ -2641,7 +2685,8 @@ function selectStructuredToolCandidate(
   if (observations.length === 0) return undefined;
   const mergedCandidate = mergeAppendableStructuredCandidates(observations);
   return {
-    ...(allowDirectCandidate && (observations.length === 1 ? { directCandidate: observations[0] }
+    ...((allowDirectCandidate || (allowDeterministicCandidate && observations.length === 1 && observations[0]?.deterministic))
+      && (observations.length === 1 ? { directCandidate: observations[0] }
       : mergedCandidate === undefined ? {} : { directCandidate: mergedCandidate })),
     observations,
   };
@@ -2700,6 +2745,7 @@ function structuredCandidateFromRecord(
 ): StructuredToolCandidate | undefined {
   const wrapperSchema = typeof record.schema === "string" ? record.schema : undefined;
   const sourceSchema = typeof record.sourceSchema === "string" ? record.sourceSchema : undefined;
+  const deterministic = record.deterministic_answer === true;
   const schema = sourceSchema ?? wrapperSchema;
   const deliveryCandidate = isPlainRecord(record.deliveryCandidate) ? record.deliveryCandidate : undefined;
   const output = typeof deliveryCandidate?.output === "string"
@@ -2732,6 +2778,7 @@ function structuredCandidateFromRecord(
       ...(schema === undefined ? {} : { schema }),
       ...(sourceSchema === undefined ? {} : { sourceSchema }),
       ...(wrapperSchema === undefined || wrapperSchema === schema ? {} : { wrapperSchema }),
+      ...(deterministic ? { deterministic_answer: true } : {}),
       deliveryCandidate: userVisibleOutput,
     }),
     observation: JSON.stringify({
@@ -2744,6 +2791,7 @@ function structuredCandidateFromRecord(
     sourceToolCallIds: [sourceToolCallId],
     ...(schema === undefined ? {} : { schema }),
     ...(aggregation === undefined ? {} : { aggregation }),
+    deterministic,
   };
 }
 
@@ -2804,6 +2852,7 @@ function mergeAppendableStructuredCandidates(
     observation: JSON.stringify({ aggregation, sourceToolCallIds, deliveryCharacters: deliveryCandidate.output.length }),
     sourceToolCallId: sourceToolCallIds[0]!,
     sourceToolCallIds,
+    deterministic: ordered.every((candidate) => candidate.deterministic),
     ...(schema === undefined ? {} : { schema }),
   };
 }
