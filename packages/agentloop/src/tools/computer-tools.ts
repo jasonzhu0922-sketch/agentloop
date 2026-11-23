@@ -204,11 +204,12 @@ export function createComputerTools(
       name: "computer_search_text",
       effect: "read",
       description: [
-        "Search literal text recursively under the configured workspace root or an authorized read-only @skills/<skill-name> root.",
+        "Search literal text recursively under the configured workspace root or an authorized read-only @skills/<skill-name> root. This is a pure-text search tool.",
         "path must be relative to an authorized root; absolute paths are rejected.",
         "Use this low-noise search tool instead of running shell grep/cat loops for file discovery.",
-        "For structured JSON artifacts, use computer_read_json with schema/profile or JSON Pointer first; use text search only when the keyword location is unknown or the manifest is insufficient.",
-        "Use optional contextBefore/contextAfter to return small evidence windows around each match.",
+        "For JSON, JSONL, and structured Runtime results, use computer_read_json first; use computer_search_text only when a location is unknown in plain text or a structured profile/manifest is insufficient.",
+        "contextBefore and contextAfter are line counts and must be integers from 0 through 20. maxMatches must be an integer from 1 through 200.",
+        "For character windows use computer_read_file or read_result. Do not pass character counts, character offsets, or token counts as contextBefore/contextAfter.",
       ].join(" "),
       inputSchema: objectSchema(["path", "query"], {
         path: { type: "string" },
@@ -804,7 +805,17 @@ function directoryPath(value: string): string {
 function optionalBoundedInteger(value: unknown, field: string, min: number, max: number): number | undefined {
   if (value === undefined) return undefined;
   if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) {
-    throw badRequest(`${field} must be an integer between ${min} and ${max}`);
+    throw badRequest(`${field} must be an integer between ${min} and ${max}`, {
+      code: "invalid_tool_argument",
+      path: argumentPath(field),
+      received: value,
+      expected: {
+        type: "integer",
+        minimum: min,
+        maximum: max,
+        ...(field === "contextBefore" || field === "contextAfter" ? { unit: "lines" } : {}),
+      },
+    });
   }
   return value as number;
 }
@@ -1618,9 +1629,23 @@ function parseOptionalStringArray(value: unknown, field: string, maximum: number
 
 function requireBoundedInteger(value: unknown, field: string, min: number, max: number): number {
   if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) {
-    throw badRequest(`${field} must be an integer between ${min} and ${max}`);
+    throw badRequest(`${field} must be an integer between ${min} and ${max}`, {
+      code: "invalid_tool_argument",
+      path: argumentPath(field),
+      received: value,
+      expected: {
+        type: "integer",
+        minimum: min,
+        maximum: max,
+        ...(field === "contextBefore" || field === "contextAfter" ? { unit: "lines" } : {}),
+      },
+    });
   }
   return value as number;
+}
+
+function argumentPath(field: string): string {
+  return `/${field.replace(/\[(\d+)\]/g, "/$1").replaceAll(".", "/")}`;
 }
 
 function createDriverTools(driver: ComputerDriver): RuntimeTool<unknown>[] {

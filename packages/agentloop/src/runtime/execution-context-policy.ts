@@ -132,7 +132,7 @@ export function buildStepRuntimeContextSnapshot(input: {
         ...(hasStructuredJsonArtifactDependencies
           ? {
             structuredArtifactConsumptionDiscipline:
-              "A dependency result includes durable structured JSON artifacts. Use its resultBinding with read_result first to inspect the canonical artifact manifest; do not infer omitted tables, rows, or groups from step handoff metadata. For agentloop.tableExtractionArtifact/v1, use the returned manifest table entries and their recordsPointer/rowsPointer/columnsPointer with computer_read_json JSON Pointer queries and array windows. Use computer_summarize_table_artifact first to cover all manifest tables with compact field/count/stat summaries; then use computer_read_json only for missing details or narrow windows. Use computer_search_text only for unknown keyword locations in unstructured text, or when the manifest/profile is insufficient after structured reads.",
+              "Structured artifact rule: consume the bound Result with read_result first, inspect manifest table entries, then route JSON, JSONL, and structured Runtime results to computer_read_json (JSON Pointer and array windows); use computer_summarize_table_artifact for a compact manifest-wide scan. Use computer_search_text only for an unknown location in plain text or when the structured profile is insufficient. Its contextBefore/contextAfter are line counts 0-20, maxMatches is 1-200; use computer_read_file or read_result for character windows.",
           }
           : {}),
         ...(evidenceAcquisitionDiscipline === undefined ? {} : { evidenceAcquisitionDiscipline }),

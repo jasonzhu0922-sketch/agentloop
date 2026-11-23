@@ -1156,7 +1156,7 @@ test("ContextAssembler defers proactive compaction after artifact evidence while
   });
 
   const canonical = [
-    { role: "user" as const, content: "historical source ".repeat(2_500) },
+    { role: "assistant" as const, content: "historical source ".repeat(2_500) },
     {
       role: "assistant" as const,
       content: "",
@@ -1429,7 +1429,7 @@ test("ContextAssembler reduces an overlong persisted summary before treating com
     model,
   });
   const assembly = await assembler.assemble([
-    { role: "user", content: "source ".repeat(7_000) },
+    { role: "assistant", content: "source ".repeat(7_000) },
     { role: "assistant", content: "latest action" },
   ], []);
 
@@ -1462,7 +1462,7 @@ test("completion repair keeps the best valid summary above the target when the p
     },
     emit: (event) => { events.push(event); },
   });
-  const messages: ModelMessage[] = [{ role: "user", content: "canonical evidence ".repeat(6_000) }, { role: "assistant", content: "Continue." }];
+  const messages: ModelMessage[] = [{ role: "assistant", content: "canonical evidence ".repeat(6_000) }, { role: "assistant", content: "Continue." }];
   assert.equal(await assembler.forceCompactForCompletionRepair(messages, []), true);
   const assembly = await assembler.assemble(messages, []);
   assert.equal(assembler.contextSummary, original);
@@ -1492,7 +1492,7 @@ test("a malformed reduction is retried against the last valid summary", async ()
       },
     },
   });
-  assert.equal(await assembler.forceCompactForCompletionRepair([{ role: "user", content: "source ".repeat(20_000) }], []), true);
+  assert.equal(await assembler.forceCompactForCompletionRepair([{ role: "assistant", content: "source ".repeat(20_000) }], []), true);
   assert.equal(calls, 3);
   assert.doesNotMatch(assembler.contextSummary!, /invalid reduction/);
 });
@@ -1510,7 +1510,7 @@ test("failed compaction preserves the accepted summary, epoch, and newly acquire
     },
     emit: (event) => { events.push(event); },
   });
-  const messages: ModelMessage[] = [{ role: "user", content: "historical evidence ".repeat(3_000) }];
+  const messages: ModelMessage[] = [{ role: "assistant", content: "historical evidence ".repeat(3_000) }];
   await assembler.forceCompactForCompletionRepair(messages, []);
   const prior = assembler.contextSummary;
   fail = true;
@@ -1550,7 +1550,7 @@ test("replacement compaction budgets the new summary without double counting the
     },
     emit: (event) => { events.push(event); },
   });
-  const messages: ModelMessage[] = [{ role: "user", content: "original evidence" }];
+  const messages: ModelMessage[] = [{ role: "assistant", content: "original evidence" }];
   assert.equal(await assembler.forceCompactForCompletionRepair(messages, []), true);
   assembler.setRuntimeDirective("PRESSURE");
   messages.push({ role: "assistant", content: "new evidence" });
@@ -1575,7 +1575,7 @@ test("compaction rejects a summary whose actual projected invocation exceeds the
     },
     emit: (event) => { events.push(event); },
   });
-  await assert.rejects(() => assembler.forceCompactForCompletionRepair([{ role: "user", content: "source ".repeat(3_000) }], []), /smaller usable projection/);
+  await assert.rejects(() => assembler.forceCompactForCompletionRepair([{ role: "assistant", content: "source ".repeat(3_000) }], []), /smaller usable projection/);
   assert.equal(assembler.contextSummary, undefined);
   assert.equal(events.some((event) => event.type === "context.compacted"), false);
   assert.equal(events.some((event) => event.type === "context.compaction.rejected"), true);
@@ -1654,7 +1654,7 @@ test("ContextAssembler retries a length-truncated summary without accepting part
     model,
   });
   const assembly = await assembler.assemble([
-    { role: "user", content: "source ".repeat(7_000) },
+    { role: "assistant", content: "source ".repeat(7_000) },
     { role: "assistant", content: "latest action" },
   ], []);
 
@@ -1681,7 +1681,8 @@ test("ContextAssembler rejects an unstructured refusal without synthesizing a re
     model,
   });
   await assert.rejects(() => assembler.assemble([
-    { role: "user", content: "统计绩效分布并返回前三名\n" + "source ".repeat(7_000) },
+    { role: "user", content: "统计绩效分布并返回前三名" },
+    { role: "assistant", content: "source ".repeat(7_000) },
     { role: "assistant", content: "已读取表格，等待聚合" },
   ], []), /did not return a complete structured summary/);
 
@@ -1713,7 +1714,7 @@ test("ContextAssembler skips failed proactive compaction when context still fits
     emit: (event) => { events.push(event); },
   });
   const canonical = [
-    { role: "user" as const, content: "historical source ".repeat(2_500) },
+    { role: "assistant" as const, content: "historical source ".repeat(2_500) },
     { role: "assistant" as const, content: "continue with current step" },
   ];
 
@@ -1751,7 +1752,7 @@ test("ContextAssembler summarizes an oversized terminal candidate instead of ret
     { role: "assistant", content: oversizedCandidate },
   ], []);
 
-  assert.deepEqual(assembly.messages, []);
+  assert.deepEqual(assembly.messages, [{ role: "user", content: "Produce a verifiable result." }]);
   assert.match(assembly.runtimeContext.content, /<structured_summary>/);
   assert.match(assembly.runtimeContext.content, /original candidate remains canonical evidence/);
   assert.ok(assembly.runtimeContext.supersedesId !== undefined);

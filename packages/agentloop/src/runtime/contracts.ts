@@ -99,6 +99,10 @@ export type ModelMessage =
       readonly toolCalls?: readonly ModelToolCall[];
       /** Provider reasoning content, also preserved when the provider needs it for continuation. */
       readonly reasoningContent?: string;
+      /** Runtime checkpoint provenance; never supplied by the model. */
+      readonly executionHistoryBasis?: import("./execution-history-projection.ts").ExecutionHistoryBasis;
+      /** Derived model projection only; never written back into canonical history. */
+      readonly historyProjection?: import("./execution-history-projection.ts").ExecutionHistoryRecord;
     }
   | {
       readonly role: "tool";
@@ -106,6 +110,7 @@ export type ModelMessage =
       readonly name: string;
       readonly content: string;
       readonly isError: boolean;
+      readonly executionOutcome?: Pick<AgentLoopToolEvidence, "invocationStatus" | "operationStatus" | "failurePhase" | "exitCode">;
     };
 
 export interface ModelToolDefinition {

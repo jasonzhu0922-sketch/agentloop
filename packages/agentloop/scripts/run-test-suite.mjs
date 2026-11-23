@@ -43,6 +43,7 @@ const suites = Object.freeze({
     "tests/concurrency.test.ts",
     "tests/tool-call-scheduling.test.ts",
     "tests/context-assembler.test.ts",
+    "tests/execution-history-projection.test.ts",
     "tests/context-compaction-persistence.test.ts",
     "tests/content-reference-flow.test.ts",
     "tests/completion-preparation.test.ts",

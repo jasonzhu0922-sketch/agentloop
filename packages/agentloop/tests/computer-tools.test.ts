@@ -4506,6 +4506,72 @@ test("computer_search_text returns bounded context windows and read ranges", asy
   }
 });
 
+test("computer_search_text rejects invalid line and match bounds with structured diagnostics", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-search-arguments-"));
+  try {
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_search_text"]));
+    const cases = [
+      { field: "contextBefore", value: 21, path: "/contextBefore", minimum: 0, maximum: 20 },
+      { field: "contextAfter", value: -1, path: "/contextAfter", minimum: 0, maximum: 20 },
+      { field: "maxMatches", value: 201, path: "/maxMatches", minimum: 1, maximum: 200 },
+    ] as const;
+    for (const item of cases) {
+      assert.throws(
+        () => allowed.prepare({ id: `invalid-${item.field}`, name: "computer_search_text", arguments: {
+          path: "records.json", query: "needle", [item.field]: item.value,
+        } }),
+        (error: unknown) => {
+          assert.equal(hasCode(error, "BAD_REQUEST"), true);
+          const details = (error as { details?: Record<string, unknown> }).details;
+          assert.equal(details?.code, "invalid_tool_argument");
+          assert.equal(details?.tool, "computer_search_text");
+          assert.equal(details?.path, item.path);
+          assert.equal(details?.received, item.value);
+          assert.deepEqual(details?.expected, {
+            type: "integer", minimum: item.minimum, maximum: item.maximum,
+            ...(item.field === "maxMatches" ? {} : { unit: "lines" }),
+          });
+          assert.equal(details?.suggested_tool, "computer_read_json");
+          assert.equal(details?.reason, "Use computer_read_json for structured JSON artifacts");
+          return true;
+        },
+      );
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_search_text description routes structured results and distinguishes line windows from character windows", () => {
+  const root = process.cwd();
+  const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+  const definition = registry.materialize(grant(["computer_search_text"])).definitions[0]!;
+  assert.match(definition.description, /pure-text search/i);
+  assert.match(definition.description, /JSON.*computer_read_json/i);
+  assert.match(definition.description, /contextBefore.*contextAfter.*0 through 20/i);
+  assert.match(definition.description, /maxMatches.*1 through 200/i);
+  assert.match(definition.description, /computer_read_file or read_result/i);
+  assert.match(definition.description, /character counts|character offsets|token counts/i);
+});
+
+test("computer search executor rejects out-of-range windows instead of truncating them", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-search-executor-bounds-"));
+  try {
+    const executor = new ComputerExecutor(root);
+    await assert.rejects(
+      () => executor.searchText(".", "needle", { contextBefore: 21 }),
+      (error: unknown) => {
+        assert.equal(hasCode(error, "BAD_REQUEST"), true);
+        assert.equal((error as { details?: Record<string, unknown> }).details?.path, "/contextBefore");
+        return true;
+      },
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("computer_search_text delegates to a trusted grep and matches the JS walk", async () => {
   const grep = await findGrep();
   if (grep === undefined) return;

@@ -79,6 +79,23 @@ interface SearchMatch {
   readonly readRange?: ReadLineRange;
 }
 
+function boundedSearchInteger(value: number, field: string, minimum: number, maximum: number): number {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw badRequest(`${field} must be an integer between ${minimum} and ${maximum}`, {
+      code: "invalid_tool_argument",
+      path: `/${field}`,
+      received: value,
+      expected: {
+        type: "integer",
+        minimum,
+        maximum,
+        ...(field === "contextBefore" || field === "contextAfter" ? { unit: "lines" } : {}),
+      },
+    });
+  }
+  return value;
+}
+
 interface DirectoryFileEntry {
   readonly path: string;
   readonly bytes: number;
@@ -1032,9 +1049,9 @@ export class ComputerExecutor {
     const resolvedRoot = await this.resolveReadablePath(path);
     const root = resolvedRoot.absolutePath;
     const maxFiles = options.maxFiles ?? 5_000;
-    const maxMatches = options.maxMatches ?? 200;
-    const contextBefore = Math.min(options.contextBefore ?? 0, SEARCH_CONTEXT_MAX_LINES);
-    const contextAfter = Math.min(options.contextAfter ?? 0, SEARCH_CONTEXT_MAX_LINES);
+    const maxMatches = boundedSearchInteger(options.maxMatches ?? 200, "maxMatches", 1, 200);
+    const contextBefore = boundedSearchInteger(options.contextBefore ?? 0, "contextBefore", 0, SEARCH_CONTEXT_MAX_LINES);
+    const contextAfter = boundedSearchInteger(options.contextAfter ?? 0, "contextAfter", 0, SEARCH_CONTEXT_MAX_LINES);
     const rg = this.executableAliases.get("rg");
     const grep = this.executableAliases.get("grep");
     const binary = rg ?? grep;

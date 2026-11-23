@@ -25,6 +25,8 @@ import type {
   RuntimeEvent,
 } from "../src/runtime/contracts.ts";
 import { AppError } from "../src/shared/errors.ts";
+import { ComputerExecutor } from "../src/computer/computer-executor.ts";
+import { createComputerTools } from "../src/tools/computer-tools.ts";
 import { ToolRegistry } from "../src/tools/tool-registry.ts";
 import type { RuntimeTool } from "../src/tools/tool-registry.ts";
 import { TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
@@ -2950,7 +2952,7 @@ test("two empty completion candidates compact context before one bounded deliver
   assert.equal(events.some((event) => event.type === "candidate.approved" && event.data.output === ""), false);
 });
 
-test("repeated empty completion candidates fail explicitly after the compacted retry is exhausted", async () => {
+test("empty completion fails explicitly when only protected user input remains", async () => {
   const events: RuntimeEvent[] = [];
   let compactionCalls = 0;
   const model: ModelAdapter = {
@@ -2980,8 +2982,8 @@ test("repeated empty completion candidates fail explicitly after the compacted r
     (error: unknown) => error instanceof AppError && error.code === "STEP_NOT_COMPLETED",
   );
 
-  assert.equal(compactionCalls, 1);
-  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 4);
+  assert.equal(compactionCalls, 0);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 2);
   assert.equal(events.some((event) => event.type === "candidate.approved"), false);
 });
 
@@ -3324,6 +3326,40 @@ test("modify-artifact writes overwrite a same-Run read target without another mo
     effectiveMode: "overwrite",
     reason: "modify_artifact_overwrite_observed_existing",
   }]);
+});
+
+test("computer_search_text prepare rejection preserves structured argument diagnostics in tool.rejected", async () => {
+  let calls = 0;
+  const events: RuntimeEvent[] = [];
+  const tools = createComputerTools(new ComputerExecutor(process.cwd()));
+  const grant = makeGrant(["computer_search_text"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Search the workspace.",
+    input: "Find the record.",
+    model: {
+      limits: TEST_MODEL_LIMITS,
+      complete: async () => {
+        calls += 1;
+        return calls === 1
+          ? { content: "", finishReason: "tool_calls", toolCalls: [{ id: "bad-search", name: "computer_search_text", arguments: { path: "records.json", query: "needle", contextBefore: 21 } }] }
+          : { content: "done", finishReason: "stop", toolCalls: [] };
+      },
+    },
+    tools: new ToolRegistry(tools),
+    grant,
+    maxSteps: 3,
+    emit: event => { events.push(event); },
+  });
+  assert.equal(result.output, "done");
+  const rejected = events.find(event => event.type === "tool.rejected" && event.data.toolCallId === "bad-search");
+  assert.ok(rejected);
+  assert.equal(rejected.data.code, "invalid_tool_argument");
+  assert.equal(rejected.data.path, "/contextBefore");
+  assert.equal(rejected.data.received, 21);
+  assert.deepEqual(rejected.data.expected, { type: "integer", minimum: 0, maximum: 20, unit: "lines" });
+  assert.equal(rejected.data.suggested_tool, "computer_read_json");
+  assert.equal(rejected.data.reason, "Use computer_read_json for structured JSON artifacts");
 });
 
 test("prepare-stage argument rejection receives a schema repair directive", async () => {

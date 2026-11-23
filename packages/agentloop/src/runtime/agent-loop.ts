@@ -193,7 +193,7 @@ export interface ToolStepConvergenceDecision {
 
 type PreparedEntry =
   | { readonly kind: "ready"; readonly value: PreparedToolCall }
-  | { readonly kind: "rejected"; readonly call: ModelToolCall; readonly message: string };
+  | { readonly kind: "rejected"; readonly call: ModelToolCall; readonly message: string; readonly diagnostics?: Readonly<Record<string, unknown>> };
 
 interface ToolOutcome {
   readonly call: ModelToolCall;
@@ -1259,7 +1259,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           try {
             return { kind: "ready" as const, value: prepareWithArtifactTarget(automaticAcceptance.call) };
           } catch (error) {
-            return { kind: "rejected" as const, call: automaticAcceptance.call, message: publicErrorMessage(error) };
+            return {
+              kind: "rejected" as const,
+              call: automaticAcceptance.call,
+              message: publicErrorMessage(error),
+              diagnostics: publicErrorDetails(error),
+            };
           }
         })();
         if (prepared.kind === "ready") {
@@ -1291,6 +1296,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
               toolCallId: automaticAcceptance.call.id,
               toolName: automaticAcceptance.call.name,
               reason: prepared.message,
+              ...prepared.diagnostics,
               invocationStatus: "rejected",
               operationStatus: "unknown",
               isError: true,
@@ -1535,6 +1541,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       }
     }
 
+    const executionHistoryBasis: import("./execution-history-projection.ts").ExecutionHistoryBasis = {
+      identity: currentDecisionView.identity,
+      toolEffects: Object.fromEntries(response.toolCalls.map(call => [call.name, options.tools.effectOf(call.name) ?? "unknown"])),
+    };
     // This awaited event is the durable checkpoint before any external effect.
     await emit({
       type: "assistant.committed",
@@ -1543,6 +1553,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         content: response.content,
         finishReason: response.finishReason,
         toolCalls: response.toolCalls,
+        executionHistoryBasis,
         ...(response.finishReason === "length"
           ? { providerReplayableToolCallIds: replayableToolCalls.map((call) => call.id) }
           : {}),
@@ -1855,13 +1866,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
               toolCallId: call.id,
               toolName: call.name,
               reason: message,
+              ...publicErrorDetails(error),
               invocationStatus: "rejected",
               operationStatus: "unknown",
               isError: true,
               failurePhase: "prepare",
             },
           });
-          prepared.push({ kind: "rejected", call, message });
+          prepared.push({ kind: "rejected", call, message, diagnostics: publicErrorDetails(error) });
         }
       }
 
@@ -1903,6 +1915,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const assistantMessage: ModelMessage = {
       role: "assistant",
       content: response.content,
+      executionHistoryBasis,
       ...(providerReplayableToolCalls.length === 0 ? {} : { toolCalls: providerReplayableToolCalls }),
       ...(response.reasoningContent === undefined ? {} : { reasoningContent: response.reasoningContent }),
     };
@@ -1923,6 +1936,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           name: outcome.call.name,
           content: outcome.content,
           isError: outcome.isError,
+          executionOutcome: { invocationStatus: evidence.invocationStatus, operationStatus: evidence.operationStatus,
+            failurePhase: evidence.failurePhase, exitCode: evidence.exitCode },
         });
       }
       if (!outcome.isError && outcome.call.name === "load_skill") {
@@ -3130,13 +3145,14 @@ async function completeWithStreamingAndDispatch(
             toolCallId: call.id,
             toolName: call.name,
             reason: message,
+            ...publicErrorDetails(error),
             invocationStatus: "rejected",
             operationStatus: "unknown",
             isError: true,
             failurePhase: "prepare",
           },
         });
-        entry = { kind: "rejected", call, message };
+        entry = { kind: "rejected", call, message, diagnostics: publicErrorDetails(error) };
       }
       return entry;
     });
@@ -3883,6 +3899,9 @@ function omitUndefinedRecord(value: Record<string, unknown>): Record<string, unk
 }
 
 function publicErrorMessage(error: unknown): string {
+  if (error instanceof AppError && error.details?.code === "invalid_tool_argument") {
+    return JSON.stringify({ error: `${error.code}: ${error.message}`, ...error.details });
+  }
   if (error instanceof AppError && error.details?.patchRecovery !== undefined) {
     return JSON.stringify({ error: `${error.code}: ${error.message}`, failureKind: error.details.failureKind,
       patchRecovery: error.details.patchRecovery });
@@ -3890,6 +3909,12 @@ function publicErrorMessage(error: unknown): string {
   if (error instanceof AppError) return `${error.code}: ${error.message}`;
   if (error instanceof Error && error.name === "AbortError") return "CANCELLED: Operation was cancelled";
   return "INTERNAL_ERROR: Tool execution failed";
+}
+
+function publicErrorDetails(error: unknown): Readonly<Record<string, unknown>> {
+  return error instanceof AppError && error.details?.code === "invalid_tool_argument"
+    ? error.details
+    : {};
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

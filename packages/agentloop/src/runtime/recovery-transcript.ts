@@ -1,4 +1,5 @@
 import type { AgentLoopToolEvidence, ModelMessage, ModelToolCall, RuntimeEvent } from "./contracts.ts";
+import type { ExecutionHistoryBasis } from "./execution-history-projection.ts";
 import { parseRuntimeResultRef, type RuntimeResultRef } from "./runtime-result.ts";
 import { decisionCommitsFromEvents, type RuntimeDecisionCommit } from "./decision-ledger.ts";
 import { parseOutputBudgetState, type OutputBudgetState } from "./tool-content-budget.ts";
@@ -61,6 +62,7 @@ export function selectRecoveryExchanges(input: {
 }
 
 interface AssistantCheckpoint {
+  readonly executionHistoryBasis?: ExecutionHistoryBasis;
   readonly event: RecoveryEvent;
   readonly content: string;
   readonly toolCalls: readonly ModelToolCall[];
@@ -166,6 +168,9 @@ export function reconstructRecoveryTranscript(input: {
         ? event.data.providerReplayableToolCallIds.filter((value): value is string => typeof value === "string")
         : undefined;
       assistants.push({
+        ...(isRecord(event.data.executionHistoryBasis) && isRecord(event.data.executionHistoryBasis.identity)
+          && isRecord(event.data.executionHistoryBasis.toolEffects)
+          ? { executionHistoryBasis: event.data.executionHistoryBasis as unknown as ExecutionHistoryBasis } : {}),
         event,
         content,
         toolCalls,
@@ -241,7 +246,7 @@ export function reconstructRecoveryTranscript(input: {
         ? new Set<string>()
         : new Set(assistant.toolCalls.filter((call) => isToolArgumentsObject(call.arguments)).map((call) => call.id))
       : new Set(assistant.providerReplayableToolCallIds);
-    const replayableCalls = assistant.toolCalls.filter((call) =>
+    let replayableCalls = assistant.toolCalls.filter((call) =>
       replayableToolCallIds.has(call.id) && isToolArgumentsObject(call.arguments),
     );
     const suppressedCalls = assistant.toolCalls.filter((call) => !replayableToolCallIds.has(call.id) || !isToolArgumentsObject(call.arguments));
@@ -259,11 +264,15 @@ export function reconstructRecoveryTranscript(input: {
       for (const call of replayableCalls) {
         if (!outcomes.has(call.id)) unfinishedToolCalls.push({ toolCallId: call.id, toolName: call.name });
       }
-      continue;
+      // Preserve completed siblings (especially writes) while outstanding
+      // calls remain explicit recovery blockers, never invented ToolResults.
+      replayableCalls = replayableCalls.filter(call => outcomes.has(call.id));
+      if (replayableCalls.length === 0) continue;
     }
     messages.push({
       role: "assistant",
       content: assistant.content,
+      ...(assistant.executionHistoryBasis === undefined ? {} : { executionHistoryBasis: assistant.executionHistoryBasis }),
       toolCalls: replayableCalls,
       ...(assistant.reasoningContent === undefined ? {} : { reasoningContent: assistant.reasoningContent }),
     });
@@ -275,6 +284,10 @@ export function reconstructRecoveryTranscript(input: {
         name: call.name,
         content: outcome.content,
         isError: outcome.isError,
+        ...(assistant.executionHistoryBasis === undefined ? {} : {
+          executionOutcome: { invocationStatus: outcome.invocationStatus, operationStatus: outcome.operationStatus,
+            failurePhase: outcome.failurePhase, exitCode: outcome.exitCode },
+        }),
       });
       toolEvidence.push(toolEvidenceFromOutcome(call, outcome));
       }
@@ -290,14 +303,14 @@ export function reconstructRecoveryTranscript(input: {
     orphanCalls.push({ id, name: committed.name, arguments: committed.arguments, seq: committed.seq });
   }
   if (orphanCalls.length > 0) {
-    const complete = orphanCalls.every((call) => outcomes.has(call.id));
-    if (complete) {
+    const completedCalls = orphanCalls.filter(call => outcomes.has(call.id));
+    if (completedCalls.length > 0) {
       messages.push({
         role: "assistant",
         content: "",
-        toolCalls: orphanCalls.map((call) => ({ id: call.id, name: call.name, arguments: call.arguments })),
+        toolCalls: completedCalls.map((call) => ({ id: call.id, name: call.name, arguments: call.arguments })),
       });
-      for (const call of orphanCalls) {
+      for (const call of completedCalls) {
         const outcome = outcomes.get(call.id)!;
         messages.push({
           role: "tool",
@@ -315,11 +328,10 @@ export function reconstructRecoveryTranscript(input: {
           ...(outcome.failurePhase === undefined ? {} : { failurePhase: outcome.failurePhase }),
         });
       }
-      checkpointEventSeq = Math.max(checkpointEventSeq ?? 0, ...orphanCalls.map((call) => call.seq));
-    } else {
-      for (const call of orphanCalls) {
-        if (!outcomes.has(call.id)) unfinishedToolCalls.push({ toolCallId: call.id, toolName: call.name });
-      }
+      checkpointEventSeq = Math.max(checkpointEventSeq ?? 0, ...completedCalls.map((call) => call.seq));
+    }
+    for (const call of orphanCalls) {
+      if (!outcomes.has(call.id)) unfinishedToolCalls.push({ toolCallId: call.id, toolName: call.name });
     }
   }
   for (const response of humanResponses) {

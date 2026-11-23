@@ -176,8 +176,19 @@ export class ToolRegistry {
           }
           input = tool.parse(call.arguments);
         } catch (error) {
-          if (error instanceof Error) throw badRequest(`Invalid arguments for ${call.name}: ${error.message}`);
-          throw badRequest(`Invalid arguments for ${call.name}`);
+          const details: Record<string, unknown> | undefined = error instanceof AppError && error.code === "BAD_REQUEST"
+            ? { ...(error.details ?? {}), ...(error.details?.code === "invalid_tool_argument" ? { tool: call.name } : {}) }
+            : undefined;
+          if (call.name === "computer_search_text"
+            && details?.code === "invalid_tool_argument"
+            && isStructuredJsonPath(call.arguments)) {
+            Object.assign(details, {
+              suggested_tool: "computer_read_json",
+              reason: "Use computer_read_json for structured JSON artifacts",
+            });
+          }
+          if (error instanceof Error) throw badRequest(`Invalid arguments for ${call.name}: ${error.message}`, details);
+          throw badRequest(`Invalid arguments for ${call.name}`, details);
         }
         assertDecisionBinding(tool, input, grant, options.decisionLedger ?? []);
         assertResolvedOperationBinding(tool, input, grant);
@@ -241,6 +252,14 @@ export class ToolRegistry {
       },
     };
   }
+}
+
+function isStructuredJsonPath(argumentsValue: unknown): boolean {
+  if (argumentsValue === null || typeof argumentsValue !== "object" || Array.isArray(argumentsValue)) return false;
+  const path = (argumentsValue as Record<string, unknown>).path;
+  if (typeof path !== "string") return false;
+  const normalized = path.split(/[?#]/, 1)[0]!.toLowerCase();
+  return normalized.endsWith(".json") || normalized.endsWith(".jsonl") || normalized.includes("/content-refs/");
 }
 
 function assertResolvedOperationBinding(

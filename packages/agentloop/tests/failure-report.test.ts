@@ -23,7 +23,9 @@ test("the failure-report provider sees committed observations without assistant 
       reports += 1;
       assert.equal(body.messages.some((message: { role: string }) => message.role === "assistant"), false,
         "reporting must not imitate tool-call commentary or server-authored assistant placeholders");
-      assert.doesNotMatch(JSON.stringify(body.messages), /FUNDAMENTAL PRIORITY|completed the prior operation|tool_calls|reasoning_content/);
+      assert.doesNotMatch(JSON.stringify(body.messages), /completed the prior operation|tool_calls|reasoning_content/);
+      assert.match(JSON.stringify(body.messages), /Historical assistant/);
+      assert.match(JSON.stringify(body.messages), /FUNDAMENTAL PRIORITY/);
       assert.match(JSON.stringify(body.messages), /127199/);
       assert.match(JSON.stringify(body.messages), /current-stage-result/);
     }

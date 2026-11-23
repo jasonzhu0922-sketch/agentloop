@@ -123,19 +123,26 @@ export class AppDatabase implements SqlConnection {
   }
 
   prepare(sql: string): SqlStatement {
-    const statement = this.connection.prepare(sql);
+    // `migrate()` is promise-based even for the synchronous SQLite adapter.
+    // Constructing the engine statement here races that migration: SQLite
+    // validates referenced tables during prepare(), so callers that create a
+    // database and immediately prepare a statement can observe `no such
+    // table` before the schema has been installed. Defer statement creation
+    // until the same readiness barrier used by run/get/all.
+    let statement: SqlStatement | undefined;
+    const readyStatement = async (): Promise<SqlStatement> => {
+      await this.migrated;
+      return statement ??= this.connection.prepare(sql);
+    };
     return {
       run: async (...params) => {
-        await this.migrated;
-        return await statement.run(...params);
+        return await (await readyStatement()).run(...params);
       },
       get: async (...params) => {
-        await this.migrated;
-        return await statement.get(...params);
+        return await (await readyStatement()).get(...params);
       },
       all: async (...params) => {
-        await this.migrated;
-        return await statement.all(...params);
+        return await (await readyStatement()).all(...params);
       },
     };
   }
@@ -147,6 +154,43 @@ export class AppDatabase implements SqlConnection {
   async close(): Promise<void> {
     await this.migrated;
     await this.connection.close();
+  }
+
+  private async dropUnsupportedTiDbCompositeForeignKeys(): Promise<void> {
+    if (this.dialect !== "tidb") return;
+    type ForeignKeyColumn = {
+      table_name: string; constraint_name: string; column_name: string;
+      referenced_table_name: string; referenced_column_name: string; ordinal_position: number;
+    };
+    const expected: Record<string, { referencedTable: string; pairs: readonly (readonly [string, string])[] }> = {
+      plan_step_retirements: { referencedTable: "plan_steps", pairs: [["plan_id", "plan_id"], ["step_id", "step_id"]] },
+      skill_compliance_assessments: { referencedTable: "plan_steps", pairs: [["plan_id", "plan_id"], ["step_id", "step_id"]] },
+      run_round_results: { referencedTable: "run_rounds", pairs: [["run_id", "run_id"], ["round_number", "round_number"]] },
+    };
+    const rows = await this.connection.prepare(`
+      SELECT table_name, constraint_name, column_name, referenced_table_name, referenced_column_name, ordinal_position
+      FROM information_schema.key_column_usage
+      WHERE table_schema = DATABASE() AND referenced_table_name IS NOT NULL
+      ORDER BY table_name, constraint_name, ordinal_position
+    `).all<ForeignKeyColumn>();
+    const groups = new Map<string, ForeignKeyColumn[]>();
+    for (const row of rows) {
+      if (!(row.table_name in expected)) continue;
+      const key = `${row.table_name}\0${row.constraint_name}`;
+      groups.set(key, [...(groups.get(key) ?? []), row]);
+    }
+    for (const group of groups.values()) {
+      const table = group[0].table_name;
+      const definition = expected[table];
+      const pairs = [...group].sort((a, b) => a.ordinal_position - b.ordinal_position)
+        .map(row => [row.column_name, row.referenced_column_name] as const);
+      if (group[0].referenced_table_name !== definition.referencedTable
+        || pairs.length !== definition.pairs.length
+        || pairs.some((pair, index) => pair[0] !== definition.pairs[index][0] || pair[1] !== definition.pairs[index][1])) continue;
+      const constraint = group[0].constraint_name;
+      if (!/^[A-Za-z0-9_]+$/.test(constraint)) continue;
+      await this.connection.exec(`ALTER TABLE \`${table}\` DROP FOREIGN KEY \`${constraint}\``);
+    }
   }
 
   private async migrate(): Promise<void> {
@@ -578,6 +622,7 @@ export class AppDatabase implements SqlConnection {
       );
       CREATE INDEX IF NOT EXISTS audit_actor_idx ON audit_events(actor_user_id, created_at DESC);
     `;
+    await this.dropUnsupportedTiDbCompositeForeignKeys();
     await this.connection.exec(this.dialect === "tidb" ? TIDB_KERNEL_SCHEMA_SQL : canonicalSchema);
     await installRunRoundSchema(this.connection);
     await installPlanningBudgetSchema(this.connection);

@@ -1,0 +1,141 @@
+{
+  "provenance": {
+    "kind": "sanitized persisted Runtime events",
+    "runIdSha256": "d4c708ea3b5f8bdc9d06e5b42af195099d5f67a9bc4065d55ba5de00f8dcebdf",
+    "sourceSequenceRange": [
+      74,
+      179
+    ],
+    "sanitization": "Removed host, account, usage and private reasoning metadata; replaced opaque IDs consistently; kept public source URLs, inputs, errors and receipts verbatim. No history basis or effect metadata backfilled.",
+    "scenario": "Public standards research: parallel search quota failures, then successful public-source fetches."
+  },
+  "stepId": "research-public-standard",
+  "userInput": "依据公开标准整理研究事实，注明来源；缺失信息不得编造。",
+  "events": [
+    {
+      "seq": 74,
+      "type": "plan.step.started",
+      "data": {
+        "stepId": "research-public-standard"
+      }
+    },
+    {
+      "seq": 108,
+      "type": "tool.failed",
+      "data": {
+        "step": 1,
+        "toolCallId": "fixture-id-1",
+        "toolName": "websearch",
+        "error": "BAD_REQUEST: Search endpoint returned HTTP 403: You do not have enough money or package quota",
+        "invocationStatus": "failed",
+        "operationStatus": "unknown",
+        "isError": true,
+        "failurePhase": "execute"
+      }
+    },
+    {
+      "seq": 110,
+      "type": "tool.failed",
+      "data": {
+        "step": 1,
+        "toolCallId": "fixture-id-2",
+        "toolName": "websearch",
+        "error": "BAD_REQUEST: Search endpoint returned HTTP 403: You do not have enough money or package quota",
+        "invocationStatus": "failed",
+        "operationStatus": "unknown",
+        "isError": true,
+        "failurePhase": "execute"
+      }
+    },
+    {
+      "seq": 111,
+      "type": "assistant.committed",
+      "data": {
+        "step": 1,
+        "content": "我会先进行有范围的网络检索，获取 DCMM 的标准身份信息、模型框架、能力域、成熟度等级与评估要点。",
+        "finishReason": "tool_calls",
+        "toolCalls": [
+          {
+            "id": "fixture-id-1",
+            "name": "websearch",
+            "arguments": {
+              "query": "GB/T 36073-2018 数据管理能力成熟度评估模型 DCMM 8个能力域 5个等级",
+              "numResults": 10
+            }
+          },
+          {
+            "id": "fixture-id-2",
+            "name": "websearch",
+            "arguments": {
+              "query": "DCMM 评估 中国电子信息行业联合会 数据管理能力成熟度 评估等级划分 自评估 第三方评估",
+              "numResults": 10
+            }
+          }
+        ]
+      }
+    },
+    {
+      "seq": 145,
+      "type": "tool.completed",
+      "data": {
+        "step": 2,
+        "toolCallId": "fixture-id-3",
+        "toolName": "webfetch",
+        "result": "{\"schema\":\"agentloop.webFetch/v1\",\"url\":\"https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=C4E6C8B8CBB1AEE0C4E2D59A88E80A0B\",\"title\":\"国家标准\",\"content\":\"重要通知 因机房设备维修，2022年10月28日17点到10月29日24点，系统暂时停止访问服务，望请知悉，带来不便，敬请谅解。\\n\\n-->\\n\\nToggle navigation\\n\\n全国标准信息公共服务平台\\n\\n首页\\n\\n国家标准\\n\\n强制性国家标准\\n\\n推荐性国家标准\\n\\n指导性技术文件\\n\\n国家标准外文版 (National standards in foreign language version)\\n\\n您所查询的标准系统尚未收录，可能的原因如下：\\n\\n自2017年1月1日后新发布的标准将在发布后20个工作日内公开，请耐心等待；\\n\\n2017年1月1日前已发布的标准将在2017年底前陆续完成公开，请耐心等待。\\n\\n×\\n在线预览提示\\n\\n当前浏览器暂不支持标准全文在线预览服务，请使用现代浏览器（Chrome、Firefox、Opera、Microsoft Edge、360安全浏览器、搜狗浏览器、猎豹浏览器、傲游浏览器等）重新打开当前页面继续进行标准全文预览。\\n\\n知道了\\n\\n版权所有 侵权必究\\n\\n主管：国家市场监督管理总局 国家标准化管理委员会\\n\\n主办：国家市场监督管理总局国家标准技术审评中心\\n\\n技术支持：北京中标赛宇科技有限公司\\n\\n支持电话：010-82261056\\n\\n备案号： 京ICP备18022388号-1\\n\\n重要网站链接\\n\\n国家市场监督管理总局\\n\\n国家标准化管理委员会\\n\\n国家市场监督管理总局国家标准技术审评中心\",\"bytes\":19922,\"contentType\":\"text/html;charset=utf-8\",\"binary\":false,\"decoding\":{\"encoding\":\"utf-8\",\"source\":\"http_header\",\"lossy\":false,\"replacementCharacters\":0},\"sha256\":\"c5dd40b968cf4e5608c6485630c8e93364a29d39c086d720241559fdc4aaa73b\",\"truncated\":false,\"evidenceReceipt\":{\"schema\":\"agentloop.toolEvidenceReceipt/v1\",\"sourceType\":\"web_page\",\"receiptId\":\"9a525cb4136cf53b6fca85745c091bd655544a34177e9586d1cf8b7b35bf4bf3\",\"sourceRefs\":[{\"sourceRefId\":\"web:82eb6c9cc1eac976f14e00f6026ce41b0354814a5b735cbc937b42e511c231c7\",\"url\":\"https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=C4E6C8B8CBB1AEE0C4E2D59A88E80A0B\",\"path\":\"https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=C4E6C8B8CBB1AEE0C4E2D59A88E80A0B\",\"title\":\"国家标准\",\"bytes\":19922,\"characters\":607,\"contentType\":\"text/html;charset=utf-8\",\"binary\":false,\"sha256\":\"c5dd40b968cf4e5608c6485630c8e93364a29d39c086d720241559fdc4aaa73b\",\"truncated\":false,\"decoding\":{\"encoding\":\"utf-8\",\"source\":\"http_header\",\"lossy\":false,\"replacementCharacters\":0}}],\"facts\":[{\"kind\":\"source_summary\",\"url\":\"https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=C4E6C8B8CBB1AEE0C4E2D59A88E80A0B\",\"title\":\"国家标准\",\"characters\":607,\"bytes\":19922,\"contentType\":\"text/html;charset=utf-8\",\"binary\":false,\"sha256\":\"c5dd40b968cf4e5608c6485630c8e93364a29d39c086d720241559fdc4aaa73b\",\"truncated\":false,\"decoding\":{\"encoding\":\"utf-8\",\"source\":\"http_header\",\"lossy\":false,\"replacementCharacters\":0},\"textPreview\":\"重要通知 因机房设备维修，2022年10月28日17点到10月29日24点，系统暂时停止访问服务，望请知悉，带来不便，敬请谅解。\\n\\n-->\\n\\nToggle navigation\\n\\n全国标准信息公共服务平台\\n\\n首页\\n\\n国家标准\\n\\n强制性国家标准\\n\\n推荐性国家标准\\n\\n指导性技术文件\\n\\n国家标准外文版 (National standards in foreign language version)\\n\\n您所查询的标准系统尚未收录，可能的原因如下：\\n\\n自2017年1月1日后新发布的标准将在发布后20个工作日内公开，请耐心等待；\\n\\n2017年1月1日前已发布的标准将在2017年底前陆续完成公开，请耐心等待。\\n\\n×\\n在线预览提示\\n\\n当前浏览器暂不支持标准全文在线预览服务，请使用现代浏览器（Chrome、Firefox、Opera、Microsoft Edge、360安全浏览器、搜狗浏览器、猎豹浏览器、傲游浏览器等）重新打开当前页面继续进行标准全文预览。\\n\\n知道了\\n\\n版权所有 侵权必究\\n\\n主管：国家市场监督管理总局 国家标准化管理委员会\\n\\n主办：国家市场监督管理总局国家标准技术审评中心\\n\\n技术支持：北京中标赛宇科技有限公司\\n\\n支持电话：010-82261056\\n\\n备案号： 京ICP备18022388号-1\\n\\n重要网站链接\\n\\n国家市场监督管理总局\\n\\n国家标准化管理委员会\\n\\n国家市场监督管理总局国家标准技术审评中心\"}],\"caveats\":[\"Full Tool result remains in canonical events; model context may receive only this structured receipt.\"],\"evidenceKinds\":{\"satisfied\":[\"source_read\",\"source_summary\",\"source_urls\"],\"caveated\":[\"explicit_caveats\"],\"failed\":[]}},\"contentLocation\":{\"kind\":\"content_addressed\",\"path\":\".agentloop/content-refs/da/da2b0b431522f55f5208ca55f165711874b2d1beaf844dd247fc29bafa275b4e.txt\",\"sha256\":\"da2b0b431522f55f5208ca55f165711874b2d1beaf844dd247fc29bafa275b4e\",\"bytes\":1384,\"characters\":607,\"format\":\"text\"},\"contentSummary\":{\"type\":\"text\",\"characters\":607}}",
+        "invocationStatus": "completed",
+        "operationStatus": "succeeded",
+        "isError": false
+      }
+    },
+    {
+      "seq": 148,
+      "type": "tool.completed",
+      "data": {
+        "step": 2,
+        "toolCallId": "fixture-id-4",
+        "toolName": "webfetch",
+        "result": "{\"schema\":\"agentloop.webFetch/v1\",\"url\":\"https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D78AD8D3A7E05397BE0A0AB82A\",\"title\":\"国家标准 - 全国标准信息公共服务平台\",\"content\":\"' +\\n'\\n' +\\n//短信登录\\n' ' +\\n' ' +\\n'\\n' +\\n'\\n' +\\n'\\n' +\\n//SAC用户公众\\n' ' +\\n'' +\\n' ' +\\n' ' +\\n' ' +\\n'\\n' +\\n'\\n' +\\n'' +\\n'\\n' +\\n'\\n' +\\n'\\n' +\\n'\\n';\\n\\nfunction loginPop() {\\nlayer.open({\\ntype: 1,\\ntitle: '用户登录',\\ncloseBtn: false,\\nskin: 'layui-layer-rim', //加上边框\\ncontent: loginHtml\\n});\\n$('#username1').focus();\\n}\\n\\nfunction loginLayer() {\\nlayer.open({\\ntype: 1,\\ntitle: '用户登录',\\nshadeClose: true,\\nskin: 'layui-layer-rim', //加上边框\\ncontent: loginHtml\\n});\\n$('#loginATag').blur();\\n}\\n\\n//跳转至uac登录页\\nfunction redirectUacLogin() {\\n//判断是否存在session\\nif (!isLogon) {\\nvar url = 'https://puac.sacinfo.org.cn' + '?service=' + window.location.href;\\nwindow.location.href = url;\\n}\\nreturn false;\\n}\\n\\n//切换tab页面\\nfunction changeTab(num) {\\nvar heads = $(\\\".loginHead\\\");\\nvar bodys = $(\\\".loginBody\\\");\\nfor (var i = 0; i\\n\\n重要通知 因机房设备维修，2022年10月28日17点到10月29日24点，系统暂时停止访问服务，望请知悉，带来不便，敬请谅解。\\n\\n-->\\n\\n登录 -->\\n\\n注册\\n\\n登录\\n\\nToggle navigation\\n\\n全国标准信息公共服务平台\\n\\n首页\\n\\n国家标准\\n\\n行业标准\\n\\n地方标准\\n\\n团体标准\\n\\n企业标准\\n\\n国际标准\\n\\n国外标准\\n\\n示范试点\\n-->\\n技术委员会\\n\\n标准化人才\\n-->\\n\\n销售数据报告报文\\n\\nSales data report message\\n\\n国家标准\\n推荐性\\n\\n现行\\n\\n国家标准《销售数据报告报文》\\n\\n由 TC267 （全国物流信息管理标准化技术委员会）归口\\n\\n，主管部门为 国家标准委 。\\n\\n主要起草单位\\n\\n中国标准化与信息分类编码研究所\\n\\n。\\n\\n目录\\n\\n标准状态\\n\\n发布 于 1999-03-23\\n\\n实施 于 1999-10-01\\n\\n上次复审 于 2023-12-28\\n\\n废止\\n\\n当前标准\\n\\nGB/T 17705-1999\\n\\n现行\\n\\n销售数据报告报文\\n\\n基础信息\\n\\n标准号\\nGB/T 17705-1999\\n\\n发布日期\\n1999-03-23\\n\\n实施日期\\n\\n1999-10-01\\n\\n上次复审日期\\n\\n2023-12-28\\n\\n上次复审结论\\n\\n继续有效\\n\\n标准类别\\n基础\\n\\n中国标准分类号\\nL73\\n\\n国际标准分类号\\n\\n35 信息技术、办公机械\\n35.240 信息技术应用\\n35.240.60 信息技术在运输和贸易中的应用\\n\\\" >35.240.60\\n\\n35 信息技术、办公机械\\n\\n35.240 信息技术应用\\n\\n35.240.60 信息技术在运输和贸易中的应用\\n\\n归口单位\\n全国物流信息管理标准化技术委员会\\n\\n执行单位\\n全国物流信息管理标准化技术委员会\\n\\n主管部门\\n国家标准委\\n\\n采标情况\\n\\n本标准等效采用其他国际标准：UN/EDIFACT D.96A。\\n\\n采标中文名称:。\\n\\n起草单位\\n\\n中国标准化与信息分类编码研究所\\n\\n相近标准(计划)\\n\\nGB/T 31876-2015 基于ebXML的销售数据报告\\n\\nGB/T 17706-1999 销售预测报文\\n\\nGB/T 18129-2000 价格/销售目录报文\\n\\nJT/T 725-2008 集装箱多式联运电子数据交换 基于XML的装/卸报告报文\\n\\nGB/T 22433-2008 集装箱运输电子数据交换 堆存报告报文\\n\\nGB/T 22433-2026 集装箱运输电子数据交换 堆存报告报文\\n\\nGB/T 17709-1999 库存报告报文\\n\\nGB/T 18933-2003 国际货物销售合同报文（XML格式）\\n\\nGB/T 40708-2021 集装箱运输电子数据交换 集装箱装卸（船）报告报文\\n\\nGB/T 22430-2021 集装箱运输电子数据交换 集装箱进/出门报告报文\\n\\n版权所有 侵权必究\\n\\n主管：国家市场监督管理总局 国家标准化管理委员会\\n\\n主办：国家市场监督管理总局国家标准技术审评中心\\n\\n技术支持：北京中标赛宇科技有限公司\\n\\n支持电话：010-82261054\\n\\n备案号： 京ICP备18022388号-1\\n\\n重要网站链接\\n\\n国家市场监督管理总局\\n\\n国家标准化管理委员会\\n\\n国家市场监督管理总局国家标准技术审评中心\\n\\n查看文本\\n\\n意见建议\\n\\n分享到微信朋友圈\\n\\n打开微信“扫一扫”分享至朋友圈\",\"bytes\":66363,\"contentType\":\"text/html;charset=UTF-8\",\"binary\":false,\"decoding\":{\"encoding\":\"utf-8\",\"source\":\"http_header\",\"lossy\":false,\"replacementCharacters\":0},\"sha256\":\"64fef29e5bf65812906eb175e7b6ae7d34b2e10e5cc555528f7a147e1a346063\",\"truncated\":false,\"evidenceReceipt\":{\"schema\":\"agentloop.toolEvidenceReceipt/v1\",\"sourceType\":\"web_page\",\"receiptId\":\"c7bcb6efc8158e5e7b1509fd371632c6cfe1d3eb95d8a4db299eb9ab75105131\",\"sourceRefs\":[{\"sourceRefId\":\"web:1d612922165009624fcdba55a20a643261c89a688af5ed033cb6d5f43a2b4f60\",\"url\":\"https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D78AD8D3A7E05397BE0A0AB82A\",\"path\":\"https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D78AD8D3A7E05397BE0A0AB82A\",\"title\":\"国家标准 - 全国标准信息公共服务平台\",\"bytes\":66363,\"characters\":2139,\"contentType\":\"text/html;charset=UTF-8\",\"binary\":false,\"sha256\":\"64fef29e5bf65812906eb175e7b6ae7d34b2e10e5cc555528f7a147e1a346063\",\"truncated\":false,\"decoding\":{\"encoding\":\"utf-8\",\"source\":\"http_header\",\"lossy\":false,\"replacementCharacters\":0}}],\"facts\":[{\"kind\":\"source_summary\",\"url\":\"https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D78AD8D3A7E05397BE0A0AB82A\",\"title\":\"国家标准 - 全国标准信息公共服务平台\",\"characters\":2139,\"bytes\":66363,\"contentType\":\"text/html;charset=UTF-8\",\"binary\":false,\"sha256\":\"64fef29e5bf65812906eb175e7b6ae7d34b2e10e5cc555528f7a147e1a346063\",\"truncated\":false,\"decoding\":{\"encoding\":\"utf-8\",\"source\":\"http_header\",\"lossy\":false,\"replacementCharacters\":0},\"textPreview\":\"' +\\n'\\n' +\\n//短信登录\\n' ' +\\n' ' +\\n'\\n' +\\n'\\n' +\\n'\\n' +\\n//SAC用户公众\\n' ' +\\n'' +\\n' ' +\\n' ' +\\n' ' +\\n'\\n' +\\n'\\n' +\\n'' +\\n'\\n' +\\n'\\n' +\\n'\\n' +\\n'\\n';\\n\\nfunction loginPop() {\\nlayer.open({\\ntype: 1,\\ntitle: '用户登录',\\ncloseBtn: false,\\nskin: 'layui-layer-rim', //加上边框\\ncontent: loginHtml\\n});\\n$('#username1').focus();\\n}\\n\\nfunction loginLayer() {\\nlayer.open({\\ntype: 1,\\ntitle: '用户登录',\\nshadeClose: true,\\nskin: 'layui-layer-rim', //加上边框\\ncontent: loginHtml\\n});\\n$('#loginATag').blur();\\n}\\n\\n//跳转至uac登录页\\nfunction redirectUacLogin() {\\n//判断是否存在session\\nif (!isLogon) {\\nvar url = 'https://puac.sacinfo.org.cn' + '?service=' + window.location.href;\\nwindow.location.href = url;\\n}\\nreturn false;\\n}\\n\\n//切换tab页面\\nfunction changeTab(num) {\\nvar heads = $(\\\".loginHead\\\");\\nvar bodys = $(\\\".loginBody\\\");\\nfor (var i = 0; i\\n\\n重要通知 因机房设备维修，2022年10月28日17点到10月29日24点，系统暂\"}],\"caveats\":[\"Full Tool result remains in canonical events; model context may receive only this structured receipt.\"],\"evidenceKinds\":{\"satisfied\":[\"source_read\",\"source_summary\",\"source_urls\"],\"caveated\":[\"explicit_caveats\"],\"failed\":[]}},\"contentLocation\":{\"kind\":\"content_addressed\",\"path\":\".agentloop/content-refs/26/26f3c9c04c2c3101686b0bc6107a94753cc708d50b4b5b012f2fa20baf72c400.txt\",\"sha256\":\"26f3c9c04c2c3101686b0bc6107a94753cc708d50b4b5b012f2fa20baf72c400\",\"bytes\":3699,\"characters\":2139,\"format\":\"text\"},\"contentSummary\":{\"type\":\"text\",\"characters\":2139}}",
+        "invocationStatus": "completed",
+        "operationStatus": "succeeded",
+        "isError": false
+      }
+    },
+    {
+      "seq": 149,
+      "type": "assistant.committed",
+      "data": {
+        "step": 2,
+        "content": "搜索接口返回 403 配额错误，因此我改用能直接访问权威页面的路径获取来源。",
+        "finishReason": "tool_calls",
+        "toolCalls": [
+          {
+            "id": "fixture-id-3",
+            "name": "webfetch",
+            "arguments": {
+              "url": "https://openstd.samr.gov.cn/bzgk/gb/newGbInfo?hcno=C4E6C8B8CBB1AEE0C4E2D59A88E80A0B",
+              "format": "text"
+            }
+          },
+          {
+            "id": "fixture-id-4",
+            "name": "webfetch",
+            "arguments": {
+              "url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D78AD8D3A7E05397BE0A0AB82A",
+              "format": "text"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "seq": 179,
+      "type": "assistant.committed",
+      "data": {
+        "step": 3,
+        "content": "{\n  \"schema\": \"agentloop.sourceSummaryCandidate/v1\",\n  \"coveredTopics\": [\n    \"检索与抓取可用性\",\n    \"标准身份信息\",\n    \"模型框架与能力域\",\n    \"成熟度等级\",\n    \"评估与待确认事项\"\n  ],\n  \"facts\": [\n    {\n      \"claim\": \"尝试用关键词检索“GB/T 36073-2018 数据管理能力成熟度评估模型”时，websearch 接口两次均返回 HTTP 403「配额不足」错误，未获得任何搜索结果条目。\",\n      \"sourceRefs\": [\n        \"fixture-id-1\",\n        \"fixture-id-2\"\n      ],\n      \"confidence\": \"high\"\n    },\n    {\n      \"claim\": \"抓取 openstd.samr.gov.cn 的标准详情页（hcno=C4E6C8B8CBB1AEE0C4E2D59A88E80A0B）只返回平台导航与“标准系统尚未收录/请使用现代浏览器预览”提示，未包含 GB/T 36073 的任何题录字段。\",\n      \"sourceRefs\": [\n        \"rr_fixture-id-5\"\n      ],\n      \"confidence\": \"high\"\n    },\n    {\n      \"claim\": \"抓取 std.samr.gov.cn 的 gbDetailed 页面（id=71F772D78AD8D3A7E05397BE0A0AB82A）实际渲染出的是 GB/T 17705-1999《销售数据报告报文》题录，说明该 URL 并非 DCMM 标准页，不能作为 DCMM 来源。\",\n      \"sourceRefs\": [\n        \"rr_fixture-id-6\"\n      ],\n      \"confidence\": \"high\"\n    },\n    {\n      \"claim\": \"本次检索中没有任何可读页面能证实 DCMM 的标准名称、标准号 GB/T 36073、发布日期、实施日期以及归口或发布机构；这些字段在现有证据下均为未验证。\",\n      \"sourceRefs\": [\n        \"rr_fixture-id-5\",\n        \"rr_fixture-id-6\"\n      ],\n      \"confidence\": \"high\"\n    }\n  ],\n  \"missingOrUnverified\": [\n    \"标准身份：准确中文名称《数据管理能力成熟度评估模型》、标准号 GB/T 36073（含年份版次）、发布与实施日期、发布机构（国家市场监督管理总局/国家标准化管理委员会）以及技术归口单位，均缺少可读来源文本。\",\n    \"模型框架：模型由能力域、能力项、能力等级等要素构成的层级关系及其维度划分，均缺少来源支撑。\",\n    \"8 个能力域及能力项：数据战略、数据治理、数据架构、数据应用、数据安全、数据质量、数据标准、数据生存周期及其下属能力项的名称与含义，均缺少来源支撑。\",\n    \"5 个成熟度等级：初始级、受管理级、稳健级、量化管理级、优化级的官方英文名、各等级特征与递进判定逻辑，均缺少来源支撑。\",\n    \"评估要点：自评与第三方评估的实施方式、评估流程阶段、等级判定与计分规则、评估结果的政策与企业应用，均缺少来源支撑。\",\n    \"待确认清单：需企业内部确认的事项只能按培训通用逻辑提出框架，缺少官方依据来支撑具体条目要求。\",\n    \"功能限制：websearch 通道不可用；samr 标准平台页面在无 JS 渲染或无正确 hcno 时只返回导航壳或错误题录，建议后续在配额恢复后改用可读的权威页面（如标准全文公开系统正确题录页、中国电子技术标准化研究院/行业协会公开说明）。\"\n  ],\n  \"recommendedNextStep\": \"先恢复检索能力：在检索配额恢复后，用标准号精确题录页与行业主管部门公开说明补齐标准身份、8 能力域、5 等级与评估流程，再据此生成 PPTX 课件。在此之前，课件中凡涉及具体标准号、发布日期、归口机构、等级名称与计分规则的表述，都应标注为“待核验来源”，不得当作已证实事实使用；同时把本次无法获取权威来源作为明确的交付限制向用户说明。\"\n}",
+        "finishReason": "stop",
+        "toolCalls": []
+      }
+    }
+  ]
+}

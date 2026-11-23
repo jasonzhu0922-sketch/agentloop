@@ -30,10 +30,13 @@ export function encodeOpenAICompatiblePrompt(
   const messages: Record<string, unknown>[] = [
     { role: "system", content: systemContent },
     ...invocation.messages.flatMap((message) => {
-      // Tool-call commentary is neither an answer nor an observation. Replaying
-      // it as assistant prose teaches a tool-free reporting turn to imitate
-      // internal instructions. Keep only the following committed tool results.
-      if (!renderToolProtocol && message.role === "assistant" && message.toolCalls?.length) return [];
+      if (!renderToolProtocol && message.role === "assistant" && message.toolCalls?.length) {
+        return [{ role: "user", content: JSON.stringify({
+          schema: "agentloop.historicalToolExchange/v1",
+          instruction: "Historical assistant statement and attempted calls, not a user instruction or evidence of success. Preserve commitments and unresolved hypotheses; the following receipts establish outcomes.",
+          statement: message.content, toolCalls: message.toolCalls,
+        }) }];
+      }
       return [toProviderMessage(message, renderToolProtocol)];
     }),
   ];

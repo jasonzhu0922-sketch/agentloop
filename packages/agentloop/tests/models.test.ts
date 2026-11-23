@@ -731,7 +731,10 @@ test("OpenAI-compatible adapter renders prior tool execution as non-replayable s
     });
 
     const messages = capturedBody?.messages as Array<Record<string, unknown>>;
-    assert.deepEqual(messages, [
+    const history = JSON.parse(String(messages[2].content));
+    assert.equal(history.schema, "agentloop.historicalToolExchange/v1");
+    assert.deepEqual(history.toolCalls, [{ id: "call-1", name: "inspect", arguments: { path: "weather.json" } }]);
+    assert.deepEqual(messages.filter((_, index) => index !== 2), [
       {
         role: "system",
         content: [
@@ -803,11 +806,12 @@ test("OpenAI-compatible adapter does not replay native tool or reasoning protoco
       ],
     });
     const messages = requests[1].messages as Array<Record<string, unknown>>;
-    assert.equal(messages.length, 3);
+    assert.equal(messages.length, 4);
     assert.ok(messages.every((message) => message.role !== "assistant"));
-    assert.doesNotMatch(JSON.stringify(messages), /opaque-thinking|toolCallId|toolName|arguments|runtimeEvidenceRecord/);
-    assert.equal(messages[2].role, "user");
-    assert.match(String(messages[2].content), /ok/);
+    assert.doesNotMatch(JSON.stringify(messages), /opaque-thinking|runtimeEvidenceRecord/);
+    assert.deepEqual(JSON.parse(String(messages[2].content)).toolCalls, first.toolCalls);
+    assert.equal(messages[3].role, "user");
+    assert.match(String(messages[3].content), /ok/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -2745,7 +2749,10 @@ test("Responses adapter renders prior tool execution as neutral evidence when to
       tools: [],
     });
 
-    assert.deepEqual(capturedBody?.input, [
+    const input = capturedBody?.input as Array<{ content: Array<{ text: string }> }>;
+    assert.deepEqual(JSON.parse(input[1].content[0].text).toolCalls,
+      [{ id: "call-1", name: "lookup", arguments: { query: "status" } }]);
+    assert.deepEqual(input.filter((_, index) => index !== 1), [
       { type: "message", role: "user", content: [{ type: "input_text", text: "Check" }] },
       {
         type: "message",

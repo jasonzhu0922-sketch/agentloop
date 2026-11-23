@@ -253,8 +253,7 @@ CREATE TABLE IF NOT EXISTS plan_step_retirements (
         action_id VARCHAR(191) REFERENCES runtime_actions(id) ON DELETE SET NULL,
         reason LONGTEXT NOT NULL,
         retired_at BIGINT NOT NULL,
-        PRIMARY KEY(plan_id, step_id),
-        FOREIGN KEY(plan_id, step_id) REFERENCES plan_steps(plan_id, step_id) ON DELETE CASCADE
+        PRIMARY KEY(plan_id, step_id)
       );
 CREATE TABLE IF NOT EXISTS plan_revision_assessments (
         id VARCHAR(191) PRIMARY KEY,
@@ -286,8 +285,7 @@ CREATE TABLE IF NOT EXISTS skill_compliance_assessments (
         binding_json LONGTEXT,
         inspection_json LONGTEXT,
         created_at BIGINT NOT NULL,
-        UNIQUE(plan_id, step_id, attempt),
-        FOREIGN KEY(plan_id, step_id) REFERENCES plan_steps(plan_id, step_id) ON DELETE CASCADE
+        UNIQUE(plan_id, step_id, attempt)
       );
 CREATE INDEX IF NOT EXISTS skill_assessment_step_idx
         ON skill_compliance_assessments(plan_id, step_id, attempt DESC);

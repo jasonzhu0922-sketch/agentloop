@@ -140,7 +140,7 @@ test("summary may omit all artifacts but the rebuilt Runtime frame retains them 
     emit: (event) => { events.push(event); },
   });
   assembler.setRuntimeStepFrame(JSON.stringify({ workProductContext: projection }));
-  const messages: ModelMessage[] = Array.from({ length: 30 }, (_, index) => ({ role: index % 2 ? "assistant" : "user",
+  const messages: ModelMessage[] = Array.from({ length: 30 }, (_, index) => ({ role: "assistant",
     content: "unrelated narrative without any artifact metadata ".repeat(80) }));
   const assembled = await assembler.assemble(messages, []);
   assert.ok(events.some((event) => event.type === "context.compacted"));

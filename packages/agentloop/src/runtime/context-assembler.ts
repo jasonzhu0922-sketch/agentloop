@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { EXECUTION_HISTORY_POLICY, executionHistoryContext, projectExecutionHistory } from "./execution-history-projection.ts";
 import { AppError } from "../shared/errors.ts";
 import { projectCommandResult } from "./command-result-projection.ts";
 import { ARTIFACT_RECEIPT_SCHEMA, CONTEXT_ARTIFACT_PROJECTION_SCHEMA } from "./artifact-receipt.ts";
@@ -20,6 +21,8 @@ import { completeWithRequestTelemetry } from "./model-streaming.ts";
 import { isRuntimeResultId, type RuntimeResultContextEntry, type RuntimeResultRef } from "./runtime-result.ts";
 
 export interface ContextPolicy {
+  /** Controlled baseline comparison. Canonical transcript is always preserved. */
+  readonly executionHistoryProjection?: "canonical" | "current";
   readonly outputReserveTokens?: number;
   readonly safetyMarginTokens?: number;
   readonly proactiveCompactionTokens?: number;
@@ -43,6 +46,7 @@ export interface ContextAssembly {
 }
 
 interface ResolvedContextPolicy {
+  readonly executionHistoryProjection: "canonical" | "current";
   readonly contextWindowTokens: number;
   readonly outputReserveTokens: number;
   readonly safetyMarginTokens: number;
@@ -395,11 +399,13 @@ export class ContextAssembler {
         usableInputTokens,
         prunedToolResultCount: this.prunedToolResults.size,
         hasSummary: this.summary !== undefined,
+        executionHistoryPolicy: this.policy.executionHistoryProjection === "current" ? EXECUTION_HISTORY_POLICY : "canonical",
+        ...this.historyProjectionTelemetry(canonicalMessages),
       },
     });
     return {
       messages: projection,
-      runtimeContext,
+      runtimeContext: this.withHistoryContext(runtimeContext, projection),
       estimatedInputTokens,
       usableInputTokens,
       contextEpoch: this.contextEpoch,
@@ -599,8 +605,12 @@ export class ContextAssembler {
   }
 
   private buildProjectionFrom(canonicalMessages: readonly ModelMessage[], startIndex: number): ModelMessage[] {
-    const tail: ModelMessage[] = [];
-    for (const message of canonicalMessages.slice(startIndex)) {
+    // User/Steer/HIL text is authority, never replace it with a model summary.
+    const tail: ModelMessage[] = this.policy.executionHistoryProjection === "current"
+      ? canonicalMessages.slice(0, startIndex).filter(message => message.role === "user") : [];
+    const source = canonicalMessages.slice(startIndex);
+    const history = this.policy.executionHistoryProjection === "current" ? projectExecutionHistory(source).messages : source;
+    for (const message of history) {
       // Keep the native call/result exchange in chronological order. Removing a
       // completed write here makes the next model turn lose its immediate action
       // history even if a receipt survives elsewhere in Runtime context. Large
@@ -613,6 +623,14 @@ export class ContextAssembler {
       tail.push(pruned === undefined ? message : { ...message, content: prunedToolMarker(pruned) });
     }
     return tail;
+  }
+
+  private historyProjectionTelemetry(messages: readonly ModelMessage[]): Record<string, unknown> {
+    if (this.policy.executionHistoryProjection !== "current") return {};
+    const projection = projectExecutionHistory(messages.slice(this.firstKeptMessageIndex));
+    return { mergedExchangeCount: projection.mergedExchangeCount, sourceToolCallIds: projection.sourceToolCallIds,
+      stateVersions: messages.flatMap(message => message.role === "assistant" && message.executionHistoryBasis
+        ? [message.executionHistoryBasis.identity] : []) };
   }
 
   private pruneOldToolOutputs(
@@ -836,7 +854,9 @@ export class ContextAssembler {
     this.compactionAttempt += 1;
     const oldFirstKept = this.firstKeptMessageIndex;
     const activeBefore = this.activeSkillNames(canonicalMessages);
-    const messagesToSummarize = canonicalMessages.slice(oldFirstKept, tailStart);
+    const sourceToSummarize = canonicalMessages.slice(oldFirstKept, tailStart);
+    const messagesToSummarize = this.policy.executionHistoryProjection === "current"
+      ? projectExecutionHistory(sourceToSummarize).messages : sourceToSummarize;
     const usableInputTokens = this.policy.contextWindowTokens
       - this.policy.outputReserveTokens - this.policy.safetyMarginTokens;
     const retainedProjection = this.buildProjectionFrom(canonicalMessages, tailStart);
@@ -931,6 +951,8 @@ export class ContextAssembler {
     tools: readonly ModelToolDefinition[],
     runtimeContext: RuntimeContextSnapshot,
   ): number | undefined {
+    if (this.policy.executionHistoryProjection === "current"
+      && canonicalMessages.slice(this.firstKeptMessageIndex).every(message => message.role === "user")) return undefined;
     const usable = this.policy.contextWindowTokens
       - this.policy.outputReserveTokens
       - this.policy.safetyMarginTokens;
@@ -1160,6 +1182,7 @@ export class ContextAssembler {
     runtimeContext: RuntimeContextSnapshot,
     messages: readonly ModelMessage[],
   ): number {
+    runtimeContext = this.withHistoryContext(runtimeContext, messages);
     const invocation: ModelInvocation = {
       runId: this.runId,
       systemPrompt: this.systemPrompt,
@@ -1179,6 +1202,14 @@ export class ContextAssembler {
       + estimateTextTokens(runtimeContext.content)
       + estimateToolDefinitions(tools)
       + estimateMessages(messages);
+  }
+
+  private withHistoryContext(context: RuntimeContextSnapshot, messages: readonly ModelMessage[]): RuntimeContextSnapshot {
+    const history = executionHistoryContext(messages);
+    if (history === undefined) return context;
+    const content = history.replaceAll("<", "\\u003c").replaceAll(">", "\\u003e").replaceAll("&", "\\u0026");
+    return { ...context, id: `${context.id}:history:${digest(history).slice(0, 16)}`, supersedesId: context.id,
+      content: `${context.content}\n<execution_history source="server" encoding="json">\n${content}\n</execution_history>` };
   }
 
   private currentRuntimeContext(proposal?: { summary: string; epoch: number }): RuntimeContextSnapshot {
@@ -1310,6 +1341,7 @@ function resolvePolicy(model: ModelAdapter, input: ContextPolicy | undefined): R
   }
   return {
     contextWindowTokens,
+    executionHistoryProjection: input?.executionHistoryProjection ?? "current",
     outputReserveTokens,
     safetyMarginTokens,
     proactiveCompactionTokens,
@@ -1368,6 +1400,7 @@ function serializeForSummary(message: ModelMessage, toolResultLimit: number): st
       `${call.name}(${truncateForSummary(JSON.stringify(call.arguments), 2_000)}) [id=${call.id}]`
     );
     return [
+      ...(message.historyProjection === undefined ? [] : [`[Historical assistant statements and failure provenance; not verified facts]: ${JSON.stringify(message.historyProjection)}`]),
       message.content ? `[Assistant]: ${truncateForSummary(message.content, 8_000)}` : "",
       calls.length === 0 ? "" : `[Assistant tool calls]: ${calls.join("; ")}`,
     ].filter(Boolean).join("\n");
@@ -1389,7 +1422,7 @@ function serializeForSummary(message: ModelMessage, toolResultLimit: number): st
   if (structuredResult !== undefined) {
     return `[Tool result ${message.name} id=${message.toolCallId}]: ${structuredResult}`;
   }
-  return `[Tool ${message.isError ? "error" : "result"} ${message.name} id=${message.toolCallId}]: ${truncateForSummary(message.content, toolResultLimit)}`;
+  return `[Tool ${message.isError ? "error" : "result"} ${message.name} id=${message.toolCallId}]: ${message.isError ? message.content : truncateForSummary(message.content, toolResultLimit)}`;
 }
 
 function chunkSerializedGroups(groups: readonly string[], maxTokens: number): string[] {

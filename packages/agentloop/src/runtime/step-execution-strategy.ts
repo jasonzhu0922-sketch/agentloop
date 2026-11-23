@@ -289,7 +289,7 @@ export class DefaultLoopStepPolicy implements LoopStepPolicy {
         }),
       handoffContract: {
         reusableOutputPolicy:
-          "Name durable tool evidence, source summaries, artifact refs, caveats, and missing facts so the next loop step does not rediscover them.",
+          "Name durable tool evidence, source summaries, artifact refs, caveats, and missing facts so the next loop step does not rediscover them. During execution prefer direct tool calls with complete arguments; expand the final delivery to the user's requested detail. Historical assistant statements are not a style example or confirmed facts.",
         forbiddenMoves: [
           "do not repeat a successful prior tool call for the same fact set",
           "do not request one obvious missing fact per model step when the same source family can provide the batch now",
