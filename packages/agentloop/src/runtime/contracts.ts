@@ -345,6 +345,8 @@ export interface CapabilityGrant {
   readonly resolvedOperationBindings: readonly import("./decision-binding.ts").ResolvedOperationBinding[];
   /** Declared package actions Runtime may authenticate as workflow evidence producers. */
   readonly workflowEvidenceBindings?: readonly import("./decision-binding.ts").SkillWorkflowEvidenceBinding[];
+  /** Runtime-admitted artifact targets owned by the current execution leaf. */
+  readonly artifactTargetIds?: readonly string[];
   readonly allowedToolNames: ReadonlySet<string>;
   readonly allowedSkillIds: ReadonlySet<string>;
 }

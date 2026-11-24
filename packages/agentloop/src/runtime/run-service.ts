@@ -3636,6 +3636,7 @@ export class RunService {
         skillExecutionRoots,
         resolvedOperationBindings,
         workflowEvidenceBindings,
+        artifactTargetIds: (activeStep.executionBinding.artifactTargets ?? []).map((target) => target.id),
         allowedToolNames: stepAllowedToolNames,
         allowedSkillIds: stepSkillIds,
       });
@@ -3724,6 +3725,7 @@ export class RunService {
       const discoveredSourceKinds = new Set<string>(canonicalState.intent.understanding.evidence.sourceKinds);
       const selectedPracticeProfileIds = new Set<string>((stepTaskProfile.practices ?? []).map((profile) => profile.id));
       const persistedDeliveryBindingKeys = new Set<string>();
+      const persistedUnboundDeliveryKeys = new Set<string>();
       // A provider's rendering is an observation. The Agent decides whether
       // it covers its owned fact result or the user's requested answer.
       const requiresSourceBackedSynthesis = (activeStep.role === "fact_acquisition"
@@ -3771,6 +3773,36 @@ export class RunService {
             storeSnapshot: (content: string) => new ComputerExecutor(input.rootGrant.workspaceRoot ?? this.workspaceRoot).storeContentReference(content),
           },
           onWorkProductDeliveryTargets: async (bindings, observations) => {
+            const admittedTargetIds = new Set((activeStep.executionBinding.artifactTargets ?? []).map((target) => target.id));
+            const unbound = observations.observations.filter((observation) => observation.operationStatus === "succeeded"
+              && (observation.kind === "created" || observation.kind === "modified")
+              && ((observation.deliveryTargetId !== undefined && !admittedTargetIds.has(observation.deliveryTargetId))
+                || observation.deliveryBindingStatus !== undefined
+                  && observation.deliveryBindingStatus !== "explicit"
+                  && observation.deliveryBindingStatus !== "support_only")
+              && !persistedUnboundDeliveryKeys.has(`${observation.source.toolCallId}\u0000${observation.path}\u0000${observation.sha256 ?? ""}`));
+            if (unbound.length > 0) {
+              unbound.forEach((observation) => persistedUnboundDeliveryKeys.add(`${observation.source.toolCallId}\u0000${observation.path}\u0000${observation.sha256 ?? ""}`));
+              await this.appendRunEvent(input.runId, {
+                type: "artifact.delivery_binding.unbound",
+                data: {
+                  schema: "agentloop.deliveryBinding/v1",
+                  planId: plan.id,
+                  planVersion: plan.version,
+                  stepId: activeStep.id,
+                  resolution: "target_not_admitted",
+                  diagnostics: unbound.map((observation) => ({
+                    requestedTargetId: observation.deliveryTargetId,
+                    bindingStatus: observation.deliveryBindingStatus,
+                    path: observation.path,
+                    bytes: observation.bytes,
+                    sha256: observation.sha256,
+                    observedByToolCallId: observation.source.toolCallId,
+                    message: "The file was produced and observed, but its requested target is not in the current admitted Plan.",
+                  })),
+                },
+              });
+            }
             const newlyObserved = bindings.filter((binding) => binding.bindingAuthority === "runtime"
               && !persistedDeliveryBindingKeys.has(`${binding.targetId}\u0000${binding.path}\u0000${binding.versionId}`));
             if (newlyObserved.length > 0) {

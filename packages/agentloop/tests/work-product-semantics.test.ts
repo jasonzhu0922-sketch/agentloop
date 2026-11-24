@@ -198,6 +198,34 @@ test("post-commit command output bindings select same-format targets without mod
   ]);
 });
 
+test("an output binding for a target outside the admitted Plan stays observed but unbound", () => {
+  const sha256 = "f".repeat(64);
+  const facts = deriveWorkProductObservations({
+    runId: fixture.runId,
+    workspaceId: fixture.workspaceId,
+    events: [{ runId: fixture.runId, workspaceId: fixture.workspaceId, seq: 1, evidence: {
+      toolCallId: "generate-1301", toolName: "computer_run_command", operationStatus: "succeeded", isError: false,
+      result: JSON.stringify({
+        exitCode: 0,
+        fileChangesTruncated: false,
+        fileChanges: [{ path: "reports/prepay_overdue_1301_202610.docx", changeType: "created", bytes: 128, sha256 }],
+        outputBindings: [{ targetId: "prepay-overdue-1301", path: "reports/prepay_overdue_1301_202610.docx" }],
+        deliveryBinding: { schema: "agentloop.deliveryBindingObservation/v1", status: "unknown_target" },
+      }),
+    } }],
+  });
+  const state = deriveWorkProductSemantics({
+    facts,
+    goalId,
+    declarations: [],
+    deliveryTargets: [{ targetId: "prepay-overdue-1001", purpose: "1001 report", kind: "document", format: "docx" }],
+  });
+  assert.equal(facts.objects[0]?.presence, "present");
+  assert.equal(facts.observations[0]?.deliveryTargetId, "prepay-overdue-1301");
+  assert.equal(facts.observations[0]?.deliveryBindingStatus, "unknown_target");
+  assert.deepEqual(state.deliveryTargets, []);
+});
+
 test("same-format receipts remain unbound when Runtime cannot identify one delivery target", () => {
   const report = (toolCallId: string, path: string, sha256: string): WorkProductToolEvent => ({
     runId: fixture.runId,

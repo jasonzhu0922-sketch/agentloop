@@ -628,7 +628,7 @@ export function createComputerTools(
         "Original stdout/stderr belongs to the committed Runtime Result. The model-visible view may contain previews; read exact output through the same resultRef using read_result with pointer /stdout or /stderr and bounded character windows. Do not reopen a file or rerun the command solely to recover omitted output.",
         "The result includes bounded fileChanges for workspace files created, modified, or deleted by the command; use that structured receipt instead of inferring artifacts from stdout text.",
         "Generating code/specs/deliverables and modifying files in place are file operations, not immutable-input computations. Omit computationInputs for those operations and emit an operation-specific receipt rather than agentloop.commandComputation/v1. A computationEvidenceFailure rejects only the computation declaration; inspect exitCode and fileChanges before repeating any operation.",
-        "For a command that creates final user deliverables, outputBindings may declare the admitted targetId for each exact output path. Runtime validates this mapping after result commit; it does not create targets or trust stdout declarations.",
+        "For a command that may create final user deliverables, declare outputBindings for each exact path when the target is known; pass [] for a support-only command. Runtime records omitted, partial, and unknown-target bindings as unbound observations, preserves fileChanges, and never creates targets or trusts stdout declarations.",
         "computationInputs identifies immutable data files consumed by the command; never include the interpreter entrypoint, executable source file, or package-owned Skill script itself.",
         "A package action that acquires facts directly from an external source and emits its own evidenceReceipt must omit computationInputs unless it also consumes an immutable workspace data file declared by the action as an evidence input.",
         "For every command that derives facts from workspace data, pass each exact source path in computationInputs (for example, computationInputs:[{path:'series.json'}]). Its sole stdout JSON document must use agentloop.commandComputation/v1 with inputRefs:[{path:'series.json'}] in the same order and a non-empty facts object; inputs is not a valid stdout field. Runtime captures source hashes from computationInputs and will not infer source identity from stdout.",
@@ -681,10 +681,13 @@ export function createComputerTools(
           ...(record.outputBindings === undefined ? {} : { outputBindings: commandOutputBindings(record.outputBindings) }),
         };
       },
-      execute: async (context, value) => executorForContext(executor, context).runCommand({
-        ...withWorkflowEvidenceBinding(context, value as { command: string; args: string[]; cwd: string; timeoutMs: number; computationInputs?: Array<{ path: string }>; outputBindings?: Array<{ targetId: string; path: string }> }),
-        signal: context.signal,
-      }),
+      execute: async (context, value) => annotateCommandOutputBindings(
+        context,
+        await executorForContext(executor, context).runCommand({
+          ...withWorkflowEvidenceBinding(context, value as { command: string; args: string[]; cwd: string; timeoutMs: number; computationInputs?: Array<{ path: string }>; outputBindings?: Array<{ targetId: string; path: string }> }),
+          signal: context.signal,
+        }),
+      ),
     },
   ];
   if (driver !== undefined) tools.push(...createDriverTools(driver));
@@ -755,6 +758,49 @@ function commandOutputBindings(value: unknown): Array<{ targetId: string; path: 
     seenTargets.add(targetId); seenPaths.add(path);
     return { targetId, path };
   });
+}
+
+function annotateCommandOutputBindings(
+  context: ToolExecutionContext,
+  result: Record<string, unknown>,
+): Record<string, unknown> {
+  const targetIds = context.grant.artifactTargetIds ?? [];
+  if (targetIds.length === 0) return result;
+  const declared = Array.isArray(result.outputBindings) ? result.outputBindings
+    .filter((item): item is { targetId: string; path: string } => item !== null && typeof item === "object"
+      && typeof (item as Record<string, unknown>).targetId === "string"
+      && typeof (item as Record<string, unknown>).path === "string") : undefined;
+  const changes = Array.isArray(result.fileChanges) ? result.fileChanges
+    .filter((item): item is { path: string; changeType?: string } => item !== null && typeof item === "object"
+      && typeof (item as Record<string, unknown>).path === "string") : [];
+  const declaredPaths = new Set((declared ?? []).map((item) => item.path));
+  const observedPaths = changes.filter((item) => item.changeType !== "deleted").map((item) => item.path);
+  const unknownTargetIds = (declared ?? []).map((item) => item.targetId).filter((id) => !targetIds.includes(id));
+  const unboundObservedPaths = observedPaths.filter((path) => !declaredPaths.has(path));
+  const unobservedDeclaredPaths = (declared ?? []).map((item) => item.path).filter((path) => !observedPaths.includes(path));
+  const status = unknownTargetIds.length > 0
+    ? "unknown_target"
+    : declared === undefined
+      ? "omitted"
+      : declared.length === 0
+        ? "support_only"
+        : unobservedDeclaredPaths.length > 0 || unboundObservedPaths.length > 0
+          ? "partial"
+          : "explicit";
+  return {
+    ...result,
+    deliveryBinding: {
+      schema: "agentloop.deliveryBindingObservation/v1",
+      status,
+      admittedTargetIds: targetIds,
+      ...(declared === undefined ? {} : { declaredBindings: declared }),
+      observedPaths: [...new Set(observedPaths)],
+      ...(unknownTargetIds.length === 0 ? {} : { unknownTargetIds: [...new Set(unknownTargetIds)] }),
+      ...(unboundObservedPaths.length === 0 ? {} : { unboundObservedPaths: [...new Set(unboundObservedPaths)] }),
+      ...(unobservedDeclaredPaths.length === 0 ? {} : { unobservedDeclaredPaths: [...new Set(unobservedDeclaredPaths)] }),
+      guidance: "Unknown or omitted bindings remain observed workspace files, not final delivery targets. Keep them as support artifacts or revise the admitted Plan before verification.",
+    },
+  };
 }
 
 /**

@@ -38,6 +38,8 @@ export interface WorkProductObservation {
   readonly operationStatus: "succeeded" | "failed" | "unknown";
   /** Optional model selection of an already-admitted delivery target, echoed by the producing Tool receipt. */
   readonly deliveryTargetId?: string;
+  /** Runtime classification of the producer's output-binding declaration. */
+  readonly deliveryBindingStatus?: "omitted" | "support_only" | "partial" | "explicit" | "unknown_target";
   readonly source: WorkProductSource;
   /** Only explicit, structured, version-scoped checks; stdout prose is not a check. */
   readonly checks: readonly { readonly id: string; readonly status: string }[];
@@ -141,6 +143,7 @@ export function normalizeWorkProductObservations(event: WorkProductToolEvent): {
       ...(kind === "deleted" ? {} : size(value.bytes)),
       ...(kind === "deleted" || hash(value.sha256) === undefined ? {} : { sha256: hash(value.sha256) }),
       ...(deliveryTargetId(value) === undefined ? {} : { deliveryTargetId: deliveryTargetId(value) }),
+      ...(deliveryBindingStatus(root) === undefined ? {} : { deliveryBindingStatus: deliveryBindingStatus(root) }),
       operationStatus: status, source: location, checks,
     });
   };
@@ -306,6 +309,13 @@ const RECEIPT_TOOLS = new Set(["computer_write_file", "computer_patch_file", "co
 function deliveryTargetId(value: Record<string, unknown> | undefined): string | undefined {
   const targetId = value?.deliveryTargetId;
   return typeof targetId === "string" && targetId.trim().length > 0 && targetId.length <= 128 ? targetId : undefined;
+}
+
+function deliveryBindingStatus(value: Record<string, unknown> | undefined): WorkProductObservation["deliveryBindingStatus"] {
+  const status = record(value?.deliveryBinding)?.status;
+  return status === "omitted" || status === "support_only" || status === "partial" || status === "explicit" || status === "unknown_target"
+    ? status
+    : undefined;
 }
 
 function operationStatus(evidence: AgentLoopToolEvidence, result: Record<string, unknown> | undefined): WorkProductObservation["operationStatus"] {

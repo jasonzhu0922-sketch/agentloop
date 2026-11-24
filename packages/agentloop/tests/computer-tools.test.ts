@@ -2456,6 +2456,66 @@ test("computer command arguments preserve long workspace paths while rejecting o
   }
 });
 
+test("file-producing command records omitted and unknown output bindings without blocking writes", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-output-binding-"));
+  try {
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root, {
+      executableAliases: { "trusted-node": process.execPath },
+    })));
+    const allowed = registry.materialize(grant(["computer_run_command"], {
+      artifactTargetIds: ["report-1001"],
+    }));
+    const writeArgs = (path: string) => ["-e", `require('node:fs').mkdirSync('reports',{recursive:true}); require('node:fs').writeFileSync('${path}','ok')`];
+
+    const missing = allowed.prepare({
+      id: "missing-output-bindings",
+      name: "computer_run_command",
+      arguments: { command: "trusted-node", args: writeArgs("reports/missing.md"), cwd: ".", timeoutMs: 2_000 },
+    });
+    const missingResult = await missing.tool.execute(artifactGrantContext(["computer_run_command"], { artifactTargetIds: ["report-1001"] }), missing.input) as {
+      exitCode: number | null; deliveryBinding?: { status: string }; fileChanges: readonly { path: string }[];
+    };
+    assert.equal(missingResult.exitCode, 0);
+    assert.equal(missingResult.deliveryBinding?.status, "omitted");
+    assert.deepEqual(missingResult.fileChanges.map((change) => change.path), ["reports/missing.md"]);
+
+    const unknown = allowed.prepare({
+      id: "unknown-output-target",
+      name: "computer_run_command",
+      arguments: {
+        command: "trusted-node", args: writeArgs("reports/unknown.md"), cwd: ".", timeoutMs: 2_000,
+        outputBindings: [{ targetId: "report-1301", path: "reports/unknown.md" }],
+      },
+    });
+    const unknownResult = await unknown.tool.execute(artifactGrantContext(["computer_run_command"], { artifactTargetIds: ["report-1001"] }), unknown.input) as {
+      exitCode: number | null; deliveryBinding?: { status: string; unknownTargetIds?: readonly string[] }; fileChanges: readonly { path: string }[];
+    };
+    assert.equal(unknownResult.exitCode, 0);
+    assert.equal(unknownResult.deliveryBinding?.status, "unknown_target");
+    assert.deepEqual(unknownResult.deliveryBinding?.unknownTargetIds, ["report-1301"]);
+    assert.deepEqual(unknownResult.fileChanges.map((change) => change.path), ["reports/unknown.md"]);
+
+    const valid = allowed.prepare({
+      id: "valid-output-binding",
+      name: "computer_run_command",
+      arguments: {
+        command: "trusted-node", args: writeArgs("reports/report.md"), cwd: ".", timeoutMs: 2_000,
+        outputBindings: [{ targetId: "report-1001", path: "reports/report.md" }],
+      },
+    });
+    const result = await valid.tool.execute(
+      artifactGrantContext(["computer_run_command"], { artifactTargetIds: ["report-1001"] }),
+      valid.input,
+    ) as { exitCode: number | null; outputBindings?: readonly { targetId: string; path: string }[]; deliveryBinding?: { status: string }; fileChanges: readonly { path: string }[] };
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(result.outputBindings, [{ targetId: "report-1001", path: "reports/report.md" }]);
+    assert.equal(result.deliveryBinding?.status, "explicit");
+    assert.deepEqual(result.fileChanges.map((change) => change.path), ["reports/report.md"]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("computer_write_file returns bounded write-after-inspection evidence", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-write-inspection-"));
   try {
@@ -4641,9 +4701,10 @@ async function findGrep(): Promise<string | undefined> {
   return undefined;
 }
 
-function grant(toolNames: readonly string[]) {
+function grant(toolNames: readonly string[], options: { artifactTargetIds?: readonly string[] } = {}) {
   return createCapabilityGrant({
     actorUserId: "user", runId: "run", depth: 0,
+    ...(options.artifactTargetIds === undefined ? {} : { artifactTargetIds: options.artifactTargetIds }),
     allowedToolNames: toolNames, allowedSkillIds: [],
   });
 }
@@ -4769,6 +4830,10 @@ function escapeXml(value: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function artifactGrantContext(toolNames: readonly string[], options: { artifactTargetIds?: readonly string[] }) {
+  return { grant: grant(toolNames, options) };
 }
 
 function grantContext(toolNames: readonly string[]) {
