@@ -253,7 +253,7 @@ class PlanCQueryPilotTest(unittest.TestCase):
         with self.assertRaises(EntityBindingError) as caught:
             validate_plan(self.catalog, sql, ['在岗员工人数'], plan)
         diagnostic = caught.exception.diagnostic()
-        self.assertEqual(diagnostic['error_domain'], 'business')
+        self.assertEqual(diagnostic['error_domain'], 'conflict')
         self.assertEqual(diagnostic['field'], 'metric_bindings')
         self.assertIn('headcount', diagnostic['expected'])
         self.assertEqual(diagnostic['actual'], '[]')

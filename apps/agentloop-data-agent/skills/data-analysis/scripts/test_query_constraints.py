@@ -300,7 +300,7 @@ class QueryConstraintsTest(unittest.TestCase):
     def test_rejection_diagnostic_identifies_domain_field_expected_and_actual(self):
         result = self.gateway.execute_sql('group', self.sql, self.params[:2] + ['202601', '202604'], self.plan(), _internal=True)
         diagnostic = result['error']['diagnostic']
-        self.assertEqual(diagnostic['error_domain'], 'time')
+        self.assertEqual(diagnostic['error_domain'], 'conflict')
         self.assertEqual(diagnostic['field'], 'time_bindings[staff_report.period]')
         self.assertIn('202601', diagnostic['expected'])
         self.assertIn('202603', diagnostic['expected'])

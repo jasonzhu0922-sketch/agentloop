@@ -11,7 +11,13 @@ class EntityBindingError(ValueError):
         self.field, self.expected, self.actual = field, expected, actual
 
     def diagnostic(self):
-        domain = self.code.split('_', 1)[0]
+        # 错误域用于决定修复路径：输入缺项回到计划构造，目录变化先重查定义，
+        # 已证实冲突才要求重选候选或改 SQL；无法证明的合法形态不能伪装成业务歧义。
+        domain = ('unproven' if self.code.endswith(('_unverified', '_unsupported')) else
+                  'input' if self.code.endswith(('_invalid', '_required')) else
+                  'catalog' if self.code.endswith(('_missing', '_stale', '_changed')) else
+                  'conflict' if self.code.endswith(('_mismatch', '_conflict', '_rejected')) else
+                  self.code.split('_', 1)[0])
         return {'error_domain': domain, 'field': self.field or 'query_plan',
                 'expected': self.expected or str(self),
                 'actual': self.actual or self.code}
@@ -134,6 +140,9 @@ def validate_plan(catalog, sql, params, plan):
             and (any(plan.get(key) for key in keys) or bool(plan.get('source_signatures'))
                  or bool(plan.get('filter_bindings'))),
             'query_plan_invalid', 'Query plan must contain source signatures, entity, metric or time bindings')
+    # 覆盖表随正式回执保留，但其题面来自模型，不能单凭该表升级为原题已验证。
+    # 本阶段硬拒绝仍须依赖下方目录、实体、时间及 SQL 的独立物理证据。
+    question_coverage = None
     if 'business_intent' in plan:
         from playbook_decision import decide
         try:
@@ -144,6 +153,8 @@ def validate_plan(catalog, sql, params, plan):
                 'Business intent needs a current unambiguous Playbook decision',
                 field='business_intent', expected='proceed',
                 actual=repr({'decision': decision['decision'], 'reasons': decision['reasons']}))
+        from question_coverage import check_coverage
+        question_coverage = check_coverage(plan['business_intent'])
         require_match(plan.get('source_signatures'), decision['source_signatures'],
                       'source_signatures', 'Plan sources differ from the current business decision')
         intent = plan['business_intent']
@@ -280,7 +291,15 @@ def validate_plan(catalog, sql, params, plan):
     if 'business_intent' in plan and decision['selected_playbook']['id'] == 'category_distribution':
         from sqlglot import exp
         group = evidence.tree.args.get('group') if isinstance(evidence.tree, exp.Select) else None
-        actual = [g.name for g in group.expressions] if group else []
+        # GROUP BY 可引用投影别名；仅当别名不与源表物理列同名时，才可把它
+        # 还原为投影列。发生同名碰撞时 SQL 的解析语义可能不同，不能放宽验证。
+        physical_columns = {column['name'] for table in catalog['tables']
+                            for column in table['columns'] if table['name'] in
+                            plan['business_intent']['source_ids']}
+        aliases = {projection.alias: projection.this.name for projection in evidence.tree.expressions
+                   if isinstance(projection, exp.Alias) and isinstance(projection.this, exp.Column)
+                   and projection.alias not in physical_columns}
+        actual = [aliases.get(g.name, g.name) for g in group.expressions] if group else []
         require(actual == plan['business_intent']['dimension_fields']
                 and all(isinstance(g, exp.Column) for g in (group.expressions if group else [])),
                 'category_sql_mismatch', 'Category GROUP BY must match the selected dimensions',
@@ -323,6 +342,7 @@ def validate_plan(catalog, sql, params, plan):
     if constraints['scope_checks']:
         scope.append('scope_scans')
     return {'status': 'verified', 'plan_sha256': digest(plan), 'entity_checks': checks,
+            'question_coverage': question_coverage,
             **constraints, 'verification_scope': scope,
             'verified_claims': scope,
             'agent_review_required': ['metric_expression', 'aggregation_grain', 'units', 'business_meaning',

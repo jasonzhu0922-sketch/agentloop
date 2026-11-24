@@ -2,7 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { PrivateSkill } from "@zhujun/agentloop";
-import { fixedSkillExecutionPolicy, gateRepairDecision } from "../src/skill-policy.ts";
+import { fixedSkillExecutionPolicy, gateRepairDecision, assessOriginalQuestion } from "../src/skill-policy.ts";
+
+test("host question detects omitted literal month and wrong model question", () => {
+  const actual = "请查 2026 年 2 月员工人数";
+  const wrong = { business_intent: { question: "2026 年 3 月员工人数",
+    time_range: { start: "2026-03-01", end: "2026-04-01" } } };
+  assert.equal(assessOriginalQuestion(actual, wrong).status, "conflict");
+  const aligned = { business_intent: { question: actual,
+    time_range: { start: "2026-02-01", end: "2026-03-01" } } };
+  assert.equal(assessOriginalQuestion(actual, aligned).status, "matched_limited");
+  assert.equal(assessOriginalQuestion("查最近人数", aligned).status, "unproven");
+});
+
+test("original question check distinguishes absent and invalid model dates", () => {
+  const prompt = "请查 2026 年 1 月和 2026 年 3 月人数";
+  assert.equal(assessOriginalQuestion(prompt, { business_intent: { question: prompt } }).status, "unproven");
+  const range = { business_intent: { question: prompt,
+    time_range: { start: "2026-01-01", end: "2026-04-01" } } };
+  assert.equal(assessOriginalQuestion(prompt, range).status, "unproven");
+});
 
 test("fixed package policy admits declared entrypoints and keeps credentials private", async () => {
   const skill = { name: "data-analysis", package: { root: fileURLToPath(new URL("../skills/data-analysis", import.meta.url)) } } as PrivateSkill;
@@ -67,5 +86,21 @@ test("large metadata receipts count once as evidence across output paths", () =>
   call("5", "get-query-context"); receipt("5", evidence("b.json", "a".repeat(64)));
   call("6", "execute"); receipt("6", refused);
   call("7", "execute"); receipt("7", refused);
+  assert.equal(gateRepairDecision(rows).decision, "deny");
+});
+
+test("same root cause cannot reset the budget by changing SQL details", () => {
+  const rows: Array<{ type: string; payload_json: string }> = [];
+  const event = (type: string, data: object) => rows.push({ type, payload_json: JSON.stringify(data) });
+  for (let index = 0; index < 3; index++) {
+    const id = `retry-${index}`;
+    event("assistant.tool_call.committed", { toolCallId: id,
+      arguments: { command: "python3", args: ["scripts/data_client.py", "execute"] } });
+    event("tool.completed", { toolCallId: id, toolName: "computer_run_command",
+      result: JSON.stringify({ stdout: JSON.stringify({ status: "rejected", diagnostic: {
+        origin: "query_gateway", sql_executed: false, code: "time_sql_mismatch",
+        field: "time_bindings", expected: "2026-01", actual: `variation-${index}`,
+      } }) }) });
+  }
   assert.equal(gateRepairDecision(rows).decision, "deny");
 });

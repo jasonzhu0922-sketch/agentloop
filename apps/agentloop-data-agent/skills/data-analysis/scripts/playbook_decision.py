@@ -134,9 +134,13 @@ def decide(catalog, raw):
     if scopes and any(not {'id', 'source_id', 'codes', 'output', 'time_range'} <= set(s)
                       for s in scopes if isinstance(s, dict)):
         reasons.append('scope_definition_missing')
-    if scopes and not intent.get('confirmed_business_choice'):
+    # 分别列示只要求每个 scope 自身有完整绑定；只有联合计算或相加才需要
+    # 证明范围可比且不重叠。不能把这两种问题一律转成业务 HIL。
+    if (scopes and intent.get('comparison', {}).get('mode') != 'separate_listing'
+            and not intent.get('confirmed_business_choice')):
         reasons.append('scope_business_unconfirmed')
     if (ORGANIZATION_SCOPE_HINT.search(intent['question']) and not intent.get('confirmed_business_choice')
+            and intent.get('comparison', {}).get('mode') != 'separate_listing'
             and any(entity.get('source_id') in source_ids for entity in catalog.get('entities', []))):
         reasons.append('scope_business_unconfirmed')
     if 'ratio' in requested:
@@ -164,6 +168,9 @@ def decide(catalog, raw):
         decision = 'reject'
     elif probe_valid and not eligible and set(reasons) <= {'time_range_missing'}:
         decision = 'probe'
+    # 计划草稿缺字段属于输入问题，不能让用户在 HIL 中替模型补齐内部结构。
+    elif any(reason.endswith('_missing') for reason in reasons):
+        decision = 'reject'
     elif reasons or not eligible:
         decision = 'clarify'
     else:
@@ -173,6 +180,25 @@ def decide(catalog, raw):
 
 def _receipt(catalog, intent, stripped, candidates, decision, reasons, eligible=()):
     selected = eligible[0] if decision == 'proceed' and len(eligible) == 1 else None
+    # 唯一合格的 Playbook 仍只是模型提议的执行候选。这里记录其状态及其余
+    # 候选的淘汰原因，不把模型排名或自报的确认标记当成用户授权证据。
+    candidates = [{**candidate,
+                   'evidence_status': ('proposed' if selected and candidate['id'] == selected['id'] else
+                                       'runner_up' if candidate['status'] == 'eligible' else
+                                       'rejected' if candidate['blocking'] == ['not_requested'] else 'unresolved'),
+                   'rejection_evidence': candidate['blocking']} for candidate in candidates]
+    catalog_reasons = {'metric_definition_missing', 'dimension_definition_missing',
+                       'entity_role_undefined', 'filter_definition_invalid', 'source_not_authorized'}
+    input_reasons = {'playbook_unknown', 'source_ids_missing', 'metric_refs_missing',
+                     'time_range_missing', 'scope_definition_invalid', 'scope_definition_missing'}
+    physical_reasons = {'ratio_physical_shape_unsupported', 'snapshot_comparability_unproven'}
+    # 把目录缺项、输入错误、物理暂不可证和真正业务选择分开，供 Agent
+    # 决定重查目录、重编计划、采用受控等价 SQL，还是发起最小澄清。
+    reason_domains = {reason: ('catalog' if reason in catalog_reasons else
+                               'input' if reason in input_reasons else
+                               'unproven' if reason in physical_reasons else 'business_choice')
+                      for reason in reasons}
+    from question_coverage import coverage
     return {'schema': 'nl2sql.evidence-decision/v1', 'scenario_id': catalog['scenario_id'],
             'decision': decision,
             'catalog_revision': catalog['catalog_revision'], 'input_summary': {
@@ -183,6 +209,8 @@ def _receipt(catalog, intent, stripped, candidates, decision, reasons, eligible=
             'candidates': candidates, 'conflicts': [c['id'] for c in eligible] if len(eligible) > 1 else [],
             'selected_playbook': {k: selected[k] for k in ('id', 'version')} if selected else None,
             'typed_intent': deepcopy(intent),
-            'reasons': reasons, 'unverified': ['business_meaning', 'answer_accuracy'],
+            'reasons': reasons, 'reason_domains': reason_domains,
+            'question_coverage': coverage(intent),
+            'unverified': ['business_meaning', 'answer_accuracy', 'original_question_coverage'],
             'contract': {k: deepcopy(intent[k]) for k in ('source_ids', 'metric_refs', 'dimension_fields',
                          'scopes', 'time_range', 'ratio', 'filters') if k in intent} if selected else None}
