@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { PrivateSkill } from "@zhujun/agentloop";
-import { fixedSkillExecutionPolicy } from "../src/skill-policy.ts";
+import { fixedSkillExecutionPolicy, gateRepairDecision } from "../src/skill-policy.ts";
 
 test("fixed package policy admits declared entrypoints and keeps credentials private", async () => {
   const skill = { name: "data-analysis", package: { root: fileURLToPath(new URL("../skills/data-analysis", import.meta.url)) } } as PrivateSkill;
@@ -18,4 +18,54 @@ test("fixed package policy admits declared entrypoints and keeps credentials pri
     assert.equal(await check("computer_search_text", { path }), "deny", path);
   for (const path of ["@skills/data-analysis/SKILL.md", "@skills/data-analysis/references/planning.md", "answer.json"])
     assert.equal(await check("computer_read_file", { path }), "allow", path);
+});
+
+test("enforce stops the same physical refusal after two corrections, but new evidence resets it", async () => {
+  const rows: Array<{ type: string; payload_json: string }> = [];
+  const event = (type: string, data: object) => rows.push({ type, payload_json: JSON.stringify(data) });
+  const call = (id: string, action: string) => event("assistant.tool_call.committed", {
+    toolCallId: id, arguments: { command: "python3", args: ["scripts/data_client.py", action] },
+  });
+  const result = (id: string, body: object) => event("tool.completed", { toolCallId: id,
+    toolName: "computer_run_command", result: JSON.stringify({ stdout: JSON.stringify(body) }) });
+  const refused = { status: "rejected", diagnostic: { origin: "query_gateway", sql_executed: false,
+    code: "ratio_sql_mismatch", field: "ratio_binding.group_by", expected: "['period']", actual: "['org']" } };
+  call("1", "execute"); result("1", refused);
+  assert.equal(gateRepairDecision(rows).decision, "allow");
+  call("2", "execute"); result("2", refused);
+  assert.equal(gateRepairDecision(rows).decision, "allow");
+  call("2b", "execute"); result("2b", refused);
+  assert.equal(gateRepairDecision(rows).decision, "deny");
+  call("3", "get-query-context"); result("3", { status: "completed", content: { catalog_revision: "new", table: "staff" } });
+  assert.equal(gateRepairDecision(rows).decision, "allow");
+  call("4", "execute"); result("4", refused);
+  assert.equal(gateRepairDecision(rows).decision, "allow");
+  call("5", "get-query-context"); result("5", { status: "completed", content: { catalog_revision: "new", table: "staff" } });
+  call("6", "execute"); result("6", refused);
+  assert.equal(gateRepairDecision(rows).decision, "allow");
+  call("7", "execute"); result("7", refused);
+  assert.equal(gateRepairDecision(rows).decision, "deny");
+  event("human_loop.answered", { value: "confirmed" });
+  assert.equal(gateRepairDecision(rows).decision, "allow");
+});
+
+test("large metadata receipts count once as evidence across output paths", () => {
+  const rows: Array<{ type: string; payload_json: string }> = [];
+  const event = (type: string, data: object) => rows.push({ type, payload_json: JSON.stringify(data) });
+  const call = (id: string, action: string) => event("assistant.tool_call.committed", { toolCallId: id,
+    arguments: { command: "python3", args: ["scripts/data_client.py", action] } });
+  const receipt = (id: string, body: object) => event("tool.completed", { toolCallId: id,
+    toolName: "computer_run_command", result: JSON.stringify({ stdout: JSON.stringify(body) }) });
+  const refused = { status: "rejected", diagnostic: { origin: "query_gateway", sql_executed: false,
+    code: "ratio_sql_mismatch", field: "ratio_binding.group_by", expected: "period", actual: "org" } };
+  const evidence = (path: string, hash: string) => ({ status: "completed", path, sha256: hash, content_complete: false });
+  call("1", "execute"); receipt("1", refused);
+  call("2", "execute"); receipt("2", refused);
+  call("3", "get-query-context"); receipt("3", evidence("a.json", "a".repeat(64)));
+  call("4", "execute"); receipt("4", refused);
+  assert.equal(gateRepairDecision(rows).decision, "allow");
+  call("5", "get-query-context"); receipt("5", evidence("b.json", "a".repeat(64)));
+  call("6", "execute"); receipt("6", refused);
+  call("7", "execute"); receipt("7", refused);
+  assert.equal(gateRepairDecision(rows).decision, "deny");
 });

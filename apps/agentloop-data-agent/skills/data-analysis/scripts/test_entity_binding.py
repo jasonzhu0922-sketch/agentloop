@@ -37,7 +37,9 @@ class EntityBindingTest(unittest.TestCase):
             'entities': [{'id': 'finance.organization', 'source_id': 'finance',
                           'key_field': 'company_code', 'name_fields': ['company_name'], 'aliases': {}}]}
         self.audits, self.executions = [], []
-        self.gateway = Gateway(self, self.scope, deepcopy, self.execute, QueryPolicyError)
+        # These historical fixtures exercise physical binding directly; their
+        # old plans predate the formal typed business contract.
+        self.gateway = Gateway(self, self.scope, deepcopy, self.execute, QueryPolicyError, mode='enforce')
         self.request = {'mention': '宝钢股份', 'matched_term': '宝钢股份',
                         'canonical_name': '宝山钢铁股份有限公司', 'source_id': 'finance',
                         'entity_id': 'finance.organization'}
@@ -68,10 +70,11 @@ class EntityBindingTest(unittest.TestCase):
         return {'columns': [c[0] for c in cursor.description], 'rows': rows, 'row_count': len(rows)}
 
     def plan(self):
-        return self.gateway.resolve_entity('group', self.request)['query_plan']
+        plan = self.gateway.resolve_entity('group', self.request)['query_plan']
+        return plan
 
     def run_query(self, sql, params, plan=None):
-        return self.gateway.execute_sql('group', sql, params, plan if plan is not None else self.plan())
+        return self.gateway.execute_sql('group', sql, params, plan if plan is not None else self.plan(), _internal=True)
 
     def assert_rejected(self, sql, params, code='entity_sql_mismatch', plan=None):
         plan = self.plan() if plan is None else plan
@@ -179,9 +182,9 @@ class EntityBindingTest(unittest.TestCase):
             with redirect_stdout(io.StringIO()) as stream:
                 code = data_client.main(['execute', '--scenario-id', 'group', '--request-json', json.dumps(body),
                                          '--query-plan', str(resolution), '--output', str(output)])
-            self.assertEqual(code, 0)
-            self.assertEqual(json.loads(output.read_text())['plan_verification']['status'], 'verified')
-            self.assertEqual(json.loads(stream.getvalue())['plan_verification']['status'], 'verified')
+            self.assertEqual(code, 1)
+            self.assertEqual(json.loads(output.read_text())['error']['diagnostic']['code'], 'query_source_unbound')
+            self.assertEqual(json.loads(stream.getvalue())['diagnostic']['code'], 'query_source_unbound')
 
     def test_http_uses_the_same_resolution_and_sql_verification(self):
         async def check():
@@ -193,11 +196,11 @@ class EntityBindingTest(unittest.TestCase):
                 body = {'scenario_id': 'group', 'sql': 'SELECT amount FROM business.finance WHERE company_code=%s',
                         'params': ['1001'], 'query_plan': plan}
                 result = (await client.post('/api/data/execute', json=body)).json()
-                self.assertEqual(result['status'], 'completed', result)
-                self.assertEqual(result['plan_verification']['entity_checks'][0]['sql_codes'], ['1001'])
+                self.assertEqual(result['status'], 'rejected', result)
+                self.assertEqual(result['error']['diagnostic']['code'], 'query_source_unbound')
                 bad = {**body, 'sql': 'SELECT amount FROM business.finance WHERE company_name LIKE %s', 'params': ['%宝钢%']}
                 result = (await client.post('/api/data/execute', json=bad)).json()
-                self.assertEqual(result['error']['code'], 'entity_binding_rejected')
+                self.assertEqual(result['error']['diagnostic']['code'], 'query_source_unbound')
         asyncio.run(check())
 
     def test_wrong_canonical_name_missing_term_and_invalid_entity_fail_without_query(self):

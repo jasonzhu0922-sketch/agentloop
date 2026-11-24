@@ -167,6 +167,12 @@ class KnowledgeTest(unittest.TestCase):
         self.assertEqual({f for d in result['knowledge_diagnostics'] for f in d['missing_fields']},
                          {'missing_item', 'missing_org', 'missing_period'})
 
+    def test_period_selector_field_must_exist_in_source(self):
+        self.raw['period_formats'][0]['selector'] = {'field': 'missing_kind', 'value': 'D'}
+        result = self.gateway.catalog('group', ['staff_report'])
+        self.assertEqual(result['period_formats'][0]['definition_status'], 'invalid')
+        self.assertEqual(result['knowledge_diagnostics'][-1]['missing_fields'], ['missing_kind'])
+
     def test_source_details_scope_knowledge_and_expose_only_related_table_identities(self):
         self.raw['entities'].append({'id': 'transaction', 'source_id': 'transactions',
                                      'key_field': 'id', 'name_fields': ['id']})

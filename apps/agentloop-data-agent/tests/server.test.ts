@@ -5,7 +5,7 @@ import test from "node:test";
 import type { AddressInfo } from "node:net";
 import { createChatServer } from "../src/server.ts";
 import type { DataAgent } from "../src/agent.ts";
-import { MODEL_CONFIGURATION_EDITOR_SCHEMA } from "@zhujun/agentloop";
+import { AppError, MODEL_CONFIGURATION_EDITOR_SCHEMA } from "@zhujun/agentloop";
 
 test("chat opens without login and protects mutations from other origins", async t => {
   const starts: unknown[] = [];
@@ -41,4 +41,34 @@ test("chat opens without login and protects mutations from other origins", async
   const result = await fetch(`${url}/api/messages`, { method: "POST", headers: { Cookie: cookie, Origin: url, "Content-Type": "application/json" }, body: JSON.stringify(data) });
   assert.equal(result.status, 202);
   assert.deepEqual(starts, [{ requestId: "request", conversationId: "conversation", input: "指标", modelKey: "test" }]);
+});
+
+test("application admission 429 keeps request provenance and no SQL execution", async t => {
+  const agent = { start: async () => { throw new AppError("CONFLICT", "查询并发已满，请稍后重试", 429); } } as unknown as DataAgent;
+  const server = createChatServer(agent, { webRoot: resolve(import.meta.dirname, "../web"), models: [{ key: "test", displayName: "Test" }], defaultModelKey: "test" });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const cookie = (await fetch(url)).headers.get("set-cookie")!.split(";")[0];
+  const response = await fetch(`${url}/api/messages`, { method: "POST", headers: { Cookie: cookie, Origin: url,
+    "Content-Type": "application/json" }, body: JSON.stringify({ requestId: "req-429", conversationId: "c",
+      input: "人数", modelKey: "test" }) });
+  assert.equal(response.status, 429);
+  assert.deepEqual((await response.json()).diagnostic, { origin: "app_admission", phase: "app.admission",
+    requestId: "req-429", sqlExecuted: false, retryable: true, retryBudget: 1 });
+});
+
+test("model upstream limit stays distinct in projected Run events", async t => {
+  const agent = { runs: { get: async () => ({ id: "run" }), currentHumanLoop: async () => null,
+    eventsAfter: async () => [{ seq: 1, type: "model.failed", createdAt: 1,
+      data: { phase: "model.request", status: 429, providerRequestId: "provider-429", code: "rate_limit" } }] } } as unknown as DataAgent;
+  const server = createChatServer(agent, { webRoot: resolve(import.meta.dirname, "../web"), models: [], defaultModelKey: "test" });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const cookie = (await fetch(url)).headers.get("set-cookie")!.split(";")[0];
+  const response = await fetch(`${url}/api/runs/run`, { headers: { Cookie: cookie } });
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).events[0].data, { phase: "model.request", status: 429,
+    providerRequestId: "provider-429", code: "rate_limit", failureOrigin: "model_upstream", sqlExecuted: false });
 });
