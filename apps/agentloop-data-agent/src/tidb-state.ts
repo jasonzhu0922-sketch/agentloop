@@ -23,17 +23,29 @@ export async function acquireLease(database: SqlConnection) {
     .run(token, Date.now() + ttl, Date.now());
   if (Number(claim.changes) !== 1) throw new Error("该 TiDB Runtime 已有活动宿主");
   let lost = false;
+  let renewing = false;
   const timer = setInterval(() => {
-    void database.prepare("UPDATE data_agent_host_lease SET expires_at = ? WHERE id = 'host' AND owner_token = ? AND expires_at > ?")
-      .run(Date.now() + ttl, token, Date.now()).then(r => { if (Number(r.changes) !== 1) lost = true; }, () => { lost = true; });
+    if (lost || renewing) return;
+    renewing = true;
+    // A transient TiDB failure must not permanently poison the host. A late
+    // renewal may reclaim only its own expired row; another owner still wins.
+    void database.prepare("UPDATE data_agent_host_lease SET expires_at = ? WHERE id = 'host' AND owner_token = ?")
+      .run(Date.now() + ttl, token).then(r => { if (Number(r.changes) !== 1) lost = true; }, () => {
+        // assert() retries the same ownership check on the next request.
+      }).finally(() => { renewing = false; });
   }, 20_000);
   timer.unref();
   return {
     async assert() {
       if (lost) throw new Error("TiDB host lease lost");
-      const row = await database.prepare("SELECT owner_token, expires_at FROM data_agent_host_lease WHERE id = 'host' FOR UPDATE")
+      const row = await database.prepare("SELECT owner_token, expires_at FROM data_agent_host_lease WHERE id = 'host'")
         .get<{ owner_token: string; expires_at: number }>();
-      if (!row || row.owner_token !== token || Number(row.expires_at) <= Date.now()) throw new Error("TiDB host lease lost");
+      if (!row || row.owner_token !== token) { lost = true; throw new Error("TiDB host lease lost"); }
+      if (Number(row.expires_at) <= Date.now()) {
+        const renewed = await database.prepare("UPDATE data_agent_host_lease SET expires_at = ? WHERE id = 'host' AND owner_token = ?")
+          .run(Date.now() + ttl, token);
+        if (Number(renewed.changes) !== 1) { lost = true; throw new Error("TiDB host lease lost"); }
+      }
     },
     async release() {
       clearInterval(timer);

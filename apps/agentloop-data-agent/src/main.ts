@@ -14,6 +14,8 @@ if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error("DA
 const stateUrl = process.env.DATA_AGENT_TIDB_URL;
 if (!stateUrl) throw new Error("请配置 DATA_AGENT_TIDB_URL；本应用结构化状态使用 TiDB，大文件使用持久磁盘");
 const fileDirectory = resolve(appRoot, process.env.DATA_AGENT_FILE_DIR ?? "data/files");
+const planCMode = process.env.AGENTLOOP_DATA_PLAN_C_MODE ?? "legacy";
+if (planCMode !== "legacy" && planCMode !== "enforce") throw new Error("AGENTLOOP_DATA_PLAN_C_MODE 无效");
 const terminalLogOptions = { colorMode: process.env.AGENTLOOP_LOG_COLOR, isTTY: process.stdout.isTTY, noColor: process.env.NO_COLOR };
 const log = (entry: string) => console.log(`${colorizeTerminalLogLabel("[AgentLoop Data Agent]", "agentloop-data-agent", terminalLogOptions)} ${new Date().toISOString()} ${colorizeTerminalLogLine(entry, terminalLogOptions)}`);
 let agent: Awaited<ReturnType<typeof createDataAgent>> | undefined;
@@ -23,7 +25,7 @@ try {
   if (!models.registry.modelKeys().includes(modelKey)) throw new Error("DATA_AGENT_MODEL_KEY 未在配置中声明");
   agent = await createDataAgent({
     connection: await connectState(stateUrl), fileDirectory,
-    skillRoot: join(appRoot, "skills", "data-analysis"), python: process.env.DATA_AGENT_PYTHON ?? "python3",
+    skillRoot: join(appRoot, "skills", "data-analysis"), python: process.env.DATA_AGENT_PYTHON ?? "python3", planCMode,
     modelFactory: (onRetry, key) => models.registry.create(key, onRetry),
     modelKeys: models.registry.modelKeys(), defaultModelKey: modelKey,
     runEventLogSink: log,

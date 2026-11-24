@@ -9,7 +9,7 @@ import re
 
 CATALOG_LIST_FIELDS = (
     'tables', 'metrics', 'terms', 'relationships', 'skills', 'dimensions',
-    'time_policies', 'table_summaries', 'entities', 'period_formats',
+    'time_policies', 'table_summaries', 'entities', 'period_formats', 'source_freshness',
 )
 SUMMARY_INDEX_FIELDS = (
     'source_id', 'table_signature', 'purpose', 'business_domain', 'business_terms',
@@ -87,12 +87,23 @@ def prepare_knowledge(config):
             if source not in tables:
                 continue
             fields = ([definition['key_field'], *definition.get('name_fields', [])]
-                      if key == 'entities' else [definition['field']])
+                      if key == 'entities' else [definition['field'],
+                          *([definition['selector'].get('field')]
+                            if isinstance(definition.get('selector'), dict) else [])])
             missing = sorted(set(fields) - {c['name'] for c in tables[source]['columns']})
-            definition['definition_status'] = 'invalid' if missing else 'current'
-            if missing:
+            invalid_selector = (key == 'period_formats' and 'selector' in definition and
+                (not isinstance(definition['selector'], dict)
+                 or not {'field', 'value'} <= set(definition['selector'])
+                 or set(definition['selector']) - {'field', 'value', 'period_length'}
+                 or type(definition['selector'].get('value')) not in (str, int)
+                 or ('period_length' in definition['selector'] and
+                     (type(definition['selector']['period_length']) is not int or
+                      not 1 <= definition['selector']['period_length'] <= 32))))
+            definition['definition_status'] = 'invalid' if missing or invalid_selector else 'current'
+            if missing or invalid_selector:
                 diagnostics.append({'kind': key, 'source_id': source,
-                                    'status': 'invalid', 'missing_fields': missing})
+                                    'status': 'invalid', 'missing_fields': missing,
+                                    **({'invalid_selector': True} if invalid_selector else {})})
             scoped.append(definition)
         public[key] = scoped
     if diagnostics:
@@ -216,7 +227,7 @@ def project_sources(catalog, requested, question=None):
                                   for table in catalog['tables'] if table['name'] in related]
     catalog['tables'] = [table for table in catalog['tables'] if table['name'] in requested]
     catalog['metrics'] = [m for m in catalog['metrics'] if m.get('table') in requested]
-    for key in ('table_summaries', 'entities', 'period_formats'):
+    for key in ('table_summaries', 'entities', 'period_formats', 'source_freshness'):
         catalog[key] = [definition for definition in catalog[key] if definition['source_id'] in requested]
     catalog['relationships'] = [r for r in catalog['relationships']
                                  if any(r.get(side, {}).get('source_id') in requested for side in ('left', 'right'))]

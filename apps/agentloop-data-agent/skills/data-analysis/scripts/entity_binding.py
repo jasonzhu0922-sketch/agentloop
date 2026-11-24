@@ -5,14 +5,27 @@ import json
 
 
 class EntityBindingError(ValueError):
-    def __init__(self, code, message):
+    def __init__(self, code, message, *, field=None, expected=None, actual=None):
         super().__init__(message)
         self.code = code
+        self.field, self.expected, self.actual = field, expected, actual
+
+    def diagnostic(self):
+        domain = self.code.split('_', 1)[0]
+        return {'error_domain': domain, 'field': self.field or 'query_plan',
+                'expected': self.expected or str(self),
+                'actual': self.actual or self.code}
 
 
-def require(condition, code, message):
+def require(condition, code, message, **details):
     if not condition:
-        raise EntityBindingError(code, message)
+        raise EntityBindingError(code, message, **details)
+
+
+def require_match(actual, expected, field, message):
+    """Report the mismatched contract slot without any table-specific repair rule."""
+    require(actual == expected, 'business_plan_mismatch', message,
+            field=field, expected=repr(expected), actual=repr(actual))
 
 
 def digest(value):
@@ -102,7 +115,8 @@ def validate_plan(catalog, sql, params, plan):
     """Verify source-bound evidence and exact SQL selectors; never rewrite SQL."""
     require(isinstance(plan, dict) and {'schema', 'scenario_id', 'catalog_revision'} <= set(plan)
         and set(plan) <= {'schema', 'scenario_id', 'catalog_revision', 'entity_bindings',
-                         'metric_bindings', 'time_bindings', 'source_signatures'}
+                         'metric_bindings', 'time_bindings', 'source_signatures',
+                         'ratio_binding', 'scope_bindings', 'filter_bindings', 'business_intent'}
         and plan['schema'] == 'nl2sql.query-plan/v1', 'query_plan_invalid', 'Use a query-plan object')
     require(plan['scenario_id'] == catalog['scenario_id'] and plan['catalog_revision'] == catalog['catalog_revision'],
             'query_plan_stale', 'Scenario or catalog revision changed; rebind affected definitions')
@@ -116,12 +130,92 @@ def validate_plan(catalog, sql, params, plan):
                         for source, signature in signatures.items()),
                 'query_schema_changed', 'A selected source structure changed; reload query context and rebind')
     require(all(isinstance(plan.get(key, []), list) for key in keys)
-            and (any(plan.get(key) for key in keys) or bool(plan.get('source_signatures'))),
+            and isinstance(plan.get('filter_bindings', []), list)
+            and (any(plan.get(key) for key in keys) or bool(plan.get('source_signatures'))
+                 or bool(plan.get('filter_bindings'))),
             'query_plan_invalid', 'Query plan must contain source signatures, entity, metric or time bindings')
+    if 'business_intent' in plan:
+        from playbook_decision import decide
+        try:
+            decision = decide(catalog, plan['business_intent'])
+        except (TypeError, ValueError):
+            raise EntityBindingError('business_intent_invalid', 'Business intent is not a valid typed input') from None
+        require(decision['decision'] == 'proceed', 'business_decision_unresolved',
+                'Business intent needs a current unambiguous Playbook decision',
+                field='business_intent', expected='proceed',
+                actual=repr({'decision': decision['decision'], 'reasons': decision['reasons']}))
+        require_match(plan.get('source_signatures'), decision['source_signatures'],
+                      'source_signatures', 'Plan sources differ from the current business decision')
+        intent = plan['business_intent']
+        separate = intent.get('comparison', {}).get('mode') == 'separate_listing'
+        scopes = intent.get('scopes', []) if separate and decision['selected_playbook']['id'] == 'scope_comparison' else []
+        selected_scope = plan.get('scope_bindings', [None])[0] if scopes and len(plan.get('scope_bindings', [])) == 1 else None
+        selected_source = selected_scope.get('source_id') if isinstance(selected_scope, dict) else None
+        selected_id = selected_scope.get('id') if isinstance(selected_scope, dict) else None
+        expected_metrics = ([m for m in intent.get('metric_refs', []) if m.get('source_id') == selected_source]
+                            if selected_scope else intent.get('metric_refs', []))
+        expected_filters = ([f for f in intent.get('filters', []) if f.get('source_id') == selected_source]
+                            if selected_scope else intent.get('filters', []))
+        require_match(plan.get('metric_bindings', []), expected_metrics,
+                      'metric_bindings', 'Metric bindings differ from the business decision')
+        require_match(plan.get('filter_bindings', []), expected_filters,
+                      'filter_bindings', 'Filter bindings differ from the business decision')
+        if 'time_range' in intent:
+            valid_time = bool(plan.get('time_bindings')) and all(
+                b.get('start') == intent['time_range']['start'] and b.get('end') == intent['time_range']['end']
+                for b in plan['time_bindings'])
+            require(valid_time, 'business_plan_mismatch', 'Typed period differs from the execution plan',
+                    field='time_bindings', expected=repr(intent['time_range']),
+                    actual=repr(plan.get('time_bindings', [])))
+        else:
+            require(not plan.get('time_bindings'), 'business_plan_mismatch',
+                    'Execution plan contains a period absent from the business decision',
+                    field='time_bindings', expected='[]', actual=repr(plan.get('time_bindings')))
+        if decision['selected_playbook']['id'] == 'ratio':
+            ratio = intent['ratio']
+            for key in ('source_id', 'project_field', 'measure_field', 'numerator_values',
+                        'denominator_values', 'group_by', 'zero_denominator', 'kind'):
+                if key == 'kind' and key not in ratio:
+                    continue
+                actual = plan.get('ratio_binding', {}).get(key) if isinstance(plan.get('ratio_binding'), dict) else None
+                require_match(actual, ratio.get(key), 'ratio_binding.' + key,
+                              'Ratio branches differ from the business decision')
+        if decision['selected_playbook']['id'] == 'scope_comparison':
+            scopes = intent['scopes']
+            bound = plan.get('scope_bindings', [])
+            selected = ([s for s in scopes if s.get('id') == selected_id]
+                        if separate and selected_scope else scopes)
+            require(isinstance(bound, list) and len(bound) == len(selected),
+                    'business_plan_mismatch', 'Scope binding count differs from the business decision',
+                    field='scope_bindings', expected=f'{len(selected)} scopes',
+                    actual=f'{len(bound) if isinstance(bound, list) else type(bound).__name__} scopes')
+            for scope in selected:
+                matches = [b for b in bound if isinstance(b, dict) and b.get('id') == scope.get('id')]
+                require(len(matches) == 1, 'business_plan_mismatch', 'Scope id differs from the business decision',
+                        field='scope_bindings.id', expected=repr(scope.get('id')),
+                        actual=repr([b.get('id') for b in bound if isinstance(b, dict)]))
+                for field, value in (('source_id', scope.get('source_id')), ('field', scope.get('field')),
+                                     ('codes', scope.get('codes')), ('output', scope.get('output')),
+                                     ('time_field', scope.get('time_field')),
+                                     ('start', scope.get('time_range', {}).get('start')),
+                                     ('end', scope.get('time_range', {}).get('end')),
+                                     ('time_selector', scope.get('time_selector'))):
+                    require_match(matches[0].get(field), value,
+                                  f"scope_bindings[{scope['id']}].{field}",
+                                  'Scope bindings differ from the business decision')
+        else:
+            require(not plan.get('scope_bindings'), 'business_plan_mismatch',
+                    'Unexpected scope binding for the selected Playbook',
+                    field='scope_bindings', expected='[]', actual=repr(plan.get('scope_bindings')))
+        if decision['selected_playbook']['id'] != 'ratio':
+            require(not plan.get('ratio_binding'), 'business_plan_mismatch',
+                    'Unexpected ratio binding for the selected Playbook',
+                    field='ratio_binding', expected='None', actual=repr(plan.get('ratio_binding')))
     bindings = []
     for binding in plan.get('entity_bindings', []):
         require(isinstance(binding, dict) and set(binding) <= {
-            'mention', 'matched_term', 'canonical_name', 'entity', 'lookup', 'selected_codes', 'selection_evidence'},
+            'mention', 'matched_term', 'canonical_name', 'entity', 'lookup', 'selected_codes', 'selection_evidence',
+            'scope_id'},
             'entity_binding_invalid', 'Invalid entity binding fields')
         entity = binding.get('entity', {})
         term = binding.get('matched_term')
@@ -159,15 +253,62 @@ def validate_plan(catalog, sql, params, plan):
             require(isinstance(binding.get('selection_evidence'), str) and bool(binding['selection_evidence'].strip()),
                     'entity_selection_required', 'Ambiguous candidates require a user decision or other explicit selection evidence')
         bindings.append(binding)
+    if plan.get('scope_bindings') is not None:
+        require(isinstance(plan['scope_bindings'], list)
+                and all(isinstance(s, dict) for s in plan['scope_bindings']),
+                'scope_binding_invalid', 'Scope bindings must be an array of objects')
+        for scope_binding in plan['scope_bindings']:
+            matches = [b for b in bindings if b.get('scope_id') == scope_binding.get('id')
+                       and b['entity']['source_id'] == scope_binding.get('source_id')
+                       and b['entity']['key_field'] == scope_binding.get('field')]
+            require(len(matches) == 1 and {scalar(v) for v in matches[0]['selected_codes']}
+                    == {scalar(v) for v in scope_binding.get('codes', [])},
+                    'scope_entity_required', 'Each scope must retain its own source-bound entity lookup and codes')
     from sql_evidence import SqlEvidence
     from query_constraints import constraint_checks
     evidence = SqlEvidence(sql, params)
+    if ('business_intent' in plan and plan['business_intent'].get('comparison', {}).get('mode')
+            == 'separate_listing'):
+        from sqlglot import exp
+        require(len(list(evidence.physical_sources())) == 1
+                and not any(isinstance(scope.expression, exp.Select) and scope.expression.args.get('joins')
+                            for scope in evidence.scopes),
+                'separate_listing_sql_mismatch',
+                'Separate listing cannot combine sources in one SQL query',
+                field='business_intent.comparison.mode', expected='one physical source per query',
+                actual='joined or combined source scan')
+    if 'business_intent' in plan and decision['selected_playbook']['id'] == 'category_distribution':
+        from sqlglot import exp
+        group = evidence.tree.args.get('group') if isinstance(evidence.tree, exp.Select) else None
+        actual = [g.name for g in group.expressions] if group else []
+        require(actual == plan['business_intent']['dimension_fields']
+                and all(isinstance(g, exp.Column) for g in (group.expressions if group else [])),
+                'category_sql_mismatch', 'Category GROUP BY must match the selected dimensions',
+                field='business_intent.dimension_fields',
+                expected=repr(plan['business_intent']['dimension_fields']), actual=repr(actual))
     if 'source_signatures' in plan:
         require(all(table['name'] in plan['source_signatures'] for table in catalog['tables']
                     if list(evidence.scans(table))),
                 'query_source_unbound', 'Every SQL source must be included in the verified query context')
-    checks = sql_checks(catalog, sql, params, bindings, evidence)
-    constraints = constraint_checks(catalog, plan, evidence)
+    if 'business_intent' in plan:
+        declared = set(plan['business_intent']['source_ids'])
+        scanned = {table['name'] for table in catalog['tables'] if list(evidence.scans(table))}
+        if plan['business_intent'].get('comparison', {}).get('mode') != 'separate_listing':
+            require(declared == scanned, 'business_source_mismatch',
+                    'The SQL must cover each declared business source',
+                    field='business_intent.source_ids', expected=repr(sorted(declared)),
+                    actual=repr(sorted(scanned)))
+        else:
+            require(bool(scanned) and scanned <= declared, 'business_source_mismatch',
+                    'Each separate-listing SQL may use one declared business source',
+                    field='business_intent.source_ids', expected=repr(sorted(declared)),
+                    actual=repr(sorted(scanned)))
+    separate_listing = bool('business_intent' in plan and
+        plan['business_intent'].get('comparison', {}).get('mode') == 'separate_listing')
+    checks = sql_checks(catalog, sql, params, bindings, evidence, separate_listing=separate_listing,
+                        scope_bindings=plan.get('scope_bindings', []))
+    constraints = constraint_checks(catalog, plan, evidence,
+        separate_listing=separate_listing)
     scope = (['source_signatures'] if plan.get('source_signatures') else []) + (['entity_codes'] if bindings else [])
     if constraints['metric_checks']:
         scope.append('metric_definitions')
@@ -175,9 +316,17 @@ def validate_plan(catalog, sql, params, plan):
         scope.append('metric_projects')
     if constraints['time_checks']:
         scope.append('time_ranges')
+    if constraints['filter_checks']:
+        scope.append('physical_filters')
+    if constraints['ratio_check']:
+        scope.append('ratio_branches')
+    if constraints['scope_checks']:
+        scope.append('scope_scans')
     return {'status': 'verified', 'plan_sha256': digest(plan), 'entity_checks': checks,
             **constraints, 'verification_scope': scope,
-            'agent_review_required': ['metric_expression', 'aggregation_grain', 'units', 'business_meaning']}
+            'verified_claims': scope,
+            'agent_review_required': ['metric_expression', 'aggregation_grain', 'units', 'business_meaning',
+                                      'scope_identity', 'snapshot_comparability', 'answer_accuracy']}
 
 
 def scalar(value):
@@ -185,14 +334,24 @@ def scalar(value):
     return (type(value).__name__, value)
 
 
-def sql_checks(catalog, sql, params, bindings, evidence):
+def sql_checks(catalog, sql, params, bindings, evidence, *, separate_listing=False, scope_bindings=()):
     checks = []
     for binding in bindings:
         entity = binding['entity']
         table = next(t for t in catalog['tables'] if t['name'] == entity['source_id'])
         selected = {scalar(code) for code in binding['selected_codes']}
         occurrences = []
-        for alias, where, single in evidence.scans(table):
+        scoped = list(evidence.scoped_scans(table))
+        if binding.get('scope_id'):
+            with_clause = evidence.tree.args.get('with_')
+            ctes = {c.alias_or_name: c.this for c in with_clause.expressions} if with_clause else {}
+            if (separate_listing and len(scope_bindings) == 1
+                    and scope_bindings[0].get('id') == binding['scope_id']
+                    and not ctes and plan_separate_scope(evidence, scope_bindings[0])):
+                scoped = [s for s in scoped if s[0] is evidence.tree]
+            else:
+                scoped = [s for s in scoped if s[0] is ctes.get(binding['scope_id'])]
+        for _, alias, where, single in scoped:
             actual = evidence.selector(where, alias, entity['key_field'], single)
             require(actual == selected, 'entity_sql_mismatch',
                     'SQL must filter ' + table['name'] + '.' + entity['key_field']
@@ -207,3 +366,12 @@ def sql_checks(catalog, sql, params, bindings, evidence):
                        'lookup_query_id': binding['lookup']['query_id'], 'table_aliases': occurrences,
                        'status': 'verified'})
     return checks
+
+
+def plan_separate_scope(evidence, binding):
+    # This helper is only called for a single direct Select; scope_constraints
+    # still verifies its output, source, selector and period independently.
+    from sqlglot import exp
+    root = evidence.tree
+    return (isinstance(root, exp.Select) and not root.args.get('with_')
+            and len(root.expressions) == 1 and root.expressions[0].alias_or_name == binding.get('output'))

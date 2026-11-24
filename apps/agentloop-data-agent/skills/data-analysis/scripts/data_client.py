@@ -63,6 +63,10 @@ def save_result(value, output):
             receipt["columns"] = value["dataset"]["columns"]
         if 'plan_verification' in value:
             receipt['plan_verification'] = value['plan_verification']
+        if value.get('status') == 'rejected' and isinstance(value.get('error'), dict):
+            # Keep small, actionable rejection facts in the Runtime tool result
+            # even when the saved full plan makes /content too large to inline.
+            receipt['diagnostic'] = value['error'].get('diagnostic')
         if 'matched_terms' in value:
             receipt['matched_terms_pointer'] = '/matched_terms'
             if len(json.dumps(value['matched_terms'], ensure_ascii=False)) <= 4000:
@@ -106,10 +110,10 @@ def main(argv=None):
         command.add_argument('--scenario-id', required=True, type=text_arg)
         command.add_argument('--request-json', required=True)
         command.add_argument('--output', required=True)
-    for name in ("catalog", "execute", "resolve-entity"):
+    for name in ("catalog", "execute", "resolve-entity", "decide", "probe"):
         command = actions.add_parser(name)
         command.add_argument("--scenario-id", required=True, type=text_arg)
-        command.add_argument("--output", required=name in ('execute', 'resolve-entity'))
+        command.add_argument("--output", required=name in ('execute', 'resolve-entity', 'decide', 'probe'))
         if name == "catalog":
             command.add_argument("--source-id", action="append", type=text_arg)
             command.add_argument("--question", type=text_arg, help="Rank authorized sources using business knowledge")
@@ -117,19 +121,50 @@ def main(argv=None):
             command.add_argument("--request-json", required=True)
         if name == 'execute':
             command.add_argument('--query-plan', help='Workspace entity-resolution result or entity/metric/time query-plan JSON file')
+    plan_command = actions.add_parser('compose-plan')
+    plan_command.add_argument('--context', required=True)
+    plan_command.add_argument('--decision', required=True)
+    plan_command.add_argument('--entity-result', action='append', default=[])
+    plan_command.add_argument('--time-field')
+    plan_command.add_argument('--time-selector-field')
+    plan_command.add_argument('--time-selector-value')
+    plan_command.add_argument('--time-period-length', type=int)
+    plan_command.add_argument('--output', required=True)
     args = parser.parse_args(argv)
+    if args.action == 'compose-plan':
+        try:
+            from plan_composition import compose_plan
+            def read_json(path):
+                with open(path, encoding='utf-8') as stream:
+                    return json.load(stream)
+            if bool(args.time_selector_field) != bool(args.time_selector_value):
+                raise ValueError('time selector needs both field and value')
+            selector = ({'field': args.time_selector_field, 'value': args.time_selector_value}
+                        if args.time_selector_field else None)
+            if args.time_period_length is not None:
+                if selector is None or not 1 <= args.time_period_length <= 32:
+                    raise ValueError('period length needs a selector and a value from 1 to 32')
+                selector['period_length'] = args.time_period_length
+            plan = compose_plan(read_json(args.context), read_json(args.decision),
+                                [read_json(path) for path in args.entity_result], args.time_field, selector)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            parser.error('cannot compose plan: ' + str(exc))
+        save_result(plan, args.output)
+        return 0
     body = None
     if args.action in METADATA_ACTIONS:
         try:
             body = json.loads(args.request_json)
+            from playbook_decision import strip_input_only
+            body, stripped_input = strip_input_only(body)
             validate_request(args.action, body)
         except ValueError as exc:
             parser.error('invalid metadata request: ' + str(exc))
-    if args.action == 'resolve-entity':
+    if args.action in ('resolve-entity', 'decide', 'probe'):
         try:
             body = json.loads(args.request_json)
             if not isinstance(body, dict):
-                raise ValueError('expected an entity lookup object')
+                raise ValueError('expected a request object')
         except ValueError as exc:
             parser.error('invalid entity request JSON: ' + str(exc))
     if args.action == "execute":
@@ -165,6 +200,8 @@ def main(argv=None):
         if args.action in METADATA_ACTIONS:
             phase = 'knowledge.' + args.action
             result = gateway.knowledge(args.action, args.scenario_id, body)
+            if stripped_input:
+                result['input_normalization'] = {'stripped_input_fields': stripped_input}
         elif args.action == "scenarios":
             phase = "catalog.scenarios"
             result = gateway.scenarios()
@@ -175,6 +212,14 @@ def main(argv=None):
             phase = 'entity.resolve'
             result = gateway.resolve_entity(args.scenario_id, body)
             if result.get('status') == 'failed':
+                exit_code = 1
+        elif args.action == 'decide':
+            phase = 'business.decide'
+            result = gateway.decide(args.scenario_id, body)
+        elif args.action == 'probe':
+            phase = 'query.probe'
+            result = gateway.probe(args.scenario_id, body)
+            if result.get('status') != 'completed':
                 exit_code = 1
         else:
             phase = "query.dispatch"
@@ -194,6 +239,12 @@ def main(argv=None):
         elif isinstance(exc, KnowledgeRequestError):
             diagnostic.update(phase='knowledge.validate', code=exc.code)
             message = str(exc)
+        elif isinstance(exc, ValueError) and phase == 'business.decide':
+            # Typed intent validation uses fixed, credential-free messages.
+            # Distinguish a malformed request from a gateway outage so the
+            # caller can correct field names without inventing a HIL choice.
+            diagnostic['code'] = 'business_intent_invalid'
+            message = str(exc)
         elif isinstance(exc, ImportError):
             diagnostic["code"] = "dependency_unavailable"
             if exc.name in ("pymysql", "sqlglot"):
@@ -208,14 +259,15 @@ def main(argv=None):
                   "execution_state": ("unknown" if phase == "query.dispatch" else "not_started")
                       if args.action == "execute" else "not_applicable"}
         exit_code = 1
-    if exit_code == 0 and args.action in {"catalog", "execute"} | METADATA_ACTIONS:
+    if exit_code == 0 and args.action in {"catalog", "execute", "decide", "probe"} | METADATA_ACTIONS:
         expected_schema = ("nl2sql.semantic-metadata/v1" if args.action in METADATA_ACTIONS else
-                           "nl2sql.data-catalog/v1" if args.action == "catalog" else "nl2sql.query-result/v1")
+                           "nl2sql.data-catalog/v1" if args.action == "catalog" else
+                           "nl2sql.evidence-decision/v1" if args.action == "decide" else "nl2sql.query-result/v1")
         if (not isinstance(result, dict) or result.get("scenario_id") != args.scenario_id
                 or result.get("schema") != expected_schema):
             result = {"status": "response_mismatch", "error": "Data interface schema or scenario does not match the request"}
             exit_code = 1
-        elif args.action == "execute":
+        elif args.action in ("execute", "probe"):
             if result.get("status") != "completed":
                 exit_code = 1
             else:

@@ -53,6 +53,8 @@ python3 -m venv .venv
 npm run start:data-agent
 ```
 
+方案 C 默认使用 `legacy`：不强制业务 `query_plan` 校验；授权表、参数化只读 SQL 策略、资源限制和查询审计仍生效。要启用 `enforce`，在本应用目录运行 `AGENTLOOP_DATA_PLAN_C_MODE=enforce npm start`；该模式要求正式查询提交当前目录的计划、来源签名和业务意图，并核对已声明的物理条件。也可显式运行 `AGENTLOOP_DATA_PLAN_C_MODE=legacy npm start`。只支持这两个值；修改 `.env` 中的该变量或命令前缀后，重启服务才生效。`enforce` 的计划通过不代表已证明答案覆盖原题全部业务条件。
+
 打开 [本机对话页](http://127.0.0.1:8810)。页面无需登录。支持新对话、历史恢复、进度与回答流、结构化澄清、停止查询；[知识与数据管理](http://127.0.0.1:8810/settings) 中可编辑业务连接、业务目录与模型配置。当前不提供用户管理、业务数据写入或公网部署。HttpOnly 本机页面 cookie 与同源检查用于阻止其他网页代发请求，不是账号系统。
 
 同一服务也提供 MCP SSE Server：`http://127.0.0.1:8810/mcp/sse`。MCP 客户端通过标准 `initialize`、`tools/list` 和 `tools/call` 使用 `query`、`search_tables`；`query` 复用当前 AgentLoop Run、HIL 和只读 Skill 执行链路，支持 `clarification_run_id` 与 `clarification_response` 继续澄清。调用进度通过 `notifications/progress` 推送，客户端断开后 Run 仍继续并在专用 TiDB Runtime 表 `data_agent_mcp_calls` 中保留终态记录。管理页同源接口 `/api/mcp/server`、`/api/mcp/calls` 只用于查看服务和调用记录，不暴露凭据、SQL 或完整大结果。

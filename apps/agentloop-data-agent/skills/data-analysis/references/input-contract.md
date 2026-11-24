@@ -1,5 +1,19 @@
 # 包内数据访问契约
 
+## 方案 C 兼容扩展与开关
+
+`enforce` 正式执行只接受 `nl2sql.query-plan/v1`；`legacy` 的正式执行可省略计划。保留原有 `scenario_id/catalog_revision/source_signatures/entity_bindings/metric_bindings/time_bindings`；可选增加 `ratio_binding` 或 `scope_bindings`；`enforce` 模式另需将 `decide` 所用 typed 输入放入 `business_intent`。执行入口用当前目录重新裁决并核对源、指标、期间、ratio 与 scope 绑定。旧计划在 `legacy` 模式可读但不验证业务计划；`enforce` 要求所有正式 `execute` 请求带计划、当前源签名和 `business_intent`。宿主设置 `AGENTLOOP_DATA_PLAN_C_MODE=legacy|enforce`，默认为 `legacy`。`enforce` 在 CLI 与 HTTP 共用的 Gateway 拒绝，错误码为 `query_plan_required`、`query_source_unbound` 或 `business_intent_required`。回滚设为 `legacy` 并重启 Skill 宿主；进行中的 Run 继续使用其已固定的 Skill 包版本，等待原生 Run/HIL 结束再切换。
+
+`decide` 输入为本题轻量 typed intent，返回 `nl2sql.evidence-decision/v1`，记录全部候选、阻断、冲突、目录版本、规范化后的 `typed_intent`、剥离字段与未证实范围。它是 SQL 前业务记录，不是第二份执行授权；模型回显的 HIL 文本不能证明用户授权。`clarify` 使用原生 `request_human_loop`，恢复后重新裁决。`probe` 仅接受 `{purpose:"latest-period"|"distinct-values",source_id,field}`，从当前目录生成 MAX 或最多 50 个不同值的只读 SQL；不接受 caller SQL 或扩大行数。需要更复杂物理探查时拒绝，不能省略正式计划绕过。
+
+CLI `decide` 的未知字段或非法 `time_range` 返回 `diagnostic.code=business_intent_invalid`，属于输入修正，不是 Gateway 不可用。分类题用 `pattern=category_distribution`、`dimension_fields:["<当前列名>"]`；单个实体使用解析回执的 `entity_bindings`，不写 `scopes`。`probe.latest-period` 的 MAX 只证明上界，不能证明早于它的月份均有数据。
+
+Ratio 扩展为 `{kind:"part_to_whole"|"a_over_b",source_id,project_field,measure_field,numerator_values,denominator_values,group_by,zero_denominator:"null"}`。前者要求分子项目集合包含于分母全集，后者允许互不包含。只证明同源单物理扫描、WHERE 精确项目全集、两支条件 SUM、精确 GROUP BY 与零分母 `NULLIF`；分子需 `ELSE 0`，分母可用 `ELSE 0`、`ELSE NULL` 或缺省 ELSE。双 scope 扩展为两个 `{id:"company"|"headquarters",source_id,field,codes,time_field,start,end,output}`；联合计算要求两个独立 CTE，各自核对编码、期间与输出。`comparison.mode=separate_listing` 时，同一 typed intent 下每次 SQL 只提交一个 scope 的绑定和对应实体 lookup，直接单源聚合并用对应 `output` 命名，分别查询后列示，不要求跨源共同水位。重叠编码合法；这些证明不覆盖组织含义、单位或最终答案。其他形态拒绝，回执保留 `verified_claims` 与 `agent_review_required`。
+
+目录可选 `source_freshness:[{source_id,snapshot_id,watermark,provenance}]`，纳入 `catalog_revision`。仅同一来源明确元数据可作为跨源同一时点证据；缺项或不同时裁决给出 `snapshot_comparability_unproven`。结构签名不能代替水位。
+
+回滚：将 `enforce` 改为 `legacy` 并重启宿主；后者仍保留独立只读 SQL 安全策略和查询审计。要关闭新 ratio/scope 形态则回退 Skill 包至已知版本，保留数据库审计、Result 文件与历史 Run。
+
 所有执行代码均在本包：`scripts/data_access.py` 组织确定性操作；`scripts/gateway/` 实现场景、目录存储、物理字段探查、SQL 策略、只读执行及审计；CLI 与 HTTP 共用它们。除已安装的 Python 依赖外，不导入外部项目代码，不调用外部自然语言问数服务，不读取模型配置或调用模型。
 
 ## 根目录连接配置
@@ -24,6 +38,9 @@ python3 scripts/data_client.py catalog --scenario-id group --output <index.json>
 python3 scripts/data_client.py catalog --scenario-id group --question '<用户问题>' --output <ranked-index.json>
 python3 scripts/data_client.py catalog --scenario-id group --source-id <table_name> --question '<用户问题>' --output <details.json>
 python3 scripts/data_client.py resolve-entity --scenario-id group --request-json '<实体解析JSON>' --output <entity.json>
+python3 scripts/data_client.py decide --scenario-id group --request-json '<typed-intent JSON>' --output <decision.json>
+python3 scripts/data_client.py probe --scenario-id group --request-json '<受限探查 JSON>' --output <probe.json>
+python3 scripts/data_client.py compose-plan --context <context.json> --decision <decision.json> --entity-result <entity.json> --time-field <期间字段> --output <plan.json>
 python3 scripts/data_client.py execute --scenario-id group --request-json '<SQL请求JSON>' --output <result.json>
 python3 scripts/data_client.py execute --scenario-id group --query-plan <entity.json> --request-json '<SQL请求JSON>' --output <result.json>
 ```
@@ -54,9 +71,19 @@ python3 scripts/data_client.py execute --scenario-id group --query-plan <entity.
 
 ### 统一查询计划
 
-`execute` 可通过请求 JSON 的 `query_plan` 字段提交计划，或用 `--query-plan` 读取工作区中保存的解析结果/计划文件，二者不能同时使用。解析结果生成的实体计划可直接执行；要同时绑定指标和期间，保留其完整 `entity_bindings` 并加到同一计划中，不另建一套状态。
+`execute` 可通过请求 JSON 的 `query_plan` 字段提交计划，或用 `--query-plan` 读取工作区中保存的解析结果/计划文件，二者不能同时使用。`legacy` 可读取解析结果生成的旧实体计划，但不标记物理条件已验证；`enforce` 要从 `get-query-context.plan_seed` 补入当前 `source_signatures` 后执行；要同时绑定指标和期间，保留其完整 `entity_bindings` 并加到同一计划中，不另建一套状态。
 
-使用 `get-query-context` 时从返回的 `plan_seed` 补充业务绑定，保留 `source_signatures`；只探查最新期间等无指标/实体/具体时间范围的查询也可仅携带源签名计划。签名不一致返回 `query_schema_changed`，引用计划未包含的表返回 `query_source_unbound`，均在数据 SQL 执行前拒绝。
+单源普通指标可用 `compose-plan` 从当前 `get-query-context`、`decide`（必须 `proceed`）和零到多个 `resolve-entity` 结果文件复制完整绑定。参数中的文件路径由 Runtime 解析，`--entity-result` 可重复；有单一连续时间区间时传已选源的 `--time-field`，无期间时省略。该动作不运行 SQL，只减少模型手工复制实体 JSON 时丢失定义与 lookup 的风险；ratio、双 scope 及多个不连续区间仍按专门契约显式构建。执行入口始终重新校验计划。
+
+先把逐月趋势问题裁决为以下 typed 输入。`decide` 的 `--request-json` 和计划的 `business_intent` 使用**同一对象**；不要加入输出粒度描述或裁决结果等未知键。期间必须是完整 ISO 日期。
+
+```json
+{"question":"宝钢股份 2025 年一月至三月每月在岗员工人数如何变化？","pattern":"period_comparison","source_ids":["v_fawhzhss0401"],"metric_refs":[{"source_id":"v_fawhzhss0401","metric_id":"hr_headcount_on_duty"}],"time_range":{"start":"2025-01-01","end":"2025-04-01"}}
+```
+
+执行计划由当前 `get-query-context.plan_seed` 原样起步，`entity_bindings` 原样复制 `resolve-entity.query_plan.entity_bindings`，不得自己重写并丢掉 `lookup`。只补 `time_bindings:[{"source_id":"v_fawhzhss0401","field":"ny","start":"2025-01-01","end":"2025-04-01"}]` 和上面的 `business_intent`。SQL 中该期间对应存储参数 `202501`、`202504`，组织编码和项目值也各用 `%s` 参数。若返回 `business_intent_invalid`、`entity_binding_rejected` 或其他计划错误，按诊断修复原计划和 SQL；绝不能省略计划或把参数内联到 SQL。
+
+使用 `get-query-context` 时从返回的 `plan_seed` 补充业务绑定，保留 `source_signatures`；最新期间等物理探查改走受限 `probe`，不复用通用 `execute`。签名不一致返回 `query_schema_changed`，引用计划未包含的表返回 `query_source_unbound`，均在数据 SQL 执行前拒绝。
 
 ```json
 {
@@ -66,6 +93,8 @@ python3 scripts/data_client.py execute --scenario-id group --query-plan <entity.
     "schema": "nl2sql.query-plan/v1",
     "scenario_id": "group",
     "catalog_revision": "<当前目录版本>",
+    "source_signatures": {"v_fawhzhss0401": "<当前 get-query-context 的表签名>"},
+    "business_intent": {"question": "<原始问题>", "pattern": "period_comparison", "source_ids": ["v_fawhzhss0401"], "metric_refs": [{"source_id": "v_fawhzhss0401", "metric_id": "<目录中的指标name>"}], "time_range": {"start": "2026-01-01", "end": "2026-03-01"}},
     "metric_bindings": [{"source_id": "v_fawhzhss0401", "metric_id": "<目录中的指标name>"}],
     "time_bindings": [{"source_id": "v_fawhzhss0401", "field": "ny", "start": "2026-01-01", "end": "2026-03-01"}]
   }
@@ -78,9 +107,13 @@ python3 scripts/data_client.py execute --scenario-id group --query-plan <entity.
 - 指标绑定仅提交 `source_id/metric_id`，按当前指标定义派生 `project.field/value`，核对每个物理源 WHERE 的参数化 `=/IN` 项目集合，返回 `metric_checks`，完整保留所选定义及 provenance。多个同源项目按绑定全集筛选。没有 project 的指标只核对定义引用及源表存在，明确标记 `verification_scope=catalog_definition`，不声称其公式已落实。
 - 时间绑定提交 `source_id/field/start/end`；自然日期使用 ISO `YYYY-MM-DD` 和 `[start,end)`。脚本根据该字段的当前 `period_formats` 编码 SQL 参数；实际 SQL 的每个物理扫描须使用该存储值的 `>= start AND < end`，返回 `time_checks`（含自然日期、存储边界、格式和定义）。支持按年、月、日有序编码 `%Y`、`%Y%m`、`%Y-%m`、`%Y%m%d`、`%Y-%m-%d`，边界须与数据粒度对齐。原生 DATE/DATETIME/TIMESTAMP 可用 ISO 日期及 `CAST(%s AS DATE)`，文本/整数期间不得 DATE 转换；文本/数值字段缺结构化格式时返回 `time_definition_missing`。同一源字段可绑定多个区间；SQL 用 OR 表达这些区间的并集，脚本归并重叠边界后核对，非连续比较也可在一次调用中完成。
 
+  同一字段有多个期间格式时，目录可用 `selector:{field,value,period_length?}` 区分编码；`time_bindings` 携带相同 selector，双 scope 用 `time_selector`。物理 Gate 对每个扫描验证参数化等值条件、可选 `LENGTH(field)=%s` 和类型化时间区间。缺匹配定义时返回 `time_definition_missing`；缺选择器或定义冲突返回 `time_definition_invalid`。拒绝诊断包含 `error_domain/field/expected/actual`，重复同一错误且无新证据应停止重试。
+
+  用户明确限定源字段值时，可在 typed intent 声明 `filters:[{source_id,field,value}]`，`compose-plan` 复制到 `filter_bindings`。Gate 检查当前字段存在，并要求每个物理扫描以参数化等值条件匹配；它只证明物理筛选，业务语义仍须有目录或用户证据。
+
 回执的 `plan_verification` 含 `status/plan_sha256/entity_checks/metric_checks/time_checks/verification_scope/agent_review_required`。`verified` 只表示声明的约束通过；公式等价性、聚合粒度、单位和业务含义不在自动核对范围，必须由当前 Agent 审核。CTE 内物理层筛选可以核对；外层才筛选、错表同名字段、OR/UNION 绕过均拒绝。不静默重写 SQL。
 
-实体错误返回 `entity_binding_rejected`、阶段 `query.entity_binding`；通用计划、指标、时间错误返回 `query_plan_rejected`、阶段 `query.plan`，例如 `query_plan_stale/metric_sql_mismatch/time_sql_mismatch/time_definition_missing`。拒绝时不提交业务 SQL，并记录拒绝审计。按诊断修正目录绑定或 SQL，不通过删计划绕过。纯项目探查可不带计划；已确认的取数条件不能因执行失败而丢弃。
+实体错误返回 `entity_binding_rejected`、阶段 `query.entity_binding`；通用计划、指标、时间错误返回 `query_plan_rejected`、阶段 `query.plan`，例如 `query_plan_stale/metric_sql_mismatch/time_sql_mismatch/time_definition_missing`。拒绝时不提交业务 SQL，并记录拒绝审计。按诊断修正目录绑定或 SQL，不通过删计划绕过。物理事实探查走受限 `probe`；已确认的取数条件不能因执行失败而丢弃。
 
 查询执行器接收明确 SQL、有限 JSON 标量参数和上述查询计划；禁止传递连接覆盖或模型配置。占位符与参数分开，不能拼接参数进 SQL。宿主路径别名（含 `--query-plan`）需要先解析为实际文件路径。查证结果与计划由当前 Agent 在本 Run 中传递，是可追溯业务证据，不作为不可伪造的身份认证凭证。
 

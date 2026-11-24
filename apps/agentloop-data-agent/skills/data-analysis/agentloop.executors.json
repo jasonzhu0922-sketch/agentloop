@@ -276,6 +276,26 @@
           "result": "resolved, ambiguous or unmatched; complete candidates and lookup query evidence. Ambiguous plans have no selected codes and require an explicit selection."
         },
         {
+          "id": "decide-business",
+          "description": "Check all five Playbooks against current Catalog evidence and record blockers, conflicts and the decision before SQL. Clarify business ambiguity through native HIL.",
+          "inputs": [
+            {"name": "request-json", "description": "Typed intent with question, pattern, source_ids and applicable metric_refs, scopes, dimensions or time_range.", "required": true},
+            {"name": "output", "description": "Workspace evidence decision JSON path.", "required": true}
+          ],
+          "args": ["decide", "--scenario-id", "group", "--request-json", "{{request-json}}", "--output", "{{output}}"],
+          "result": "nl2sql.evidence-decision/v1; proceed, clarify or reject with candidate blockers and unverified claims."
+        },
+        {
+          "id": "probe-physical-fact",
+          "description": "One template-generated, read-only Gateway probe for a current period maximum or bounded distinct field values. No caller SQL or query-plan omission route.",
+          "inputs": [
+            {"name": "request-json", "description": "JSON purpose latest-period or distinct-values, source_id and field.", "required": true},
+            {"name": "output", "description": "Workspace probe result JSON path.", "required": true}
+          ],
+          "args": ["probe", "--scenario-id", "group", "--request-json", "{{request-json}}", "--output", "{{output}}"],
+          "result": "Bounded nl2sql.query-result/v1 through the existing read-only Gateway and audit."
+        },
+        {
           "id": "execute-entity-sql",
           "description": "Execute SQL with a saved combined entity/metric/time query plan. Verify exact entity codes, metric project values and declared time ranges in each physical source WHERE before execution.",
           "inputs": [
@@ -315,11 +335,11 @@
         },
         {
           "id": "execute-sql",
-          "description": "Execute caller SQL with inline query_plan binding selected metric names, source time ranges and resolved entities. Combine plan and SQL in this call; do not omit existing bindings. Definition probes may run without a plan.",
+          "description": "Execute caller SQL with inline query_plan binding selected sources, metrics, times, entities and supported ratio/scope shapes. In enforce mode a plan with live source signatures and business_intent is mandatory; use probe-physical-fact for bounded physical discovery.",
           "inputs": [
             {
               "name": "request-json",
-              "description": "JSON with sql, separate params, and query_plan (schema, scenario_id, catalog_revision, metric_bindings, time_bindings, entity_bindings as applicable). See references/input-contract.md.",
+              "description": "JSON with sql, separate params, and query_plan (schema, scenario_id, catalog_revision, metric_bindings, time_bindings, entity_bindings, business_intent as applicable). See references/input-contract.md.",
               "required": true
             },
             {

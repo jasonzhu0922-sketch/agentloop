@@ -13,6 +13,17 @@ class QueryExecutionError(RuntimeError):
         self.diagnostic = query_diagnostic(error, phase)
 
 
+def classify_failure(status, phase, request_id=None, sql_executed=False, upstream_code=None):
+    """Keep application admission, model provider and query gateway failures apart."""
+    origin = ('app_admission' if status == 429 and phase.startswith('app.') else
+              'model_upstream' if status == 429 and phase.startswith('model.') else
+              'query_gateway' if phase.startswith('query.') else 'other_http')
+    transient = status == 429 and origin in ('app_admission', 'model_upstream') and not sql_executed
+    return {'origin': origin, 'phase': phase, 'status': status, 'request_id': request_id,
+            'upstream_code': upstream_code, 'sql_executed': sql_executed,
+            'retryable': transient, 'retry_budget': 1 if transient else 0}
+
+
 def query_diagnostic(error, phase="query.execute"):
     if isinstance(error, QueryExecutionError):
         return dict(error.diagnostic)

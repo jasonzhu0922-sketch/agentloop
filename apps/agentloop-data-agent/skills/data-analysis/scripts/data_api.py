@@ -81,6 +81,14 @@ def create_app(*, gateway=None):
     def resolve_entity(payload: EntityRequest):
         return call(gateway.resolve_entity, payload.scenario_id, payload.model_dump(exclude={'scenario_id'}))
 
+    @app.post('/api/data/decide')
+    def decide(scenario_id: Annotated[str, Query(min_length=1, max_length=200, pattern=r'^\S+$')], payload: dict):
+        return call(gateway.decide, scenario_id, payload)
+
+    @app.post('/api/data/probe')
+    def probe(scenario_id: Annotated[str, Query(min_length=1, max_length=200, pattern=r'^\S+$')], payload: dict):
+        return call(gateway.probe, scenario_id, payload)
+
     return app
 
 

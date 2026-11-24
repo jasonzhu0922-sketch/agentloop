@@ -1,5 +1,7 @@
 # 知识检索与精准元数据接口
 
+方案 C 的 Playbook 对每个候选记录命中特征、阻断和冲突，见 [Playbook](question-playbooks.md)。检索分数只排列候选；分页 `complete=false` 时继续按需查证，不因 top-1 或未读页面确认业务口径。选源后 `decide` 使用当前目录校验已选择的源、指标和维度；它不取代 `get-query-context` 的 live 表签名。`source_freshness` 有独立来源与水位时才可用于跨源时点比较。
+
 检索业务知识、定位表和指标、补齐字段后，再由当前 Agent 制定领域计划并生成 SQL。所有动作在本 Skill 内执行，不调用第二套模型、不使用 Memory。维护的定义来自 TiDB 场景目录；检索输出、上下文及完整大结果保存在工作区磁盘，Run 保留版本、引用和回执。
 
 ## 调用方式
@@ -38,7 +40,7 @@
 {"schema":"nl2sql.query-plan/v1","scenario_id":"group","catalog_revision":"返回值","source_signatures":{"所选表":"返回的完整签名"},"metric_bindings":[{"source_id":"所选表","metric_id":"采用的正式指标"}],"entity_bindings":[],"time_bindings":[]}
 ```
 
-在此基础上补充本题真实需要的实体和时间绑定，再与 SQL、独立参数数组在同一次 `execute` 请求中传入。指标项目条件、单位、聚合粒度仍按完整定义落实。不能把期间字段的 `format/granularity` 直接塞进 `time_bindings`；有具体区间时才绑定 `{source_id,field,start,end}`（ISO 日期，左闭右开）。仅求最新月份、探查值域等查询可以只带表签名。
+在此基础上补充本题真实需要的实体和时间绑定，再与 SQL、独立参数数组在同一次 `execute` 请求中传入。指标项目条件、单位、聚合粒度仍按完整定义落实。不能把期间字段的 `format/granularity` 直接塞进 `time_bindings`；有具体区间时才绑定 `{source_id,field,start,end}`（ISO 日期，左闭右开）。最新月份和值域探查走 `probe`，不以省略计划的通用 `execute` 代替。
 
 执行时重新核对维护知识版本和 SQL 所用表的真实结构；签名发生变化返回 `query_schema_changed`，SQL 引用未绑定来源返回 `query_source_unbound`。重取受影响上下文并重新规划，不能删签名、删条件或更换聚合来绕过。
 

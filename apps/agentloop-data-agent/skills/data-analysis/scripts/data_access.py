@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from time import monotonic
 from uuid import uuid4
 from query_errors import QueryParameterError, query_diagnostic
@@ -22,9 +23,12 @@ def catalog_projection(config, scenario_id, revision=None):
 
 
 class Gateway:
-    def __init__(self, store, scope, physical_catalog, execute, policy_error):
+    def __init__(self, store, scope, physical_catalog, execute, policy_error, mode=None):
         self.store, self.scope, self.physical_catalog = store, scope, physical_catalog
         self.execute, self.policy_error = execute, policy_error
+        self.mode = mode or os.environ.get('AGENTLOOP_DATA_PLAN_C_MODE', 'legacy')
+        if self.mode not in ('legacy', 'enforce'):
+            raise ValueError('AGENTLOOP_DATA_PLAN_C_MODE must be legacy or enforce')
 
     def scenarios(self):
         # Only identity and business descriptions reach the model.
@@ -47,6 +51,8 @@ class Gateway:
     def knowledge(self, action, scenario_id, request):
         from semantic_retrieval import validate_request, selected_sources, configured_scope, response, check
         from gateway.query_policy import allowed_relations
+        from playbook_decision import strip_input_only
+        request, stripped = strip_input_only(request)
         validate_request(action, request)
         scenario, raw = self.store.read_snapshot(scenario_id)
         with self.scope(scenario):
@@ -67,15 +73,51 @@ class Gateway:
                 catalog = catalog_projection(config, scenario_id, revision)
             else:
                 catalog = snapshot
-        return response(catalog, action, request)
+        result = response(catalog, action, request)
+        if stripped:
+            result['input_normalization'] = {'stripped_input_fields': stripped}
+        return result
 
     def resolve_entity(self, scenario_id, request):
         catalog = self.catalog(scenario_id, [request.get('source_id')], question=request.get('mention'))
         spec = lookup_spec(catalog, request)
-        lookup = self.execute_sql(scenario_id, spec['sql'], spec['params'])
+        lookup = self.execute_sql(scenario_id, spec['sql'], spec['params'], _internal=True)
         return resolution_result(catalog, spec, lookup)
 
-    def execute_sql(self, scenario_id, sql, params, query_plan=None):
+    def decide(self, scenario_id, request):
+        from playbook_decision import decide, normalize_input
+        intent, _ = normalize_input(request)
+        source_ids = intent.get('source_ids')
+        catalog = self.catalog(scenario_id, source_ids if isinstance(source_ids, list) else None,
+                               question=intent['question'])
+        return decide(catalog, request)
+
+    def probe(self, scenario_id, request):
+        """Generate one bounded physical-fact query; caller SQL is never accepted."""
+        if (not isinstance(request, dict) or set(request) != {'purpose', 'source_id', 'field'}
+                or request['purpose'] not in ('latest-period', 'distinct-values')
+                or not isinstance(request['source_id'], str) or not isinstance(request['field'], str)):
+            raise ValueError('Probe needs purpose, source_id and field')
+        catalog = self.catalog(scenario_id, [request['source_id']])
+        table = next(t for t in catalog['tables'] if t['name'] == request['source_id'])
+        field = request['field']
+        if field not in {c['name'] for c in table['columns']}:
+            raise ValueError('Probe field is absent from the selected source')
+        if request['purpose'] == 'latest-period' and not any(
+                p['source_id'] == table['name'] and p['field'] == field and p['definition_status'] == 'current'
+                for p in catalog['period_formats']):
+            raise ValueError('Latest-period probe needs a current period definition')
+        if not all(s.isascii() and s.isidentifier() for s in (table['schema'], table['name'], field)):
+            raise ValueError('Probe identifiers must be valid physical names')
+        relation = f"`{table['schema']}`.`{table['name']}`"
+        sql = (f'SELECT MAX(`{field}`) AS latest_period FROM {relation}' if request['purpose'] == 'latest-period'
+               else f'SELECT DISTINCT `{field}` FROM {relation} ORDER BY `{field}` LIMIT 50')
+        result = self.execute_sql(scenario_id, sql, [], _internal=True)
+        result['probe'] = {'purpose': request['purpose'], 'source_id': table['name'], 'field': field,
+                           'row_limit': 1 if request['purpose'] == 'latest-period' else 50}
+        return result
+
+    def execute_sql(self, scenario_id, sql, params, query_plan=None, *, _internal=False):
         started = monotonic()
         result = {"schema": "nl2sql.query-result/v1", "scenario_id": scenario_id,
                   "query_id": "query_" + uuid4().hex, "sql": sql, "params": params}
@@ -90,7 +132,20 @@ class Gateway:
             config["_run_id"] = result["query_id"]
             config["_query_audit"] = self.store.record_query_audit
             try:
-                if query_plan is not None:
+                if self.mode == 'legacy' and query_plan is not None and not _internal:
+                    # Retain the model's plan, but never label it verified.
+                    result['query_plan_status'] = 'unverified_legacy'
+                    self.store.record_query_audit({'run_id': result['query_id'],
+                        'query_hash': hashlib.sha256(sql.encode()).hexdigest(),
+                        'params_hash': hashlib.sha256(json.dumps(params, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
+                        'decision': 'legacy_unverified_plan', 'reason': 'plan_not_enforced'})
+                if self.mode == 'enforce' and query_plan is None and not _internal:
+                    raise EntityBindingError('query_plan_required', 'Formal data retrieval requires a complete query plan')
+                if query_plan is not None and (self.mode == 'enforce' or _internal):
+                    if self.mode == 'enforce' and not _internal and not query_plan.get('source_signatures'):
+                        raise EntityBindingError('query_source_unbound', 'Formal data retrieval needs live source signatures')
+                    if self.mode == 'enforce' and not _internal and not query_plan.get('business_intent'):
+                        raise EntityBindingError('business_intent_required', 'Formal data retrieval needs a current business decision')
                     result['plan_verification'] = validate_plan(catalog, sql, params, query_plan)
                 dataset = self.execute(sql, params, config)
             except EntityBindingError as exc:
@@ -98,7 +153,8 @@ class Gateway:
                 result.update(status='rejected', plan_verification={'status': 'rejected', 'code': exc.code},
                               error={'code': 'entity_binding_rejected' if entity_error else 'query_plan_rejected',
                                      'message': str(exc), 'diagnostic': {
-                                         'phase': 'query.entity_binding' if entity_error else 'query.plan', 'code': exc.code}})
+                                         'phase': 'query.entity_binding' if entity_error else 'query.plan',
+                                         'code': exc.code, **exc.diagnostic()}})
                 self.store.record_query_audit({'run_id': result['query_id'],
                     'query_hash': hashlib.sha256(sql.encode()).hexdigest(),
                     'params_hash': hashlib.sha256(json.dumps(params, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
@@ -120,6 +176,11 @@ class Gateway:
                         result["error"][key] = diagnostic[key]
             else:
                 result.update(status="completed", dataset=dataset, error=None)
+        diagnostic = result.get('error', {}).get('diagnostic') if isinstance(result.get('error'), dict) else None
+        if isinstance(diagnostic, dict):
+            diagnostic['request_id'] = result['query_id']
+            diagnostic['sql_executed'] = diagnostic.get('phase') in ('query.execute', 'result.fetch', 'result.serialize')
+            diagnostic['origin'] = 'query_gateway'
         result["duration_ms"] = round((monotonic() - started) * 1000)
         return result
 

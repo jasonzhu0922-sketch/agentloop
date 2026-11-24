@@ -12,6 +12,7 @@ export interface AgentOptions {
   fileDirectory: string;
   skillRoot: string;
   python: string;
+  planCMode?: "legacy" | "enforce";
   modelFactory: ModelFactory;
   modelKeys: readonly string[];
   defaultModelKey: string;
@@ -43,6 +44,8 @@ export interface DataAgentMcpCallStore {
 
 export async function createDataAgent(options: AgentOptions) {
   if (options.connection.dialect !== "tidb") throw new TypeError("问数 Agent 仅支持 TiDB 持久化");
+  const planCMode = options.planCMode ?? "legacy";
+  if (!["legacy", "enforce"].includes(planCMode)) throw new TypeError("方案 C 模式无效");
   let lease: Awaited<ReturnType<typeof acquireLease>> | undefined;
   try {
     lease = await acquireLease(options.connection);
@@ -70,9 +73,9 @@ export async function createDataAgent(options: AgentOptions) {
       requireExplicitModel: true, timeZone: "Asia/Shanghai",
       runEventLogSink: options.runEventLogSink,
       plannerFactory: () => fixedDataAnalysisPlanner(skill!),
-      toolExecutionPlugins: [await fixedSkillExecutionPolicy(skill)],
+      toolExecutionPlugins: [await fixedSkillExecutionPolicy(skill, database, planCMode)],
       computerExecutableAliases: { python3: options.python },
-      computerCommandEnvironment: { PYTHONDONTWRITEBYTECODE: "1" },
+      computerCommandEnvironment: { PYTHONDONTWRITEBYTECODE: "1", AGENTLOOP_DATA_PLAN_C_MODE: planCMode },
       systemPrompt: [
         "你是集团经营问数 Agent。应用已固定 data-analysis 主 Skill 和 group 场景，不选择或推荐其他 Skill。",
         "先 load_skill 加载该 Skill，并按其 references 与正式执行动作完成领域推理、SQL、核对和回答。",

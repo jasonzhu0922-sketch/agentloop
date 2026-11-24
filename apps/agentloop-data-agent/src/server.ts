@@ -53,6 +53,11 @@ function publicEvent(event: { seq: number; type: string; createdAt: number; data
       return { id: value.id, objective: value.objective, status: value.status };
     }).filter(Boolean);
   }
+  if ((data.status === 429 || data.code === "rate_limit" || data.code === "RATE_LIMIT")
+      && (String(data.phase ?? "").startsWith("model.") || event.type.startsWith("model."))) {
+    projected.failureOrigin = "model_upstream";
+    projected.sqlExecuted = false;
+  }
   return { seq: event.seq, type: event.type, createdAt: event.createdAt, data: projected,
     ...(typeof data.content === "string" ? { content: data.content } : {}) };
 }
@@ -95,6 +100,7 @@ export function createChatServer(agent: DataAgent, options: {
     "/settings.css": ["settings.css", "text/css; charset=utf-8"],
   };
   return createServer(async (request, response) => {
+    let activeRequestId: string | undefined;
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
@@ -195,8 +201,9 @@ export function createChatServer(agent: DataAgent, options: {
       }
       if (request.method === "POST" && url.pathname === "/api/messages") {
         const value = await body(request);
+        activeRequestId = required(value, "requestId", 191);
         const message: StartMessage = {
-          requestId: required(value, "requestId", 191), conversationId: required(value, "conversationId", 191),
+          requestId: activeRequestId, conversationId: required(value, "conversationId", 191),
           input: required(value, "input", 20_000), modelKey: required(value, "modelKey"),
         };
         json(response, 202, { run: await agent.start(message) }); return;
@@ -230,7 +237,9 @@ export function createChatServer(agent: DataAgent, options: {
       console.error("Data Agent HTTP failure:", error instanceof Error ? error.message.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"']+/giu, "<url>") : "Unknown error");
       const status = error instanceof AppError ? error.status : 500;
       // Provider/filesystem errors can contain deployment details; keep those off the HTTP boundary.
-      json(response, status, { error: status < 500 && error instanceof AppError ? error.message : "服务处理失败，请检查服务端运行记录", code: error instanceof AppError ? error.code : "INTERNAL_ERROR" });
+      json(response, status, { error: status < 500 && error instanceof AppError ? error.message : "服务处理失败，请检查服务端运行记录", code: error instanceof AppError ? error.code : "INTERNAL_ERROR",
+        ...(status === 429 ? { diagnostic: { origin: "app_admission", phase: "app.admission",
+          requestId: activeRequestId, sqlExecuted: false, retryable: true, retryBudget: 1 } } : {}) });
     }
   });
 }

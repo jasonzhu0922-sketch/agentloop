@@ -80,7 +80,7 @@ def configured_scope(config, allowed):
     sources = {t['name'] for t in value['tables']}
     check(len(sources) == len(value['tables']), 'source_identity_ambiguous', 'Source names must be unique within the scenario')
     value['metrics'] = [m for m in value['metrics'] if m.get('table') in sources]
-    for key in ('table_summaries', 'entities', 'period_formats'):
+    for key in ('table_summaries', 'entities', 'period_formats', 'source_freshness'):
         value[key] = [d for d in value[key] if d.get('source_id') in sources]
     value['relationships'] = [r for r in value['relationships'] if all(r.get(k, {}).get('source_id') in sources for k in ('left', 'right'))]
     value['terms'] = [t for t in value['terms'] if t.get('source_id', t.get('table')) in sources | {None}]
@@ -295,6 +295,7 @@ def response(catalog, action, request):
             result.update(metrics=metrics, candidate_metrics=metric_matches(catalog, question, sources),
                           entities=[e for e in catalog['entities'] if e['source_id'] in sources],
                           period_formats=[p for p in catalog['period_formats'] if p['source_id'] in sources],
+                          source_freshness=[f for f in catalog['source_freshness'] if f['source_id'] in sources],
                           relationships=[r for r in catalog['relationships'] if any(r[k]['source_id'] in sources for k in ('left', 'right'))],
                           terms=[m['definition'] for m in term_matches(catalog, question)],
                           table_summaries=[s for s in catalog['table_summaries'] if s['source_id'] in sources],
