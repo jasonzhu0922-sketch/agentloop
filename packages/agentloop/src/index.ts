@@ -6,6 +6,7 @@
 export { BatchService } from "./batch/batch-service.ts";
 export type { BatchItemRecord, BatchRecord } from "./batch/batch-service.ts";
 export { ComputerExecutor, buildCommandEnvironment } from "./computer/computer-executor.ts";
+export type { HostCommandRunner, HostCommandRequest, HostCommandResult } from "./computer/computer-executor.ts";
 export type { ComputerDriver, ComputerSnapshot } from "./computer/computer-driver.ts";
 export { ArtifactAcceptanceService } from "./acceptance/artifact-acceptance.ts";
 export { assertPracticeProfileCatalog, practiceGuidanceForPrompt, practiceInputFamiliesForSourceKinds, resolvePracticeProfileResolution, resolvePracticeProfiles } from "./runtime/practice-profiles.ts";

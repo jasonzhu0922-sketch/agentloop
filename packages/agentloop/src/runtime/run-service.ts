@@ -537,6 +537,7 @@ export class RunService {
     acceptanceProviders?: readonly ArtifactAcceptanceProvider[];
     computerExecutableAliases?: Readonly<Record<string, string>>;
     computerCommandEnvironment?: Readonly<Record<string, string>>;
+    computerCommandRunner?: import("../computer/computer-executor.ts").HostCommandRunner;
     computerCommandSandbox?: import("../computer/command-sandbox.ts").CommandSandboxPolicy;
     tools?: readonly RuntimeTool<unknown>[];
     /** Optional Run-scoped Connector tool resolver supplied by the host application. */
@@ -596,6 +597,7 @@ export class RunService {
     const computerExecutor = new ComputerExecutor(options.workspaceRoot ?? process.cwd(), {
       executableAliases: options.computerExecutableAliases,
       commandEnvironment: options.computerCommandEnvironment,
+      commandRunner: options.computerCommandRunner,
       commandSandbox: options.computerCommandSandbox,
       readOnlyRoots: skillReadOnlyRoots,
     });

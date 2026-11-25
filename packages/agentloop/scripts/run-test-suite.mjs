@@ -39,6 +39,7 @@ const suites = Object.freeze({
   ],
   kernel: [
     "tests/command-sandbox.test.ts",
+    "tests/host-command-runner.test.ts",
     "tests/pptx-execution-manifest.test.ts",
     "tests/batch.test.ts",
     "tests/concurrency.test.ts",

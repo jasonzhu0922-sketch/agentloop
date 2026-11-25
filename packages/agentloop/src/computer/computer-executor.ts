@@ -287,8 +287,27 @@ export interface CommandRootMount {
   readonly path: string;
 }
 
+export interface HostCommandRequest {
+  readonly command: string;
+  readonly executable: string;
+  readonly args: readonly string[];
+  readonly cwd: string;
+  readonly environment: Readonly<Record<string, string>>;
+  readonly timeoutMs: number;
+  readonly signal?: AbortSignal;
+}
+export interface HostCommandResult {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly exitCode: number | null;
+  readonly signal: NodeJS.Signals | null;
+}
+/** Undefined selects native spawn. Accepted requests must honor cancellation/deadline and must never be replayed. */
+export type HostCommandRunner = (request: HostCommandRequest) => Promise<HostCommandResult> | undefined;
+
 export interface ComputerExecutorOptions {
   readonly commandSandbox?: CommandSandboxPolicy;
+  readonly commandRunner?: HostCommandRunner;
   /**
    * Server-owned executable aliases. The model receives only the alias while
    * the executor resolves it to a canonical absolute binary path.
@@ -312,10 +331,12 @@ export class ComputerExecutor {
   private readonly commandRoots: readonly CommandRootMount[];
   private readonly fileRevisionScope?: string;
   private readonly commandSandbox?: CommandSandboxPolicy;
+  private readonly commandRunner?: HostCommandRunner;
 
   constructor(workspaceRoot: string, options: ComputerExecutorOptions = {}) {
     this.workspaceRoot = realpathSync(resolve(workspaceRoot));
     this.commandSandbox = options.commandSandbox;
+    this.commandRunner = options.commandRunner;
     this.executableAliases = new Map(
       Object.entries(options.executableAliases ?? {}).map(([name, target]) => {
         if (!EXECUTABLE_NAME_PATTERN.test(name)) {
@@ -373,6 +394,7 @@ export class ComputerExecutor {
       commandRoots: options.commandRoots ?? this.commandRoots,
       fileRevisionScope: options.fileRevisionScope ?? this.fileRevisionScope,
       commandSandbox: this.commandSandbox,
+      commandRunner: this.commandRunner,
     });
   }
 
@@ -1654,6 +1676,82 @@ export class ComputerExecutor {
       policy: this.commandSandbox,
     });
     const beforeFiles = await this.snapshotWorkspaceFiles();
+    const complete = async ({ stdout, stderr, exitCode, signal, timedOut = false }: HostCommandResult & { timedOut?: boolean }) => {
+      const afterFiles = await this.snapshotWorkspaceFiles();
+      const fileChangeSummary = await summarizeFileChanges(this.workspaceRoot, beforeFiles, afterFiles);
+      // Only an immutable, Runtime-registered Skill package may publish
+      // a control signal through command stdout. Workspace commands and
+      // later file reads remain ordinary content, never control-plane
+      // input.
+      const allowControlSignals = cwdResolution.readOnlyRoot?.id.startsWith("@skills/") === true;
+      const stdoutReference = await this.storeCommandOutput("stdout", stdout);
+      const stderrReference = await this.storeCommandOutput("stderr", stderr);
+      const controlSignals = commandControlSignals(stdout, allowControlSignals);
+      const evidenceReceipt = extractStdoutEvidenceReceipt(stdout);
+      const computationEvidence = await this.bindCommandComputationEvidence({
+        inputs: computationInputs,
+        command: input.command,
+        args: input.args,
+        exitCode,
+        signal,
+        truncated: false,
+        stdout,
+        stdoutRef: stdoutReference,
+      });
+      const workflowEvidence = await this.bindSkillWorkflowEvidence({
+        binding: input.workflowEvidenceBinding,
+        inputs: computationInputs,
+        command: input.command,
+        args: input.args,
+        exitCode,
+        signal,
+        truncated: false,
+        stdout,
+        stdoutRef: stdoutReference,
+      });
+      return {
+        exitCode,
+        signal,
+        stdout,
+        stderr,
+        ...(stdoutReference === undefined ? {} : { stdoutRef: stdoutReference }),
+        ...(stderrReference === undefined ? {} : { stderrRef: stderrReference }),
+        ...(controlSignals === undefined ? {} : { controlSignals }),
+        fileChanges: fileChangeSummary.changes,
+        ...(input.outputBindings === undefined ? {} : { outputBindings: input.outputBindings }),
+        fileChangesTruncated: fileChangeSummary.truncated,
+        executionReceipt: {
+          schema: "agentloop.commandExecutionReceipt/v1",
+          startState: "started",
+          completionState: exitCode === null ? "signaled" : "exited",
+          // Network-capable commands can have effects outside the workspace.
+          effectScope: "unbounded",
+          workspaceFileChanges: {
+            coverage: fileChangeSummary.truncated ? "truncated" : "complete",
+            count: fileChangeSummary.changes.length,
+          },
+        },
+        truncated: false,
+        timedOut,
+        ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
+        ...(computationEvidence.receipt === undefined ? {} : { computationReceipt: computationEvidence.receipt }),
+        ...(computationEvidence.error === undefined ? {} : { computationEvidenceError: computationEvidence.error }),
+        ...(computationEvidence.failure === undefined ? {} : { computationEvidenceFailure: computationEvidence.failure }),
+        ...(computationEvidence.observation === undefined ? {} : { computationObservation: computationEvidence.observation }),
+        ...(workflowEvidence === undefined ? {} : { workflowEvidenceReceipt: workflowEvidence }),
+      } as const;
+    };
+    // A host transport cannot bypass an explicitly configured OS sandbox.
+    // Preflight, snapshots and evidence normalization remain executor-owned.
+    const hosted = this.commandSandbox === undefined ? this.commandRunner?.({
+      command: input.command, executable: this.executableAliases.get(input.command) ?? input.command,
+      args, cwd, environment: Object.fromEntries(Object.entries(buildCommandEnvironment({
+        ...commandRootEnvironment(this.commandRoots), ...this.commandEnvironment,
+        AGENTLOOP_WORKSPACE_ROOT: this.workspaceRoot,
+        ...(this.fileRevisionScope === undefined ? {} : { AGENTLOOP_RUN_ID: this.fileRevisionScope }),
+      })).filter((entry): entry is [string, string] => typeof entry[1] === "string")), timeoutMs: input.timeoutMs, signal: input.signal,
+    }) : undefined;
+    if (hosted !== undefined) return complete(await hosted);
     return new Promise((resolvePromise, rejectPromise) => {
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
@@ -1734,69 +1832,7 @@ export class ComputerExecutor {
           try {
             const stdout = Buffer.concat(stdoutChunks).toString("utf8");
             const stderr = Buffer.concat(stderrChunks).toString("utf8");
-            const afterFiles = await this.snapshotWorkspaceFiles();
-            const fileChangeSummary = await summarizeFileChanges(this.workspaceRoot, beforeFiles, afterFiles);
-            // Only an immutable, Runtime-registered Skill package may publish
-            // a control signal through command stdout. Workspace commands and
-            // later file reads remain ordinary content, never control-plane
-            // input.
-            const allowControlSignals = cwdResolution.readOnlyRoot?.id.startsWith("@skills/") === true;
-            const stdoutReference = await this.storeCommandOutput("stdout", stdout);
-            const stderrReference = await this.storeCommandOutput("stderr", stderr);
-            const controlSignals = commandControlSignals(stdout, allowControlSignals);
-            const evidenceReceipt = extractStdoutEvidenceReceipt(stdout);
-            const computationEvidence = await this.bindCommandComputationEvidence({
-              inputs: computationInputs,
-              command: input.command,
-              args: input.args,
-              exitCode,
-              signal,
-              truncated: false,
-              stdout,
-              stdoutRef: stdoutReference,
-            });
-            const workflowEvidence = await this.bindSkillWorkflowEvidence({
-              binding: input.workflowEvidenceBinding,
-              inputs: computationInputs,
-              command: input.command,
-              args: input.args,
-              exitCode,
-              signal,
-              truncated: false,
-              stdout,
-              stdoutRef: stdoutReference,
-            });
-            resolvePromise({
-              exitCode,
-              signal,
-              stdout,
-              stderr,
-              ...(stdoutReference === undefined ? {} : { stdoutRef: stdoutReference }),
-              ...(stderrReference === undefined ? {} : { stderrRef: stderrReference }),
-              ...(controlSignals === undefined ? {} : { controlSignals }),
-              fileChanges: fileChangeSummary.changes,
-              ...(input.outputBindings === undefined ? {} : { outputBindings: input.outputBindings }),
-              fileChangesTruncated: fileChangeSummary.truncated,
-              executionReceipt: {
-                schema: "agentloop.commandExecutionReceipt/v1",
-                startState: "started",
-                completionState: exitCode === null ? "signaled" : "exited",
-                // Network-capable commands can have effects outside the workspace.
-                effectScope: "unbounded",
-                workspaceFileChanges: {
-                  coverage: fileChangeSummary.truncated ? "truncated" : "complete",
-                  count: fileChangeSummary.changes.length,
-                },
-              },
-              truncated: false,
-              timedOut,
-              ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
-              ...(computationEvidence.receipt === undefined ? {} : { computationReceipt: computationEvidence.receipt }),
-              ...(computationEvidence.error === undefined ? {} : { computationEvidenceError: computationEvidence.error }),
-              ...(computationEvidence.failure === undefined ? {} : { computationEvidenceFailure: computationEvidence.failure }),
-              ...(computationEvidence.observation === undefined ? {} : { computationObservation: computationEvidence.observation }),
-              ...(workflowEvidence === undefined ? {} : { workflowEvidenceReceipt: workflowEvidence }),
-            });
+            resolvePromise(await complete({ stdout, stderr, exitCode, signal, timedOut }));
           } catch (error) {
             rejectPromise(error);
           }
