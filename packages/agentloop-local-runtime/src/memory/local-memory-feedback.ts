@@ -1,4 +1,4 @@
-import type { SqlConnection } from "@zhujun/agentloop";
+import { runtimePersistence, ascending, type RuntimePersistenceInput } from "@zhujun/agentloop";
 import { reconcileMemoryFeedback, type MemoryStore } from "@zhujun/agentloop-memory";
 import { LocalMemorySettlementReader } from "./local-memory-settlement-reader.ts";
 import { memoryFeedbackEffect } from "./local-memory-feedback-semantics.ts";
@@ -10,7 +10,7 @@ export class LocalMemoryFeedback {
   private readonly input: {
     readonly store: MemoryStore;
     readonly tenantId: string;
-    readonly sources: () => readonly { readonly sourceId: string; readonly database: SqlConnection }[];
+    readonly sources: () => readonly { readonly sourceId: string; readonly database: RuntimePersistenceInput }[];
     readonly now?: () => number;
   };
   constructor(input: LocalMemoryFeedback["input"]) { this.input = input; }
@@ -18,15 +18,15 @@ export class LocalMemoryFeedback {
   async poll(): Promise<void> {
     const sources = this.input.sources();
     for (const { sourceId, database } of sources) {
-      const key = `${this.input.tenantId}:${sourceId}`;
+      const state = runtimePersistence(database);
+      let cursor: string | undefined;
+      do {
+      const page = await state.records.scan("runs", cursor, 100); cursor = page.cursor;
+      for (const sourceRun of page.rows) {
+      const key = `${this.input.tenantId}:${sourceId}:${sourceRun.id}`;
       const saved = await this.input.store.feedbackCursor(key);
-      const anchor = saved ? await database.prepare("SELECT run_id, seq FROM run_events WHERE rowid = ?").get<{ run_id: string; seq: number }>(saved.position) : undefined;
-      // SQLite may reuse rowids after deleting Runs. Never skip a new event
-      // just because its reused rowid is below a deleted cursor anchor.
-      const cursor = saved && anchor && `${anchor.run_id}:${anchor.seq}` === saved.eventKey ? saved.position : 0;
-      const events = await database.prepare(`SELECT rowid AS cursor, run_id, seq, type, payload_json FROM run_events
-        WHERE rowid > ? AND type IN ('conversation.outcome.disputed', 'conversation.outcome.superseded')
-        ORDER BY rowid LIMIT 100`).all<{ cursor: number; run_id: string; seq: number; type: string; payload_json: string }>(cursor);
+      const events = (await state.records.find("run_events", { run_id: sourceRun.id }))
+        .filter(event => event.seq > (saved?.position ?? 0) && ["conversation.outcome.disputed", "conversation.outcome.superseded"].includes(event.type)).sort(ascending("seq"));
       for (const event of events) {
         let targetRunId: unknown;
         let effect: ReturnType<typeof memoryFeedbackEffect> = "unknown";
@@ -40,15 +40,13 @@ export class LocalMemoryFeedback {
         if (["disputed", "corrected"].includes(effect) && typeof targetRunId === "string" && targetRunId !== event.run_id) {
           // Target must belong to the same owner AND conversation. Payloads
           // cannot select another user's or another chat's remembered result.
-          const source = await database.prepare("SELECT owner_user_id, conversation_id FROM runs WHERE id = ?")
-            .get<{ owner_user_id: string; conversation_id: string | null }>(event.run_id);
+          const source = sourceRun;
           let target: { owner_user_id: string; result_ref: string | null; committed_at: number } | undefined;
-          if (source?.conversation_id) for (const candidate of sources) {
-            target = await candidate.database.prepare(`SELECT target.owner_user_id, outcome.result_ref, outcome.committed_at
-              FROM runs target JOIN run_outcomes outcome ON outcome.run_id = target.id
-              WHERE target.id = ? AND target.owner_user_id = ? AND target.conversation_id = ?`)
-              .get<typeof target>(targetRunId, source.owner_user_id, source.conversation_id);
-            if (target) break;
+          if (source.conversation_id) for (const candidate of sources) {
+            const candidateState = runtimePersistence(candidate.database);
+            const run = (await candidateState.records.find("runs", { id: targetRunId, owner_user_id: source.owner_user_id, conversation_id: source.conversation_id }))[0];
+            const outcome = run && (await candidateState.records.find("run_outcomes", { run_id: run.id }))[0];
+            if (run && outcome) { target = { ...outcome, owner_user_id: run.owner_user_id }; break; }
           }
           if (target) {
             const scope = { tenantId: this.input.tenantId, ownerUserId: target.owner_user_id };
@@ -69,8 +67,10 @@ export class LocalMemoryFeedback {
             }
           }
         }
-        await this.input.store.advanceFeedbackCursor(key, { position: event.cursor, eventKey: `${event.run_id}:${event.seq}` });
+        await this.input.store.advanceFeedbackCursor(key, { position: event.seq, eventKey: `${event.run_id}:${event.seq}` });
       }
+      }
+      } while (cursor);
     }
   }
 }

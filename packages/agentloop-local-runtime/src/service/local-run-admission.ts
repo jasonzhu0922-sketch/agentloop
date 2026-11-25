@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { AppError } from "@zhujun/agentloop";
+import { AppError, runtimePersistence, type RuntimePersistence } from "@zhujun/agentloop";
 import type { LocalRuntimeControl } from "../contracts/host.ts";
 import type { LocalRunInput } from "./local-runtime.ts";
 
@@ -43,12 +43,14 @@ function conflict(message: string): AppError { return new AppError("CONFLICT", m
  * atomically with Kernel Run/source creation, not after the model has started.
  */
 export class LocalRunAdmissionService {
+  private readonly state: RuntimePersistence;
   private readonly inFlight = new Map<string, { fingerprint: string; promise: Promise<AdmissionResult> }>();
   private pending = 0;
   private settlementError?: unknown;
   private readonly watched = new Set<string>();
   private readonly background = new Set<Promise<void>>();
   constructor(private readonly runtime: LocalRuntimeControl, private readonly hooks: LocalRunAdmissionHooks = {}) {
+    this.state = runtime.runtimeState ?? runtimePersistence(runtime.database);
     const capacity = hooks.maxConcurrentRuns ?? 10;
     if (!Number.isSafeInteger(capacity) || capacity < 1) throw new TypeError("maxConcurrentRuns must be a positive integer");
   }
@@ -82,8 +84,9 @@ export class LocalRunAdmissionService {
   }
 
   private async row(owner: string, requestId: string): Promise<AdmissionRow | undefined> {
-    return await this.runtime.database.prepare("SELECT fingerprint, reservation_id, run_id, run_deleted FROM local_run_admissions WHERE owner_user_id = ? AND request_id = ?")
-      .get(owner, requestId) as AdmissionRow | undefined;
+    const row = (await this.state.records.find("local_run_admissions", { owner_user_id: owner, request_id: requestId }))[0];
+    if (row?.run_id && (await this.state.records.find("runtime_deletions", { run_id: row.run_id })).length) return { ...row, run_deleted: 1 };
+    return row;
   }
 
   private async startOnce(owner: string, requestId: string, fingerprint: string, input: LocalRunInput, legacy?: { dispatchKey: string; assignmentId: string }): Promise<AdmissionResult> {
@@ -95,8 +98,7 @@ export class LocalRunAdmissionService {
       return { run: await this.runtime.runs.get(owner, existing.run_id), replayed: true };
     }
     if (legacy !== undefined) {
-      const previous = await this.runtime.database.prepare("SELECT owner_user_id, remote_run_id FROM local_runtime_dispatches WHERE dispatch_key = ?")
-        .get(legacy.dispatchKey) as { owner_user_id: string; remote_run_id: string } | undefined;
+      const previous = (await this.state.records.find("local_runtime_dispatches", { dispatch_key: legacy.dispatchKey }))[0];
       if (previous !== undefined) {
         if (previous.owner_user_id !== owner) throw conflict("local_runtime_dispatch_owner_mismatch");
         return { run: await this.runtime.runs.get(owner, previous.remote_run_id), replayed: true };
@@ -109,9 +111,9 @@ export class LocalRunAdmissionService {
       else if (!runtime.modelKeys.includes(input.modelKey)) throw new AppError("MODEL_ERROR", "local_model_unavailable", 409);
       const visibleDirectories = await runtime.scopes.paths(input.directoryScopeIds ?? []);
       const reservation = randomUUID();
-      const claimed = await runtime.database.transaction(async () => {
-        await runtime.database.prepare(`INSERT INTO local_run_admissions(owner_user_id, request_id, fingerprint, reservation_id, created_at)
-          VALUES (?, ?, ?, ?, ?) ON CONFLICT(owner_user_id, request_id) DO NOTHING`).run(owner, requestId, fingerprint, reservation, Date.now());
+      const claimed = await this.state.transaction(async () => {
+        await this.state.records.insert("local_run_admissions", { owner_user_id: owner, request_id: requestId,
+          fingerprint, reservation_id: reservation, created_at: Date.now() }, "ignore");
         return this.row(owner, requestId);
       });
       if (claimed?.reservation_id !== reservation) {
@@ -127,12 +129,13 @@ export class LocalRunAdmissionService {
           sourceIds: input.uploadedSourceIds ?? [], allowDangerousTools: input.allowDangerousTools ?? false,
           connectorConnectionIds: input.connectorConnectionIds ?? runtime.connectorConnectionIds,
         }, { persist: async run => {
-          const result = await runtime.database.prepare(`UPDATE local_run_admissions SET run_id = ?
-            WHERE owner_user_id = ? AND request_id = ? AND reservation_id = ? AND run_id IS NULL`)
-            .run(run.id, owner, requestId, reservation);
-          if (Number(result.changes) !== 1) throw conflict("admission_reservation_lost");
-          if (legacy !== undefined) await runtime.database.prepare(`INSERT INTO local_runtime_dispatches(dispatch_key, assignment_id, owner_user_id, remote_run_id, created_at)
-            VALUES (?, ?, ?, ?, ?)`).run(legacy.dispatchKey, legacy.assignmentId, owner, run.id, Date.now());
+          const changed = await this.state.records.update("local_run_admissions", { owner_user_id: owner, request_id: requestId,
+            reservation_id: reservation, run_id: null }, () => ({ run_id: run.id }));
+          if (changed !== 1) throw conflict("admission_reservation_lost");
+          if (legacy !== undefined) await this.state.records.insert("local_runtime_dispatches", { dispatch_key: legacy.dispatchKey,
+            assignment_id: legacy.assignmentId, owner_user_id: owner, remote_run_id: run.id, created_at: Date.now() });
+          if (runtime.executionRuntimeId) await this.state.records.insert("runtime_executors", { remote_run_id: run.id,
+            runtime_id: runtime.executionRuntimeId, dispatch_key: `local:${owner}:${requestId}`, owner_user_id: owner, accepted_at: Date.now() });
         } });
         return { runId: started.id, value: started };
       } catch (error) {
@@ -144,10 +147,8 @@ export class LocalRunAdmissionService {
         }
         // The same transaction would have attached run_id if a Run had committed.
         // Only this provably uncommitted attempt may release its reservation.
-        await runtime.database.transaction(async () => {
-          await runtime.database.prepare(`DELETE FROM local_run_admissions
-            WHERE owner_user_id = ? AND request_id = ? AND reservation_id = ? AND run_id IS NULL`).run(owner, requestId, reservation);
-        });
+        await this.state.records.remove("local_run_admissions", { owner_user_id: owner, request_id: requestId,
+          reservation_id: reservation, run_id: null });
         throw error;
       }
     });
@@ -185,11 +186,15 @@ export class LocalRunAdmissionService {
       const error = this.settlementError; this.settlementError = undefined;
       throw error;
     }
-    const rows = await this.runtime.database.prepare(`SELECT a.owner_user_id, a.run_id, a.run_deleted, r.status,
-      recovery.state AS recovery_state, recovery.planning_token, recovery.resume_token FROM local_run_admissions a
-      LEFT JOIN runs r ON r.id = a.run_id AND r.owner_user_id = a.owner_user_id
-      LEFT JOIN run_recovery_states recovery ON recovery.run_id = r.id WHERE a.run_id IS NOT NULL`)
-      .all() as Array<{ owner_user_id: string; run_id: string; run_deleted: number; status: string | null; recovery_state: string | null; planning_token: string | null; resume_token: string | null }>;
+    const rows = [];
+    for (const admission of await this.state.records.find("local_run_admissions")) {
+      if (!admission.run_id) continue;
+      const run = (await this.state.records.find("runs", { id: admission.run_id, owner_user_id: admission.owner_user_id }))[0];
+      const recovery = (await this.state.records.find("run_recovery_states", { run_id: admission.run_id }))[0];
+      const deleted = (await this.state.records.find("runtime_deletions", { run_id: admission.run_id })).length > 0;
+      rows.push({ ...admission, run_id: admission.run_id, run_deleted: admission.run_deleted || Number(deleted), status: run?.status ?? null,
+        recovery_state: recovery?.state ?? null, planning_token: recovery?.planning_token ?? null, resume_token: recovery?.resume_token ?? null });
+    }
     const settled: string[] = [];
     for (const row of rows) {
       if (row.status === null && !row.run_deleted) throw conflict("admission_run_missing");

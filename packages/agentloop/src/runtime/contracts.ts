@@ -124,7 +124,7 @@ export interface ModelToolDefinition {
 /**
  * Provider-neutral input to one model turn.
  *
- * `messages` is the canonical user/assistant/tool transcript. Runtime state
+ * `messages` is a model-facing projection of the persisted user/assistant/tool transcript. Runtime state
  * belongs in `runtimeContext`, never in a synthetic user turn. Provider
  * adapters decide how to encode that state for their supported wire protocol.
  */
@@ -164,9 +164,17 @@ export interface ModelResponse extends ModelProviderIdentity {
   readonly usage?: Readonly<{
     inputTokens?: number;
     outputTokens?: number;
+    /** Provider-reported uncached input tokens; absent when unsupported. */
+    inputTokensNoCache?: number;
+    /** Provider-reported input tokens served from cache; absent when unsupported. */
+    cacheReadInputTokens?: number;
+    /** Provider-reported input tokens written to cache; absent when unsupported. */
+    cacheWriteInputTokens?: number;
   }>;
   /** Sanitized wire-level evidence for a streaming provider response. */
   readonly streamReceipt?: ModelStreamReceipt;
+  /** Inclusive timing evidence. Overlapping transport, SDK, and sink durations are not additive. */
+  readonly performanceTiming?: Readonly<Record<string, unknown>>;
 }
 
 export interface ModelRequestLogContext {
@@ -291,6 +299,8 @@ export interface ModelRetryInfo extends ModelProviderIdentity {
 export type ModelRetryReporter = (info: ModelRetryInfo) => void | Promise<void>;
 
 export interface ModelAdapter {
+  /** Explicit adapter guarantee; unknown adapters conservatively retain native exchanges. */
+  readonly completedExchangePolicy?: "retain" | "releasable";
   readonly limits: Readonly<{
     contextWindowTokens: number;
     maxOutputTokens: number;
@@ -441,6 +451,8 @@ export interface CandidateCompletionContext {
   /** Runtime-derived basis of the current admitted Step, excluding assessment bookkeeping. */
   readonly decisionBasisDigest?: string;
   readonly contextSummary?: string;
+  readonly decisionWorkingSet?: import("./decision-working-set.ts").DecisionWorkingSet;
+  readonly currentDecisionView?: import("./current-decision-view.ts").CurrentDecisionViewProjection;
 }
 
 export interface CandidateCompletionEvaluation {

@@ -7,6 +7,7 @@ import test from "node:test";
 import { ComputerExecutor } from "../src/computer/computer-executor.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { ContextAssembler } from "../src/runtime/context-assembler.ts";
+import { projectCommandResult } from "../src/runtime/command-result-projection.ts";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
 import type { ModelMessage, RuntimeEvent } from "../src/runtime/contracts.ts";
 import { RuntimeToolArgumentsQueryService } from "../src/runtime/runtime-tool-arguments-query-service.ts";
@@ -32,6 +33,40 @@ function append(messages: ModelMessage[], name: string, args: Record<string, unk
   messages.push({ role: "assistant", content: "", toolCalls: [{ id, name, arguments: args }] },
     { role: "tool", name, toolCallId: id, content: JSON.stringify(result), isError: false });
 }
+
+test("large computation receipts keep formal Result authority with a bounded neutral model view", () => {
+  const resultRef = { schema: "agentloop.resultRef/v1", resultId: "rr_00000000-0000-0000-0000-000000000123" };
+  const largeFacts = Array.from({ length: 240 }, (_, index) => ({
+    id: `fact-${index}`, sourceId: "source-ledger", organizationScope: "scope-a",
+    period: "period-a", denominator: 1000, value: index, caveats: ["bounded fixture caveat"],
+  }));
+  const canonical = {
+    exitCode: 0, signal: null, stdout: JSON.stringify({ schema: "neutral.analysis/v1", facts: largeFacts }), stderr: "",
+    resultRef, outputBindings: [{ targetId: "delivery-a", path: "result.json" }],
+    computationReceipt: { schema: "agentloop.commandComputationReceipt/v1", receiptId: "receipt-a",
+      sourceType: "persisted_result", sourceRefs: [{ resultId: "source-ledger" }], facts: { analysis: largeFacts },
+      caveats: ["bounded fixture caveat"], evidenceKinds: { satisfied: ["derived_aggregation"] } },
+    evidenceReceipt: { schema: "agentloop.toolEvidenceReceipt/v1", receiptId: "evidence-a", sourceType: "persisted_result",
+      sourceRefs: [{ resultId: "source-ledger" }], facts: [{ kind: "derived_aggregation", sourceId: "source-ledger" }],
+      deliveryFacts: { schema: "neutral.deliveryFacts/v1", organizationScope: "scope-a", period: "period-a",
+        denominator: 1000, gaps: ["gap-a"], facts: largeFacts }, caveats: ["bounded fixture caveat"] },
+  };
+  const before = JSON.stringify(canonical);
+  const projected = projectCommandResult(canonical)!;
+  const serialized = JSON.stringify(projected);
+  assert.equal(JSON.stringify(canonical), before, "projection must not mutate or replace the persisted Result");
+  assert.ok(before.length > 100_000);
+  assert.ok(serialized.length < 30_000, `expected bounded projection, got ${serialized.length} characters`);
+  assert.deepEqual(projected.resultRef, resultRef);
+  assert.deepEqual(projected.outputBindings, canonical.outputBindings);
+  assert.match(serialized, /source-ledger/);
+  assert.match(serialized, /bounded fixture caveat/);
+  assert.match(serialized, /originalSha256/);
+  assert.match(serialized, /\"pointer\":\"\/computationReceipt\"/);
+  assert.match(serialized, /\"keys\":\[\"schema\",\"receiptId\"/);
+  assert.doesNotMatch(serialized, /evidenceCoordinates/);
+  assert.match(String(projected.instruction), /read_result/);
+});
 
 function projected(messages: readonly ModelMessage[], name: string) {
   const text = messages.findLast((message) => message.role === "tool" && message.name === name)?.content;

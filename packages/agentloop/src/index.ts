@@ -104,6 +104,11 @@ export type {
   RuntimeCapabilitySnapshotSourceInput,
   RuntimeCapabilitySourceState,
 } from "./runtime/capability-snapshot.ts";
+export { deriveDecisionWorkingSet } from "./runtime/decision-working-set.ts";
+export { committedDecisionRecords } from "./runtime/committed-decision-records.ts";
+export type { CommittedDecisionRecords } from "./runtime/committed-decision-records.ts";
+export type { DecisionContextItem, DecisionWorkingSet } from "./runtime/decision-working-set.ts";
+export { projectCanonicalDecisionBasis } from "./runtime/canonical-decision-basis.ts";
 export { deriveCurrentDecisionView, projectCurrentDecisionView } from "./runtime/current-decision-view.ts";
 export type {
   CurrentDecisionContext,
@@ -143,7 +148,25 @@ export { OpenAICompatibleModel } from "./runtime/models.ts";
 export { LlmProviderRegistry } from "./runtime/provider-registry.ts";
 export type { LlmModelSummary, LlmProviderRegistryOptions, LlmProviderSummary } from "./runtime/provider-registry.ts";
 export { RunEventHub } from "./runtime/run-event-hub.ts";
-export type { LiveRunEvent } from "./runtime/run-event-hub.ts";
+export type { RunEventOutbox, RunEventOutboxEntry, RunEventOutboxBatch } from "./runtime/run-event-outbox.ts";
+export type { RunEventBatchOptions } from "./runtime/run-event-batch-queue.ts";
+export type { LiveRunEvent, LiveRunProgress } from "./runtime/run-event-hub.ts";
+export {
+  JsonlRuntimePerformanceSink,
+  RuntimePerformanceDiagnostics,
+  createRuntimePerformanceDiagnosticsFromEnvironment,
+  currentRuntimePerformanceContext,
+  currentRuntimePerformanceDiagnostics,
+  runtimePerformanceInstant,
+  runtimePerformanceSpan,
+  withRuntimePerformanceContext,
+} from "./diagnostics/runtime-performance.ts";
+export type {
+  RuntimePerformanceContext,
+  RuntimePerformanceDiagnosticsOptions,
+  RuntimePerformanceRecord,
+  RuntimePerformanceSink,
+} from "./diagnostics/runtime-performance.ts";
 export { colorizeTerminalLogLabel, colorizeTerminalLogLine, shouldUseTerminalLogColor } from "./runtime/terminal-log.ts";
 export type { TerminalLogColorMode, TerminalLogColorOptions } from "./runtime/terminal-log.ts";
 export type {
@@ -383,3 +406,35 @@ export type { RunInputMessage, RunInputStatus } from "./runtime/run-input-reposi
 
 export { MODEL_CONFIGURATION_EDITOR_SCHEMA, MODEL_PROVIDER_DEFINITIONS, MODEL_SERVICE_PRESETS, modelProviderDefinition, modelServicePreset } from "./runtime/model-configuration-schema.ts";
 export type { ModelProviderKind, ModelReasoning, ModelServicePresetId } from "./runtime/model-configuration-schema.ts";
+
+export { RuntimeStateConnection } from "./storage/runtime-state-connection.ts";
+export { RedisRuntimeStateStore } from "./storage/redis-runtime-state-store.ts";
+export type { RuntimeRedisPort } from "./storage/redis-runtime-state-store.ts";
+export type { RuntimeStateCommit, RuntimeStateStore } from "./storage/runtime-state-store.ts";
+
+export { RuntimeStateMaintenance } from "./storage/runtime-state-maintenance.ts";
+export { RedisRunEventJournal } from "./runtime/redis-run-event-journal.ts";
+
+// Repository adapter API. This is separate from the legacy changeset connection;
+// Execution repositories share this boundary; control-plane SQL remains separate.
+export { runtimePersistence, ascending } from "./storage/runtime-records.ts";
+export type { RuntimePersistence, RuntimePersistenceInput, RuntimeRecords, RuntimeWhere } from "./storage/runtime-records.ts";
+export type { RuntimeRows, RuntimeTable } from "./storage/runtime-record-schema.ts";
+export { RedisRuntimeRecords, RuntimeStateConflict, RuntimeCommitUncertain } from "./storage/redis-runtime-records.ts";
+export { RuntimeRedisClient } from "./storage/runtime-redis-client.ts";
+export { openRuntimeRecordBackend } from "./storage/runtime-record-backend.ts";
+export type { RuntimeRecordBackendConfig } from "./storage/runtime-record-backend.ts";
+
+export { RuntimeHostStateRepository } from "./storage/repositories/runtime-host-state-repository.ts";
+
+export { openRuntimeState, type RuntimeStateConfig } from "./storage/runtime-record-backend.ts";
+
+export { RuntimeRecordMaintenance, FileRuntimeArchiveStore, SqlRuntimeSummarySink, restoreRuntimeArchives, type RuntimeArchiveStore, type RuntimeSummarySink, type RuntimeRunSummary } from "./storage/runtime-record-maintenance.ts";
+
+export { exportRuntimeRecords, importRuntimeRecords, validateRuntimeTransfer, writeRuntimeTransfer, readRuntimeTransfer, type RuntimeTransferManifest } from "./storage/runtime-record-transfer.ts";
+
+export { streamRuntimeRun } from "./runtime/runtime-run-stream.ts";
+
+export * from "./storage/runtime-history.ts";
+export * from "./storage/runtime-history-factory.ts";
+export * from "./storage/runtime-history-view.ts";

@@ -1,3 +1,9 @@
+import { committedDecisionRecords } from "./committed-decision-records.ts";
+import { projectCanonicalDecisionBasis } from "./canonical-decision-basis.ts";
+import { deriveDecisionWorkingSet } from "./decision-working-set.ts";
+import { reconstructRecoveryTranscript } from "./recovery-transcript.ts";
+import { deriveCurrentDecisionView, projectCurrentDecisionView } from "./current-decision-view.ts";
+import { WorkProductContext } from "./work-product-context.ts";
 import { AppError, badRequest } from "../shared/errors.ts";
 import { nullableJsonSchema } from "../shared/json-schema.ts";
 import { requireRecord, requireString, requireStringArray } from "../shared/validation.ts";
@@ -20,7 +26,8 @@ import type {
   PlanningToolSummary,
 } from "../planning/contracts.ts";
 import { canonicalDeliveryPlanScope, type CanonicalGoalGap, type CanonicalRunState } from "./canonical-run-state.ts";
-import type { ModelAdapter, ModelToolCall, RuntimeContextSnapshot } from "./contracts.ts";
+import type { ModelAdapter, ModelToolCall, RuntimeContextSnapshot, RuntimeEventSink } from "./contracts.ts";
+import { completeWithRequestTelemetry } from "./model-streaming.ts";
 import type { RuntimeActionRecord } from "./runtime-action-repository.ts";
 import { buildUserAuthorityContext, USER_AUTHORITY_INSTRUCTION, type RuntimeUserAuthorityContext } from "./user-authority.ts";
 import { parseRuntimeResultRef, RUNTIME_RESULT_ID_PATTERN, type RuntimeResultCard } from "./runtime-result.ts";
@@ -40,10 +47,14 @@ export interface RecoveryDecisionProposal {
 export interface RecoveryPlannerInput {
   readonly runId: string;
   readonly userInput: string;
+  readonly workspaceId?: string;
   readonly action: RuntimeActionRecord;
   readonly plan?: PlanRevisionAssessmentInput["currentPlan"];
   readonly failedBoundary?: FailedBoundary;
   readonly events: readonly Readonly<{ seq: number; type: string; data: Readonly<Record<string, unknown>> }>[];
+  /** Server-authored ordered lifecycle for evidence relevant to the failed
+   * boundary. Later state never proves an earlier call's prerequisites. */
+  readonly evidenceTimeline?: readonly import("../planning/contracts.ts").PersistedEvidenceTimelineEntry[];
   readonly userResponses: readonly Readonly<{ actionId: string; response: string; createdAt: number }>[];
   readonly canonicalGap?: CanonicalGoalGap;
   readonly canonicalState: CanonicalRunState;
@@ -72,10 +83,22 @@ export interface RecoveryRevisionFeedback {
   readonly feedback: string;
   readonly evidenceRefs: readonly string[];
   readonly proposal?: unknown;
+  readonly correction?: RecoveryRevisionCorrection;
+}
+
+export interface RecoveryRevisionCorrection {
+  readonly invalidField: string;
+  readonly activePersistedStepIds: readonly string[];
+  readonly retiredPersistedStepIds: readonly string[];
+  readonly retainableStepIds: readonly string[];
+  readonly requiredRetainedStepIds: readonly string[];
+  readonly replaceableStepIds: readonly string[];
+  readonly activeMilestoneParentIds: readonly string[];
+  readonly legalShapes: readonly string[];
 }
 
 export interface RecoveryPlanner {
-  decide(input: RecoveryPlannerInput, signal?: AbortSignal): Promise<RecoveryDecisionProposal>;
+  decide(input: RecoveryPlannerInput, signal?: AbortSignal, emit?: RuntimeEventSink): Promise<RecoveryDecisionProposal>;
 }
 
 /** A Gap follows the replacement producers and their prerequisites, not every new leaf. */
@@ -129,15 +152,17 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
     this.model = model;
   }
 
-  async decide(input: RecoveryPlannerInput, signal?: AbortSignal): Promise<RecoveryDecisionProposal> {
+  async decide(input: RecoveryPlannerInput, signal?: AbortSignal, emit?: RuntimeEventSink): Promise<RecoveryDecisionProposal> {
     const baseSystemPrompt = [
       "You are the recovery planner in a plan-first runtime.",
       "You cannot execute tools, declare completion, or alter recovery facts.",
+      "decisionWorkingSet.currentDecision and parallelDecisions join pre-action model interpretations to committed outcomes. Use progress/remaining/purpose to locate the attempted task transition, then inspect its actual evidence and effects. A successful operation does not prove the purpose, and an absent receipt or unknown effect never permits replay.",
       USER_AUTHORITY_INSTRUCTION,
       "For assessment_failed_boundary, choose revise_plan, ask_user or fail. resume_step is reserved for interrupted execution and cannot restart an exhausted candidate loop.",
       "Choose exactly one structured recovery decision. replayPolicy=unsafe never permits resume_step.",
       "When choosing revise_plan, submit a complete planRevision in the same decision: retainedStepIds references unchanged persisted Steps, and steps contains only new Step definitions. If you cannot produce a complete valid replacement Plan, choose fail instead.",
       "Existing Step definitions are immutable. When replacing the failed boundary, never reuse its Step id with a changed objective, dependencies, bindings, criteria or ownership: create a new repair leaf id (for example <failedStepId>.repair.<version>), omit the old failed Step so Runtime retires it, and rewire dependents to the new id. Unchanged Steps may keep their ids.",
+      "parentId expresses only the structural milestone tree. It never records repair origin, replacement provenance, or the Step whose failure caused recovery. A parent must be an active or newly submitted milestone in the final graph; use stepReplacements for replacement provenance and dependencies for scheduling/data flow. Never use a retired Step as parentId.",
       "For a local replacement, declare stepReplacements: [{stepId: oldId, replacementStepId: newId}], submit the new Step definition and reference its unchanged dependents in retainedStepIds. Runtime creates new identities for affected unfinished dependents and rewires their dependencies and parent links while preserving their contracts and Result/source bindings. Never rewrite completed Steps. Omit stepReplacements when explicitly authoring the entire replacement graph.",
       "A Plan revision retires a Step from future scheduling only. It never erases, authorizes, compensates for, or replays an Action already recorded for that Step. If a retired Action has an unknown external effect, preserve that fact and choose a continuation that neither relies on nor repeats that effect, or fail when no such continuation exists.",
       "If the failed boundary shows the current Plan's evidence contract is wrong for the evidence that actually exists, prefer revise_plan and repair the Plan boundary rather than resubmitting the same step.",
@@ -150,9 +175,10 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
       "Use failedBoundary.unmetCriteria to identify the actual result gap and any contractIssue. Choose a continuation that can change that cause, considering previously attempted strategies, available capabilities and the remaining gap budget in runtimeContext. A locally stalled turn does not prove global exhaustion. Never repeat unchanged work or weaken an explicit user requirement to obtain approval.",
       "Goal incompleteness is not a reason to continue by itself. Use failedBoundary.repairPrerequisite and committed results, including failed operations, to separate answer correction, a necessary new observation and a blocked prerequisite. For any continuation, explain in rationale the gap, the proposed action, what new observation or changed condition makes it useful, and the stopping condition within the remaining budget. A low-cost probe may resolve uncertainty even if it fails; repeating a known failure through another operation sharing the same prerequisite does not create an alternative. Consider only authorized paths that preserve the user's source and result constraints. If no useful path exists, choose fail; use ask_user only when a concrete consumable input is needed.",
       "Evidence concerns distinguish observations from unverified hypotheses. Do not elevate a suggested explanation or action into a proven cause. Reuse references only for the properties they support; a contradiction can affect several results sharing a premise, and repeated results do not independently verify that premise. Bind the relevant evidence for inspection in the repair instead of assuming it proves the requested result.",
+      "Read persistedEvidenceTimeline in ascending seq order. A later write, validation or successful read changes only later state and cannot prove that an earlier failed action had the same prerequisite. When a prerequisite appears only after the failure, repair from the now-available state instead of inventing a path, alias or content defect.",
       "Do not ask the user to authorize a Plan revision, confirm whether a recorded Action had an effect, or accept a candidate as evidence that it meets a result criterion. Those are Runtime recovery and assessment obligations. Use ask_user only for a concrete, missing input that only the user can supply and that an execution continuation will consume; a missing capability to observe or verify the requested result is not such an input. When the available capabilities cannot change or verify a remaining result gap, choose fail and retain the stage artifact and its evidence.",
     ].join("\n");
-    const response = await this.model.complete({
+    const invocation = {
       runId: input.runId,
       phase: "planning",
       systemPrompt: baseSystemPrompt + (input.revisionFeedback?.length
@@ -162,7 +188,11 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
       messages: [{ role: "user", content: input.userInput }],
       tools: [SUBMIT_RECOVERY_DECISION_TOOL],
       toolChoice: { name: SUBMIT_RECOVERY_DECISION_TOOL.name },
-    }, signal);
+    } as const;
+    const response = emit === undefined
+      ? await this.model.complete(invocation, signal)
+      : await completeWithRequestTelemetry({ model: this.model, invocation, emit, signal,
+          base: { phase: "planning", purpose: "recovery_planning", actionId: input.action.id } });
     try {
       if (response.finishReason === "length" || response.toolCalls.length !== 1 || response.toolCalls[0].name !== SUBMIT_RECOVERY_DECISION_TOOL.name) {
         throw new AppError("PLANNING_ERROR", "Recovery Planner must submit exactly one structured recovery decision", 422);
@@ -184,8 +214,8 @@ export class ModelPlanRevisionAssessor implements PlanRevisionAssessor {
     this.model = model;
   }
 
-  async assess(input: PlanRevisionAssessmentInput, signal?: AbortSignal): Promise<PlanRevisionAssessment> {
-    const response = await this.model.complete({
+  async assess(input: PlanRevisionAssessmentInput, signal?: AbortSignal, emit?: RuntimeEventSink): Promise<PlanRevisionAssessment> {
+    const invocation = {
       runId: input.runId,
       phase: "assessment",
       systemPrompt: [
@@ -197,13 +227,18 @@ export class ModelPlanRevisionAssessor implements PlanRevisionAssessor {
         "The revised Plan covers the goal jointly with deliveryPlanScope.acceptedTargets, whose exact assessed realizations and bindings are retained by Runtime even if their producing Step is retired. New Steps must own outstanding targets, never reproduce or reassign accepted ones. Do not infer new acceptance from an artifact, model prose, or an event alone.",
         "Assess the revised Plan against open canonical evidence concerns. Do not treat an assessor hypothesis as a proven cause or reuse affected results as proof of a disputed premise without resolving the concern. Repeated results based on the same premise are not independent proof of that premise.",
         "Assess feasibility as well as goal coverage: the continuation must identify an action that can correct the result, add a necessary observation or change a blocked prerequisite using authorized capabilities. Repeating the failed method or changing only wording/Step identities without a justified changed condition cannot repair the gap. Preserve useful evidence and bounded probes, and reject a revision whose only effect is to restart exhausted work.",
+        "Use evidenceTimeline in ascending seq order. Later writes and validations cannot establish prerequisites for earlier failed actions. Reject any diagnosis or revision rationale that reverses this ordering; require the plan to act from the latest actually persisted state.",
         "Return exactly one submit_plan_revision_assessment tool call.",
       ].join("\n"),
       runtimeContext: planRevisionRuntimeContext(input),
       messages: [{ role: "user", content: input.userInput }],
       tools: [SUBMIT_PLAN_REVISION_ASSESSMENT_TOOL],
       toolChoice: { name: SUBMIT_PLAN_REVISION_ASSESSMENT_TOOL.name },
-    }, signal);
+    } as const;
+    const response = emit === undefined
+      ? await this.model.complete(invocation, signal)
+      : await completeWithRequestTelemetry({ model: this.model, invocation, emit, signal,
+          base: { phase: "assessment", purpose: "recovery_plan_revision_assessment", actionId: input.recoveryAction.id } });
     if (response.finishReason === "length" || response.toolCalls.length !== 1 || response.toolCalls[0].name !== SUBMIT_PLAN_REVISION_ASSESSMENT_TOOL.name) {
       throw new AppError("ASSESSMENT_ERROR", "Plan Revision Assessor must submit exactly one structured assessment", 422, { recoveryStage: "assessment" });
     }
@@ -254,6 +289,21 @@ export function parseRecoveryDecision(call: ModelToolCall, canonicalState: Canon
 }
 
 function recoveryRuntimeContext(input: RecoveryPlannerInput): RuntimeContextSnapshot {
+  const stepId = input.failedBoundary?.stepId ?? input.action.stepId;
+  const transcript = stepId === undefined ? undefined : reconstructRecoveryTranscript({ userInput: input.userInput, stepId, events: input.events });
+  const step = input.plan?.steps.find(candidate => candidate.id === stepId);
+  const products = input.workspaceId === undefined || step === undefined ? undefined : new WorkProductContext(input.runId, {
+    workspaceId: input.workspaceId, goalId: `${input.plan!.id}:v${input.plan!.version}:${step.id}`, goal: step.objective,
+    storeSnapshot: async () => { throw new Error("Recovery projection does not write a snapshot"); },
+  });
+  for (const event of transcript?.workProductEvents ?? []) products?.capture(event);
+  const workingSet = transcript === undefined ? undefined : deriveDecisionWorkingSet({ runId: input.runId, messages: transcript.messages,
+    records: committedDecisionRecords(transcript.workProductEvents ?? []),
+    // Same exact evidence reducer as execution. This recovery view does not
+    // alter the persisted transcript or authorize retrying any action.
+    materializeObservations: true, evidenceBudgetCharacters: 32_000, evidenceEntryCharacters: 16_000,
+    ...(products === undefined ? {} : { currentView: deriveCurrentDecisionView({ runId: input.runId,
+      context: { canonicalState: input.canonicalState, stepId: stepId! }, workProducts: products.derive() }) }) });
   const refs = new Set([
     ...(input.failedBoundary?.reusableEvidenceRefs ?? []),
     ...(input.failedBoundary?.unmetCriteria ?? []).flatMap((criterion) => criterion.evidenceRefs),
@@ -270,7 +320,7 @@ function recoveryRuntimeContext(input: RecoveryPlannerInput): RuntimeContextSnap
   const referencedEvidenceEvents = input.events.filter((event) =>
     (event.type === "tool.result_committed" || event.type === "tool.failed" || event.type === "assistant.tool_call.committed")
     && typeof event.data.toolCallId === "string" && callIds.has(event.data.toolCallId))
-    .slice(-60).map((event) => {
+    .map((event) => {
       const serialized = JSON.stringify(event.data);
       return { seq: event.seq, type: event.type, dataPreview: serialized.slice(0, 4000), truncated: serialized.length > 4000 };
     });
@@ -289,9 +339,22 @@ function recoveryRuntimeContext(input: RecoveryPlannerInput): RuntimeContextSnap
         metadata: input.action.metadata,
       },
       currentPlan: recoveryPlanProjection(input.plan),
+      recoveryGraphContract: recoveryRevisionCorrection(input.plan, input.failedBoundary, ""),
       failedBoundary: input.failedBoundary,
       canonicalGap: input.canonicalGap,
-      canonicalState: input.canonicalState,
+      canonicalState: input.canonicalState === undefined ? undefined : projectCanonicalDecisionBasis(input.canonicalState),
+      decisionWorkingSet: workingSet === undefined ? undefined : { ...workingSet.view, history: workingSet.history },
+      currentDecisionView: products === undefined ? undefined : projectCurrentDecisionView(deriveCurrentDecisionView({ runId: input.runId,
+        context: { canonicalState: input.canonicalState, stepId: stepId! }, workProducts: products.derive() })),
+      productApplicabilityGap: products === undefined && workingSet?.items.some(item => item.version !== undefined)
+        ? "Current product versions were not supplied by this host; versioned context is historical until revalidated at the resumed leaf." : undefined,
+      recoveryTranscriptFacts: transcript === undefined ? undefined : {
+        stepId: transcript.facts.stepId, checkpointEventSeq: transcript.facts.checkpointEventSeq,
+        unfinishedToolCalls: transcript.facts.unfinishedToolCalls, decisionLedger: transcript.facts.decisionLedger,
+        outputBudgetState: transcript.facts.outputBudgetState,
+        historicalCandidateCount: transcript.facts.candidateOutputs.length,
+        historicalRejectionCount: transcript.facts.candidateRejections.length,
+      },
       deliveryPlanScope: canonicalDeliveryPlanScope(input.canonicalState),
       userAuthority: input.userAuthority ?? buildUserAuthorityContext({ userInput: input.userInput, intent: input.canonicalState.intent }),
       availableTools: input.availableTools,
@@ -302,8 +365,55 @@ function recoveryRuntimeContext(input: RecoveryPlannerInput): RuntimeContextSnap
       unresolvedActionEffects: input.unresolvedActionEffects,
       userResponses: input.userResponses,
       referencedEvidenceEvents,
-      events: input.events.slice(-100),
+      evidenceTimeline: input.evidenceTimeline,
+      events: input.events.filter(event => {
+        const actionId = event.data.actionId;
+        return actionId === input.action.id || input.unresolvedActionEffects?.some(action => action.actionId === actionId)
+          || typeof event.data.toolCallId === "string" && callIds.has(event.data.toolCallId);
+      }),
+      historyNavigation: { runId: input.runId, stepId: input.failedBoundary?.stepId ?? input.action.stepId,
+        availableResults: input.availableResults?.map(result => result.result),
+        instruction: "The current canonical state, explicit failure boundary and unresolved effect ledger own recovery. Omitted unrelated events remain persisted. Resume the admitted leaf to read_result(view=step_history or producer_exchange) when exact detail is needed; do not retry an effect to obtain its output." },
     }),
+  };
+}
+
+/** Machine-readable correction hints; Admission remains the final authority. */
+export function recoveryRevisionCorrection(
+  plan: RecoveryPlannerInput["plan"],
+  failedBoundary: FailedBoundary | undefined,
+  message: string,
+): RecoveryRevisionCorrection | undefined {
+  if (plan === undefined) return undefined;
+  const active = plan.steps.filter(step => step.retiredAt === undefined);
+  const retired = plan.steps.filter(step => step.retiredAt !== undefined);
+  const failedId = failedBoundary?.stepId;
+  const invalidField = /unknown parent|parent .*must be a milestone|cyclic parent|own parent/iu.test(message)
+    ? "planRevision.steps[].parentId"
+    : /stepReplacements|Step replacement|Cannot replace|Replacement .*must name/iu.test(message)
+      ? "planRevision.stepReplacements"
+      : /Existing Step|step IDs/iu.test(message)
+          ? "planRevision.steps[].id"
+        : /retainedStepIds|retain unknown|Completed Step/iu.test(message)
+          ? "planRevision.retainedStepIds"
+          : /duplicate/iu.test(message)
+            ? "planRevision.steps[].id"
+        : /dependency|cycle/iu.test(message)
+          ? "planRevision.steps[].dependencies"
+          : "planRevision";
+  return {
+    invalidField,
+    activePersistedStepIds: active.map(step => step.id),
+    retiredPersistedStepIds: retired.map(step => step.id),
+    retainableStepIds: active.map(step => step.id),
+    requiredRetainedStepIds: active.filter(step => step.status === "completed").map(step => step.id),
+    replaceableStepIds: active.filter(step => step.status !== "completed").map(step => step.id),
+    activeMilestoneParentIds: active.filter(step => step.kind === "milestone").map(step => step.id),
+    legalShapes: [
+      `Local replacement: steps contains one new id; stepReplacements=[{stepId:${failedId ?? "<active-incomplete-id>"},replacementStepId:<new-id>}]; retain unchanged active Steps by id.`,
+      "Explicit replacement graph: steps contains only new ids with final dependencies/structural milestone parents; retainedStepIds contains unchanged active persisted ids; do not submit stepReplacements.",
+      "A root repair leaf omits parentId. parentId may name only a milestone present in the final active/revised graph.",
+    ],
   };
 }
 
@@ -338,12 +448,13 @@ function planRevisionRuntimeContext(input: PlanRevisionAssessmentInput): Runtime
     phase: "assessment",
     content: JSON.stringify({
       currentPlan: input.currentPlan,
-      canonicalState: input.canonicalState,
+      canonicalState: input.canonicalState === undefined ? undefined : projectCanonicalDecisionBasis(input.canonicalState),
       ...(input.canonicalState === undefined ? {} : { deliveryPlanScope: canonicalDeliveryPlanScope(input.canonicalState) }),
       userAuthority: input.userAuthority ?? buildUserAuthorityContext({ userInput: input.userInput, intent: input.canonicalState?.intent }),
       proposedPlan: input.proposal,
       retiredStepIds: input.retiredStepIds,
       recoveryAction: input.recoveryAction,
+      evidenceTimeline: input.evidenceTimeline,
     }),
   };
 }

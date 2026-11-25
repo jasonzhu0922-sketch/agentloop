@@ -62,6 +62,8 @@ export function unreadRuntimeResultRefs(
     let value: unknown;
     try { value = JSON.parse(call.result); } catch { return []; }
     if (value === null || typeof value !== "object" || Array.isArray(value)) return [];
+    const source = (value as Record<string, unknown>).source;
+    if (source && typeof source === "object" && "view" in source && source.view !== "result") return [];
     const ref = parseRuntimeResultRef((value as Record<string, unknown>).sourceResultRef);
     return ref === undefined ? [] : [ref.resultId];
   }));

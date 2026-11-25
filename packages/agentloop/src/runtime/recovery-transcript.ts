@@ -247,9 +247,9 @@ export function reconstructRecoveryTranscript(input: {
         : new Set(assistant.toolCalls.filter((call) => isToolArgumentsObject(call.arguments)).map((call) => call.id))
       : new Set(assistant.providerReplayableToolCallIds);
     let replayableCalls = assistant.toolCalls.filter((call) =>
-      replayableToolCallIds.has(call.id) && isToolArgumentsObject(call.arguments),
+      replayableToolCallIds.has(call.id) && isToolArgumentsObject(call.arguments) && outcomes.get(call.id)?.failurePhase !== "prepare",
     );
-    const suppressedCalls = assistant.toolCalls.filter((call) => !replayableToolCallIds.has(call.id) || !isToolArgumentsObject(call.arguments));
+    const suppressedCalls = assistant.toolCalls.filter(call => !replayableCalls.some(replayable => replayable.id === call.id));
     for (const call of suppressedCalls) {
       const outcome = outcomes.get(call.id);
       if (outcome === undefined) {
@@ -303,7 +303,12 @@ export function reconstructRecoveryTranscript(input: {
     orphanCalls.push({ id, name: committed.name, arguments: committed.arguments, seq: committed.seq });
   }
   if (orphanCalls.length > 0) {
-    const completedCalls = orphanCalls.filter(call => outcomes.has(call.id));
+    const completedCalls = orphanCalls.filter(call => outcomes.has(call.id)
+      && outcomes.get(call.id)?.failurePhase !== "prepare" && isToolArgumentsObject(call.arguments));
+    for (const call of orphanCalls) {
+      const outcome = outcomes.get(call.id);
+      if (outcome && !completedCalls.some(completed => completed.id === call.id)) toolEvidence.push(toolEvidenceFromOutcome(call, outcome));
+    }
     if (completedCalls.length > 0) {
       messages.push({
         role: "assistant",
@@ -347,7 +352,7 @@ export function reconstructRecoveryTranscript(input: {
   return {
     messages,
     toolEvidence,
-    workProductEvents: scope.filter(event => ["assistant.committed", "tool.completed", "tool.failed", "tool.rejected"].includes(event.type)),
+    workProductEvents: scope.filter(event => ["assistant.committed", "tool.result_committed", "tool.completed", "tool.failed", "tool.rejected"].includes(event.type)),
     facts: {
       stepId: input.stepId,
       ...(checkpointEventSeq === undefined ? {} : { checkpointEventSeq }),

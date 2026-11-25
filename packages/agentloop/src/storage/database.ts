@@ -23,6 +23,8 @@ import { installRoundScopeSchema } from "./round-scope-schema.ts";
  */
 export class AppDatabase implements SqlConnection {
   readonly dialect: SqlDialect;
+  readonly supportsRunEventTransactions = true;
+  runEventStore?: import("./run-event-store.ts").RunEventStore;
 
   private readonly connection: SqlConnection;
   private readonly migrated: Promise<void>;
@@ -60,6 +62,10 @@ export class AppDatabase implements SqlConnection {
   /** Resolves once schema creation/migration finished. */
   ready(): Promise<void> {
     return this.migrated;
+  }
+
+  diagnosticEnvironment(): Readonly<Record<string, unknown>> {
+    return this.connection.diagnosticEnvironment?.() ?? {};
   }
 
   /**
@@ -116,6 +122,40 @@ export class AppDatabase implements SqlConnection {
   async installRunInputSchema(): Promise<void> {
     await this.migrated;
     await installRunInputSchema(this.connection);
+    await this.connection.exec(`
+      CREATE TABLE IF NOT EXISTS local_run_admissions (
+        owner_user_id VARCHAR(191) NOT NULL, request_id VARCHAR(256) NOT NULL, fingerprint VARCHAR(64) NOT NULL,
+        reservation_id VARCHAR(191) NOT NULL, run_id VARCHAR(191) UNIQUE, created_at BIGINT NOT NULL,
+        run_deleted INTEGER NOT NULL DEFAULT 0 CHECK(run_deleted IN (0, 1)), PRIMARY KEY(owner_user_id, request_id)
+      );
+      CREATE TABLE IF NOT EXISTS local_runtime_dispatches (
+        dispatch_key VARCHAR(191) PRIMARY KEY, assignment_id VARCHAR(191) NOT NULL, owner_user_id VARCHAR(191) NOT NULL,
+        remote_run_id VARCHAR(191) NOT NULL, created_at BIGINT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS runtime_deletions (
+        run_id VARCHAR(191) PRIMARY KEY, last_seq BIGINT NOT NULL, deleted_at BIGINT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS runtime_requests (
+        scope VARCHAR(191) NOT NULL, request_id VARCHAR(191) NOT NULL,
+        fingerprint VARCHAR(64) NOT NULL, run_id VARCHAR(191) NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        PRIMARY KEY(scope, request_id), UNIQUE(scope, run_id)
+      );
+      CREATE TABLE IF NOT EXISTS runtime_dispatches (
+        dispatch_key VARCHAR(191) PRIMARY KEY, assignment_id VARCHAR(191) NOT NULL,
+        owner_user_id VARCHAR(191) NOT NULL, remote_run_id VARCHAR(191) UNIQUE,
+        state VARCHAR(32) NOT NULL, lease_expires_at BIGINT, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS runtime_executors (
+        remote_run_id VARCHAR(191) PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+        runtime_id VARCHAR(191) NOT NULL, dispatch_key VARCHAR(191) NOT NULL UNIQUE,
+        owner_user_id VARCHAR(191) NOT NULL, accepted_at BIGINT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS runtime_observations (
+        scope VARCHAR(191) NOT NULL, id VARCHAR(191) NOT NULL, category VARCHAR(191) NOT NULL,
+        created_at BIGINT NOT NULL, payload_json ${this.dialect === "tidb" ? "LONGTEXT" : "TEXT"} NOT NULL,
+        PRIMARY KEY(scope, id)
+      );
+    `);
   }
 
   exec(sql: string): Promise<void> {
@@ -148,7 +188,9 @@ export class AppDatabase implements SqlConnection {
   }
 
   transaction<T>(operation: () => T | Promise<T>): Promise<T> {
-    return this.migrated.then(() => this.connection.transaction(operation));
+    return this.migrated.then(() => this.runEventStore
+      ? this.runEventStore.transaction(operation, callback => this.connection.transaction(callback))
+      : this.connection.transaction(operation));
   }
 
   async close(): Promise<void> {
@@ -631,6 +673,40 @@ export class AppDatabase implements SqlConnection {
     await installMultiPlanSchema(this.connection);
     await installRoundScopeSchema(this.connection);
     await installRunInputSchema(this.connection);
+    await this.connection.exec(`
+      CREATE TABLE IF NOT EXISTS local_run_admissions (
+        owner_user_id VARCHAR(191) NOT NULL, request_id VARCHAR(256) NOT NULL, fingerprint VARCHAR(64) NOT NULL,
+        reservation_id VARCHAR(191) NOT NULL, run_id VARCHAR(191) UNIQUE, created_at BIGINT NOT NULL,
+        run_deleted INTEGER NOT NULL DEFAULT 0 CHECK(run_deleted IN (0, 1)), PRIMARY KEY(owner_user_id, request_id)
+      );
+      CREATE TABLE IF NOT EXISTS local_runtime_dispatches (
+        dispatch_key VARCHAR(191) PRIMARY KEY, assignment_id VARCHAR(191) NOT NULL, owner_user_id VARCHAR(191) NOT NULL,
+        remote_run_id VARCHAR(191) NOT NULL, created_at BIGINT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS runtime_deletions (
+        run_id VARCHAR(191) PRIMARY KEY, last_seq BIGINT NOT NULL, deleted_at BIGINT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS runtime_requests (
+        scope VARCHAR(191) NOT NULL, request_id VARCHAR(191) NOT NULL,
+        fingerprint VARCHAR(64) NOT NULL, run_id VARCHAR(191) NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        PRIMARY KEY(scope, request_id), UNIQUE(scope, run_id)
+      );
+      CREATE TABLE IF NOT EXISTS runtime_dispatches (
+        dispatch_key VARCHAR(191) PRIMARY KEY, assignment_id VARCHAR(191) NOT NULL,
+        owner_user_id VARCHAR(191) NOT NULL, remote_run_id VARCHAR(191) UNIQUE,
+        state VARCHAR(32) NOT NULL, lease_expires_at BIGINT, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS runtime_executors (
+        remote_run_id VARCHAR(191) PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+        runtime_id VARCHAR(191) NOT NULL, dispatch_key VARCHAR(191) NOT NULL UNIQUE,
+        owner_user_id VARCHAR(191) NOT NULL, accepted_at BIGINT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS runtime_observations (
+        scope VARCHAR(191) NOT NULL, id VARCHAR(191) NOT NULL, category VARCHAR(191) NOT NULL,
+        created_at BIGINT NOT NULL, payload_json ${this.dialect === "tidb" ? "LONGTEXT" : "TEXT"} NOT NULL,
+        PRIMARY KEY(scope, id)
+      );
+    `);
 
     // Kernel boundary: business rows are owned by opaque host-provided user
     // ids, so business tables must not enforce foreign keys into any

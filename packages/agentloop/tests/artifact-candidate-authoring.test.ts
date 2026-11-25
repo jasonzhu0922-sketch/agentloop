@@ -44,7 +44,7 @@ test("multi-chunk authoring and explicit intermediate checks keep full budgets; 
       turn++;
       assert.equal(request.maxOutputTokens, 16384, `turn ${turn} must retain the authoring budget`);
       const write = request.tools.find(tool => tool.name === "computer_write_file")!;
-      assert.equal((write.inputSchema.properties as any).content.maxLength, 4096);
+      assert.equal((write.inputSchema.properties as any).content.maxLength, undefined, "Output guidance preserves the Tool-owned schema");
       if (turn === 2) {
         assert.equal(checks, 0, "a first fragment does not schedule automatic acceptance");
         return call("explicit-check", "verify_artifact_acceptance", { artifactPath: "forecast.html" });

@@ -22,7 +22,7 @@ for (const backend of ["memory", "sqlite"] as const) test(`${backend}: terminal 
   let interrupt = true;
   store.advanceFeedbackCursor = async (...args) => { if (interrupt) { interrupt = false; throw new Error("crash after enqueue"); } return original(...args); };
   await assert.rejects(new LocalMemoryOutcomes({ store, tenantId: "device", sources }).poll(), /crash/);
-  assert.equal((await store.settlementJobs(scope, "hil-resumed")).length, 1);
+  assert.equal((await store.settlementJobs(scope, "hil-resumed")).length + (await store.settlementJobs(scope, "failed")).length, 1, "exactly the enqueued record survives a failed acknowledgement");
   const reloaded = backend === "sqlite" ? new SqliteMemoryStore(memory) : store;
   const poller = new LocalMemoryOutcomes({ store: reloaded, tenantId: "device", sources, now: () => 10 });
   await poller.poll(); await poller.poll();

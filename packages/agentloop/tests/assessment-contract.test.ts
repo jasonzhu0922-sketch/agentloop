@@ -48,6 +48,71 @@ test("plan revision assessment uses the ordered amended intent without waiving u
   assert.equal(result.approved, true);
 });
 
+test("plan revision assessment receives persisted evidence in causal order", async () => {
+  const state = createCanonicalRunState({ runId: "temporal-revision", userInput: "Render the report.",
+    understanding: understandTask({ objective: "Render the report." }), now: 1 });
+  const evidenceTimeline = [
+    { seq: 10, createdAt: 10, type: "tool.failed", toolCallId: "call_render", toolName: "computer_run_command",
+      data: { error: "interpretation file unreadable" } },
+    { seq: 20, createdAt: 20, type: "tool.result_committed", toolCallId: "call_write", toolName: "computer_write_file",
+      data: { operationStatus: "succeeded" } },
+    { seq: 30, createdAt: 30, type: "tool.result_committed", toolCallId: "call_validate", toolName: "computer_read_json",
+      data: { operationStatus: "succeeded" } },
+  ];
+  const input = { runId: state.runId, userInput: state.intent.userInput, canonicalState: state,
+    currentPlan: { id: "plan", version: 1 }, proposal: { goal: "Render", steps: [] }, retiredStepIds: [], evidenceTimeline,
+    recoveryAction: { id: "action", kind: "planning", replayPolicy: "safe", metadata: {} },
+  } as unknown as PlanRevisionAssessmentInput;
+  await new ModelPlanRevisionAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
+    assert.match(request.systemPrompt, /Later writes and validations cannot establish prerequisites for earlier failed actions/);
+    const context = JSON.parse(request.runtimeContext!.content);
+    assert.deepEqual(context.evidenceTimeline, evidenceTimeline);
+    return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "assessment", name: "submit_plan_revision_assessment",
+      arguments: { approved: true, feedback: "Render again from the now-validated file.", evidenceRefs: ["call_render", "call_write", "call_validate"] } }] };
+  } }).assess(input);
+});
+
+test("step assessment exposes ordered evidence and forbids backward prerequisite inference", async () => {
+  const base = assessmentInput();
+  const evidenceTimeline = [
+    { seq: 5, createdAt: 5, type: "tool.failed", toolCallId: "call_render", toolName: "computer_run_command", data: { error: "file unreadable" } },
+    { seq: 8, createdAt: 8, type: "tool.result_committed", toolCallId: "call_write", toolName: "computer_write_file", data: { operationStatus: "succeeded" } },
+  ];
+  await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
+    assert.match(request.systemPrompt, /reason in ascending seq order/);
+    const context = JSON.parse(request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+    assert.deepEqual(context.evidenceTimeline, evidenceTimeline);
+    return submission({ ...base, evidenceTimeline });
+  } }).assess({ ...base, evidenceTimeline });
+});
+
+test("step assessment references an identical delivery output instead of copying it twice", async () => {
+  const base = assessmentInput();
+  const candidateOutput = "完整交付正文。".repeat(2_000);
+  const deliveryCandidate = {
+    schema: "agentloop.runtimeDeliveryCandidate/v1" as const,
+    output: candidateOutput,
+    caveats: ["preserve caveat"],
+    evidenceKinds: { satisfied: ["delivery_receipt"], caveated: [], failed: [] },
+    sourceToolCallIds: ["call-delivery"],
+    deliveryClaims: [{ targetId: "target-delivery", evidenceRefs: ["call-delivery"] }],
+  };
+  await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
+    const context = JSON.parse(request.runtimeContext!.content.match(/<assessment_context source="server">\n([^\n]+)\n/)![1]!);
+    assert.equal(context.evidence.candidateOutput, candidateOutput);
+    assert.deepEqual(context.evidence.deliveryCandidate.output, {
+      schema: "agentloop.assessmentEvidenceReference/v1",
+      ref: "evidence.candidateOutput",
+      characters: candidateOutput.length,
+    });
+    assert.deepEqual(context.evidence.deliveryCandidate.deliveryClaims, deliveryCandidate.deliveryClaims);
+    assert.deepEqual(context.evidence.deliveryCandidate.caveats, deliveryCandidate.caveats);
+    assert.equal(request.runtimeContext!.content.split(candidateOutput).length - 1, 1);
+    return submission({ ...base, evidence: { ...base.evidence, candidateOutput, deliveryCandidate } });
+  } }).assess({ ...base, evidence: { ...base.evidence, candidateOutput, deliveryCandidate },
+    modelEvidence: { ...base.evidence, candidateOutput, deliveryCandidate } });
+});
+
 function assessmentInput(): StepAssessmentInput {
   return {
     runId: "run-contract", planId: "plan-contract", attempt: 1, assessmentProfile: "result_judged",
@@ -759,4 +824,32 @@ test("a matching reply reaches terminal delivery while an extra Plan proof stays
     assert.equal(events.some(event => event.type === "terminal.delivery_committed"), true);
     assert.equal(events.some(event => event.type === "run.repairing"), false);
   } finally { await database.close(); }
+});
+
+test("assessment reads necessary original history before judging the same canonical goal and candidate", async () => {
+  const input = assessmentInput();
+  const events: RuntimeEvent[] = [];
+  let calls = 0;
+  let reads = 0;
+  input.contextReads = { definitions: [{ name: "read_result", description: "Read authorized exact evidence", inputSchema: { type: "object" } }],
+    execute: async call => { reads++; assert.equal(call.name, "read_result"); return JSON.stringify({ exact: output, unknown: "Coverage B remains unverified" }); } };
+  input.decisionWorkingSet = { schema: "agentloop.decisionWorkingSet/v1", items: [], historicalItemCount: 10, absorbedExchangeCount: 10,
+    retainedExchangeCount: 1, pendingToolCallIds: [], rejectionCount: 0, gaps: ["Read necessary detail before relying on the omitted source."] };
+  const result = await new ModelStepAssessor({ limits: TEST_MODEL_LIMITS, async complete(request) {
+    calls++;
+    assert.ok(request.runtimeContext!.content.includes(input.canonicalState.intent.userInput));
+    assert.ok(request.runtimeContext!.content.includes("decisionWorkingSet"));
+    if (calls === 1) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "history-read", name: "read_result", arguments: { resultId: "rr_11111111-1111-4111-8111-111111111111" } },...submission(input).toolCalls] };
+    assert.equal(request.messages[0].role, "assistant");
+    assert.equal(request.messages[1].role, "tool");
+    assert.ok(request.messages[1].content.includes("Coverage B remains unverified"));
+    assert.equal(request.messages.length,3,"a mixed read/submit batch keeps every native call paired");
+    assert.equal(request.messages[2].role,"tool");
+    assert.match(request.messages[2].content,/not executed/);
+    return submission(input);
+  } }).assess(input, undefined, event => { events.push(event); });
+  assert.equal(result.approved, true);
+  assert.equal(reads, 1);
+  assert.equal(calls, 2);
+  assert.equal(events.filter(event => event.type === "context.history.read").length, 1);
 });

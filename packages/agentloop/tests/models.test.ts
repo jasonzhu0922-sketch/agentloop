@@ -1,8 +1,56 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { InMemoryResponsesReasoningContinuationStore, OpenAICompatibleModel, ResponsesModel } from "../src/runtime/models.ts";
-import { completeWithRequestTelemetry, completeWithStreaming } from "../src/runtime/model-streaming.ts";
+import { completeWithRequestTelemetry, completeWithStreaming, modelInvocationComposition } from "../src/runtime/model-streaming.ts";
 import type { ModelStreamRawCaptureInput } from "../src/runtime/contracts.ts";
+
+test("model request composition measures neutral context categories without copying their contents", () => {
+  const runtimeContent = JSON.stringify({ deliveryFacts: [{ targetId: "target-a", accepted: true }], state: "ready" });
+  const skillContent = JSON.stringify({ schema: "example.skill/v1", instructions: "Use persisted facts." });
+  const resultContent = JSON.stringify({
+    resultRef: { schema: "agentloop.resultRef/v1", resultId: "rr-example" },
+    deliveryFacts: [{ targetId: "target-a", sourceRef: "rr-example" }],
+  });
+  const assistantToolCalls = [{ id: "skill-1", name: "load_skill", arguments: { id: "example" } }];
+  const toolDefinitions = [{ name: "read_result", description: "Read persisted Result", inputSchema: { type: "object" } }];
+  const composition = modelInvocationComposition({
+    runId: "composition-run",
+    phase: "assessment",
+    systemPrompt: "Assess the evidence.",
+    runtimeContext: { id: "context-1", phase: "assessment", content: runtimeContent },
+    messages: [
+      { role: "user", content: "Assess this delivery." },
+      { role: "assistant", content: "I will inspect it.", toolCalls: assistantToolCalls },
+      { role: "tool", toolCallId: "skill-1", name: "load_skill", content: skillContent, isError: false },
+      { role: "tool", toolCallId: "result-1", name: "read_result", content: resultContent, isError: false },
+    ],
+    tools: toolDefinitions,
+  });
+
+  assert.equal(composition.phase, "assessment");
+  assert.deepEqual(composition.componentCharacters, {
+    systemPrompt: 20,
+    toolSchemas: JSON.stringify(toolDefinitions).length,
+    runtimeContext: runtimeContent.length,
+    userMessages: 21,
+    assistantText: "I will inspect it.".length,
+    assistantReasoning: 0,
+    assistantToolArguments: JSON.stringify({ id: "example" }).length,
+    skillResults: skillContent.length,
+    otherToolResults: resultContent.length,
+  });
+  assert.deepEqual(composition.componentReferences, {
+    systemPrompt: 1, toolSchemas: 1, runtimeContext: 1, userMessages: 1, assistantText: 1,
+    assistantReasoning: 0, assistantToolArguments: 1, skillResults: 1, otherToolResults: 1,
+  });
+  assert.equal(composition.totalCharacters, Object.values(composition.componentCharacters as Record<string, number>).reduce((sum, value) => sum + value, 0));
+  assert.equal(composition.totalEstimatedTokens, Object.values(composition.componentEstimatedTokens as Record<string, number>).reduce((sum, value) => sum + value, 0));
+  assert.deepEqual(composition.runtimeContextDiagnostics, {
+    deliveryFacts: { characters: JSON.stringify([{ targetId: "target-a", accepted: true }]).length, references: 1 },
+  });
+  assert.equal(JSON.stringify(composition).includes("Use persisted facts."), false);
+  assert.equal(JSON.stringify(composition).includes("rr-example"), false);
+});
 
 for (const Model of [OpenAICompatibleModel, ResponsesModel]) {
   test(`${Model.name} forwards external tool schemas without rewriting references, unions or literal values`, async () => {
@@ -176,6 +224,21 @@ test("OpenAI-compatible adapter maps server-configured requests and tool calls",
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("OpenAI-compatible adapter preserves provider cache token details separately from totals", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{ finish_reason: "stop", message: { content: "cached" } }],
+    usage: { prompt_tokens: 10, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 6 } },
+  }), { headers: { "content-type": "application/json" } });
+  try {
+    const model = new OpenAICompatibleModel({ baseUrl: "https://models.example.test/v1", apiKey: "test-secret",
+      model: "test-model", contextWindowTokens: 128_000, maxOutputTokens: 8_192, maxAttempts: 1 });
+    const result = await model.complete({ runId: "cache-usage", phase: "execution", systemPrompt: "System",
+      messages: [{ role: "user", content: "Check cache usage" }], tools: [] });
+    assert.deepEqual(result.usage, { inputTokens: 10, outputTokens: 2, inputTokensNoCache: 4, cacheReadInputTokens: 6 });
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("OpenAI-compatible streaming persists an anomalous finish-only SSE capture and receipt", async () => {

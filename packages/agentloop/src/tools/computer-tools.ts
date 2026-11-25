@@ -246,7 +246,7 @@ export function createComputerTools(
         "Read structured data from a JSON file under the configured workspace root or an authorized read-only @skills/<skill-name> root.",
         "Use this for durable JSON artifacts such as .agentloop/table-extractions/*.json before falling back to computer_search_text or line-window computer_read_file.",
         "queries are source JSON Pointer selectors; omit queries to get a compact profile without values. Use pointer=\"\" to select the root value with the same content bounds and caveats as other selectors. Each returned query also includes a resultPointer rooted in this persisted result envelope for follow-up read_result calls. For array targets, offset is 0-indexed and limit returns a bounded window.",
-        "The result includes schema, path, sha256, root profile, selected values, source pointers, counts, and caveats without interpreting business semantics. Each array query's nextOffset continues the original source array with computer_read_json using the same path and sourcePointer; null means no later source items. read_result only reads the already persisted window, whose offsets start at zero.",
+        "The result includes schema, path, sha256, root profile, selected values, source pointers, counts, and caveats without interpreting business semantics. complete reports whether value contains the full selected value; false requires narrower source selectors for omitted detail. Each array query's nextOffset continues the original source array with computer_read_json using the same path and sourcePointer; null means no later source items. read_result only reads the already persisted window, whose offsets start at zero.",
       ].join(" "),
       inputSchema: objectSchema(["path"], {
         path: { type: "string" },
@@ -465,15 +465,16 @@ export function createComputerTools(
       effect: "write",
       boundedContent: {
         field: "content", targetField: "path",
-        continuationInstruction: "For a new file, write one complete bounded chunk with mode=create, then continue the same path with separate mode=append calls from the last successful receipt. Append concatenates the content verbatim: it inserts NO newline, separator, or whitespace. Preserve every intended boundary character explicitly in content, including trailing newlines or a leading newline in the next chunk; use the committed tail to choose the exact continuation. If the entire file fits this turn's budget, one call suffices. Do not put the complete large artifact in one call or repeat already committed chunks.",
+        continuationInstruction: "If multiple calls are necessary, create a contiguous prefix once with mode=create, then continue the same path from the last successful receipt. Each chunk is a consecutive byte slice of ONE file, not a standalone document; intermediate file syntax may be incomplete. Do not add temporary closing delimiters or placeholder endings to make a prefix look complete. Append writes literally at EOF; it never inserts inside or before existing closing delimiters. If the required insertion point is before the committed tail, use computer_patch_file with the current revisionId instead of append. Append inserts NO newline, separator, or whitespace. Preserve every intended boundary character explicitly in content; use the committed tail to choose the exact continuation. Do not repeat already committed chunks.",
       },
       description: [
         "Create, overwrite, or append to a UTF-8 file under the workspace root; requires dangerous-tool consent.",
         "path must be relative to the workspace root; absolute paths are rejected.",
         "Use only mode for write behavior: create, overwrite, or append; omit mode for create. Append requires an existing file.",
         "Append inserts no separator, newline, or whitespace. Include all required boundary characters in content explicitly; the inspection tail records the exact committed ending. Never assume a new call starts a new line.",
+        "A multi-call write is one continuous file: intermediate chunks may have incomplete syntax. Append writes at EOF, never inside a previously closed structure; use computer_patch_file for insertion before existing content.",
         "This Tool may write authored HTML/CSS/JS directly, including paginated HTML, HTML-PPT, browser slide decks, custom visual pages, dashboards, apps, and interactions.",
-        `Keep each content value within the advertised ${MAX_WRITE_CONTENT_CHARACTERS}-character bound. For larger files, use one mode=create call followed by one mode=append call per bounded chunk, keeping the same path; never put the entire large artifact in one model tool call.`,
+        `Keep each content value within the advertised ${MAX_WRITE_CONTENT_CHARACTERS}-character bound. Prefer writing the complete file in one call when it fits the model output window. Only split when the file exceeds that bound or an actual output truncation requires shorter calls; use create once, then append at EOF or patch an existing insertion point.`,
         "When this write is the final instance of one Runtime-admitted delivery target, pass its deliveryTargetId. This selects an already-admitted target; it never creates a target and is optional for process/support files.",
         "The result includes a Run-scoped revisionId. Use that opaque handle, not a hash, as baseRevisionId when making a subsequent computer_patch_file call.",
         "The result also includes the write mode, final file sha256 as receipt-only evidence, final byte size, Markdown-style outline, and bounded first/last sample ranges as write-after-inspection evidence; cite that receipt before rereading the whole file.",
@@ -917,6 +918,7 @@ function readJsonPointer(document: unknown, query: JsonReadQuery, caveats: strin
   readonly sourcePointer: string;
   readonly pointer: string;
   readonly found: boolean;
+  readonly complete?: boolean;
   readonly summary?: JsonValueSummary;
   readonly value?: unknown;
   readonly offset?: number;
@@ -952,6 +954,7 @@ function readJsonPointer(document: unknown, query: JsonReadQuery, caveats: strin
       found: true,
       summary: summarizeJsonValue(value),
       value: window,
+      complete: offset === 0 && window.length === value.length,
       offset,
       limit,
       returned: window.length,
@@ -960,13 +963,20 @@ function readJsonPointer(document: unknown, query: JsonReadQuery, caveats: strin
       sourceRange: `${query.pointer || "/"}[${offset}:${offset + window.length}]`,
     };
   }
+  // A small selected object is content, regardless of nesting depth. The old
+  // depth reducer turned legitimate leaf values into type summaries even when
+  // the whole selection fit one normal Result read window.
+  const caveatStart = caveats.length;
+  const selectedValue = JSON.stringify(value).length <= CONTENT_REFERENCE_WINDOW_CHARACTERS
+    ? value : boundJsonValue(value, caveats, query.pointer || "/");
   return {
     pointer: query.pointer,
     sourcePointer: query.pointer,
     resultPointer,
     found: true,
     summary: summarizeJsonValue(value),
-    value: boundJsonValue(value, caveats, query.pointer || "/"),
+    value: selectedValue,
+    complete: caveats.length === caveatStart,
     sourceRange: query.pointer || "/",
   };
 }

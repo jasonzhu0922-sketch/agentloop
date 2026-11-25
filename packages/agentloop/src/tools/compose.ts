@@ -1,3 +1,4 @@
+import { ToolArgumentsReferenceStore } from "../runtime/tool-arguments-reference-store.ts";
 import type { ArtifactAcceptanceService } from "../acceptance/artifact-acceptance.ts";
 import type { ComputerDriver } from "../computer/computer-driver.ts";
 import { ComputerExecutor } from "../computer/computer-executor.ts";
@@ -33,7 +34,7 @@ export function createCoreTools(options: CoreToolsOptions): readonly RuntimeTool
   return [
     createHumanLoopTool(),
     ...(options.memoryRecall ? [createMemoryRecallTool(options.memoryRecall.memory, options.memoryRecall.authorizeRun)] : []),
-    ...(options.results === undefined ? [] : [createResultTool(options.results), createResultJsonMaterializer(options.results, options.executor),
+    ...(options.results === undefined ? [] : [createResultTool(options.results, { resolveEventData: data => new ToolArgumentsReferenceStore(options.executor.workspaceRoot).resolveEventData(data) }), createResultJsonMaterializer(options.results, options.executor),
       ...(options.executionInsights ? [createExecutionInsightTool(options.results)] : [])]),
     ...createComputerTools(options.executor, options.driver, options.acceptanceService),
     ...createArtifactConverterTools(options.executor),

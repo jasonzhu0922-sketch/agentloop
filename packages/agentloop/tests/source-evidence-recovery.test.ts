@@ -356,10 +356,13 @@ test("source receipts and non-empty fabricated claims cannot bypass semantic ass
           const context = request.runtimeContext?.content ?? "";
           assert.match(context, /user_request_match/);
           assert.match(context, /没有披露负责人姓名/);
-          assert.match(context, /sourceContent/);
           const match = context.match(/<assessment_context source="server">\n([^\n]+)\n/);
           assert.ok(match);
           const view = JSON.parse(match[1]);
+          const sourceResult = view.evidence.toolCalls.find((call: { toolCallId: string }) => call.toolCallId === "fetch-source").result;
+          const source = typeof sourceResult === "string" ? JSON.parse(sourceResult) : sourceResult;
+          assert.equal(source.content, "公告仅说明会议召开，没有披露负责人姓名。");
+          assert.equal(source.truncated, false, "assessment consumes the exact selected source rather than execution's preview encoding");
           return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `assessment-${assessments}`, name: "submit_assessment", arguments: {
             criteria: view.step.successCriteria.map((criterion: { id: string }) => ({ criterionId: criterion.id, satisfied: false,
               rationale: "The readable source does not name the requested person.", evidenceRefs: ["fetch-source"],

@@ -602,8 +602,8 @@ for (const length of [2_000, 15_000]) {
       },
     });
     assert.equal(projected.length, 2);
-    for (const value of projected) {
-      const projection = JSON.parse(value.split("\n\n")[0]);
+    {
+      const projection = JSON.parse(projected[0]!.split("\n\n")[0]);
       assert.match(projection.sourceContent.text, /董事长为甲，总裁为乙/);
       assert.equal(projection.sourceContent.text, text.slice(0, 12_000));
       assert.equal(projection.sourceContent.complete, length <= 12_000);
@@ -611,6 +611,13 @@ for (const length of [2_000, 15_000]) {
       assert.deepEqual(projection.sourceContent.decoding, decoding);
       assert.deepEqual(projection.evidenceReceipt.sourceRefs[0].decoding, decoding);
     }
+    // Assessment selection is independent of execution pruning. Known source
+    // content is supplied directly and exactly, avoiding a needless read turn.
+    const assessed = JSON.parse(projected[1]!);
+    assert.equal(assessed.content, text);
+    assert.equal(assessed.truncated, false);
+    assert.deepEqual(assessed.decoding, decoding);
+
   });
 }
 
@@ -1825,7 +1832,7 @@ test("ContextAssembler preserves requested workspace line bodies through executi
   }
 });
 
-test("ContextAssembler retains an opaque workspace revision when a large file read is projected", async () => {
+test("ContextAssembler delivers a large explicit file read before aging it into a revision receipt", async () => {
   const model: ModelAdapter = {
     limits: { contextWindowTokens: 80_000, maxOutputTokens: 4_096 },
     complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
@@ -1847,10 +1854,17 @@ test("ContextAssembler retains an opaque workspace revision when a large file re
     revisionId: "rev_0123456789abcdef0123456789abcdef",
   });
   assert.ok(toolResult.length > 16_000);
-  const assembly = await assembler.assemble([
+  const messages: ModelMessage[] = [
     { role: "assistant", content: "", toolCalls: [{ id: "read-workspace", name: "computer_read_file", arguments: { path: "report.html" } }] },
     { role: "tool", toolCallId: "read-workspace", name: "computer_read_file", content: toolResult, isError: false },
-  ], []);
+  ];
+  const first = await assembler.assemble(messages, []);
+  assert.equal(first.messages[1].content, toolResult, "requested body must reach a decision before projection");
+  messages.push(
+    { role: "assistant", content: "The source has been consumed.", toolCalls: [{ id: "next", name: "inspect", arguments: {} }] },
+    { role: "tool", toolCallId: "next", name: "inspect", content: "done", isError: false },
+  );
+  const assembly = await assembler.assemble(messages, []);
   const projected = assembly.messages.find((message) => message.role === "tool")?.content ?? "";
   const value = JSON.parse(projected.split("\n\n")[0]) as { schema?: string; revisionId?: string; instruction?: string; content?: string };
 
@@ -1859,6 +1873,38 @@ test("ContextAssembler retains an opaque workspace revision when a large file re
   assert.match(value.instruction ?? "", /baseRevisionId/);
   assert.equal(value.content, undefined);
   assert.doesNotMatch(projected, /source detail source detail source detail/);
+});
+
+test("explicit selected JSON values survive an oversized envelope before first consumption and after restart", async () => {
+  const values = [{ format: "confirmed", scope: "revision r1" }, "contract ".repeat(400), "fields ".repeat(1400)];
+  const content = JSON.stringify({ schema: "agentloop.jsonRead/v1",
+    root: { properties: "unrequested navigation ".repeat(500) },
+    queries: values.map((value, index) => ({ pointer: `/sections/${index}`, value, found: true })) });
+  assert.ok(content.length > 16000);
+  assert.ok(JSON.stringify(values).length > 12000);
+  const messages: ModelMessage[] = [
+    { role: "assistant", content: "", toolCalls: [{ id: "selected", name: "computer_read_json", arguments: {} }] },
+    { role: "tool", toolCallId: "selected", name: "computer_read_json", content, isError: false },
+  ];
+  const make = () => new ContextAssembler({ runId: "selected-values", systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "state" },
+    model: { limits: { contextWindowTokens: 100000, maxOutputTokens: 4096 }, complete: async () => { throw Error("No maintenance model call"); } } });
+  for (const instance of [make(), make()]) {
+    const assembly = await instance.assemble(structuredClone(messages), []);
+    assert.equal(assembly.messages[1].content, content);
+    assert.equal(assembly.contextEpoch, 0);
+  }
+});
+
+test("an explicit next-decision read that exceeds capacity fails visibly rather than silently omitting values", async () => {
+  const content = JSON.stringify({ schema: "agentloop.jsonRead/v1", queries: [{ pointer: "/selected", value: "evidence ".repeat(10000) }] });
+  const instance = new ContextAssembler({ runId: "oversize-selected", systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "state" },
+    model: { limits: { contextWindowTokens: 8000, maxOutputTokens: 1024 }, complete: async () => { throw Error("No maintenance model call"); } } });
+  await assert.rejects(() => instance.assemble([
+    { role: "assistant", content: "", toolCalls: [{ id: "selected", name: "computer_read_json", arguments: {} }] },
+    { role: "tool", toolCallId: "selected", name: "computer_read_json", content, isError: false },
+  ], []), /Context remains over budget/);
 });
 
 test("ContextAssembler applies step prompt projection thresholds to large ToolResult previews", async () => {
@@ -1954,6 +2000,9 @@ test("the Loop prunes old Tool output, compacts complete exchanges, and reloads 
   ]);
   const result = await runAgentLoop({
     runId: "run-compaction",
+    // This regression exercises the explicit native capacity-compaction path.
+    // Current-state decision/release behavior has separate lifecycle coverage.
+    contextPolicy: { executionHistoryProjection: "canonical" },
     systemPrompt: [
       "Follow the current Plan step.",
       "The exact Skill body is authoritative.",

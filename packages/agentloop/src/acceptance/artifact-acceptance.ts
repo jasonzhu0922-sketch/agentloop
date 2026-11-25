@@ -1,5 +1,6 @@
 import { extname } from "node:path";
 import { Script } from "node:vm";
+import { Parser } from "htmlparser2";
 import type { ComputerExecutor } from "../computer/computer-executor.ts";
 import { isSourceArtifactPath, isWordDocumentPath } from "../shared/artifact-format.ts";
 import type {
@@ -284,23 +285,28 @@ function verifyHtmlProfile(
     || /<html\b/i.test(text)
     || (/<body\b/i.test(text) && /<\/body>/i.test(text));
   const scriptSyntax = inspectInlineScriptSyntax(text);
+  const documentBoundary = inspectHtmlDocumentBoundary(text);
   const slideCount = countHtmlSlides(text);
   const navigationSignals = htmlNavigationSignals(text);
   const checks: ArtifactAcceptanceCheck[] = [
-    checkStatus("format_matches_request", extensionMatches && hasHtmlShape && scriptSyntax.valid, {
+    checkStatus("format_matches_request", extensionMatches && hasHtmlShape && scriptSyntax.valid && documentBoundary.valid, {
       expected: presentationMode ? "html_ppt" : "html",
       extensionMatches,
       hasHtmlShape,
       inlineScriptSyntaxValid: scriptSyntax.valid,
+      documentBoundaryValid: documentBoundary.valid,
       contentTruncated: truncated,
     }),
-    checkStatus("artifact_openable", hasHtmlShape && scriptSyntax.valid, {
+    checkStatus("artifact_openable", hasHtmlShape && scriptSyntax.valid && documentBoundary.valid, {
       mode: "static_html_parse",
       hasHtmlShape,
       inlineScriptSyntaxValid: scriptSyntax.valid,
+      documentBoundaryValid: documentBoundary.valid,
       contentTruncated: truncated,
     }),
     checkStatus("inline_script_syntax", scriptSyntax.valid, scriptSyntax.evidence),
+    { ...checkStatus("html_document_boundary", documentBoundary.valid, documentBoundary.evidence),
+      ...(documentBoundary.valid ? {} : { diagnostics: "Content was appended after the document's explicit </html> end tag. Append writes at EOF, not inside a closed document; repair the existing boundary before publishing." }) },
   ];
   if (presentationMode) {
     checks.push(
@@ -333,6 +339,31 @@ function verifyHtmlProfile(
     }, "Browser-rendered openability is unavailable in this runtime."));
   }
   return checks;
+}
+
+/** Check source boundaries before a browser's error recovery hides them.
+ * Tokenization keeps comments, quoted attributes and raw script/style text from
+ * being mistaken for document end tags. Optional HTML end tags remain allowed.
+ * This is deliberately not a claim of full HTML validity or visual acceptance.
+ */
+function inspectHtmlDocumentBoundary(text: string): { valid: boolean; evidence: Record<string, unknown> } {
+  let closedAt: number | undefined;
+  let trailingAt: number | undefined;
+  const markTrailing = () => { if (closedAt !== undefined) trailingAt ??= parser.startIndex; };
+  const parser = new Parser({
+    onopentag: markTrailing,
+    ontext(value) { if (value.trim().length > 0) markTrailing(); },
+    onclosetag(name, implied) {
+      if (name === "html" && !implied && closedAt === undefined) closedAt = parser.startIndex;
+    },
+  }, { decodeEntities: false });
+  parser.end(text);
+  const lineAt = (offset: number) => text.slice(0, offset).split("\n").length;
+  return { valid: trailingAt === undefined, evidence: {
+    mode: "html_source_document_boundary", contentAfterDocumentEnd: trailingAt !== undefined,
+    ...(closedAt === undefined ? {} : { documentEndLine: lineAt(closedAt) }),
+    ...(trailingAt === undefined ? {} : { firstTrailingContentLine: lineAt(trailingAt) }),
+  } };
 }
 
 function htmlBasicNavigationRequested(checks: readonly string[]): boolean {

@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { SqlConnection } from "../storage/connection.ts";
-import { insertIfAbsentSql } from "../storage/dialect-sql.ts";
+import { runtimePersistence, type RuntimePersistence, type RuntimePersistenceInput } from "../storage/runtime-records.ts";
 import { AppError } from "../shared/errors.ts";
 
 export interface RunCheckpointRecord {
@@ -28,10 +27,10 @@ interface RunCheckpointRow {
 }
 
 export class RunCheckpointRepository {
-  private readonly database: SqlConnection;
+  private readonly database: RuntimePersistence;
 
-  constructor(database: SqlConnection) {
-    this.database = database;
+  constructor(database: RuntimePersistenceInput) {
+    this.database = runtimePersistence(database);
   }
 
   async create(input: {
@@ -43,56 +42,34 @@ export class RunCheckpointRepository {
   }): Promise<RunCheckpointRecord> {
     const id = randomUUID();
     const createdAt = input.createdAt ?? Date.now();
-    await this.database.prepare(insertIfAbsentSql({
-      dialect: this.database.dialect,
-      insert: `INSERT INTO run_checkpoints(id, run_id, plan_id, action_id, reason, snapshot_json, created_at)
-        VALUES (?, ?, ?, ?, 'execution_authority_lost', ?, ?)`,
-      keyColumn: "run_id",
-    })).run(
-      id,
-      input.runId,
-      input.planId ?? null,
-      input.actionId ?? null,
-      JSON.stringify(input.snapshot),
-      createdAt,
-    );
+    await this.database.records.insert("run_checkpoints", { id, run_id: input.runId, plan_id: input.planId ?? null,
+      action_id: input.actionId ?? null, reason: "execution_authority_lost", snapshot_json: JSON.stringify(input.snapshot), created_at: createdAt }, "ignore");
     return await this.requireByRun(input.runId);
   }
 
   async getByRun(runId: string): Promise<RunCheckpointRecord | undefined> {
-    const row = await this.database.prepare("SELECT * FROM run_checkpoints WHERE run_id = ?")
-      .get(runId) as RunCheckpointRow | undefined;
+    const row = (await this.database.records.find("run_checkpoints", { run_id: runId }))[0];
     return row === undefined ? undefined : toRecord(row);
   }
 
   async get(id: string): Promise<RunCheckpointRecord | undefined> {
-    const row = await this.database.prepare("SELECT * FROM run_checkpoints WHERE id = ?")
-      .get(id) as RunCheckpointRow | undefined;
+    const row = (await this.database.records.find("run_checkpoints", { id }))[0];
     return row === undefined ? undefined : toRecord(row);
   }
 
   async claim(id: string, now = Date.now()): Promise<RunCheckpointRecord> {
-    const result = await this.database.prepare(`
-      UPDATE run_checkpoints SET consumed_at = ?
-      WHERE id = ? AND consumed_at IS NULL AND child_run_id IS NULL
-    `).run(now, id) as { changes: number };
-    if (result.changes !== 1) throw new AppError("CONFLICT", "Checkpoint has already been started", 409);
+    const changed = await this.database.records.update("run_checkpoints", { id, consumed_at: null, child_run_id: null }, () => ({ consumed_at: now }));
+    if (changed !== 1) throw new AppError("CONFLICT", "Checkpoint has already been started", 409);
     return await this.require(id);
   }
 
   async attachChild(id: string, childRunId: string): Promise<void> {
-    const result = await this.database.prepare(`
-      UPDATE run_checkpoints SET child_run_id = ?
-      WHERE id = ? AND consumed_at IS NOT NULL AND child_run_id IS NULL
-    `).run(childRunId, id) as { changes: number };
-    if (result.changes !== 1) throw new AppError("CONFLICT", "Checkpoint continuation is no longer claimable", 409);
+    const changed = await this.database.records.update("run_checkpoints", { id, child_run_id: null }, row => row.consumed_at !== null ? { child_run_id: childRunId } : undefined);
+    if (changed !== 1) throw new AppError("CONFLICT", "Checkpoint continuation is no longer claimable", 409);
   }
 
   async releaseClaim(id: string): Promise<void> {
-    await this.database.prepare(`
-      UPDATE run_checkpoints SET consumed_at = NULL
-      WHERE id = ? AND child_run_id IS NULL
-    `).run(id);
+    await this.database.records.update("run_checkpoints", { id, child_run_id: null }, () => ({ consumed_at: null }));
   }
 
   private async require(id: string): Promise<RunCheckpointRecord> {

@@ -3492,7 +3492,7 @@ test("missing command is rejected before execution and the corrected structured 
   assert.equal(events.filter((event) => event.type === "tool.rejected").length, 1);
 });
 
-test("repeated prepare-stage argument rejection stops before burning the step budget", async () => {
+test("repeated prepare-stage argument rejection produces a recoverable Step boundary", async () => {
   let calls = 0;
   let executions = 0;
   const tool: RuntimeTool<unknown> = {
@@ -3533,6 +3533,12 @@ test("repeated prepare-stage argument rejection stops before burning the step bu
   };
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["computer_write_file"]);
+  const state = createCanonicalRunState({
+    runId: grant.runId,
+    userInput: "write report",
+    understanding: understandTask({ objective: "write report", toolNames: ["computer_write_file"] }),
+  });
+  let persistedBoundary: any;
   await assert.rejects(
     () => runAgentLoop({
       runId: grant.runId,
@@ -3542,11 +3548,16 @@ test("repeated prepare-stage argument rejection stops before burning the step bu
       tools: new ToolRegistry([tool]),
       grant,
       maxSteps: 8,
+      currentDecisionContext: () => ({ canonicalState: state, stepId: "write-report" }),
+      onLocalRepairExhausted: async (failure) => { persistedBoundary = failure.failedBoundary; },
       emit: (event) => { events.push(event); },
     }),
     (error: unknown) => error instanceof AppError
-      && error.code === "RUN_LIMIT_EXCEEDED"
-      && error.message.includes("without forward progress"),
+      && error.code === "STEP_NOT_COMPLETED"
+      && error.details?.reason === "repeated_prepare_rejection"
+      && error.details?.repairExhausted === true
+      && (error.details?.failedBoundary as any)?.suggestedRepairShape === "repair_leaf"
+      && (error.details?.failedBoundary as any)?.unmetCriteria?.[0]?.criterionId === "valid_tool_invocation",
   );
 
   assert.equal(calls, 4); // One terminal report after the no-progress stop.
@@ -3554,6 +3565,8 @@ test("repeated prepare-stage argument rejection stops before burning the step bu
   const noProgress = events.filter((event) => event.type === "loop.no_progress");
   assert.equal(noProgress.length, 2);
   assert.equal(noProgress.at(-1)?.data.stalled, true);
+  assert.equal(persistedBoundary.stepId, "write-report");
+  assert.equal(persistedBoundary.repairPrerequisite, "new_observation");
 });
 
 test("a rejected assessed candidate grants bounded tool repair grace", async () => {

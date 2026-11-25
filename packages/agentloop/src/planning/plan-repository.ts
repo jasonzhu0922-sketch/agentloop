@@ -1,6 +1,5 @@
 import { RunInputRepository } from "../runtime/run-input-repository.ts";
-import type { SqlConnection } from "../storage/connection.ts";
-import { insertIgnoreConflictsSql } from "../storage/dialect-sql.ts";
+import { ascending, runtimePersistence, type RuntimePersistence, type RuntimePersistenceInput } from "../storage/runtime-records.ts";
 import { AppError, notFound } from "../shared/errors.ts";
 import type {
   AssessmentMethod,
@@ -68,177 +67,108 @@ interface PlanRevisionInput {
 }
 
 export class PlanRepository {
-  private readonly database: SqlConnection;
+  private readonly database: RuntimePersistence;
 
-  constructor(database: SqlConnection) {
-    this.database = database;
+  constructor(database: RuntimePersistenceInput) {
+    this.database = runtimePersistence(database);
   }
 
   async create(plan: ExecutionPlan): Promise<ExecutionPlan> {
-    await this.database.transaction(async () => {
-      await this.database.prepare(`
-        INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, canonical_state_ref_json, input_bindings_json, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        plan.id,
-        plan.runId,
-        plan.version,
-        plan.goal,
-        JSON.stringify(plan.selectedSkillIds),
-        JSON.stringify(plan.canonicalStateRef),
-        JSON.stringify(plan.resultBindings ?? []),
-        plan.status,
-        plan.createdAt,
-        plan.updatedAt,
-      );
-      const insertStep = this.database.prepare(`
-        INSERT INTO plan_steps(
-          plan_id, step_id, kind, parent_step_id, position, objective, dependencies_json,
-          role, refinement_state, required_facts_json, skill_ids_json,
-          required_capabilities_json, recommended_tool_names_json, execution_binding_json,
-          evidence_contract_json, success_criteria_json, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      for (const step of plan.steps) {
-        await insertStep.run(
-          plan.id,
-          step.id,
-          step.kind,
-          step.parentId ?? null,
-          step.position,
-          step.objective,
-          JSON.stringify(step.dependencies),
-          step.role ?? null,
-          step.refinementState,
-          JSON.stringify(step.requiredFacts),
-          JSON.stringify(step.skillIds),
-          JSON.stringify(step.requiredCapabilities),
-          JSON.stringify([]),
-          JSON.stringify(step.executionBinding),
-          step.evidenceContract === undefined ? null : JSON.stringify(step.evidenceContract),
-          JSON.stringify(step.successCriteria),
-          step.status,
-        );
-      }
+    return await this.database.transaction(async () => {
+      await this.database.records.insert("plans", { id: plan.id, run_id: plan.runId, version: plan.version, goal: plan.goal,
+        selected_skill_ids_json: JSON.stringify(plan.selectedSkillIds), canonical_state_ref_json: JSON.stringify(plan.canonicalStateRef),
+        input_bindings_json: JSON.stringify(plan.resultBindings ?? []), status: storedPlanStatus(plan.status), created_at: plan.createdAt, updated_at: plan.updatedAt });
+      for (const step of plan.steps) await this.insertStep(plan.id, step);
       await this.saveSnapshot(plan, "initial_admission", undefined, plan.createdAt);
       await this.saveRoundScope(plan);
+      return await this.get(plan.id);
     });
-    return await this.get(plan.id);
+  }
+
+  private async insertStep(planId: string, step: PlanStep): Promise<void> {
+    await this.database.records.insert("plan_steps", { plan_id: planId, step_id: step.id, kind: step.kind, parent_step_id: step.parentId ?? null,
+      position: step.position, objective: step.objective, dependencies_json: JSON.stringify(step.dependencies), role: step.role ?? null,
+      refinement_state: step.refinementState, required_facts_json: JSON.stringify(step.requiredFacts), skill_ids_json: JSON.stringify(step.skillIds),
+      required_capabilities_json: JSON.stringify(step.requiredCapabilities), recommended_tool_names_json: "[]", execution_binding_json: JSON.stringify(step.executionBinding),
+      evidence_contract_json: step.evidenceContract === undefined ? null : JSON.stringify(step.evidenceContract),
+      success_criteria_json: JSON.stringify(step.successCriteria), status: step.status });
   }
 
   async getByRun(runId: string): Promise<ExecutionPlan> {
-    const row = await this.database.prepare(`SELECT plans.* FROM plans
-      LEFT JOIN run_rounds current_round ON current_round.run_id = plans.run_id
-        AND current_round.plan_id = plans.id
-      WHERE plans.run_id = ?
-      ORDER BY CASE WHEN current_round.plan_id IS NULL THEN 1 ELSE 0 END,
-        plans.created_at DESC, plans.id DESC LIMIT 1`).get(runId) as PlanRow | undefined;
-    if (row === undefined) throw notFound("Plan");
-    return await this.hydrate(row);
+    return await this.database.transaction(async () => {
+      const rounds = await this.database.records.find("run_rounds", { run_id: runId });
+      const bound = new Set(rounds.map(row => row.plan_id));
+      const rows = await this.database.records.find("plans", { run_id: runId });
+      rows.sort((a, b) => Number(bound.has(b.id)) - Number(bound.has(a.id)) || b.created_at - a.created_at || b.id.localeCompare(a.id));
+      if (!rows[0]) throw notFound("Plan");
+      return await this.hydrate(rows[0]);
+    });
   }
 
   async listByRun(runId: string): Promise<ExecutionPlan[]> {
-    const rows = await this.database.prepare("SELECT * FROM plans WHERE run_id = ? ORDER BY created_at, id")
-      .all(runId) as unknown as PlanRow[];
-    if (rows.length === 0) throw notFound("Plan");
-    return await Promise.all(rows.map((row) => this.hydrate(row)));
+    return await this.database.transaction(async () => {
+      const rows = (await this.database.records.find("plans", { run_id: runId })).sort(ascending("created_at", "id"));
+      if (!rows.length) throw notFound("Plan");
+      return await Promise.all(rows.map(row => this.hydrate(row)));
+    });
   }
 
   async get(planId: string): Promise<ExecutionPlan> {
-    const row = await this.database.prepare("SELECT * FROM plans WHERE id = ?").get(planId) as PlanRow | undefined;
-    if (row === undefined) throw notFound("Plan");
-    return await this.hydrate(row);
+    return await this.database.transaction(async () => {
+      const row = (await this.database.records.find("plans", { id: planId }))[0];
+      if (!row) throw notFound("Plan");
+      return await this.hydrate(row);
+    });
   }
 
   async markPlan(planId: string, status: PlanStatus): Promise<ExecutionPlan> {
-    await this.database.prepare("UPDATE plans SET status = ?, updated_at = ? WHERE id = ?")
-      .run(status, Date.now(), planId);
-    return await this.get(planId);
+    return await this.database.transaction(async () => {
+      await this.database.records.update("plans", { id: planId }, () => ({ status: storedPlanStatus(status), updated_at: Date.now() }));
+      return await this.get(planId);
+    });
   }
 
   async startStep(planId: string, stepId: string): Promise<ExecutionPlan> {
-    const now = Date.now();
-    await this.database.transaction(async () => {
-      await this.database.prepare("UPDATE plans SET status = 'running', updated_at = ? WHERE id = ?")
-        .run(now, planId);
-      await this.database.prepare(`
-        UPDATE plan_steps SET status = 'running', started_at = ?
-        WHERE plan_id = ? AND step_id = ? AND status = 'pending'
-      `).run(now, planId, stepId);
+    return await this.database.transaction(async () => {
+      const now = Date.now();
+      await this.database.records.update("plans", { id: planId }, () => ({ status: "running" as const, updated_at: now }));
+      await this.database.records.update("plan_steps", { plan_id: planId, step_id: stepId, status: "pending" }, () => ({ status: "running" as const, started_at: now }));
+      return await this.get(planId);
     });
-    return await this.get(planId);
   }
 
   async completeStep(planId: string, stepId: string, output: string, evidence: StepEvidence): Promise<ExecutionPlan> {
-    const now = Date.now();
-    await this.database.transaction(async () => {
-      const plan = await this.get(planId);
+    return await this.database.transaction(async () => {
+      const now = Date.now(), plan = await this.get(planId);
       await new RunInputRepository(this.database).assertDrained(plan.runId);
-      await this.database.prepare(`
-        UPDATE plan_steps
-        SET status = 'completed', output = ?, evidence_json = ?, finished_at = ?
-        WHERE plan_id = ? AND step_id = ? AND status = 'running'
-          AND EXISTS (
-            SELECT 1 FROM plans
-            JOIN runs ON runs.id = plans.run_id
-            WHERE plans.id = plan_steps.plan_id AND runs.status = 'running'
-          )
-      `).run(output, JSON.stringify(evidence), now, planId, stepId);
-      await this.database.prepare("UPDATE plans SET updated_at = ? WHERE id = ?").run(now, planId);
+      const run = (await this.database.records.find("runs", { id: plan.runId }))[0];
+      if (run?.status === "running") await this.database.records.update("plan_steps", { plan_id: planId, step_id: stepId, status: "running" as const },
+        () => ({ status: "completed" as const, output, evidence_json: JSON.stringify(evidence), finished_at: now }));
+      await this.database.records.update("plans", { id: planId }, () => ({ updated_at: now }));
+      return await this.get(planId);
     });
-    return await this.get(planId);
   }
 
   async failStep(planId: string, stepId: string, error: string): Promise<ExecutionPlan> {
-    const now = Date.now();
-    await this.database.transaction(async () => {
-      await this.database.prepare(`
-        UPDATE plan_steps SET status = 'failed', error = ?, finished_at = ?
-        WHERE plan_id = ? AND step_id = ?
-      `).run(error, now, planId, stepId);
-      await this.database.prepare("UPDATE plans SET status = 'failed', updated_at = ? WHERE id = ?")
-        .run(now, planId);
+    return await this.database.transaction(async () => {
+      const now = Date.now();
+      await this.database.records.update("plan_steps", { plan_id: planId, step_id: stepId }, () => ({ status: "failed" as const, error, finished_at: now }));
+      await this.database.records.update("plans", { id: planId }, () => ({ status: "failed" as const, updated_at: now }));
+      return await this.get(planId);
     });
-    return await this.get(planId);
   }
 
   async saveAssessment(assessment: SkillComplianceAssessment): Promise<void> {
-    await this.database.prepare(`
-      INSERT INTO skill_compliance_assessments(
-        id, plan_id, step_id, attempt, assessment_profile, assessment_method,
-        approved, criteria_json, skills_json,
-        evidence_digest, feedback, failed_boundary_json, decision_bindings_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      assessment.id,
-      assessment.planId,
-      assessment.stepId,
-      assessment.attempt,
-      assessment.assessmentProfile ?? "result_judged",
-      assessment.assessmentMethod ?? "model",
-      assessment.approved ? 1 : 0,
-      JSON.stringify(assessment.criteria),
-      JSON.stringify(assessment.skills),
-      assessment.evidenceDigest,
-      assessment.feedback,
-      assessment.failedBoundary === undefined ? null : JSON.stringify(assessment.failedBoundary),
-      JSON.stringify(assessment.decisionBindings ?? []),
-      assessment.createdAt,
-    );
+    await this.database.records.insert("skill_compliance_assessments", { id: assessment.id, plan_id: assessment.planId, step_id: assessment.stepId,
+      attempt: assessment.attempt, assessment_profile: assessment.assessmentProfile ?? "result_judged", assessment_method: assessment.assessmentMethod ?? "model",
+      approved: assessment.approved ? 1 : 0, criteria_json: JSON.stringify(assessment.criteria), skills_json: JSON.stringify(assessment.skills),
+      evidence_digest: assessment.evidenceDigest, feedback: assessment.feedback,
+      failed_boundary_json: assessment.failedBoundary === undefined ? null : JSON.stringify(assessment.failedBoundary),
+      decision_bindings_json: JSON.stringify(assessment.decisionBindings ?? []), created_at: assessment.createdAt });
   }
 
   async assessments(planId: string): Promise<SkillComplianceAssessment[]> {
-    const rows = await this.database.prepare(`
-      SELECT id, plan_id, step_id, attempt, assessment_profile, assessment_method,
-             approved, criteria_json, skills_json,
-             evidence_digest, feedback, failed_boundary_json, decision_bindings_json, created_at
-      FROM skill_compliance_assessments WHERE plan_id = ? ORDER BY step_id, attempt
-    `).all(planId) as unknown as Array<{
-      id: string; plan_id: string; step_id: string; attempt: number;
-      assessment_profile?: string; assessment_method?: string; approved: number;
-      criteria_json: string; skills_json: string; evidence_digest: string; feedback: string;
-      failed_boundary_json: string | null; decision_bindings_json: string | null; created_at: number;
-    }>;
+    const rows = (await this.database.records.find("skill_compliance_assessments", { plan_id: planId })).sort(ascending("step_id", "attempt"));
     return rows.map((row) => ({
       id: row.id,
       planId: row.plan_id,
@@ -262,7 +192,7 @@ export class PlanRepository {
     const next = input.proposal;
     if (next.runId !== current.runId) throw invalidRevision("Plan revision must remain in the same Run");
     if (input.steerMessageId !== undefined) {
-      const message = await this.database.prepare("SELECT id FROM run_input_messages WHERE id = ? AND run_id = ? AND status = 'processing'").get(input.steerMessageId, current.runId);
+      const message = (await this.database.records.find("run_input_messages", { id: input.steerMessageId, run_id: current.runId, status: "processing" }))[0];
       if (message === undefined) throw invalidRevision("Steer revision requires the current durable input decision");
     }
     const currentById = new Map(current.steps.map((step) => [step.id, step]));
@@ -298,85 +228,40 @@ export class PlanRepository {
   }
 
   async revise(input: PlanRevisionInput): Promise<ExecutionPlan> {
-    const current = await this.validateRevision(input);
-    const next = input.proposal;
-    const currentById = new Map(current.steps.map((step) => [step.id, step]));
-
-    const now = Date.now();
-    await this.database.transaction(async () => {
+    return await this.database.transaction(async () => {
+      const current = await this.validateRevision(input), next = input.proposal, now = Date.now();
+      const currentById = new Map(current.steps.map(step => [step.id, step]));
       await this.saveSnapshot(current, "before_revision", input.actionId, now);
-      await this.database.prepare(`
-        UPDATE plans
-        SET version = ?, goal = ?, selected_skill_ids_json = ?, input_bindings_json = ?, canonical_state_ref_json = ?, status = 'running', updated_at = ?
-        WHERE id = ?
-      `).run(current.version + 1, next.goal, JSON.stringify(next.selectedSkillIds), JSON.stringify(next.resultBindings ?? []), JSON.stringify(next.canonicalStateRef), now, current.id);
-      const insertStep = this.database.prepare(`
-        INSERT INTO plan_steps(
-          plan_id, step_id, kind, parent_step_id, position, objective, dependencies_json,
-          role, refinement_state, required_facts_json, skill_ids_json,
-          required_capabilities_json, recommended_tool_names_json, execution_binding_json,
-          evidence_contract_json, success_criteria_json, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-      `);
-      const updateDependencies = this.database.prepare(`
-        UPDATE plan_steps SET dependencies_json = ?
-        WHERE plan_id = ? AND step_id = ? AND status IN ('pending', 'failed')
-      `);
-      let nextPosition = Math.max(-1, ...current.steps.map((step) => step.position)) + 1;
+      await this.database.records.update("plans", { id: current.id }, () => ({ version: current.version + 1, goal: next.goal,
+        selected_skill_ids_json: JSON.stringify(next.selectedSkillIds), input_bindings_json: JSON.stringify(next.resultBindings ?? []),
+        canonical_state_ref_json: JSON.stringify(next.canonicalStateRef), status: "running" as const, updated_at: now }));
+      let nextPosition = Math.max(-1, ...current.steps.map(step => step.position)) + 1;
       for (const step of next.steps) {
         const existing = currentById.get(step.id);
-        if (existing !== undefined) {
+        if (existing) {
           if (JSON.stringify(existing.dependencies) !== JSON.stringify(step.dependencies)) {
-            await updateDependencies.run(JSON.stringify(step.dependencies), current.id, step.id);
+            await this.database.records.update("plan_steps", { plan_id: current.id, step_id: step.id }, row =>
+              row.status === "pending" || row.status === "failed" ? { dependencies_json: JSON.stringify(step.dependencies) } : undefined);
           }
-          continue;
-        }
-        await insertStep.run(
-          current.id,
-          step.id,
-          step.kind,
-          step.parentId ?? null,
-          nextPosition,
-          step.objective,
-          JSON.stringify(step.dependencies),
-          step.role ?? null,
-          step.refinementState,
-          JSON.stringify(step.requiredFacts),
-          JSON.stringify(step.skillIds),
-          JSON.stringify(step.requiredCapabilities),
-          JSON.stringify([]),
-          JSON.stringify(step.executionBinding),
-          step.evidenceContract === undefined ? null : JSON.stringify(step.evidenceContract),
-          JSON.stringify(step.successCriteria),
-        );
-        nextPosition += 1;
+        } else await this.insertStep(current.id, { ...step, position: nextPosition++, status: "pending" });
       }
-      const retire = this.database.prepare(`
-        INSERT INTO plan_step_retirements(plan_id, step_id, action_id, reason, retired_at)
-        VALUES (?, ?, ?, ?, ?)
-      `);
-      for (const stepId of input.retiredStepIds) {
-        await retire.run(current.id, stepId, input.actionId, input.reason, now);
-      }
+      for (const stepId of input.retiredStepIds) await this.database.records.insert("plan_step_retirements", {
+        plan_id: current.id, step_id: stepId, action_id: input.actionId, reason: input.reason, retired_at: now });
       await this.saveRoundScope({ ...next, ...(next.roundScope === undefined && current.roundScope !== undefined ? { roundScope: current.roundScope } : {}), id: current.id, version: current.version + 1 });
       const revised = await this.get(current.id);
       await this.saveSnapshot(revised, "recovery_revision", input.actionId, now);
+      return revised;
     });
-    return await this.get(current.id);
   }
 
   private async hydrate(row: PlanRow): Promise<ExecutionPlan> {
-    const scopeRow = await this.database.prepare("SELECT scope_json FROM plan_round_scopes WHERE plan_id = ? AND plan_version = ?")
-      .get<{ scope_json: string }>(row.id, row.version);
+    const scopeRow = (await this.database.records.find("plan_round_scopes", { plan_id: row.id, plan_version: row.version }))[0];
     const roundScope = scopeRow === undefined ? undefined : parseRoundScope(JSON.parse(scopeRow.scope_json));
-    const steps = await this.database.prepare(`
-      SELECT plan_steps.*, plan_step_retirements.retired_at, plan_step_retirements.reason AS retirement_reason
-      FROM plan_steps
-      LEFT JOIN plan_step_retirements
-        ON plan_step_retirements.plan_id = plan_steps.plan_id
-        AND plan_step_retirements.step_id = plan_steps.step_id
-      WHERE plan_steps.plan_id = ? ORDER BY position
-    `).all(row.id) as unknown as StepRow[];
+    const retirements = await this.database.records.find("plan_step_retirements", { plan_id: row.id });
+    const steps: StepRow[] = (await this.database.records.find("plan_steps", { plan_id: row.id })).sort(ascending("position")).map(step => {
+      const retired = retirements.find(item => item.step_id === step.step_id);
+      return { ...step, role: step.role as StepRow["role"], retired_at: retired?.retired_at ?? null, retirement_reason: retired?.reason ?? null };
+    });
     return {
       id: row.id,
       runId: row.run_id,
@@ -417,18 +302,13 @@ export class PlanRepository {
         ...(step.retiredAt === undefined ? {} : { retiredAt: step.retiredAt }),
       })),
     };
-    await this.database.prepare(insertIgnoreConflictsSql({
-      dialect: this.database.dialect,
-      insert: `INSERT INTO plan_revision_snapshots(plan_id, version, proposal_json, reason, action_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)`,
-      tidbNoopColumn: "plan_id",
-    })).run(plan.id, plan.version, JSON.stringify(proposal), reason, actionId ?? null, createdAt);
+    await this.database.records.insert("plan_revision_snapshots", { plan_id: plan.id, version: plan.version,
+      proposal_json: JSON.stringify(proposal), reason, action_id: actionId ?? null, created_at: createdAt }, "ignore");
   }
 
   private async saveRoundScope(plan: ExecutionPlan): Promise<void> {
     if (plan.roundScope === undefined) return;
-    await this.database.prepare("INSERT INTO plan_round_scopes(plan_id, plan_version, scope_json) VALUES (?, ?, ?)")
-      .run(plan.id, plan.version, JSON.stringify(plan.roundScope));
+    await this.database.records.insert("plan_round_scopes", { plan_id: plan.id, plan_version: plan.version, scope_json: JSON.stringify(plan.roundScope) });
   }
 }
 
@@ -589,4 +469,9 @@ function isSafeRecoveryDependencyRewire(
 
 function invalidRevision(message: string): AppError {
   return new AppError("PLAN_NOT_ADMITTED", message, 422, { recoveryStage: "definition" });
+}
+
+function storedPlanStatus(status: PlanStatus): Exclude<PlanStatus, "pending"> {
+  if (status === "pending") throw new AppError("CONFLICT", "A pending Plan must be admitted before persistence", 409);
+  return status;
 }

@@ -343,3 +343,139 @@ test("a recovery exception reports later committed receipts rather than the orig
     assert.equal(events.some(event => event.type === "terminal.delivery_committed"), false);
   } finally { database.close(); }
 });
+
+test("repeated prepare rejection enters canonical Recovery with prior Results and ordered evidence", async t => {
+  const root = await mkdtemp(join(tmpdir(), "prepare-rejection-recovery-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const database = new AppDatabase(":memory:");
+  let contextReads = 0;
+  let malformedQueries = 0;
+  let correctedQueries = 0;
+  let recoveries = 0;
+  let contextResultId = "";
+  try {
+    const runs = new RunService({
+      database,
+      workspaceRoot: root,
+      skills: new SkillService(database),
+      maxSteps: 12,
+      plannerFactory: singleStepTestPlanner,
+      assessorFactory: approvingTestAssessor,
+      planRevisionAssessorFactory: () => ({ assess: async input => {
+        const timeline = input.evidenceTimeline ?? [];
+        assert.ok(timeline.length > 0);
+        assert.deepEqual([...timeline.map(event => event.seq)].sort((a, b) => a - b), timeline.map(event => event.seq));
+        assert.ok(timeline.some(event => event.toolCallId === "context-read" && event.type === "tool.completed"));
+        assert.equal(timeline.filter(event => event.type === "tool.rejected").length, 3);
+        return { approved: true, feedback: "The repair preserves the committed context and changes the invalid invocation.", evidenceRefs: [contextResultId] };
+      } }),
+      tools: [
+        {
+          name: "read_context",
+          description: "Read reusable query context",
+          inputSchema: { type: "object", additionalProperties: false },
+          executionMode: "parallel",
+          replaySafe: true,
+          parse: value => value,
+          execute: async () => {
+            contextReads += 1;
+            return { organization: "BWSS", period: "202601-202610" };
+          },
+        },
+        {
+          name: "query_data",
+          description: "Run the admitted report query",
+          inputSchema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["command"],
+            properties: { command: { type: "string", minLength: 1 } },
+          },
+          executionMode: "parallel",
+          replaySafe: true,
+          parse: value => {
+            const command = typeof value === "object" && value !== null && "command" in value
+              ? (value as { command?: unknown }).command : undefined;
+            if (typeof command !== "string" || command.length === 0) {
+              throw new AppError("BAD_REQUEST", "Invalid arguments for query_data: command must be a string", 400);
+            }
+            return { command };
+          },
+          execute: async input => {
+            correctedQueries += 1;
+            assert.equal(input.command, "python3");
+            return { rows: 10, status: "ok" };
+          },
+        },
+      ],
+      recoveryPlannerFactory: () => ({ decide: async input => {
+        recoveries += 1;
+        assert.equal(input.action.metadata?.localRepairExhausted, true);
+        assert.equal(input.failedBoundary?.repairPrerequisite, "existing_evidence");
+        assert.equal(input.failedBoundary?.unmetCriteria?.[0]?.criterionId, "valid_tool_invocation");
+        assert.equal(input.failedBoundary?.unmetCriteria?.[0]?.contractIssue,
+          "The required operation never executed because its arguments failed Tool schema validation.");
+        const rejectedCallIds = input.failedBoundary?.unmetCriteria?.[0]?.evidenceRefs ?? [];
+        assert.equal(rejectedCallIds.length, 3);
+        const prior = input.availableResults?.find(result => result.producer.toolName === "read_context");
+        assert.ok(prior, "Recovery must receive the committed pre-failure Result");
+        contextResultId = prior.result.resultId;
+        const timeline = input.evidenceTimeline ?? [];
+        assert.deepEqual([...timeline.map(event => event.seq)].sort((a, b) => a - b), timeline.map(event => event.seq));
+        assert.ok(timeline.some(event => event.toolCallId === "context-read" && event.type === "tool.completed"));
+        assert.deepEqual(
+          timeline.filter(event => event.type === "tool.rejected").map(event => event.toolCallId),
+          rejectedCallIds,
+        );
+        const failed = input.plan!.steps.find(step => step.id === input.failedBoundary!.stepId)!;
+        const repair = repairLeafForFailedBoundary(failed, input.failedBoundary!, input.plan!.version);
+        return {
+          actionId: input.action.id,
+          expectedActionRevision: input.action.revision,
+          decision: "revise_plan" as const,
+          rationale: "Reuse the committed context, inspect it, then issue one corrected query invocation with the required command field.",
+          evidenceRefs: [contextResultId, ...rejectedCallIds],
+          planRevision: {
+            schema: "agentloop.outcomePlan/v2" as const,
+            shape: "recovery_patch" as const,
+            goal: input.plan!.goal,
+            selectedSkillIds: [],
+            steps: [{ ...repair, id: "query-repair", inputResultRefs: [prior.result] }],
+          },
+        };
+      } }),
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async request => {
+          if (recoveries > 0) {
+            if (!request.messages.some(message => message.role === "tool" && message.name === "read_result" && !message.isError)) {
+              return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "consume-context", name: "read_result", arguments: { resultId: contextResultId } }] };
+            }
+            if (correctedQueries === 0) {
+              return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "corrected-query", name: "query_data", arguments: { command: "python3" } }] };
+            }
+            return { content: "Query completed from the preserved context.", finishReason: "stop", toolCalls: [] };
+          }
+          if (!request.messages.some(message => message.role === "tool" && message.name === "read_context" && !message.isError)) {
+            return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "context-read", name: "read_context", arguments: {} }] };
+          }
+          malformedQueries += 1;
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `malformed-query-${malformedQueries}`, name: "query_data", arguments: {} }] };
+        },
+      }),
+    });
+
+    const run = await runs.execute("owner", "Read the context and run the report query.");
+    const events = await runs.events("owner", run.id);
+    assert.equal(run.status, "completed", JSON.stringify(events.filter(event => /failed|rejected|recovery/.test(event.type))));
+    assert.equal(contextReads, 1);
+    assert.equal(malformedQueries, 3);
+    assert.equal(correctedQueries, 1);
+    assert.equal(recoveries, 1);
+    assert.equal(events.some(event => event.type === "assessment.failed_boundary"), true);
+    assert.equal(events.some(event => event.type === "loop.limit_exceeded"), false);
+    assert.equal(events.filter(event => event.type === "terminal.delivery_committed").length, 1);
+  } finally {
+    database.close();
+  }
+});

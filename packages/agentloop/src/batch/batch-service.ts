@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { RunService } from "../runtime/run-service.ts";
-import type { SqlConnection } from "../storage/connection.ts";
+import type { RuntimePersistenceInput } from "../storage/runtime-records.ts";
 import { BatchRepository, type BatchRow } from "../storage/repositories/batch-repository.ts";
 import { AppError, conflict, notFound } from "../shared/errors.ts";
 import { requireRecord, requireString } from "../shared/validation.ts";
@@ -42,7 +42,7 @@ export class BatchService {
   private readonly batches: BatchRepository;
   private readonly runs: RunService;
 
-  constructor(database: SqlConnection, runs: RunService) {
+  constructor(database: RuntimePersistenceInput, runs: RunService) {
     this.batches = new BatchRepository(database);
     this.runs = runs;
   }

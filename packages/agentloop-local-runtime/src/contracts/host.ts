@@ -1,4 +1,4 @@
-import type { AppDatabase, ModelAdapter, ModelFactory, ModelRetryReporter, RunService, McpServerRegistration, WebToolsOptions, SkillLoadDiagnostic, SkillServiceOptions } from "@zhujun/agentloop";
+import type { RuntimeStateConfig, RuntimePersistence, AppDatabase, ModelAdapter, ModelFactory, ModelRetryReporter, RunService, McpServerRegistration, WebToolsOptions, SkillLoadDiagnostic, SkillServiceOptions } from "@zhujun/agentloop";
 import type { MemoryStore } from "@zhujun/agentloop-memory";
 import type { ConnectorConnection } from "@zhujun/agentloop-connector-sdk";
 import type { ConnectorConnectionRuntime, ConnectorModuleRegistration } from "../connectors/index.ts";
@@ -70,6 +70,8 @@ export interface LocalRuntimeDefinition {
 export interface LocalRuntimeControl extends LocalRuntimeDefinition {
   readonly skillDiagnostics?: readonly SkillLoadDiagnostic[];
   readonly database: AppDatabase;
+  readonly runtimeState?: RuntimePersistence;
+  readonly executionRuntimeId?: string;
   readonly runs: RunService;
   readonly scopes: LocalDirectoryScopeStore;
   readonly modelKeys: readonly string[];
@@ -88,6 +90,8 @@ export interface LocalRuntimeExecutionPolicy {
 
 export interface LocalRuntimeHostOptions {
   readonly databasePath: string;
+  /** Per-device Runtime state configuration. The callback must isolate each Runtime namespace/file. */
+  readonly stateConfig?: (definition: LocalRuntimeDefinition) => RuntimeStateConfig;
   readonly runtimeDataRoot?: string;
   readonly skillPackageStoreRoot: string;
   readonly extensionBaseDirectory?: string;

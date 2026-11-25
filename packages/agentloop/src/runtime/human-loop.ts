@@ -1,5 +1,6 @@
+import { readRunEvents } from "../storage/run-event-store.ts";
 import { randomUUID } from "node:crypto";
-import type { SqlConnection } from "../storage/connection.ts";
+import { runtimePersistence, ascending, type RuntimePersistence, type RuntimePersistenceInput } from "../storage/runtime-records.ts";
 import { appendRunEvent } from "../storage/repositories/run-event-sequencer.ts";
 import { AppError, badRequest } from "../shared/errors.ts";
 import { createDecisionCommit } from "./decision-ledger.ts";
@@ -50,19 +51,19 @@ export interface HumanLoopResponse {
 }
 
 export class HumanLoopRepository {
-  private readonly database: SqlConnection;
+  private readonly database: RuntimePersistence;
 
-  constructor(database: SqlConnection) {
-    this.database = database;
+  constructor(database: RuntimePersistenceInput) {
+    this.database = runtimePersistence(database);
   }
 
   async current(runId: string): Promise<HumanLoopRequest | undefined> {
-    const row = await this.database.prepare("SELECT * FROM human_loop_requests WHERE run_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1").get(runId) as Row | undefined;
+    const row = (await this.database.records.find("human_loop_requests", { run_id: runId, status: "open" })).sort(ascending("created_at")).at(-1);
     return row === undefined ? undefined : requestFromRow(row);
   }
 
   async list(runId: string): Promise<HumanLoopRequest[]> {
-    const rows = await this.database.prepare("SELECT * FROM human_loop_requests WHERE run_id = ? ORDER BY created_at, id").all(runId) as unknown as Row[];
+    const rows = (await this.database.records.find("human_loop_requests", { run_id: runId })).sort(ascending("created_at", "id"));
     return rows.map(requestFromRow);
   }
 
@@ -71,14 +72,14 @@ export class HumanLoopRepository {
     const id = randomUUID();
     const now = Date.now();
     await this.database.transaction(async () => {
-      const current = await this.database.prepare("SELECT id FROM human_loop_requests WHERE run_id = ? AND status = 'open' LIMIT 1").get(input.runId);
+      const current = (await this.database.records.find("human_loop_requests", { run_id: input.runId, status: "open" }))[0];
       if (current !== undefined) throw new AppError("CONFLICT", "Run already has an unresolved Human-in-the-Loop request", 409);
-      await this.database.prepare(`INSERT INTO human_loop_requests(
-        id, run_id, plan_id, step_id, action_id, origin, kind, title, prompt, rationale,
-        evidence_refs_json, response_schema_json, resume_json, status, revision, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, ?)`)
-        .run(id, input.runId, input.planId ?? null, input.stepId ?? null, input.actionId ?? null, input.origin, input.kind, input.title, input.prompt, input.rationale,
-          JSON.stringify(input.evidenceRefs), JSON.stringify(input.responseSchema), JSON.stringify(input.resume), now);
+      await this.database.records.insert("human_loop_requests", {
+        id, run_id: input.runId, plan_id: input.planId ?? null, step_id: input.stepId ?? null, action_id: input.actionId ?? null,
+        origin: input.origin, kind: input.kind, title: input.title, prompt: input.prompt, rationale: input.rationale,
+        evidence_refs_json: JSON.stringify(input.evidenceRefs), response_schema_json: JSON.stringify(input.responseSchema),
+        resume_json: JSON.stringify(input.resume), status: "open", revision: 1, created_at: now,
+      });
       await appendEvent(this.database, input.runId, "human_loop.requested", { requestId: id, origin: input.origin, kind: input.kind, planId: input.planId, stepId: input.stepId, evidenceRefs: input.evidenceRefs }, now);
     });
     return (await this.require(id));
@@ -90,11 +91,10 @@ export class HumanLoopRepository {
       request = await this.require(input.requestId);
       if (request.runId !== input.runId || request.status !== "open" || request.revision !== input.expectedRevision) throw new AppError("CONFLICT", "Human-in-the-Loop request changed before response", 409);
       validateResponse(request.responseSchema, input.value);
-      const updated = await this.database.prepare("UPDATE human_loop_requests SET status = 'answered', revision = revision + 1, resolved_at = ? WHERE id = ? AND status = 'open' AND revision = ?")
-        .run(now, input.requestId, input.expectedRevision) as { changes: number };
-      if (updated.changes !== 1) throw new AppError("CONFLICT", "Human-in-the-Loop request changed before response", 409);
-      await this.database.prepare("INSERT INTO human_loop_responses(id, request_id, run_id, request_revision, response_json, actor_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(id, input.requestId, input.runId, input.expectedRevision, JSON.stringify(input.value), input.actorUserId, now);
+      const updated = await this.database.records.update("human_loop_requests", { id: input.requestId, status: "open", revision: input.expectedRevision }, row => ({ status: "answered" as const, revision: row.revision + 1, resolved_at: now }));
+      if (updated !== 1) throw new AppError("CONFLICT", "Human-in-the-Loop request changed before response", 409);
+      await this.database.records.insert("human_loop_responses", { id, request_id: input.requestId, run_id: input.runId,
+        request_revision: input.expectedRevision, response_json: JSON.stringify(input.value), actor_user_id: input.actorUserId, created_at: now });
       await appendEvent(this.database, input.runId, "human_loop.answered", { requestId: input.requestId, requestRevision: input.expectedRevision, value: input.value }, now);
       if (request.responseSchema.type === "select" && Array.isArray(input.value) && input.value.length > 0) {
         const byId = new Map(request.responseSchema.options.map((option) => [option.id, option] as const));
@@ -124,15 +124,14 @@ export class HumanLoopRepository {
 
   /** Use the accepted response and original request, never assistant/tool paraphrases. */
   async answers(runId: string): Promise<RuntimeHumanLoopAnswer[]> {
-    const rows = await this.database.prepare(`SELECT requests.*, responses.id AS response_id,
-        responses.request_revision, responses.response_json, responses.created_at AS answered_at
-      FROM human_loop_requests requests JOIN human_loop_responses responses ON responses.request_id = requests.id
-      WHERE requests.run_id = ? AND responses.run_id = requests.run_id
-      ORDER BY responses.created_at, responses.id`).all(runId) as Array<Row & {
-        response_id: string; request_revision: number; response_json: string; answered_at: number;
-      }>;
-    const events = await this.database.prepare("SELECT seq, payload_json FROM run_events WHERE run_id = ? AND type = 'human_loop.answered' ORDER BY seq")
-      .all(runId) as Array<{ seq: number; payload_json: string }>;
+    const requests = await this.database.records.find("human_loop_requests", { run_id: runId });
+    const responses = (await this.database.records.find("human_loop_responses", { run_id: runId })).sort(ascending("created_at", "id"));
+    const rows = responses.flatMap(response => {
+      const request = requests.find(request => request.id === response.request_id);
+      return request ? [{ ...request, response_id: response.id, request_revision: response.request_revision,
+        response_json: response.response_json, answered_at: response.created_at }] : [];
+    });
+    const events = await readRunEvents(this.database, runId, "human_loop.answered");
     const answerOrder = new Map(events.map(event => {
       const data = JSON.parse(event.payload_json) as { requestId: string; requestRevision: number };
       return [`${data.requestId}:${data.requestRevision}`, event.seq] as const;
@@ -164,7 +163,7 @@ export class HumanLoopRepository {
       };
     }).sort((left, right) => left.eventSeq - right.eventSeq);
   }
-  private async require(id: string): Promise<HumanLoopRequest> { const row = await this.database.prepare("SELECT * FROM human_loop_requests WHERE id = ?").get(id) as Row | undefined; if (row === undefined) throw new AppError("NOT_FOUND", "Human-in-the-Loop request not found", 404); return requestFromRow(row); }
+  private async require(id: string): Promise<HumanLoopRequest> { const row = (await this.database.records.find("human_loop_requests", { id }))[0]; if (row === undefined) throw new AppError("NOT_FOUND", "Human-in-the-Loop request not found", 404); return requestFromRow(row); }
 }
 
 interface Row { id: string; run_id: string; plan_id: string | null; step_id: string | null; action_id: string | null; origin: HumanLoopOrigin; kind: HumanLoopKind; title: string; prompt: string; rationale: string; evidence_refs_json: string; response_schema_json: string; resume_json: string; status: HumanLoopStatus; revision: number; created_at: number; resolved_at: number | null; }
@@ -219,6 +218,6 @@ function validateResponse(schema: HumanLoopResponseSchema, value: unknown): void
   if (reason !== undefined && (typeof reason !== "string" || reason.length > 20_000)) throw badRequest("Human-in-the-Loop rejection reason is invalid");
   return;
 } throw badRequest("Human-in-the-Loop confirmation is invalid"); } if (!value || typeof value !== "object" || Array.isArray(value)) throw badRequest("Human-in-the-Loop form is invalid"); const form = value as Record<string, unknown>; for (const field of schema.fields) { const answer = form[field.id]; if (field.required && (typeof answer !== "string" || !answer.trim())) throw badRequest(`Human-in-the-Loop field ${field.id} is required`); if (typeof answer === "string" && answer.length > (field.maxLength ?? 20_000)) throw badRequest(`Human-in-the-Loop field ${field.id} is too long`); } }
-async function appendEvent(database: SqlConnection, runId: string, type: string, payload: Record<string, unknown>, createdAt: number): Promise<void> {
+async function appendEvent(database: RuntimePersistenceInput, runId: string, type: string, payload: Record<string, unknown>, createdAt: number): Promise<void> {
   await appendRunEvent(database, runId, { type, data: payload, createdAt });
 }

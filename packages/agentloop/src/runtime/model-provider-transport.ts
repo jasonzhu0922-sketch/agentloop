@@ -2,6 +2,8 @@ import { createParser } from "eventsource-parser";
 import { AppError } from "../shared/errors.ts";
 import type { ModelInvocation, ModelRequestLogContext, ModelStreamRawCaptureWriter } from "./contracts.ts";
 import * as policy from "./model-provider-policy.ts";
+import { performance } from "node:perf_hooks";
+import { runtimePerformanceSpan } from "../diagnostics/runtime-performance.ts";
 
 type RecordValue = Record<string, any>;
 export type ProviderProtocol = "chat-completions" | "responses";
@@ -86,7 +88,13 @@ export class ProviderTransport {
         });
       }
       const headers = Object.fromEntries(new Headers(init?.headers).entries());
-      this.response = await fetch(url, { ...init, headers, body: JSON.stringify(wire) });
+      this.diagnostics.transportRequestStartedAt ??= Date.now();
+      this.diagnostics.transportRequestStartedMono ??= performance.now();
+      this.response = await runtimePerformanceSpan("model.transport.headers_wait", {
+        category: "model_transport", protocol: this.options.protocol, model: this.options.model,
+      }, async () => await fetch(url, { ...init, headers, body: JSON.stringify(wire) }));
+      this.diagnostics.responseHeadersReceivedAt ??= Date.now();
+      this.diagnostics.responseHeadersReceivedMono ??= performance.now();
       const response = this.response;
       if (!response.ok) throw await policy.providerHttpError(response, this.options.request, this.options.apiKey);
       if (policy.isJsonResponse(response) || !this.options.request.stream) {
@@ -171,6 +179,8 @@ export class ProviderTransport {
             try { next = await reader.read(); }
             catch (error) { throw new policy.StreamConsumptionError("read", error, this.diagnostics); }
             if (next.done) {
+              this.diagnostics.streamEndedAt ??= Date.now();
+              this.diagnostics.streamEndedMono ??= performance.now();
               ended = true;
               const finalText = decoder.decode();
               pendingFrame += finalText;
@@ -191,6 +201,8 @@ export class ProviderTransport {
               break;
             }
             this.diagnostics.readChunkCount += 1;
+            this.diagnostics.firstRawChunkReceivedAt ??= Date.now();
+            this.diagnostics.firstRawChunkReceivedMono ??= performance.now();
             this.collector!.recordChunk(next.value);
             this.options.recordActivity();
             const text = decoder.decode(next.value, { stream: true });
@@ -212,6 +224,34 @@ export class ProviderTransport {
       cancel: async reason => { ended = true; try { await reader.cancel(reason); } finally { release(); } },
     }, { highWaterMark: 0 });
     return new Response(body, { status: response.status, headers: response.headers });
+  }
+
+  performanceTiming(): Readonly<Record<string, unknown>> {
+    const d = this.diagnostics;
+    const started = d.transportRequestStartedAt;
+    return {
+      schema: "agentloop.modelPerformanceTiming/v1",
+      semantics: "timestamps_are_recorded_at_transport_receive_boundaries;durations_may_overlap_and_sink_backpressure_delays_future_reads",
+      ...(started === undefined ? {} : { transportRequestStartedAt: started }),
+      ...(d.responseHeadersReceivedAt === undefined ? {} : {
+        responseHeadersReceivedAt: d.responseHeadersReceivedAt,
+        requestToHeadersMs: d.transportRequestStartedMono === undefined || d.responseHeadersReceivedMono === undefined
+          ? undefined : Math.max(0, d.responseHeadersReceivedMono - d.transportRequestStartedMono),
+      }),
+      ...(d.firstRawChunkReceivedAt === undefined ? {} : {
+        firstRawChunkReceivedAt: d.firstRawChunkReceivedAt,
+        headersToFirstRawChunkMs: d.responseHeadersReceivedMono === undefined || d.firstRawChunkReceivedMono === undefined
+          ? undefined : Math.max(0, d.firstRawChunkReceivedMono - d.responseHeadersReceivedMono),
+      }),
+      ...(d.streamEndedAt === undefined ? {} : {
+        streamEndedAt: d.streamEndedAt,
+        firstRawChunkToStreamEndMs: d.firstRawChunkReceivedMono === undefined || d.streamEndedMono === undefined
+          ? undefined : Math.max(0, d.streamEndedMono - d.firstRawChunkReceivedMono),
+      }),
+      sinkCallbackCount: d.sinkCallbackCount ?? 0,
+      sinkCallbackWaitMs: d.sinkCallbackWaitMs ?? 0,
+      accounting: "inclusive_timing_do_not_sum_or_subtract_to_claim_pure_provider_time",
+    };
   }
 
   private observePayload(payload: RecordValue): void {

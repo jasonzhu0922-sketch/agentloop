@@ -8,6 +8,16 @@ export const EXECUTION_HISTORY_POLICY = "agentloop.executionHistory/v2";
 /** Checkpoint provenance, not a second state store. Missing metadata disables folding. */
 export interface ExecutionHistoryBasis {
   readonly identity: CurrentDecisionView["identity"];
+  readonly contextArgumentTools?: readonly string[];
+  /** New decisions offer task progress together with an ordinary action. */
+  readonly contextDecisionRequired?: boolean;
+  /** Optimistic update versions actually presented in this model request. */
+  /** Cited evidence actually available before this request (not early results from its own stream). */
+  readonly contextEvidenceToolCallIds?: readonly string[];
+  /** Only cited short references from the frozen request, never a global alias registry. */
+  readonly contextEvidenceBindings?: Readonly<Record<string, string>>;
+  readonly contextItemRevisions?: Readonly<Record<string, string>>;
+  readonly workProductVersions?: readonly { readonly path: string; readonly versionId: string; readonly evidenceToolCallIds: readonly string[] }[];
   readonly toolEffects: Readonly<Record<string, "read" | "write" | "unknown">>;
 }
 

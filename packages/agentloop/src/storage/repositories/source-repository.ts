@@ -1,4 +1,4 @@
-import type { SqlConnection } from "../connection.ts";
+import { ascending, runtimePersistence, type RuntimePersistence, type RuntimePersistenceInput } from "../runtime-records.ts";
 import { AppError, notFound } from "../../shared/errors.ts";
 import type { UploadedSourceStatus, UploadedSourceSummary } from "../../runtime/contracts.ts";
 
@@ -34,17 +34,11 @@ export interface SourceChunkRow {
   readonly created_at: number;
 }
 
-const SOURCE_COLUMNS = `
-  id, owner_user_id, conversation_id, original_name, mime_type, extension,
-  byte_size, sha256, storage_path, status, summary, token_estimate,
-  character_count, truncated, error_code, error_message, created_at, updated_at
-`;
-
 export class SourceRepository {
-  private readonly connection: SqlConnection;
+  private readonly connection: RuntimePersistence;
 
-  constructor(connection: SqlConnection) {
-    this.connection = connection;
+  constructor(connection: RuntimePersistenceInput) {
+    this.connection = runtimePersistence(connection);
   }
 
   async insertSource(input: {
@@ -66,76 +60,41 @@ export class SourceRepository {
     errorMessage?: string;
     createdAt: number;
   }): Promise<SourceRow> {
-    await this.connection.prepare(`
-      INSERT INTO sources(
-        id, owner_user_id, conversation_id, original_name, mime_type, extension,
-        byte_size, sha256, storage_path, status, summary, token_estimate,
-        character_count, truncated, error_code, error_message, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      input.id,
-      input.ownerUserId,
-      input.conversationId ?? null,
-      input.originalName,
-      input.mimeType,
-      input.extension,
-      input.byteSize,
-      input.sha256,
-      input.storagePath,
-      input.status,
-      input.summary ?? null,
-      input.tokenEstimate,
-      input.characterCount,
-      input.truncated ? 1 : 0,
-      input.errorCode ?? null,
-      input.errorMessage ?? null,
-      input.createdAt,
-      input.createdAt,
-    );
+    await this.connection.records.insert("sources", { id: input.id, owner_user_id: input.ownerUserId, conversation_id: input.conversationId ?? null,
+      original_name: input.originalName, mime_type: input.mimeType, extension: input.extension, byte_size: input.byteSize, sha256: input.sha256,
+      storage_path: input.storagePath, status: input.status, summary: input.summary ?? null, token_estimate: input.tokenEstimate,
+      character_count: input.characterCount, truncated: input.truncated ? 1 : 0, error_code: input.errorCode ?? null,
+      error_message: input.errorMessage ?? null, created_at: input.createdAt, updated_at: input.createdAt });
     return await this.requireByOwner(input.ownerUserId, input.id);
   }
 
   async replaceChunks(sourceId: string, chunks: readonly Omit<SourceChunkRow, "source_id" | "created_at">[], now: number): Promise<void> {
     await this.connection.transaction(async () => {
-      await this.connection.prepare("DELETE FROM source_chunks WHERE source_id = ?").run(sourceId);
-      const insert = this.connection.prepare(`
-        INSERT INTO source_chunks(source_id, chunk_index, kind, locator, content, token_estimate, sha256, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      for (const chunk of chunks) {
-        await insert.run(sourceId, chunk.chunk_index, chunk.kind, chunk.locator, chunk.content, chunk.token_estimate, chunk.sha256, now);
-      }
+      await this.connection.records.remove("source_chunks", { source_id: sourceId });
+      for (const chunk of chunks) await this.connection.records.insert("source_chunks", { ...chunk, source_id: sourceId, created_at: now });
     });
   }
 
   async requireByOwner(ownerUserId: string, sourceId: string): Promise<SourceRow> {
-    const source = await this.connection.prepare(`
-      SELECT ${SOURCE_COLUMNS} FROM sources WHERE id = ? AND owner_user_id = ?
-    `).get(sourceId, ownerUserId) as SourceRow | undefined;
+    const source = (await this.connection.records.find("sources", { id: sourceId, owner_user_id: ownerUserId }))[0];
     if (source === undefined) throw notFound("Source");
     return source;
   }
 
   async listForConversation(ownerUserId: string, conversationId: string): Promise<SourceRow[]> {
-    return await this.connection.prepare(`
-      SELECT ${SOURCE_COLUMNS}
-      FROM sources
-      WHERE owner_user_id = ? AND conversation_id = ? AND status != 'deleted'
-      ORDER BY created_at ASC
-    `).all(ownerUserId, conversationId) as unknown as SourceRow[];
+    return (await this.connection.records.find("sources", { owner_user_id: ownerUserId, conversation_id: conversationId })).filter(row => row.status !== "deleted").sort(ascending("created_at"));
   }
 
   async listByRun(runId: string): Promise<SourceRow[]> {
-    return await this.connection.prepare(`
-      SELECT
-        s.id, s.owner_user_id, s.conversation_id, s.original_name, s.mime_type, s.extension,
-        s.byte_size, s.sha256, s.storage_path, s.status, s.summary, s.token_estimate,
-        s.character_count, s.truncated, s.error_code, s.error_message, s.created_at, s.updated_at
-      FROM sources s
-      JOIN run_sources rs ON rs.source_id = s.id
-      WHERE rs.run_id = ?
-      ORDER BY rs.position ASC, s.created_at ASC
-    `).all(runId) as unknown as SourceRow[];
+    return await this.connection.transaction(async () => {
+      const links = (await this.connection.records.find("run_sources", { run_id: runId })).sort(ascending("position"));
+      const rows: SourceRow[] = [];
+      for (const link of links) {
+        const source = (await this.connection.records.find("sources", { id: link.source_id }))[0];
+        if (source) rows.push(source);
+      }
+      return rows;
+    });
   }
 
   async bindRunSources(input: {
@@ -146,6 +105,7 @@ export class SourceRepository {
     createdAt: number;
   }): Promise<SourceRow[]> {
     if (input.sourceIds.length === 0) return [];
+    return await this.connection.transaction(async () => {
     const rows = await Promise.all(input.sourceIds.map((sourceId) => this.requireByOwner(input.ownerUserId, sourceId)));
     for (const row of rows) {
       if (row.status !== "ready") {
@@ -158,27 +118,18 @@ export class SourceRepository {
         throw new AppError("FORBIDDEN", "Source belongs to another conversation", 403, { sourceId: row.id });
       }
     }
-    const update = this.connection.prepare(`
-      UPDATE sources SET conversation_id = ?, updated_at = ?
-      WHERE id = ? AND owner_user_id = ? AND (conversation_id IS NULL OR conversation_id = ?)
-    `);
-    const insert = this.connection.prepare(`
-      INSERT INTO run_sources(run_id, source_id, position, role, created_at)
-      VALUES (?, ?, ?, 'user_supplied', ?)
-    `);
     for (const [index, row] of rows.entries()) {
-      const updated = await update.run(input.conversationId, input.createdAt, row.id, input.ownerUserId, input.conversationId);
-      if (updated.changes === 0) throw new AppError("FORBIDDEN", "Source cannot be claimed for this conversation", 403);
-      await insert.run(input.runId, row.id, index, input.createdAt);
+      const changed = await this.connection.records.update("sources", { id: row.id, owner_user_id: input.ownerUserId }, value =>
+        value.conversation_id === null || value.conversation_id === input.conversationId ? { conversation_id: input.conversationId, updated_at: input.createdAt } : undefined);
+      if (!changed) throw new AppError("FORBIDDEN", "Source cannot be claimed for this conversation", 403);
+      await this.connection.records.insert("run_sources", { run_id: input.runId, source_id: row.id, position: index, role: "user_supplied", created_at: input.createdAt });
     }
     return rows.map((row) => ({ ...row, conversation_id: input.conversationId }));
+    });
   }
 
   async chunks(sourceId: string): Promise<SourceChunkRow[]> {
-    return await this.connection.prepare(`
-      SELECT source_id, chunk_index, kind, locator, content, token_estimate, sha256, created_at
-      FROM source_chunks WHERE source_id = ? ORDER BY chunk_index ASC
-    `).all(sourceId) as unknown as SourceChunkRow[];
+    return (await this.connection.records.find("source_chunks", { source_id: sourceId })).sort(ascending("chunk_index"));
   }
 }
 

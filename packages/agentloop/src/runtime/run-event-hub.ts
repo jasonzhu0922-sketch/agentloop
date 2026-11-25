@@ -10,6 +10,8 @@ export interface LiveRunEvent {
   readonly createdAt: number;
 }
 
+export type LiveRunProgress = Omit<LiveRunEvent, "seq">;
+
 type Listener = (event: LiveRunEvent) => void;
 
 export class RunEventHub {
@@ -33,6 +35,9 @@ export class RunEventHub {
   publish(runId: string, event: LiveRunEvent): void {
     const set = this.listeners.get(runId);
     if (set === undefined) return;
-    for (const listener of [...set]) listener(event);
+    for (const listener of [...set]) {
+      // A disconnected/slow observer cannot roll back successful Runtime work.
+      try { listener(event); } catch { /* Listener owns its transport failure. */ }
+    }
   }
 }

@@ -251,3 +251,8 @@ node apps/agentloop-desktop/scripts/smoke-package.mjs "apps/agentloop-desktop/re
 “测试调用”使用当前草稿及同地址已保存的凭据，按配置的输出上限发起一次基础调用，最长等待 15 秒，不会保存配置或修改版本。测试成功仅代表基础调用通过；工具调用和实际任务需分别验证。测试及保存均遵循账号隔离、CSRF、配置版本和活动任务管理约束。
 
 界面验收：`node apps/agentloop-desktop/tests/fixtures/model-settings-browser-qa.ts`，使用临时数据目录、本机模拟模型服务和无头 Chrome，验证编辑、SDK 请求、凭据、保存、并发编辑及窄窗口布局。
+
+
+Runtime 状态后端更新：设备 Desktop/Local Runtime/Local Agent 默认磁盘 SQLite；服务端 Runtime Host 默认内核原生 Redis（`AGENTLOOP_RUNTIME_STATE_BACKEND=sqlite|redis`）。Router/身份/业务 SQL 配置保持独立。旧文中 Runtime SQL 部署参数只适用于历史数据迁移。共享工作目录和归档卷必须持久化，Redis 需要 AOF、appendfsync always、noeviction；无故障降级、无启动自动迁移、无自动清理历史。完整接入、迁移与验证见仓库 `docs/RUNTIME-NATIVE-RECORDS-STATUS.md`。
+
+可选 Redis：Desktop 在设备 `.env` 设置 `AGENTLOOP_RUNTIME_STATE_BACKEND=redis`、`AGENTLOOP_RUNTIME_REDIS_URL`、`AGENTLOOP_RUNTIME_REDIS_NAMESPACE` 后重启；设备 base namespace 应唯一，应用继续按账户和 Runtime 隔离。Local Runtime 可通过类型化 `stateConfig(definition)` 传入内核配置，Local Agent 支持同名环境变量。默认仍是磁盘 SQLite；本机配置和 Memory 库独立，执行证据均从统一状态接口读取。切换不自动复制历史，须使用内核离线迁移命令；安装包提供 `agentloop-runtime-state`。

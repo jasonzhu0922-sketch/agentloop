@@ -9,7 +9,7 @@ import { createRuntimeResult, type RuntimeResultRecord } from "./runtime-result.
 import { isCaveatedStepResult } from "./step-result-committer.ts";
 import { commitCanonicalTerminal, markCanonicalReadyForTerminal } from "./canonical-run-state.ts";
 import type { CanonicalRunStateRepository } from "./canonical-run-state-repository.ts";
-import type { SqlConnection } from "../storage/connection.ts";
+import { runtimePersistence, type RuntimePersistence, type RuntimePersistenceInput } from "../storage/runtime-records.ts";
 import { RunRoundRepository } from "./run-round-repository.ts";
 import { PlanningRecoveryRepository } from "./planning-recovery-repository.ts";
 import { PlanningBudgetRepository } from "./planning-budget-repository.ts";
@@ -21,7 +21,7 @@ export class TerminalCommitter {
   private readonly outcomes: RunOutcomeRepository;
   private readonly humanLoops?: HumanLoopRepository;
   private readonly canonicalStates: CanonicalRunStateRepository;
-  private readonly connection: SqlConnection;
+  private readonly connection: RuntimePersistence;
   private readonly maxRounds: number;
   private readonly afterTerminalCommit?: (runId: string) => Promise<void>;
 
@@ -30,7 +30,7 @@ export class TerminalCommitter {
     outcomes: RunOutcomeRepository,
     humanLoops: HumanLoopRepository | undefined,
     canonicalStates: CanonicalRunStateRepository,
-    connection: SqlConnection,
+    connection: RuntimePersistenceInput,
     maxRounds = 8,
     afterTerminalCommit?: (runId: string) => Promise<void>,
   ) {
@@ -38,7 +38,7 @@ export class TerminalCommitter {
     this.outcomes = outcomes;
     this.humanLoops = humanLoops;
     this.canonicalStates = canonicalStates;
-    this.connection = connection;
+    this.connection = runtimePersistence(connection);
     this.maxRounds = maxRounds;
     this.afterTerminalCommit = afterTerminalCommit;
   }

@@ -1,3 +1,4 @@
+import { runtimePersistence } from "../src/storage/runtime-records.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp } from "node:fs/promises";
@@ -22,20 +23,14 @@ for (const mode of ["parse", "admission", "assessment", "assessment-format", "ex
     let assessments = 0;
     let corrections = 0;
     let injected = false;
-    const originalPrepare = database.prepare.bind(database);
-    database.prepare = sql => {
-      const statement = originalPrepare(sql);
-      if (mode === "commit" && sql.includes("UPDATE recovery_decisions SET state = 'admitted'")) {
-        const run = statement.run.bind(statement);
-        statement.run = async (...args) => {
-          if (!injected) {
-            injected = true;
-            throw new AppError("CONFLICT", "Injected failure while admitting the recovery decision", 409);
-          }
-          return run(...args);
-        };
+    const persistence = runtimePersistence(database);
+    const originalUpdate = persistence.records.update.bind(persistence.records);
+    persistence.records.update = async (table, where, change) => {
+      if (mode === "commit" && table === "recovery_decisions" && !injected) {
+        injected = true;
+        throw new AppError("CONFLICT", "Injected failure while admitting the recovery decision", 409);
       }
-      return statement;
+      return await originalUpdate(table, where, change);
     };
     const runs = new RunService({
       database, skills: new SkillService(database), workspaceRoot: root, maxSteps: 5,
@@ -108,6 +103,20 @@ for (const mode of ["parse", "admission", "assessment", "assessment-format", "ex
     try {
       const run = await runs.execute("owner", "Explain the supplied statement clearly.");
       const events = await runs.events("owner", run.id);
+      const recoveryRequests = events.filter(event => event.type === "model.request.started"
+        && event.data.purpose === "recovery_planning");
+      assert.equal(recoveryRequests.length, proposals);
+      for (const event of recoveryRequests) {
+        const composition = event.data.contextComposition as Record<string, any>;
+        assert.equal(composition.schema, "agentloop.modelContextComposition/v1");
+        assert.equal(composition.phase, "planning");
+        assert.equal(composition.totalCharacters, Object.values(composition.componentCharacters).reduce((sum: number, value) => sum + Number(value), 0));
+      }
+      if (mode === "assessment-format") {
+        assert.ok(events.some(event => event.type === "model.request.started"
+          && event.data.purpose === "recovery_plan_revision_assessment"
+          && (event.data.contextComposition as Record<string, unknown>)?.phase === "assessment"));
+      }
       const plan = (await runs.plan("owner", run.id)).plan;
       const state = await new CanonicalRunStateRepository(database).get(run.id);
       const detail = await runs.recoveryForRun("owner", run.id);
@@ -156,6 +165,100 @@ test("candidate reservations are serialized and survive reopening the database",
     await assert.rejects(reopened.beginProposalAttempt("budget", action.id, action.revision, 3),
       (error: unknown) => error instanceof AppError && error.details?.recoveryProposalBudgetExhausted === true);
   } finally { await database.close(); }
+});
+
+test("a second failed repair corrects illegal parent and rewritten Step drafts before completing from the original Result", async () => {
+  const database = new AppDatabase(":memory:");
+  let sourceReads = 0;
+  let recoveryCalls = 0;
+  let resultId = "";
+  try {
+    const runs = new RunService({
+      database, skills: new SkillService(database), maxSteps: 5,
+      plannerFactory: () => ({ plan: async task => ({ goal: task.canonicalState.intent.userInput, selectedSkillIds: [], steps: [
+        { id: "facts", objective: "Acquire the immutable source once.", role: "fact_acquisition", dependencies: [], targetIds: [],
+          skillIds: [], requiredCapabilities: ["source.observe"], evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "none" },
+          successCriteria: [{ id: "facts", description: "Publish the immutable source.", source: "planner" }] },
+        { id: "delivery", objective: "Deliver the result from the immutable source.", dependencies: ["facts"],
+          skillIds: [], requiredCapabilities: ["conversation_delivery"], targetIds: Object.keys(task.canonicalState.targets),
+          successCriteria: [{ id: "delivery", description: "Deliver the accepted result.", source: "task" }] },
+      ] }) }),
+      tools: [{ name: "observe_source", description: "Observe immutable source", inputSchema: { type: "object" }, replaySafe: true,
+        executionMode: "parallel", source: { id: "source", transport: "api", capabilities: [{ id: "source.observe", category: "source_acquisition",
+          sourceKinds: ["api"], producesEvidenceKinds: ["source_summary"] }] }, parse: value => value,
+        execute: async () => ({ value: 42, sourceRead: ++sourceReads,
+          evidenceReceipt: { schema: "agentloop.toolEvidenceReceipt/v1", evidenceKinds: { satisfied: ["source_summary"], caveated: [], failed: [] } } }) }],
+      assessorFactory: () => ({ assess: async input => {
+        const approved = await approvingTestAssessor().assess(input);
+        if (input.step.id === "delivery" || input.step.id === "delivery.repair.1") return { ...approved, approved: false,
+          criteria: approved.criteria.map(criterion => ({ ...criterion, satisfied: false })), feedback: "Reuse the source Result and repair delivery.",
+          failedBoundary: { stepId: input.step.id, suggestedRepairShape: "revise_plan" as const,
+            missingEvidenceKinds: [], violatedSkillRequirements: [], reusableEvidenceRefs: [resultId] } };
+        return approved;
+      } }),
+      planRevisionAssessorFactory: () => ({ assess: async () => ({ approved: true, feedback: "", evidenceRefs: [resultId] }) }),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+        if (request.tools[0]?.name === "submit_recovery_decision") {
+          recoveryCalls += 1;
+          const context = JSON.parse(request.runtimeContext!.content);
+          const failedId = context.failedBoundary.stepId as string;
+          const nextId = failedId === "delivery" ? "delivery.repair.1" : "delivery.repair.2";
+          const revision = { goal: context.currentPlan.goal, selectedSkillIds: [], retainedStepIds: ["facts"], shape: "recovery_patch",
+            steps: [{ id: nextId, objective: "Deliver from the original persisted source Result.", dependencies: ["facts"],
+              inputResultRefs: [{ schema: "agentloop.resultRef/v1", resultId }], skillIds: [], requiredCapabilities: ["conversation_delivery"],
+              targetIds: context.currentPlan.steps.find((step: any) => step.id === failedId).executionBinding.targetIds,
+              successCriteria: [{ id: "delivery", description: "Deliver the accepted result.", source: "task" }] }] } as any;
+          if (failedId === "delivery.repair.1") {
+            const attempt = context.revisionFeedback.length + 1;
+            if (attempt === 1) revision.steps[0].parentId = "delivery";
+            if (attempt === 2) revision.steps.push({ ...revision.steps[0], id: "delivery.repair.1", objective: "rewritten old Step" });
+            if (attempt === 3) {
+              revision.stepReplacements = [{ stepId: "delivery.repair.1", replacementStepId: "delivery.repair.2" }];
+              assert.equal(context.revisionFeedback[0].correction.invalidField, "planRevision.steps[].parentId");
+              assert.deepEqual(context.revisionFeedback[0].correction.retiredPersistedStepIds, ["delivery"]);
+              assert.equal(context.revisionFeedback[1].correction.invalidField, "planRevision.steps[].id");
+              assert.match(request.systemPrompt, /parentId expresses only the structural milestone tree/);
+            }
+          }
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `recovery-${recoveryCalls}`, name: "submit_recovery_decision", arguments: {
+            actionId: context.recoveryAction.id, expectedActionRevision: context.recoveryAction.revision, decision: "revise_plan",
+            rationale: "Reuse the persisted source and replace only the failed delivery leaf.", evidenceRefs: [resultId], planRevision: revision,
+          } }] };
+        }
+        const context = request.runtimeContext?.content ?? "";
+        const frame = JSON.parse(context.match(/<loop_step_frame source="server">\n([^\n]+)\n/)![1]);
+        const stepId = frame.currentDecisionView.identity.stepId;
+        const observed = request.messages.find(message => message.role === "tool" && message.name === "observe_source");
+        if (observed !== undefined) resultId = String(observed.content).match(/"resultId":"(rr_[0-9a-f-]{36})"/)?.[1] ?? resultId;
+        if (stepId === "facts") {
+          if (sourceReads === 0) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "source-once", name: "observe_source", arguments: {} }] };
+          return { content: "source value 42", finishReason: "stop", toolCalls: [] };
+        }
+        const unreadResultId = frame.currentDecisionView.currentGap.unreadResultRefs?.[0]?.resultId;
+        if (unreadResultId !== undefined) {
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `read-${stepId}-${unreadResultId}`, name: "read_result", arguments: { resultId: unreadResultId } }] };
+        }
+        return { content: stepId === "delivery.repair.2" ? "Delivered value 42." : "Incomplete delivery.", finishReason: "stop", toolCalls: [] };
+      } }),
+    });
+    let run;
+    try {
+      run = await runs.execute("owner", "Acquire one immutable value and deliver it.");
+    } catch (error) {
+      if (!(error instanceof AppError) || typeof error.details?.runId !== "string") throw error;
+      run = await runs.get("owner", error.details.runId);
+    }
+    const events = await runs.events("owner", run.id);
+    assert.equal(run.status, "completed", JSON.stringify(events.filter(event => /failed|rejected/.test(event.type))));
+    assert.equal(sourceReads, 1);
+    assert.equal(events.filter(event => event.type === "recovery.proposal_rejected").length, 2);
+    assert.deepEqual(events.filter(event => event.type === "recovery.proposal_rejected").map(event => event.data.stage), ["admission", "parse"]);
+    assert.equal(events.filter(event => event.type === "recovery.decision_admitted").length, 2);
+    assert.equal(events.filter(event => event.type === "recovery.plan_revision_applied").length, 2);
+    assert.equal(events.filter(event => event.type === "terminal.delivery_committed").length, 1);
+    assert.equal(events.filter(event => event.type === "run.completed").length, 1);
+    assert.equal(events.some(event => event.type === "run.failed"), false);
+  } finally { database.close(); }
 });
 
 for (const pending of [false, true]) {
@@ -229,6 +332,8 @@ for (const pending of [false, true]) {
       const events = await resumed.events("owner", paused.id);
       assert.equal(run.status, "completed", JSON.stringify(events.filter(event => /failed|rejected/.test(event.type))));
       assert.equal(plannerCalls, pending ? 0 : 1);
+      assert.equal(events.filter(event => event.type === "model.request.started"
+        && event.data.purpose === "recovery_planning").length, pending ? 0 : 1);
       assert.ok(events.some(event => event.type === "tool.completed" && event.data.toolName === "load_skill"), JSON.stringify(events.filter(event => /tool|assistant.committed/.test(event.type))));
       assert.equal(events.filter(event => event.type === "recovery.plan_revision_applied").length, 1);
       assert.equal(events.filter(event => event.type === "recovery.proposal_attempt_started").length, 1);

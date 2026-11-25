@@ -75,8 +75,13 @@ export class WorkProductContext {
     return { ...facts, ...(this.fullStateRef === undefined ? {} : { fullStateRef: this.fullStateRef }) };
   }
 
-  /** Add provenance fields to the same durable event; no extra model call or business receipt. */
-  capture(event: RuntimeEvent): RuntimeEvent {
+  /** Add provenance without exposing uncommitted facts. The loop serializes prepare/ack/capture. */
+  prepare(event: RuntimeEvent): RuntimeEvent { return this.observe(event, false); }
+
+  /** Replay an acknowledged event. No extra model call or independent state write. */
+  capture(event: RuntimeEvent): RuntimeEvent { return this.observe(event, true); }
+
+  private observe(event: RuntimeEvent, committed: boolean): RuntimeEvent {
     const data = event.data;
     if (["tool.completed", "tool.failed", "tool.rejected"].includes(event.type)
       && typeof data.toolCallId === "string" && typeof data.toolName === "string") {
@@ -91,8 +96,10 @@ export class WorkProductContext {
         ...(typeof data.exitCode === "number" || data.exitCode === null ? { exitCode: data.exitCode as number | null } : {}),
       };
       const sequence = { seq: this.events.length + 1, sequenceKind: "loop_observation" as const, sequenceScope: this.options.goalId };
-      this.events.push({ runId: this.runId, workspaceId: this.options.workspaceId, ...sequence, evidence });
-      this.cached = undefined;
+      if (committed) {
+        this.events.push({ runId: this.runId, workspaceId: this.options.workspaceId, ...sequence, evidence });
+        this.cached = undefined;
+      }
       return { ...event, data: { ...data, workProductSequence: sequence } };
     }
     if (event.type === "assistant.committed" && data.finishReason === "tool_calls"
@@ -102,8 +109,10 @@ export class WorkProductContext {
         modelStep: Number(data.step), throughSeq: this.events.length || null, content: data.content,
       });
       if (declaration !== undefined) {
-        this.declarations.push(declaration);
-        this.cached = undefined;
+        if (committed) {
+          this.declarations.push(declaration);
+          this.cached = undefined;
+        }
         return { ...event, data: { ...data, workProductDeclaration: declaration } };
       }
     }

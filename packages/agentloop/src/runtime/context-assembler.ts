@@ -1,3 +1,8 @@
+import { projectDecisionEvidence } from "./decision-evidence-projection.ts";
+import { projectEvidenceContext, EVIDENCE_CONTEXT_ENCODING_INSTRUCTION } from "./evidence-context-projection.ts";
+import { committedDecisionRecords } from "./committed-decision-records.ts";
+import { deriveDecisionWorkingSet, DECISION_WORKING_SET_INSTRUCTION, ACTION_DECISION_INSTRUCTION, type DecisionWorkingSet } from "./decision-working-set.ts";
+import type { CurrentDecisionView } from "./current-decision-view.ts";
 import { createHash } from "node:crypto";
 import { EXECUTION_HISTORY_POLICY, executionHistoryContext, projectExecutionHistory } from "./execution-history-projection.ts";
 import { AppError } from "../shared/errors.ts";
@@ -171,6 +176,16 @@ export class ContextAssembler {
   private readonly model: ModelAdapter;
   private readonly emit?: RuntimeEventSink;
   private readonly policy: ResolvedContextPolicy;
+  private readonly decisionEvents?: () => readonly RuntimeEvent[];
+  private decisionView?: CurrentDecisionView;
+  private workingSet?: DecisionWorkingSet;
+  private actionDecisionOffered = false;
+  private absorbedToolCallIds = new Set<string>();
+  private reconciledToolCallIds = new Set<string>();
+  private unsafeEffectToolCallIds = new Set<string>();
+  private historicalToolCallIds = new Set<string>();
+  private decisionProjectionMs = 0;
+  private semanticObservationCount = 0;
   private readonly prunedToolResults = new Map<string, PrunedToolResult>();
   private firstKeptMessageIndex = 0;
   private contextEpoch = 0;
@@ -197,13 +212,67 @@ export class ContextAssembler {
     model: ModelAdapter;
     policy?: ContextPolicy;
     emit?: RuntimeEventSink;
+    /** Same-leaf acknowledged events; unavailable for legacy transcript-only callers. */
+    decisionEvents?: () => readonly RuntimeEvent[];
   }) {
     this.runId = options.runId;
     this.systemPrompt = options.systemPrompt;
     this.runtimeContextBase = options.runtimeContext;
     this.model = options.model;
     this.emit = options.emit;
+    this.decisionEvents = options.decisionEvents;
     this.policy = resolvePolicy(options.model, options.policy);
+  }
+
+  setCurrentDecisionView(view: CurrentDecisionView): void { this.decisionView = view; }
+
+  get decisionWorkingSet(): DecisionWorkingSet | undefined { return this.workingSet; }
+
+  async refreshDecisionWorkingSet(messages: readonly ModelMessage[], tools: readonly ModelToolDefinition[]): Promise<void> {
+    if (this.policy.executionHistoryProjection !== "current") return;
+    const actionDecisionOffered = tools.some(tool => {
+      const properties = tool.inputSchema.properties as Record<string, { properties?: Record<string, unknown> }> | undefined;
+      return properties?._agentloopContext?.properties?.decision !== undefined;
+    });
+    if (actionDecisionOffered !== this.actionDecisionOffered) {
+      this.actionDecisionOffered = actionDecisionOffered;
+      this.contextRevision += 1;
+      this.invalidateSnapshot();
+    }
+    const started = performance.now();
+    const records = this.decisionEvents === undefined ? undefined : committedDecisionRecords(this.decisionEvents());
+    const readable = tools.some(tool => tool.name === "read_result"
+      && JSON.stringify(tool.inputSchema).includes("producer_exchange") && JSON.stringify(tool.inputSchema).includes("step_history"));
+    const derived = deriveDecisionWorkingSet({ runId: this.runId, messages, currentView: this.decisionView,
+      materializeObservations: this.model.completedExchangePolicy === "releasable" && readable,
+      // Preserve large native read windows' first-consumption protection and
+      // reference lifecycle instead of pinning expanded bodies in fixed state.
+      evidenceEntryCharacters: this.policy.largeToolResultProjectionCharacters,
+      // Reserve room for authority, semantic state and native continuation.
+      // A character is at most one token in the existing conservative estimate;
+      // overflow stays native rather than becoming an opaque fixed prompt.
+      evidenceBudgetCharacters: Math.max(0, Math.floor((this.policy.contextWindowTokens - this.policy.outputReserveTokens - this.policy.safetyMarginTokens
+        - this.estimateInvocationTokens(tools, { ...this.runtimeContextBase, id: "evidence-budget" }, [])) / 2)),
+      ...(records === undefined ? {} : { records }) });
+    this.semanticObservationCount = records?.observations.length ?? messages.filter(message => message.role === "tool").length;
+    this.reconciledToolCallIds = new Set(derived.reconciledToolCallIds);
+    this.unsafeEffectToolCallIds = new Set(derived.unsafeEffectToolCallIds);
+    this.historicalToolCallIds = new Set(derived.historicalToolCallIds);
+    const released = this.model.completedExchangePolicy === "releasable" && readable && derived.history !== undefined;
+    const gaps = [...derived.view.gaps];
+    this.absorbedToolCallIds = released ? derived.archived : new Set();
+    if (derived.archived.size && !released) gaps.push("History remains native: an authorized Result history reader and explicit provider release support are required.");
+    const next: DecisionWorkingSet = { ...derived.view, gaps,
+      absorbedExchangeCount: released ? derived.view.absorbedExchangeCount : 0,
+      retainedExchangeCount: released ? derived.view.retainedExchangeCount : derived.view.retainedExchangeCount + derived.view.absorbedExchangeCount,
+      ...(readable && derived.history ? { history: derived.history } : {}),
+    };
+    if (JSON.stringify(next) !== JSON.stringify(this.workingSet)) {
+      this.workingSet = next;
+      this.contextRevision += 1;
+      this.invalidateSnapshot();
+    }
+    this.decisionProjectionMs = performance.now() - started;
   }
 
   get contextSummary(): string | undefined {
@@ -304,6 +373,7 @@ export class ContextAssembler {
     signal?: AbortSignal,
   ): Promise<ContextAssembly> {
     assertClosedToolProtocol(canonicalMessages);
+    await this.refreshDecisionWorkingSet(canonicalMessages, tools);
     this.refreshToolResultCatalog(canonicalMessages);
     const usableInputTokens = this.policy.contextWindowTokens
       - this.policy.outputReserveTokens
@@ -426,6 +496,7 @@ export class ContextAssembler {
     signal?: AbortSignal,
   ): Promise<boolean> {
     assertClosedToolProtocol(canonicalMessages);
+    await this.refreshDecisionWorkingSet(canonicalMessages, tools);
     this.refreshToolResultCatalog(canonicalMessages);
     const runtimeContext = this.currentRuntimeContext();
     const { estimatedInputTokens: estimatedTokensBefore } = await this.prepareProjection(
@@ -523,36 +594,15 @@ export class ContextAssembler {
     canonicalMessages: readonly ModelMessage[],
     evidence: readonly AgentLoopToolEvidence[],
   ): readonly AgentLoopToolEvidence[] {
-    const resultIndex = new Map<string, number>();
-    for (let index = 0; index < canonicalMessages.length; index += 1) {
-      const message = canonicalMessages[index];
-      if (message.role === "tool") resultIndex.set(message.toolCallId, index);
-    }
-    return evidence.map((item) => {
-      const compacted = (resultIndex.get(item.toolCallId) ?? Number.POSITIVE_INFINITY) < this.firstKeptMessageIndex;
-      const pruned = this.prunedToolResults.get(item.toolCallId);
-      if (!compacted && pruned === undefined) return item;
-      const sha256 = pruned?.sha256 ?? digest(item.result);
-      const originalCharacters = pruned?.originalCharacters ?? item.result.length;
-      const resultRef = pruned?.resultRef ?? resultRefFromContent(item.result);
-      if (pruned?.structuredEvidence !== undefined) {
-        return {
-          ...item,
-          result: prunedToolMarker(pruned),
-        };
-      }
-      return {
-        ...item,
-        result: [
-          `[Tool result omitted from assessment projection; toolCallId=${item.toolCallId};`,
-          `sha256=${sha256}; originalCharacters=${originalCharacters};`,
-          `canonical evidence remains persisted${compacted ? `; contextEpoch=${this.contextEpoch}` : ""}]`,
-          ...(resultRef === undefined ? [] : [
-            `Exact result remains readable with read_result resultId=${resultRef.resultId}.`,
-          ]),
-        ].join(" "),
-      };
-    });
+    // Compatibility entry point. Execution message/pruning state is not an
+    // assessment dependency. Return exact selected content, never prune markers.
+    return this.selectAssessmentEvidence(evidence);
+  }
+
+  selectAssessmentEvidence(evidence: readonly AgentLoopToolEvidence[], requiredToolCallIds: readonly string[] = []): readonly AgentLoopToolEvidence[] {
+    return projectDecisionEvidence({ evidence, workingSet: this.workingSet, currentView: this.decisionView,
+      reconciledToolCallIds: this.reconciledToolCallIds, unsafeEffectToolCallIds: this.unsafeEffectToolCallIds,
+      historicalToolCallIds: this.historicalToolCallIds, requiredToolCallIds });
   }
 
   private buildProjection(canonicalMessages: readonly ModelMessage[]): ModelMessage[] {
@@ -562,7 +612,7 @@ export class ContextAssembler {
   private refreshToolResultCatalog(canonicalMessages: readonly ModelMessage[]): void {
     const entries = new Map<string, RuntimeResultContextEntry>();
     for (const message of canonicalMessages) {
-      if (message.role !== "tool" || message.isError) continue;
+      if (message.role !== "tool" || message.isError || this.absorbedToolCallIds.has(message.toolCallId)) continue;
       const value = parseJsonRecord(message.content);
       const ref = resultRefProjection(value?.resultRef) ?? resultRefFromMarker(message.content);
       if (ref === undefined) continue;
@@ -577,8 +627,8 @@ export class ContextAssembler {
         ...(selectors === undefined || selectors.length === 0 ? {} : { selectors }),
       });
     }
-    const next = [...entries.values()].slice(-64);
-    const referenceWorkingSet = contentReferenceWorkingSet(canonicalMessages);
+    const next = [...entries.values()];
+    const referenceWorkingSet = contentReferenceWorkingSet(this.releaseAbsorbedExchanges(canonicalMessages));
     const nextCoverage = referenceWorkingSet.coverage;
     const nextRetainedIds = referenceWorkingSet.retainedToolCallIds;
     if (
@@ -596,6 +646,11 @@ export class ContextAssembler {
   private isCurrentReferenceWindow(messages: readonly ModelMessage[], index: number): boolean {
     const message = messages[index];
     if (message?.role === "tool" && this.retainedContentReferenceWindowToolCallIds.has(message.toolCallId)) return true;
+    // A deliberately selected read belongs to the next decision before it can
+    // age into a historical receipt. Envelope/navigation size is not a content
+    // disposition. Derive this from committed exchanges so restart has the
+    // same first-consumption boundary; no in-memory "seen" flag is needed.
+    if (isExplicitContentRead(message) && messages.slice(index + 1).every(next => next.role === "tool")) return true;
     // A complementary tool call does not make a recently acquired value
     // obsolete. Use the existing recent-token budget, not a second cache or
     // an unbounded exemption from compaction.
@@ -608,7 +663,7 @@ export class ContextAssembler {
     // User/Steer/HIL text is authority, never replace it with a model summary.
     const tail: ModelMessage[] = this.policy.executionHistoryProjection === "current"
       ? canonicalMessages.slice(0, startIndex).filter(message => message.role === "user") : [];
-    const source = canonicalMessages.slice(startIndex);
+    const source = this.releaseAbsorbedExchanges(canonicalMessages.slice(startIndex));
     const history = this.policy.executionHistoryProjection === "current" ? projectExecutionHistory(source).messages : source;
     for (const message of history) {
       // Keep the native call/result exchange in chronological order. Removing a
@@ -625,12 +680,31 @@ export class ContextAssembler {
     return tail;
   }
 
+  private releaseAbsorbedExchanges(messages: readonly ModelMessage[]): ModelMessage[] {
+    return messages.filter(message => message.role === "tool" ? !this.absorbedToolCallIds.has(message.toolCallId)
+      : message.role !== "assistant" || !message.toolCalls?.length || !message.toolCalls.every(call => this.absorbedToolCallIds.has(call.id)));
+  }
+
   private historyProjectionTelemetry(messages: readonly ModelMessage[]): Record<string, unknown> {
     if (this.policy.executionHistoryProjection !== "current") return {};
     const projection = projectExecutionHistory(messages.slice(this.firstKeptMessageIndex));
     return { mergedExchangeCount: projection.mergedExchangeCount, sourceToolCallIds: projection.sourceToolCallIds,
-      stateVersions: messages.flatMap(message => message.role === "assistant" && message.executionHistoryBasis
-        ? [message.executionHistoryBasis.identity] : []) };
+      decisionWorkingSet: this.workingSet === undefined ? undefined : {
+        semanticSource: this.decisionEvents === undefined ? "legacy_messages" : "committed_events",
+        observationCount: this.semanticObservationCount, reconciledObservationCount: this.reconciledToolCallIds.size,
+        pendingObservationCount: this.workingSet.pendingToolCallIds.length,
+        projectionMs: this.decisionProjectionMs,
+        itemCount: this.workingSet.items.length, historicalItemCount: this.workingSet.historicalItemCount,
+        absorbedExchangeCount: this.workingSet.absorbedExchangeCount, retainedExchangeCount: this.workingSet.retainedExchangeCount,
+        currentEvidenceCount: this.workingSet.currentEvidence?.length ?? 0,
+        materializedObservationCount: this.workingSet.materializedObservationCount ?? 0,
+        historicalObservationCount: this.workingSet.historicalObservationCount ?? 0,
+        rejectionCount: this.workingSet.rejectionCount, gapCount: this.workingSet.gaps.length,
+        currentDecisionPresent: this.workingSet.currentDecision !== undefined,
+        actionDecisionCount: (this.workingSet.currentDecision ? 1 : 0) + (this.workingSet.parallelDecisions?.length ?? 0),
+        currentDecisionEvidenceCount: this.workingSet.currentDecision?.evidence.length ?? 0,
+        priorMatchingSuccessCount: this.workingSet.currentDecision?.priorMatchingSuccess?.count ?? 0,
+      } };
   }
 
   private pruneOldToolOutputs(
@@ -1218,6 +1292,11 @@ export class ContextAssembler {
     const id = `${this.runId}:${this.runtimeContextBase.phase}:context:${proposal?.epoch ?? this.contextEpoch}:${this.contextRevision}`;
     const content = [
       this.runtimeContextBase.content,
+      ...(this.policy.executionHistoryProjection !== "current" ? [] : [
+        '<decision_working_set source="server" encoding="json">',
+        JSON.stringify(this.workingSetWithExactEvidence()),
+        '</decision_working_set>',
+      ]),
       ...(summary === undefined ? [] : [
         "<structured_summary>",
         summary,
@@ -1277,6 +1356,19 @@ export class ContextAssembler {
     return [...this.runtimePromptAugmentations.keys()];
   }
 
+  private workingSetWithExactEvidence(): Record<string, unknown> {
+    const { currentEvidence, ...state } = this.workingSet ?? {};
+    const instruction = [DECISION_WORKING_SET_INSTRUCTION,
+      ...(this.actionDecisionOffered || this.workingSet?.currentDecision ? [ACTION_DECISION_INSTRUCTION] : [])].join("\n");
+    if (!currentEvidence?.length) return { instruction, ...state };
+    // Share exact values within this block, using the same lossless encoding
+    // as Assessment. No pruning markers, truncation, or semantic summarizer.
+    const projected = projectEvidenceContext({ evidence: { toolCalls: currentEvidence } });
+    return { instruction, ...state,
+      currentEvidence: { instruction: EVIDENCE_CONTEXT_ENCODING_INSTRUCTION, ...projected.view },
+      evidenceEncoding: projected.diagnostics };
+  }
+
   private invalidateSnapshot(): void {
     this.snapshot = undefined;
   }
@@ -1292,6 +1384,22 @@ export class ContextAssembler {
       ?? this.policy.largeToolResultPreviewCharacters;
     return Math.min(preview, projection);
   }
+}
+
+function isExplicitContentRead(message: ModelMessage | undefined): boolean {
+  if (message?.role !== "tool" || message.isError) return false;
+  const value = parseJsonRecord(message.content);
+  if (message.name === "computer_read_json" && value?.schema === "agentloop.jsonRead/v1") {
+    return Array.isArray(value.queries) && value.queries.some(query => {
+      const entry = recordValue(query);
+      return entry !== undefined && (Object.hasOwn(entry, "value") || Object.hasOwn(entry, "values"));
+    });
+  }
+  if (message.name === "read_result" && value?.schema === "agentloop.resultRead/v1") {
+    return typeof value.content === "string" || Object.hasOwn(value, "value");
+  }
+  return message.name === "computer_read_file" && (typeof value?.content === "string"
+    || Array.isArray(value?.ranges) && value.ranges.some(range => typeof recordValue(range)?.content === "string"));
 }
 
 export function estimateTextTokens(value: string): number {

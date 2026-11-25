@@ -11,6 +11,7 @@ import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse, RuntimeEvent } from "../src/runtime/contracts.ts";
 import { reconstructRecoveryTranscript } from "../src/runtime/recovery-transcript.ts";
 import { boundedAuthoringContext, toolContentBudget } from "../src/runtime/tool-content-budget.ts";
+import { ArtifactAcceptanceService } from "../src/acceptance/artifact-acceptance.ts";
 
 const limits = { contextWindowTokens: 128_000, maxOutputTokens: 16_384 };
 const initial = { shrinkCount: 0, consecutiveTruncations: 0 };
@@ -28,7 +29,7 @@ function writingContext(request: ModelInvocation): any {
   return JSON.parse(match[1]!);
 }
 
-test("per-turn content budgets apply to generic declared tools and preserve static schemas and grants", () => {
+test("output estimates are advisory and preserve Tool schemas, complete native calls and grants", () => {
   let parsed = 0;
   const tool: RuntimeTool = {
     name: "write_segment", effect: "write", description: "Write a segment", executionMode: "exclusive", replaySafe: false,
@@ -38,12 +39,12 @@ test("per-turn content budgets apply to generic declared tools and preserve stat
   };
   const registry = new ToolRegistry([tool]);
   const scoped = registry.materialize(grant(undefined, [tool.name]), { contentBudget: toolContentBudget(16_384, initial) });
-  assert.equal((scoped.definitions[0]!.inputSchema.properties as any).body.maxLength, 4096);
+  assert.equal((scoped.definitions[0]!.inputSchema.properties as any).body.maxLength, 48_000);
   assert.equal((tool.inputSchema.properties as any).body.maxLength, 48_000);
-  assert.throws(() => scoped.prepare({ id: "large", name: tool.name, arguments: { body: "中".repeat(4097) } }), /output budget/);
-  assert.equal(parsed, 0, "Over-budget input is rejected before parsing or effects");
-  assert.throws(() => scoped.prepare({ id: "overhead", name: tool.name,
-    arguments: { body: "中", resource: "中".repeat(4100) } }), /serialized arguments/);
+  assert.doesNotThrow(() => scoped.prepare({ id: "large", name: tool.name, arguments: { body: "中".repeat(20_000) } }));
+  assert.equal(parsed, 1, "A complete native call is parsed by its owning Tool, not refused by a token estimate");
+  assert.doesNotThrow(() => scoped.prepare({ id: "overhead", name: tool.name,
+    arguments: { body: "中", resource: "中".repeat(4100) } }));
   assert.doesNotThrow(() => scoped.prepare({ id: "small", name: tool.name, arguments: { body: "valid", resource: "doc" } }));
   assert.throws(() => scoped.prepare({ id: "duplicate", name: tool.name, arguments: { body: "more", resource: "doc" } }), /wait for its committed receipt/);
   assert.equal(registry.materialize(grant(undefined, [])).definitions.length, 0);
@@ -70,16 +71,144 @@ test("bounded append preserves explicit boundary bytes and never invents a separ
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
+test("complete multilingual and escaped calls are not refused by reduced recovery estimates", () => {
+  const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(tmpdir())));
+  const scoped = () => registry.materialize(grant(tmpdir()), { contentBudget: toolContentBudget(16_384, { shrinkCount: 4, consecutiveTruncations: 0 }) });
+  const content = ".hero{display:grid;grid-template-columns:1fr 1fr}\n".repeat(140);
+  assert.ok(content.length > 6129 && content.length < 16384);
+  assert.doesNotThrow(() => scoped().prepare({ id: "css", name: "computer_write_file",
+    arguments: { path: "portal.html", content, mode: "append" } }));
+  for (const content of ["中".repeat(4200), "\n".repeat(9000)]) {
+    assert.doesNotThrow(() => scoped().prepare({ id: "complete", name: "computer_write_file",
+      arguments: { path: "portal.html", content } }));
+  }
+  assert.throws(() => scoped().prepare({ id: "resource-limit", name: "computer_write_file",
+    arguments: { path: "portal.html", content: "x".repeat(48_001) } }), /at most 48000 characters/);
+});
+
+test("HTML continuation keeps an open style prefix across writes and verifies the assembled file", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "bounded-html-continuation-"));
+  try {
+    const executor = new ComputerExecutor(root);
+    const tools = new ToolRegistry(createComputerTools(executor));
+    const head = '<!doctype html><html><head><style>\n' + ".hero{display:grid}\n".repeat(320);
+    const tail = '.hero{color:rgb(200,16,46)}\n</style></head><body><main class="hero">Portal</main></body></html>';
+    let turn = 0;
+    await runAgentLoop({ runId: "budget-run", systemPrompt: "Write a self-contained HTML file", input: "Create portal.html", tools,
+      grant: grant(root), maxSteps: 4, model: { limits, complete: async request => {
+        turn++;
+        if (turn === 2) {
+          const receipt = writingContext(request).committedWrites[0];
+          assert.equal(receipt.tail.content, head.slice(-800));
+          assert.equal(await fs.readFile(join(root, "portal.html"), "utf8"), head);
+          assert.match(request.tools.find(t => t.name === "computer_write_file")!.description, /intermediate file syntax may be incomplete/);
+        }
+        if (turn <= 2) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `write-${turn}`,
+          name: "computer_write_file", arguments: { path: "portal.html", mode: turn === 1 ? "create" : "append", content: turn === 1 ? head : tail } }] };
+        return done;
+      } } });
+    assert.equal(await fs.readFile(join(root, "portal.html"), "utf8"), head + tail);
+    const acceptance = await new ArtifactAcceptanceService().verify(executor, { artifactPath: "portal.html", checks: ["self-contained"] });
+    assert.notEqual(acceptance.verdict, "rejected");
+    assert.equal(acceptance.checks.find(c => c.id === "html_document_boundary")?.status, "passed");
+    assert.equal(acceptance.checks.find(c => c.id === "self_contained_resources")?.status, "passed");
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("a complete HTML file larger than the old quarter budget is written in one native call", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "authoring-single-file-"));
+  try {
+    const content = '<!doctype html><html><head><style>main{color:#123}</style></head><body><main>'
+      + '<p>完整的产品介绍、客户需求、招聘与企业文化。</p>'.repeat(700) + '</main></body></html>';
+    assert.ok(content.length < 48_000);
+    let turn = 0;
+    const events: RuntimeEvent[] = [];
+    await runAgentLoop({ runId: "budget-run", systemPrompt: "Write the complete requested file", input: "Create portal.html", maxSteps: 3,
+      tools: new ToolRegistry(createComputerTools(new ComputerExecutor(root))), grant: grant(root),
+      emit: event => { events.push(event); }, model: { limits, complete: async request => {
+        assert.equal(maxContent(request), 48_000);
+        assert.match(request.tools[0]!.description, /Prefer one complete write/);
+        return ++turn === 1 ? { content: "", finishReason: "tool_calls", toolCalls: [{ id: "complete-file", name: "computer_write_file",
+          arguments: { path: "portal.html", content } }] } : done;
+      } } });
+    assert.equal(await fs.readFile(join(root, "portal.html"), "utf8"), content);
+    assert.equal(events.filter(e => e.type === "tool.completed").length, 1);
+    assert.equal(events.some(e => e.type === "tool.rejected"), false);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("authoring continuation follows the latest patch receipt live and after recovery", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "authoring-patch-revision-"));
+  try {
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const permission = grant(root, ["computer_write_file", "computer_patch_file"]);
+    const write = registry.materialize(permission).prepare({ id: "write", name: "computer_write_file",
+      arguments: { path: "portal.html", content: "prefix\nend\n" } });
+    const first: any = await write.execute({ grant: permission });
+    const patch = registry.materialize(permission).prepare({ id: "patch", name: "computer_patch_file",
+      arguments: { path: "portal.html", baseRevisionId: first.revisionId, hunks: [{ match: "unique", expectedLines: ["end"], replacementLines: ["middle", "end"] }] } });
+    const second: any = await patch.execute({ grant: permission });
+    const events: RuntimeEvent[] = [
+      { type: "plan.step.started", data: { stepId: "step-1" } },
+      ...[[write, first], [patch, second]].flatMap(([action, receipt], index) => [
+        { type: "assistant.committed", data: { step: index + 1, content: "", finishReason: "tool_calls", toolCalls: [action.call] } },
+        { type: "tool.completed", data: { step: index + 1, toolCallId: action.call.id, toolName: action.call.name,
+          isError: false, operationStatus: "succeeded", result: JSON.stringify(receipt) } },
+      ]),
+    ];
+    const recovered = reconstructRecoveryTranscript({ userInput: "continue", stepId: "step-1",
+      events: events.map((event, seq) => ({ ...event, seq: seq + 1 })) });
+    const project = (evidence: typeof recovered.toolEvidence) => boundedAuthoringContext(registry.materialize(permission).boundedContentTools,
+      toolContentBudget(16_384, initial), initial, evidence)!;
+    const liveEvidence = events.filter(e => e.type === "tool.completed").map(({ data }) => ({
+      toolCallId: String(data.toolCallId), toolName: String(data.toolName), result: String(data.result),
+      isError: false, operationStatus: "succeeded" as const,
+    }));
+    assert.equal(project(liveEvidence), project(recovered.toolEvidence));
+    const context = JSON.parse(project(recovered.toolEvidence));
+    assert.equal(context.committedWrites.length, 1);
+    assert.equal(context.committedWrites[0].toolCallId, "patch");
+    assert.equal(context.committedWrites[0].revisionId, second.revisionId);
+    assert.equal(context.committedWrites[0].totalLines, second.inspection.totalLines);
+    assert.equal(context.committedWrites[0].tail.content, "prefix\nmiddle\nend\n");
+    assert.equal(context.committedWrites[0].bytes, second.after.bytes);
+    assert.equal(context.budget.enforcement, "advisory");
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("actual truncation does not lower the Provider output limit on later execution turns", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "authoring-provider-window-"));
+  try {
+    let turn = 0;
+    await runAgentLoop({ runId: "budget-run", systemPrompt: "Write the file", input: "Create portal.html", maxSteps: 4,
+      tools: new ToolRegistry(createComputerTools(new ComputerExecutor(root))), grant: grant(root),
+      model: { limits: { contextWindowTokens: 256_000, maxOutputTokens: 65_536 }, complete: async request => {
+        turn++;
+        assert.equal(request.maxOutputTokens, 65_536);
+        assert.equal(maxContent(request), 48_000);
+        if (turn === 1) return { content: "", finishReason: "length", toolCalls: [{ id: "cut", name: "computer_write_file", arguments: '{"path":"portal.html","content":"cut' }] };
+        if (turn === 2) {
+          await assert.rejects(fs.stat(join(root, "portal.html")), { code: "ENOENT" });
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "complete", name: "computer_write_file", arguments: {
+            path: "portal.html", content: "<!doctype html><html><body>Complete</body></html>",
+          } }] };
+        }
+        return done;
+      } } });
+    assert.equal(turn, 3);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
 for (const streaming of [false, true]) {
-  test(`${streaming ? "streamed ready" : "ordinary"} oversized calls are rejected before writing`, async () => {
+  test(`${streaming ? "streamed ready" : "ordinary"} calls exceeding the file Tool resource limit are rejected before writing`, async () => {
     const root = await fs.mkdtemp(join(tmpdir(), "bounded-dispatch-"));
     try {
       let turns = 0;
       const events: RuntimeEvent[] = [];
       const respond = (request: ModelInvocation): ModelResponse => {
-        assert.equal(maxContent(request), 4096);
+        assert.equal(maxContent(request), 48000);
         return ++turns === 1 ? { content: "", finishReason: "tool_calls", toolCalls: [{ id: "oversized",
-          name: "computer_write_file", arguments: { path: "doc.txt", content: "中".repeat(5000) } }] } : done;
+          name: "computer_write_file", arguments: { path: "doc.txt", content: "中".repeat(48001) } }] } : done;
       };
       const model: ModelAdapter = { limits, complete: async request => respond(request),
         ...(streaming ? { streamComplete: async (request, sink) => {
@@ -93,7 +222,7 @@ for (const streaming of [false, true]) {
         emit: event => { events.push(event); } });
       await assert.rejects(fs.stat(join(root, "doc.txt")), { code: "ENOENT" });
       assert.equal(events.some(event => event.type === "tool.dispatched" && event.data.toolCallId === "oversized"), false);
-      assert.equal(events.some(event => event.type === "tool.rejected" && /output budget/.test(String(event.data.reason))), true);
+      assert.equal(events.some(event => event.type === "tool.rejected" && /at most 48000 characters/.test(String(event.data.reason))), true);
     } finally { await fs.rm(root, { recursive: true, force: true }); }
   });
 }
@@ -108,7 +237,7 @@ test("a later truncated chunk shrinks the budget and continues from real committ
     const model: ModelAdapter = { limits, complete: async request => {
       turns++;
       if (turns === 1) {
-        assert.equal(maxContent(request), 4096);
+        assert.equal(maxContent(request), 48000);
         return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "first", name: "computer_write_file",
           arguments: { path: "report.json", content: head, mode: "create" } }] };
       }
@@ -122,7 +251,7 @@ test("a later truncated chunk shrinks the budget and continues from real committ
           arguments: '{"path":"report.json","mode":"append","content":"unfinished' }] };
       }
       if (turns === 3) {
-        assert.equal(maxContent(request), 2048);
+        assert.equal(maxContent(request), 48000);
         assert.equal(writingContext(request).committedWrites[0].toolCallId, "first");
         assert.equal(await fs.readFile(join(root, "report.json"), "utf8"), head);
         assert.match(request.runtimeContext!.content, /next bounded chunk/);
@@ -134,7 +263,7 @@ test("a later truncated chunk shrinks the budget and continues from real committ
       assert.equal(content, head + tail);
       assert.equal(JSON.parse(content).title, "报告");
       assert.equal(writingContext(request).committedWrites[0].bytes, Buffer.byteLength(content));
-      assert.equal(maxContent(request), 2048, "Successful progress retains the safer chunk ceiling");
+      assert.equal(maxContent(request), 48000, "Recovery guidance never narrows the Tool schema");
       return done;
     } };
     await runAgentLoop({ runId: "budget-run", systemPrompt: "Create complete JSON", input: "create report.json", model,
@@ -179,7 +308,7 @@ test("recovery preserves reduced budgets, ResultRefs and committed write continu
       grant: grant(root), maxSteps: 3, initialMessages: recovered.messages, initialToolEvidence: recovered.toolEvidence,
       initialOutputBudgetState: recovered.facts.outputBudgetState,
       model: { limits, complete: async request => {
-        assert.equal(maxContent(request), 2048);
+        assert.equal(maxContent(request), 48000);
         assert.equal(writingContext(request).committedWrites[0].target, "resume.txt");
         return ++turns === 1 ? { content: "", finishReason: "tool_calls", toolCalls: [{ id: "append", name: "computer_write_file",
           arguments: { path: "resume.txt", content: "remaining\n", mode: "append" } }] } : done;
@@ -205,7 +334,7 @@ test("a completed streamed chunk survives a truncated trailing call and is never
           return { content: "", finishReason: "length", toolCalls: [call,
             { id: "incomplete", name: "computer_write_file", arguments: '{"path":"stream.txt","content":"unfinished' }] };
         }
-        assert.equal(maxContent(request), 2048);
+        assert.equal(maxContent(request), 48000);
         assert.equal(writingContext(request).recovery.consecutiveTruncations, 0);
         if (turns === 2) {
           assert.equal(await fs.readFile(join(root, "stream.txt"), "utf8"), "head\n");

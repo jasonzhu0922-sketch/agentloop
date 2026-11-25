@@ -1,3 +1,4 @@
+import { openRuntimeState, RuntimeRecordMaintenance, FileRuntimeArchiveStore, type RuntimeStateConfig } from "@zhujun/agentloop";
 import { mkdir } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { AppDatabase, AppError, LlmProviderRegistry, RunService, SkillService, createRuntimeCapabilitySnapshotFromSources, createWebTools, loadMcpToolsFromConfig, type LoadedMcpIntegration, type RuntimeCapabilitySnapshot, type WebToolsOptions } from "@zhujun/agentloop";
@@ -119,6 +120,18 @@ function localSettlementModel(
   };
 }
 
+/** Host configuration only; execution repositories use one backend-neutral contract. */
+export function localRuntimeStateConfig(definition: LocalRuntimeDefinition, filename: string,
+  environment: Readonly<Record<string, string | undefined>>): RuntimeStateConfig {
+  const backend = environment.AGENTLOOP_RUNTIME_STATE_BACKEND ?? "sqlite";
+  if (backend === "sqlite") return { backend, filename };
+  if (backend !== "redis") throw new TypeError("AGENTLOOP_RUNTIME_STATE_BACKEND must be sqlite or redis");
+  const url = environment.AGENTLOOP_RUNTIME_REDIS_URL;
+  const namespace = environment.AGENTLOOP_RUNTIME_REDIS_NAMESPACE;
+  if (!url || !namespace) throw new TypeError("Local Redis requires AGENTLOOP_RUNTIME_REDIS_URL and AGENTLOOP_RUNTIME_REDIS_NAMESPACE");
+  return { backend, url, namespace: `${namespace}:local:${definition.storageKey}` };
+}
+
 /** Creates the isolated kernel, storage and skill catalog for one device Runtime. */
 export class LocalRuntimeFactory {
   private readonly input: LocalRuntimeHostOptions;
@@ -155,7 +168,15 @@ export class LocalRuntimeFactory {
     await mkdir(sharedStorageRoot, { recursive: true });
     await mkdir(this.input.skillPackageStoreRoot, { recursive: true });
     const database = new AppDatabase(databasePath);
-    this.databases.register(definition.id, database);
+    const stateConfig = this.input.stateConfig?.(definition) ?? localRuntimeStateConfig(definition, databasePath, environment);
+    let runtimeState;
+    try { runtimeState = await openRuntimeState(stateConfig, stateConfig.backend === "sqlite" ? { sqlite: database } : undefined); }
+    catch (error) { await database.close(); throw error; }
+    const maintenance = new RuntimeRecordMaintenance({ state: runtimeState, namespace: stateConfig.backend === "redis" ? stateConfig.namespace : databasePath,
+      archive: new FileRuntimeArchiveStore(join(runtimeRoot, "runtime-state-archive")) });
+    maintenance.start();
+    const executionRuntimeId = `local:${definition.id}`;
+    this.databases.register(definition.id, runtimeState);
     // Memory is an explicitly opted-in Local Agent feature. When disabled we
     // do not even create the SQLite file, plugin, settlement worker, or timer.
     const memoryEnabled = configuration.memory?.enabled === true;
@@ -187,7 +208,7 @@ export class LocalRuntimeFactory {
           database: memoryDatabase,
           recallModel: localSettlementModel(settlementKey, () => currentModels().provider, 1_500),
           resolveRunScope: async (runId) => {
-            const row = await database.prepare("SELECT owner_user_id, conversation_id, parent_run_id FROM runs WHERE id = ?").get(runId) as { owner_user_id: string; conversation_id: string | null; parent_run_id: string | null } | undefined;
+            const row = (await runtimeState.records.find("runs", { id: runId }))[0];
             if (row === undefined) return undefined;
             return {
               tenantId: memoryTenantId!,
@@ -291,9 +312,10 @@ export class LocalRuntimeFactory {
         { environment: integrationEnvironment },
       );
       const runs = new RunService({
+        executionRuntimeId,
         skillLoadDiagnostics: configuration.skillDiagnostics,
         requireExplicitModel: true,
-        database, skills, ...(memory === undefined ? {} : { memory }), modelFactory: (onRetry, modelKey) => {
+        database: runtimeState, skills, ...(memory === undefined ? {} : { memory }), modelFactory: (onRetry, modelKey) => {
           const { provider, configuration: modelConfiguration } = currentModels();
           if (modelKey === undefined || modelKey.length === 0) throw new AppError("MODEL_ERROR", "model_required", 400);
           if (typeof modelKey === "string" && modelKey.startsWith("cloud:")) {
@@ -366,13 +388,14 @@ export class LocalRuntimeFactory {
         settlementTimer.unref();
       }
       const activeRunIds = new Set<string>();
-      const admitted = await database.prepare(`SELECT a.run_id FROM local_run_admissions a
-        JOIN runs r ON r.id = a.run_id AND r.owner_user_id = a.owner_user_id
-        LEFT JOIN run_recovery_states recovery ON recovery.run_id = r.id
-        WHERE r.status = 'running' AND (recovery.state IS NULL OR recovery.state NOT IN ('waiting_recovery', 'waiting_user')
-          OR recovery.planning_token IS NOT NULL OR recovery.resume_token IS NOT NULL)`).all() as Array<{ run_id: string }>;
-      for (const row of admitted) activeRunIds.add(row.run_id);
-      const dispatched = await database.prepare("SELECT owner_user_id, remote_run_id FROM local_runtime_dispatches").all() as Array<{ owner_user_id: string; remote_run_id: string }>;
+      for (const admission of await runtimeState.records.find("local_run_admissions")) {
+        if (!admission.run_id) continue;
+        const run = (await runtimeState.records.find("runs", { id: admission.run_id, owner_user_id: admission.owner_user_id }))[0];
+        const recovery = (await runtimeState.records.find("run_recovery_states", { run_id: admission.run_id }))[0];
+        if (run?.status === "running" && (!recovery || !["waiting_recovery", "waiting_user"].includes(recovery.state)
+          || recovery.planning_token !== null || recovery.resume_token !== null)) activeRunIds.add(run.id);
+      }
+      const dispatched = await runtimeState.records.find("local_runtime_dispatches");
       const restoredAt = Date.now();
       for (const row of dispatched) {
         try { if (shouldRetainRestoredRunActivity(await runs.get(row.owner_user_id, row.remote_run_id), restoredAt)) activeRunIds.add(row.remote_run_id); }
@@ -386,16 +409,18 @@ export class LocalRuntimeFactory {
         });
       }, 10_000);
       planningRecoveryTimer.unref();
-      return { ...definition, database, scopes, runs,
+      return { ...definition, database, runtimeState, executionRuntimeId, scopes, runs,
         get skillDiagnostics() { return [...(configuration.skillDiagnostics ?? []), ...skills.loadDiagnostics()]; },
         ...(memory === undefined || memoryTenantId === undefined ? {} : { memory: { store: memory.store, tenantId: memoryTenantId } }),
         close: async () => {
           if (settlementTimer !== undefined) clearInterval(settlementTimer);
           if (planningRecoveryTimer !== undefined) clearInterval(planningRecoveryTimer);
+          await runs.closeRunEvents();
+          await maintenance.close();
           try { await memory?.close?.(); }
           finally {
             try { await memoryDatabase?.close(); }
-            finally { this.databases.unregister(definition.id, database); }
+            finally { this.databases.unregister(definition.id, runtimeState); if (stateConfig.backend === "redis") await runtimeState.close(); }
           }
         },
         connectorConnectionIds: connectorConfiguration?.connections.filter((connection) => connection.status === "active").map((connection) => connection.id) ?? [],
@@ -403,10 +428,12 @@ export class LocalRuntimeFactory {
     } catch (error) {
       if (settlementTimer !== undefined) clearInterval(settlementTimer);
       if (planningRecoveryTimer !== undefined) clearInterval(planningRecoveryTimer);
+      await maintenance.close().catch(() => undefined);
       await memory?.close?.().catch(() => undefined);
       try { await memoryDatabase?.close(); }
       finally {
-        this.databases.unregister(definition.id, database);
+        this.databases.unregister(definition.id, runtimeState);
+        if (stateConfig.backend === "redis") await runtimeState.close();
         await database.close();
       }
       throw error;

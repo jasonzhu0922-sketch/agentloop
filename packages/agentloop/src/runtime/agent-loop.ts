@@ -1,9 +1,12 @@
+import { isDecisionRecordEvent } from "./committed-decision-records.ts";
+import { decisionContextEvidenceReferences, decisionContextReferenceBindings } from "./decision-context-transport.ts";
 import { createHash } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import { isArtifactAcceptanceKind } from "../acceptance/artifact-acceptance.ts";
 import { OrderedExecutionScheduler } from "../shared/concurrency.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import { ContextAssembler, type ContextPolicy } from "./context-assembler.ts";
+import { decisionContextToolDefinitions, toolCallWithoutDecisionContext } from "./decision-context-transport.ts";
 import { isCommandResult } from "./command-result-projection.ts";
 import { acceptedArtifactVersions, appendDeliveryCandidateCaveats, buildRuntimeDeliveryCandidate, normalizeDeliveryCandidate } from "./delivery-candidate.ts";
 import type {
@@ -165,6 +168,15 @@ export interface AgentLoopOptions {
   readonly evaluateCandidate?: (
     context: CandidateCompletionContext,
   ) => Promise<CandidateCompletionEvaluation>;
+  /** Persist a Runtime-owned failed boundary before a locally exhausted
+   * execution strategy escapes to Run-level recovery. */
+  readonly onLocalRepairExhausted?: (context: Readonly<{
+    reason: string;
+    feedback: string;
+    failedBoundary: NonNullable<CandidateCompletionEvaluation["failedBoundary"]>;
+    toolEvidence: readonly AgentLoopToolEvidence[];
+    modelSteps: number;
+  }>) => Promise<void>;
 }
 
 /** Evidence is committed before this hook runs; enrichers cannot access Tools or Runtime authority. */
@@ -250,7 +262,6 @@ const CONVERGENCE_MAX_OUTPUT_TOKENS = 4_096;
 // Once a provider truncates a Tool call, the next repair turn must be small
 // enough to make a bounded write or action possible. This also prevents a
 // repeated oversized call from holding the stream open for several minutes.
-const LENGTH_REPAIR_MAX_OUTPUT_TOKENS = 16_384;
 const EMPTY_CANDIDATE_REPAIR_ATTEMPTS = 2;
 // Extra tool-enabled steps granted after the primary budget when the model is
 // still actively executing. Defaults to 0 so the primary `maxSteps` budget is
@@ -541,13 +552,28 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const model = options.model;
   const workProducts = options.workProductContext === undefined ? undefined : new WorkProductContext(options.runId, options.workProductContext);
   for (const event of options.initialWorkProductEvents ?? []) workProducts?.capture(event);
-  const emit = async (event: RuntimeEvent): Promise<void> => {
-    const observed = workProducts?.capture(event) ?? event;
-    await options.emit?.(observed);
-    if (workProducts !== undefined && options.onWorkProductDeliveryTargets !== undefined) {
-      const facts = workProducts.derive();
-      await options.onWorkProductDeliveryTargets(facts.semantics.deliveryTargets ?? [], facts.observations);
-    }
+  const committedDecisionEvents: RuntimeEvent[] = [...(options.initialWorkProductEvents ?? [])];
+  // Preserve invocation order across parallel tool sinks. Both product and
+  // semantic projections advance only after the same event is acknowledged.
+  let eventCommitTail = Promise.resolve();
+  const emit = (event: RuntimeEvent): Promise<void> => {
+    // Streaming readiness/planning notifications must not wait behind Tool
+    // persistence: schedulers may depend on the stream continuing to drain.
+    if (!isDecisionRecordEvent(event)) return Promise.resolve().then(() => options.emit?.(event));
+    const committed = eventCommitTail.then(async () => {
+      const observed = workProducts?.prepare(event) ?? event;
+      await options.emit?.(observed);
+      workProducts?.capture(observed);
+      if (isDecisionRecordEvent(observed)) committedDecisionEvents.push(observed);
+      if (workProducts !== undefined && options.onWorkProductDeliveryTargets !== undefined) {
+        const facts = workProducts.derive();
+        await options.onWorkProductDeliveryTargets(facts.semantics.deliveryTargets ?? [], facts.observations);
+      }
+    });
+    // A failed sink cannot publish facts. Later failure evidence may still be
+    // persisted by the existing error path, so do not poison the whole queue.
+    eventCommitTail = committed.catch(() => {});
+    return committed;
   };
   const maxToolResultCharacters = options.maxToolResultCharacters ?? 50_000;
   const maxParallelToolCalls = options.maxParallelToolCalls ?? 5;
@@ -612,6 +638,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     },
     model: options.model,
     policy: options.contextPolicy,
+    ...(options.initialMessages === undefined || options.initialWorkProductEvents !== undefined
+      ? { decisionEvents: () => committedDecisionEvents } : {}),
     emit,
   });
   const initialPromptAugmentations = contextAssembler.applyRuntimePromptAugmentations(
@@ -656,6 +684,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let convergenceRequested = false;
   let previousPrepareRejectionSignature: string | undefined;
   let consecutivePrepareRejectionSteps = 0;
+  let consecutivePrepareRejectedToolCallIds: string[] = [];
   let outputBudgetState = parseOutputBudgetState(options.initialOutputBudgetState)
     ?? { shrinkCount: 0, consecutiveTruncations: 0 };
   let invalidHumanLoopAttempts = 0;
@@ -715,7 +744,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   ): Promise<CandidateCompletionEvaluation> => {
     const workProductFacts = await workProducts?.deriveForDecision();
     const decisionContext = options.currentDecisionContext?.();
-    const currentDecisionView = projectCurrentDecisionView(deriveCurrentDecisionView({
+    const fullDecisionView = deriveCurrentDecisionView({
       runId: options.runId,
       resultBindings: options.runtimeContext?.resultBindings,
       ...(decisionContext === undefined ? {} : { context: decisionContext }),
@@ -723,11 +752,39 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       evidence: deriveRuntimeStepEvidenceState({ policy: options.progressPolicy, evidence: context.toolEvidence }),
       toolEvidence: context.toolEvidence,
       ...(workProductFacts === undefined ? {} : { workProducts: workProductFacts }),
-    }));
+    });
+    contextAssembler.setCurrentDecisionView(fullDecisionView);
+    await contextAssembler.refreshDecisionWorkingSet(messages, options.tools.materialize(options.grant).definitions);
+    const currentDecisionView = projectCurrentDecisionView(fullDecisionView);
+    // Include the exact current-version observations/checks without asking the
+    // model to perform a new history-read turn just to assess known content.
+    const relevantProductPaths = new Set([
+      ...fullDecisionView.workProducts.objects.filter(object => object.role !== "unknown").map(object => object.path),
+      ...fullDecisionView.workProducts.deliveryTargets.map(target => target.path),
+      ...fullDecisionView.workProducts.issues.filter(issue => issue.applicability === "current").map(issue => issue.path),
+    ]);
+    const requiredObservationIds = new Set((workProductFacts?.observations.objects ?? [])
+      .filter(object => relevantProductPaths.has(object.path) && object.presence === "present").flatMap(object => [
+      ...(object.versions.find(version => version.id === object.currentVersionId)?.observationIds ?? []),
+      ...object.checks.filter(check => check.binding === "current").map(check => check.observationId),
+    ]));
+    const requiredToolCallIds = workProductFacts?.observations.observations.filter(observation => requiredObservationIds.has(observation.id))
+      .map(observation => observation.source.toolCallId) ?? [];
     const assessmentContext: CandidateCompletionContext = {
       ...context,
+      projectedToolEvidence: contextAssembler.selectAssessmentEvidence(context.toolEvidence, requiredToolCallIds),
       decisionBasisDigest: currentDecisionView.identity.decisionBasisDigest,
+      currentDecisionView,
+      decisionWorkingSet: contextAssembler.decisionWorkingSet,
     };
+    await emit({ type: "context.assessment_evidence_selected", data: {
+      source: "current_decision_dependencies", step,
+      originalEvidenceCount: context.toolEvidence.length, selectedEvidenceCount: assessmentContext.projectedToolEvidence.length,
+      originalCharacters: context.toolEvidence.reduce((sum, item) => sum + item.result.length, 0),
+      selectedCharacters: assessmentContext.projectedToolEvidence.reduce((sum, item) => sum + item.result.length, 0),
+      pendingObservationCount: assessmentContext.decisionWorkingSet?.pendingToolCallIds.length ?? 0,
+      // Character counts are not provider usage, estimates or billing.
+    } });
     const candidateIdentity = createHash("sha256").update(JSON.stringify({
       decisionBasisDigest: assessmentContext.decisionBasisDigest,
       output: assessmentContext.output.trim(), deliveryCandidate: assessmentContext.deliveryCandidate,
@@ -1077,9 +1134,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     if (outputBudgetState.consecutiveTruncations >= 3) { stalled = true; break; }
     const turnMaxOutputTokens = convergenceOnly
       ? Math.min(convergenceMaxOutputTokens, options.model.limits.maxOutputTokens)
-      : outputBudgetState.shrinkCount > 0
-        ? Math.min(LENGTH_REPAIR_MAX_OUTPUT_TOKENS, options.model.limits.maxOutputTokens)
-        : options.model.limits.maxOutputTokens;
+      : options.model.limits.maxOutputTokens;
     const contentBudget = toolContentBudget(turnMaxOutputTokens, outputBudgetState, options.contentBudgetPolicy);
     const grantedMaterialized = options.tools.materialize(options.grant, {
       decisionLedger: options.runtimeContext?.decisionLedger,
@@ -1119,6 +1174,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     // Ported from OpenCode's materialization boundary: each model step gets a
     // fresh authorized snapshot, and preparation remains tied to that snapshot.
     const prepareWithArtifactTarget = (call: ModelToolCall): PreparedToolCall => {
+      call = toolCallWithoutDecisionContext(call, contextTransport.names);
       assertArtifactAcceptanceCallMatchesTarget(
         call,
         options.progressPolicy,
@@ -1175,7 +1231,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       grantedMaterialized.definitions,
       stepExecutionDecision.toolCatalog.preferredToolNames,
     );
-    const modelStepDefinitions = executionDefinitions;
+    const contextTransport = options.contextPolicy?.executionHistoryProjection === "canonical"
+      ? { names: new Set<string>(), definitions: executionDefinitions }
+      : decisionContextToolDefinitions(executionDefinitions, messages.some(message => message.role === "tool"));
+    const modelStepDefinitions = contextTransport.definitions;
     const modelStepToolNames = new Set(modelStepDefinitions.map((tool) => tool.name));
     const prepareForModelStep = (call: ModelToolCall): PreparedToolCall => {
       if (!modelStepToolNames.has(call.name)) {
@@ -1189,6 +1248,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     };
     // Runtime owns one current-state projection; strategies may recommend tools
     // but cannot replace this view with an alternate fact interpretation.
+    contextAssembler.setCurrentDecisionView(currentDecisionView);
     contextAssembler.setRuntimeStepFrame(JSON.stringify(stepExecutionDecision.loopStepFrame));
     contextAssembler.setPromptProjectionPolicy(stepExecutionDecision.promptProjection);
     await emit({
@@ -1379,6 +1439,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
     let assembly = await contextAssembler.assemble(messages, modelStepDefinitions, options.signal);
 
+    // Freeze request visibility before early dispatch can add current-turn receipts.
+    const requestEvidenceToolCallIds = new Set(toolEvidence.map(item => item.toolCallId));
+    const requestEvidenceBindings = decisionContextReferenceBindings((contextAssembler.decisionWorkingSet?.evidenceReferences ?? [])
+      .filter(ref => requestEvidenceToolCallIds.has(ref.toolCallId)));
     let earlyOutcomes = new Map<string, ToolOutcome>();
     let response: ModelResponse | undefined;
     for (let candidateAttempt = 1; candidateAttempt <= EMPTY_CANDIDATE_REPAIR_ATTEMPTS; candidateAttempt += 1) {
@@ -1531,7 +1595,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       await emit({ type: "loop.output_budget.updated", data: {
         step, schema: "agentloop.outputBudgetState/v1", ...outputBudgetState,
         reason: "output_truncated", maxOutputTokens: turnMaxOutputTokens,
-        nextContentBudget: toolContentBudget(Math.min(LENGTH_REPAIR_MAX_OUTPUT_TOKENS, options.model.limits.maxOutputTokens), outputBudgetState, options.contentBudgetPolicy),
+        nextContentBudget: toolContentBudget(options.model.limits.maxOutputTokens, outputBudgetState, options.contentBudgetPolicy),
       } });
       if (outputBudgetState.consecutiveTruncations > 1) {
         await emit({ type: "loop.no_progress", data: {
@@ -1541,8 +1605,30 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       }
     }
 
+    const citedContextReferences = new Set(decisionContextEvidenceReferences(response.toolCalls, [...contextTransport.names]));
     const executionHistoryBasis: import("./execution-history-projection.ts").ExecutionHistoryBasis = {
-      identity: currentDecisionView.identity,
+      contextArgumentTools: [...contextTransport.names],
+      contextDecisionRequired: contextTransport.names.size > 0,
+      // Persist only cited identities, not a growing copy of the evidence ledger.
+      contextEvidenceToolCallIds: decisionContextEvidenceReferences(response.toolCalls, [...contextTransport.names], requestEvidenceBindings)
+        .filter(id => requestEvidenceToolCallIds.has(id)),
+      contextEvidenceBindings: Object.fromEntries(Object.entries(requestEvidenceBindings).filter(([ref]) => citedContextReferences.has(ref))),
+      contextItemRevisions: Object.fromEntries((contextAssembler.decisionWorkingSet?.items ?? []).map(item => [item.id, item.revision])),
+      identity: { ...currentDecisionView.identity,
+        ...(decisionContext === undefined && options.grant.stepId !== undefined ? { stepId: options.grant.stepId } : {}),
+        ...(decisionContext === undefined && options.grant.planId !== undefined ? { planId: options.grant.planId } : {}),
+      },
+      workProductVersions: currentDecisionView.workProducts.objects.flatMap(object => {
+        if (object.currentVersionId === undefined || object.presence !== "present") return [];
+        const fact = workProductFacts?.observations.objects.find(candidate => candidate.path === object.path);
+        const observationIds = new Set([
+          ...(fact?.versions.find(version => version.id === object.currentVersionId)?.observationIds ?? []),
+          ...(fact?.checks.filter(check => check.binding === "current").map(check => check.observationId) ?? []),
+        ]);
+        return [{ path: object.path, versionId: object.currentVersionId,
+          evidenceToolCallIds: workProductFacts?.observations.observations.filter(observation => observationIds.has(observation.id)).map(observation => observation.source.toolCallId) ?? [],
+        }];
+      }),
       toolEffects: Object.fromEntries(response.toolCalls.map(call => [call.name, options.tools.effectOf(call.name) ?? "unknown"])),
     };
     // This awaited event is the durable checkpoint before any external effect.
@@ -2084,7 +2170,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       } else {
         previousPrepareRejectionSignature = prepareRejectionSignature;
         consecutivePrepareRejectionSteps = 1;
+        consecutivePrepareRejectedToolCallIds = [];
       }
+      consecutivePrepareRejectedToolCallIds.push(...outcomes.map((outcome) => outcome.call.id));
       const repeated = consecutivePrepareRejectionSteps > 1;
       if (repeated) {
         stalled = consecutivePrepareRejectionSteps >= 3;
@@ -2098,7 +2186,55 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             stalled,
           },
         });
-        if (stalled) break;
+        if (stalled) {
+          const decisionContext = options.currentDecisionContext?.();
+          const stepId = decisionContext?.stepId;
+          const reusableEvidenceRefs = [...new Set(toolEvidence
+            .filter((item) => !item.isError && item.operationStatus === "succeeded")
+            .map((item) => item.resultRef?.resultId ?? item.toolCallId))];
+          const feedback = [
+            "The same Tool arguments were rejected before execution three times.",
+            "The rejected operation had no external effect. Preserve committed Results and let Runtime recovery replace the exhausted local execution strategy.",
+            ...outcomes.map((outcome) => `${outcome.call.name}: ${outcome.content}`),
+          ].join(" ");
+          const failedBoundary = stepId === undefined ? undefined : {
+            stepId,
+            missingEvidenceKinds: [],
+            violatedSkillRequirements: [],
+            reusableEvidenceRefs,
+            suggestedRepairShape: "repair_leaf" as const,
+            repairPrerequisite: reusableEvidenceRefs.length > 0 ? "existing_evidence" as const : "new_observation" as const,
+            unmetCriteria: [{
+              criterionId: "valid_tool_invocation",
+              status: "unverified" as const,
+              rationale: feedback,
+              evidenceRefs: [...consecutivePrepareRejectedToolCallIds],
+              contractIssue: "The required operation never executed because its arguments failed Tool schema validation.",
+            }],
+          };
+          if (failedBoundary !== undefined) {
+            await options.onLocalRepairExhausted?.({
+              reason: "repeated_prepare_rejection",
+              feedback,
+              failedBoundary,
+              toolEvidence,
+              modelSteps: step,
+            });
+          }
+          throw await completionFailure(new AppError(
+            "STEP_NOT_COMPLETED",
+            feedback,
+            422,
+            {
+              feedback,
+              reason: "repeated_prepare_rejection",
+              repairExhausted: true,
+              rejectedToolCallIds: [...consecutivePrepareRejectedToolCallIds],
+              ...(failedBoundary === undefined ? {} : { failedBoundary }),
+            },
+          ), step, "", { approved: false, feedback, requiresEvidenceProgress: true,
+            ...(failedBoundary === undefined ? {} : { failedBoundary }) });
+        }
       }
       contextAssembler.setRuntimeDirective(prepareRejectionRepairDirective({
         outcomes,
@@ -2108,6 +2244,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
     previousPrepareRejectionSignature = undefined;
     consecutivePrepareRejectionSteps = 0;
+    consecutivePrepareRejectedToolCallIds = [];
 
     const successfulCompletionObservation = convergenceOnly
       && outcomes.some((outcome) => !outcome.isError
@@ -2585,6 +2722,7 @@ function isInternalEvidenceMarkupCandidate(value: string): boolean {
     // placeholders are never user-facing completion content. This is a
     // protocol boundary, not HTML sanitisation: ordinary requested HTML is
     // unaffected.
+    || /<work_product_progress\b/i.test(trimmed)
     || /<\/?think\b[^>]*>/i.test(trimmed)
     || /\btoolResultsOverride\b/i.test(trimmed);
 }
@@ -3312,6 +3450,12 @@ async function executePrepared(
     const canonicalContent = serializeToolResult(value, Number.POSITIVE_INFINITY);
     // The transcript/evidence retain the same original command Result. Only
     // ContextAssembler projects its streams for a model invocation.
+    if (call.name === "read_result") await emit({ type: "context.history.read", data: {
+      phase: "execution", step, toolCallId: call.id, toolName: call.name,
+      resultId: typeof call.arguments === "object" && call.arguments !== null ? (call.arguments as Record<string, unknown>).resultId : undefined,
+      view: typeof call.arguments === "object" && call.arguments !== null ? (call.arguments as Record<string, unknown>).view ?? "result" : "result",
+      characters: canonicalContent.length, sha256: createHash("sha256").update(canonicalContent).digest("hex"),
+    } });
     const content = serializeToolResult(value,
       isCommandResult(value) ? Number.POSITIVE_INFINITY : tool.maxResultCharacters ?? maxCharacters,
       tracked.resultRef);
@@ -3541,7 +3685,7 @@ function lengthTruncationRepairDirective(input: {
     ...(input.repeated === true ? [
       "The same Tool call has already been truncated more than once. Change the call shape now; repeating it will stop this Run.",
     ] : []),
-    "The next turn has a smaller content budget. Follow the Tool's bounded authoring and continuation instructions immediately: for a new file create one complete small chunk, then append separate chunks to the same path from the last committed receipt. Never recreate committed content or execute incomplete native arguments.",
+    "Use a shorter payload after this actual truncation; output estimates are recovery guidance, not a restriction on complete native calls. For a new file, write a complete file if it now fits, otherwise create a contiguous prefix. For an existing file, continue from its latest committed receipt with append at EOF or patch before existing closing delimiters. Intermediate file syntax may be incomplete; native Tool arguments must be complete. Never recreate committed content or execute incomplete native arguments.",
     "If the requested artifact is incomplete, produce only the next bounded chunk or use an available materialization Tool. Complete the requested content across successful calls before publishing the deliverable.",
     "If the artifact appears complete but lacks acceptance evidence, call the available acceptance or verification Tool.",
     "Use read-only Tools only for one specifically missing fact that is not already available from recent evidence.",

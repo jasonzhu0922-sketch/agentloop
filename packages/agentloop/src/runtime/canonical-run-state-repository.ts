@@ -1,4 +1,4 @@
-import type { SqlConnection } from "../storage/connection.ts";
+import { runtimePersistence, type RuntimePersistence, type RuntimePersistenceInput } from "../storage/runtime-records.ts";
 import { AppError, notFound } from "../shared/errors.ts";
 import type { CanonicalRunState } from "./canonical-run-state.ts";
 
@@ -13,28 +13,25 @@ interface CanonicalRunStateRow {
 }
 
 export class CanonicalRunStateRepository {
-  private readonly connection: SqlConnection;
+  private readonly connection: RuntimePersistence;
 
-  constructor(connection: SqlConnection) {
-    this.connection = connection;
+  constructor(connection: RuntimePersistenceInput) {
+    this.connection = runtimePersistence(connection);
   }
 
   async create(state: CanonicalRunState): Promise<CanonicalRunState> {
     await this.connection.transaction(async () => {
-      await this.connection.prepare(`
-        INSERT INTO canonical_run_states(run_id, state_id, intent_id, revision, state_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(state.runId, state.stateId, state.intent.id, state.revision, JSON.stringify(state), state.createdAt, state.updatedAt);
+      await this.connection.records.insert("canonical_run_states", {
+        run_id: state.runId, state_id: state.stateId, intent_id: state.intent.id,
+        revision: state.revision, state_json: JSON.stringify(state), created_at: state.createdAt, updated_at: state.updatedAt,
+      });
       await this.insertRevision(state, "intent_initialized");
     });
     return state;
   }
 
   async get(runId: string): Promise<CanonicalRunState> {
-    const row = await this.connection.prepare(`
-      SELECT run_id, state_id, intent_id, revision, state_json, created_at, updated_at
-      FROM canonical_run_states WHERE run_id = ?
-    `).get(runId) as CanonicalRunStateRow | undefined;
+    const row = (await this.connection.records.find("canonical_run_states", { run_id: runId }))[0];
     if (row === undefined) throw notFound("Canonical Run State");
     return parseState(row);
   }
@@ -57,20 +54,10 @@ export class CanonicalRunStateRepository {
       throw new TypeError("Canonical Run State writer must advance exactly one revision");
     }
     await this.connection.transaction(async () => {
-      const result = await this.connection.prepare(`
-        UPDATE canonical_run_states
-        SET revision = ?, state_json = ?, updated_at = ?
-        WHERE run_id = ? AND state_id = ? AND intent_id = ? AND revision = ?
-      `).run(
-        input.state.revision,
-        JSON.stringify(input.state),
-        input.state.updatedAt,
-        input.state.runId,
-        input.state.stateId,
-        input.state.intent.id,
-        input.expectedRevision,
-      );
-      if (result.changes !== 1) {
+      const changes = await this.connection.records.update("canonical_run_states", {
+        run_id: input.state.runId, state_id: input.state.stateId, intent_id: input.state.intent.id, revision: input.expectedRevision,
+      }, () => ({ revision: input.state.revision, state_json: JSON.stringify(input.state), updated_at: input.state.updatedAt }));
+      if (changes !== 1) {
         throw new AppError("CONFLICT", "Canonical Run State revision is stale", 409, {
           runId: input.state.runId,
           expectedRevision: input.expectedRevision,
@@ -82,10 +69,9 @@ export class CanonicalRunStateRepository {
   }
 
   private async insertRevision(state: CanonicalRunState, reason: string): Promise<void> {
-    await this.connection.prepare(`
-      INSERT INTO canonical_run_state_revisions(run_id, revision, state_json, reason, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(state.runId, state.revision, JSON.stringify(state), reason, state.updatedAt);
+    await this.connection.records.insert("canonical_run_state_revisions", {
+      run_id: state.runId, revision: state.revision, state_json: JSON.stringify(state), reason, created_at: state.updatedAt,
+    });
   }
 }
 

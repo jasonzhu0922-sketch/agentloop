@@ -1,3 +1,4 @@
+import { projectCanonicalDecisionBasis } from "../runtime/canonical-decision-basis.ts";
 import { AppError, badRequest } from "../shared/errors.ts";
 import { nullableJsonSchema } from "../shared/json-schema.ts";
 import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
@@ -709,6 +710,7 @@ function plannerContractRetryDirective(
   return undefined;
 }
 
+
 function priorResultMaterializationRepair(
   planningError: AppError,
   task: TaskSpec,
@@ -1391,7 +1393,7 @@ function planningRuntimeContext(
           ? {}
           : { requiredToolSourceIds: canonicalRequiredToolSourceIds(task) }),
         ...(task.workspaceFacts === undefined ? {} : { workspaceFacts: task.workspaceFacts }),
-        canonicalRunState: task.canonicalState,
+        canonicalRunState: projectCanonicalDecisionBasis(task.canonicalState),
         userAuthority: task.userAuthority ?? buildUserAuthorityContext({ userInput: canonicalUserInput(task), intent: task.canonicalState.intent }),
         ...(task.roundResultBindings === undefined ? {} : { roundResultBindings: task.roundResultBindings }),
         ...(task.priorRoundResult === undefined ? {} : { priorRoundResult: task.priorRoundResult }),
@@ -1946,6 +1948,7 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
     );
   }
 }
+
 
 /** Validates server-owned role/dependency shape without inspecting domain content. */
 function assertRequiredPlanTopology(

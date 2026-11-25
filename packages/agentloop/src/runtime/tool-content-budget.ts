@@ -1,5 +1,4 @@
-import type { AgentLoopToolEvidence, JsonSchema, ModelToolCall, ModelToolDefinition } from "./contracts.ts";
-import { estimateTextTokens } from "./context-assembler.ts";
+import type { AgentLoopToolEvidence, ModelToolDefinition } from "./contracts.ts";
 import { badRequest } from "../shared/errors.ts";
 
 /** Tool-owned authoring vocabulary; Runtime does not infer it from a name or extension. */
@@ -21,7 +20,7 @@ export interface ToolContentBudget {
 }
 
 export interface ToolContentBudgetPolicy {
-  /** Share of the actual invocation output limit available to one authored payload. */
+  /** Advisory share of invocation output for recovery; never an admission limit. */
   readonly outputFraction?: number;
 }
 
@@ -33,33 +32,21 @@ export function parseOutputBudgetState(value: unknown): OutputBudgetState | unde
 }
 
 export function toolContentBudget(maxOutputTokens: number, state: OutputBudgetState, policy: ToolContentBudgetPolicy = {}): ToolContentBudget {
-  const fraction = policy.outputFraction ?? 0.25;
+  const fraction = policy.outputFraction ?? 1;
   if (!Number.isFinite(fraction) || fraction <= 0 || fraction > 1) throw badRequest("contentBudgetPolicy.outputFraction must be greater than 0 and at most 1");
   const target = Math.max(1, Math.floor(maxOutputTokens * fraction / 2 ** Math.min(state.shrinkCount, 20)));
-  return { maxOutputTokens, maxContentCharacters: Math.min(48_000, target), maxArgumentsTokens: target };
+  // These are planning hints after actual output truncation, not a second
+  // admission gate on complete native calls the provider already returned.
+  return { maxOutputTokens, maxContentCharacters: Math.min(48_000, target * 4), maxArgumentsTokens: target };
 }
 
 export function projectBoundedToolDefinition(
   definition: ModelToolDefinition, content: BoundedToolContent, budget: ToolContentBudget,
 ): ModelToolDefinition {
-  const properties = asRecord(definition.inputSchema.properties) ?? {};
-  const fieldSchema = asRecord(properties[content.field]) ?? {};
-  const maxLength = Math.min(typeof fieldSchema.maxLength === "number" ? fieldSchema.maxLength : Infinity, budget.maxContentCharacters);
   return {
     ...definition,
-    description: `${definition.description} This turn's stricter output budget overrides the static ceiling: ${content.field} must contain at most ${maxLength} characters and the complete serialized arguments must fit ${budget.maxArgumentsTokens} estimated tokens. Produce at most one bounded content call for the same target per turn. ${content.continuationInstruction}`,
-    inputSchema: { ...definition.inputSchema, properties: { ...properties, [content.field]: { ...fieldSchema, maxLength } } } as JsonSchema,
+    description: `${definition.description} Prefer one complete write when the requested content fits the Tool schema and the model output window. Output estimates are advisory and do not narrow this schema. After actual output truncation, aim for a shorter payload (approximately ${budget.maxArgumentsTokens} tokens); do not repeat the truncated call. Produce at most one content call for the same target per turn. ${content.continuationInstruction}`,
   };
-}
-
-export function assertToolContentBudget(call: ModelToolCall, content: BoundedToolContent, budget: ToolContentBudget): void {
-  const argumentsValue = asRecord(call.arguments);
-  if (argumentsValue === undefined || typeof argumentsValue[content.field] !== "string") return; // Tool parser owns shape errors.
-  const characters = (argumentsValue[content.field] as string).length;
-  const tokens = estimateTextTokens(JSON.stringify(call.arguments));
-  if (characters > budget.maxContentCharacters || tokens > budget.maxArgumentsTokens) {
-    throw badRequest(`Tool content exceeds this turn's output budget: ${content.field} has ${characters} characters (limit ${budget.maxContentCharacters}); serialized arguments use ${tokens} estimated tokens (limit ${budget.maxArgumentsTokens}). No write was executed. ${content.continuationInstruction}`);
-  }
 }
 
 /** Compact committed receipts, not generated/truncated arguments, own continuation. */
@@ -69,26 +56,34 @@ export function boundedAuthoringContext(
 ): string | undefined {
   if (tools.size === 0) return undefined;
   const latest = new Map<string, unknown>();
+  const targetFields = [...new Set([...tools.values()].map(tool => tool.targetField))];
   for (const item of evidence) {
-    if (item.isError || item.operationStatus === "unknown" || !tools.has(item.toolName)) continue;
+    if (item.isError || item.operationStatus === "unknown") continue;
     let receipt: Record<string, unknown> | undefined;
     try { receipt = asRecord(JSON.parse(item.result)); } catch { continue; }
-    const targetField = tools.get(item.toolName)!.targetField;
-    const target = receipt?.[targetField];
-    if (receipt === undefined || typeof target !== "string") continue;
+    if (receipt === undefined) continue;
     const inspection = asRecord(receipt.inspection);
-    latest.delete(`${item.toolName}:${target}`);
-    latest.set(`${item.toolName}:${target}`, {
-      toolName: item.toolName, toolCallId: item.toolCallId, target,
-      revisionId: receipt.revisionId, bytes: receipt.bytes, writtenBytes: receipt.writtenBytes,
-      mode: receipt.mode, sha256: receipt.sha256, resultRef: item.resultRef ?? receipt.resultRef,
-      tail: inspection?.tail,
-    });
+    // A later revision-bound mutation (for example a patch) supersedes the old
+    // write receipt for the same target. Never keep advertising its stale tail.
+    if (!tools.has(item.toolName) && (typeof receipt.revisionId !== "string" || inspection === undefined)) continue;
+    const after = asRecord(receipt.after);
+    for (const targetField of targetFields) {
+      const target = receipt[targetField];
+      if (typeof target !== "string") continue;
+      latest.delete(`${targetField}:${target}`);
+      latest.set(`${targetField}:${target}`, {
+        toolName: item.toolName, toolCallId: item.toolCallId, target,
+        revisionId: receipt.revisionId, bytes: receipt.bytes ?? after?.bytes, writtenBytes: receipt.writtenBytes,
+        totalLines: receipt.totalLines ?? inspection?.totalLines,
+        mode: receipt.mode ?? receipt.operation, sha256: receipt.sha256 ?? after?.sha256 ?? inspection?.sha256,
+        resultRef: item.resultRef ?? receipt.resultRef, tail: inspection?.tail,
+      });
+    }
   }
   return JSON.stringify({
-    schema: "agentloop.boundedAuthoringContext/v1", budget, recovery: state,
+    schema: "agentloop.boundedAuthoringContext/v1", budget: { ...budget, enforcement: "advisory" }, recovery: state,
     committedWrites: [...latest.values()].slice(-8),
-    instruction: "Use the matching committed write receipt and original task to continue only the missing content. Do not recreate or repeat committed chunks. A truncated unexecuted call contributes no content. A write receipt proves bytes, not semantic completion. Keep authoring until the requested content is complete, then verify the latest revision and submit a standalone completion candidate. If an action's effect is unknown, reconcile it before appending; never replay an uncertain append.",
+    instruction: "Prefer one complete write when it fits the Tool schema and model output window; splitting is not required. After an actual output truncation, use a shorter complete call. For an existing file, use its latest committed revision and exact tail to continue only the missing content; a later patch supersedes an earlier write. Do not recreate an existing path with mode=create or replace already completed content just to resume. A truncated unexecuted call contributes no content. A receipt proves bytes, not semantic completion. Complete the user's requested content before verifying the latest revision and submitting a standalone completion candidate. If an action's effect is unknown, reconcile it before appending; never replay an uncertain append.",
   });
 }
 

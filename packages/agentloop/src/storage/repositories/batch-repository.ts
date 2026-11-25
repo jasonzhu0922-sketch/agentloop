@@ -1,4 +1,4 @@
-import type { SqlConnection } from "../connection.ts";
+import { ascending, runtimePersistence, type RuntimePersistence, type RuntimePersistenceInput } from "../runtime-records.ts";
 
 export type BatchStatus = "running" | "completed" | "failed" | "cancelled";
 export type BatchItemStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
@@ -17,10 +17,10 @@ export interface BatchItemRow {
 }
 
 export class BatchRepository {
-  private readonly connection: SqlConnection;
+  private readonly connection: RuntimePersistence;
 
-  constructor(connection: SqlConnection) {
-    this.connection = connection;
+  constructor(connection: RuntimePersistenceInput) {
+    this.connection = runtimePersistence(connection);
   }
 
   async createBatch(input: {
@@ -34,92 +34,51 @@ export class BatchRepository {
     now: number;
   }): Promise<void> {
     await this.connection.transaction(async () => {
-      await this.connection.prepare(`
-        INSERT INTO batches(
-          id, owner_user_id, idempotency_key, status, concurrency,
-          failure_policy, allow_dangerous_tools, created_at
-        ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
-      `).run(
-        input.id,
-        input.ownerUserId,
-        input.idempotencyKey,
-        input.concurrency,
-        input.failurePolicy,
-        input.allowDangerousTools ? 1 : 0,
-        input.now,
-      );
-      const insertItem = this.connection.prepare(`
-        INSERT INTO batch_items(id, batch_id, item_key, position, input, status)
-        VALUES (?, ?, ?, ?, ?, 'pending')
-      `);
-      for (const item of input.items) {
-        await insertItem.run(item.id, input.id, item.key, item.position, item.input);
-      }
+      await this.connection.records.insert("batches", { id: input.id, owner_user_id: input.ownerUserId, idempotency_key: input.idempotencyKey,
+        status: "running", concurrency: input.concurrency, failure_policy: input.failurePolicy, allow_dangerous_tools: input.allowDangerousTools ? 1 : 0, created_at: input.now });
+      for (const item of input.items) await this.connection.records.insert("batch_items", { id: item.id, batch_id: input.id, item_key: item.key, position: item.position, input: item.input, status: "pending" });
     });
   }
 
   async findIdByIdempotencyKey(ownerUserId: string, key: string): Promise<{ id: string } | undefined> {
-    return await this.connection.prepare(`
-      SELECT id FROM batches WHERE owner_user_id = ? AND idempotency_key = ?
-    `).get(ownerUserId, key) as { id: string } | undefined;
+    return (await this.connection.records.find("batches", { owner_user_id: ownerUserId, idempotency_key: key }))[0];
   }
 
   async findByIdAndOwner(batchId: string, ownerUserId: string): Promise<BatchRow | undefined> {
-    return await this.connection.prepare(`
-      SELECT b.*,
-        COUNT(i.id) AS total,
-        SUM(CASE WHEN i.status = 'completed' THEN 1 ELSE 0 END) AS completed,
-        SUM(CASE WHEN i.status = 'failed' THEN 1 ELSE 0 END) AS failed,
-        SUM(CASE WHEN i.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
-      FROM batches b LEFT JOIN batch_items i ON i.batch_id = b.id
-      WHERE b.id = ? AND b.owner_user_id = ? GROUP BY b.id
-    `).get(batchId, ownerUserId) as BatchRow | undefined;
+    return await this.connection.transaction(async () => {
+      const row = (await this.connection.records.find("batches", { id: batchId, owner_user_id: ownerUserId }))[0];
+      if (!row) return undefined;
+      const items = await this.connection.records.find("batch_items", { batch_id: batchId });
+      return { ...row, total: items.length, completed: items.filter(item => item.status === "completed").length,
+        failed: items.filter(item => item.status === "failed").length, cancelled: items.filter(item => item.status === "cancelled").length };
+    });
   }
 
   async itemsByBatch(batchId: string): Promise<BatchItemRow[]> {
-    return await this.connection.prepare(`
-      SELECT id, batch_id, item_key, position, input, status, run_id, output,
-             error_code, started_at, finished_at
-      FROM batch_items WHERE batch_id = ? ORDER BY position
-    `).all(batchId) as unknown as BatchItemRow[];
+    return (await this.connection.records.find("batch_items", { batch_id: batchId })).sort(ascending("position"));
   }
 
   async claimItem(itemId: string, now: number): Promise<void> {
-    await this.connection.prepare(`
-      UPDATE batch_items SET status = 'running', started_at = ? WHERE id = ? AND status = 'pending'
-    `).run(now, itemId);
+    await this.connection.records.update("batch_items", { id: itemId, status: "pending" }, () => ({ status: "running" as const, started_at: now }));
   }
 
   async markItemCompleted(input: { itemId: string; runId: string; output: string; finishedAt: number }): Promise<void> {
-    await this.connection.prepare(`
-      UPDATE batch_items
-      SET status = 'completed', run_id = ?, output = ?, finished_at = ? WHERE id = ?
-    `).run(input.runId, input.output, input.finishedAt, input.itemId);
+    await this.connection.records.update("batch_items", { id: input.itemId }, () => ({ status: "completed" as const, run_id: input.runId, output: input.output, finished_at: input.finishedAt }));
   }
 
   async markItemFailed(input: { itemId: string; runId: string | null; errorCode: string; finishedAt: number }): Promise<void> {
-    await this.connection.prepare(`
-      UPDATE batch_items
-      SET status = 'failed', run_id = ?, error_code = ?, finished_at = ? WHERE id = ?
-    `).run(input.runId, input.errorCode, input.finishedAt, input.itemId);
+    await this.connection.records.update("batch_items", { id: input.itemId }, () => ({ status: "failed" as const, run_id: input.runId, error_code: input.errorCode, finished_at: input.finishedAt }));
   }
 
   async cancelPendingItems(batchId: string, now: number): Promise<void> {
-    await this.connection.prepare(`
-      UPDATE batch_items SET status = 'cancelled', finished_at = ?
-      WHERE batch_id = ? AND status = 'pending'
-    `).run(now, batchId);
+    await this.connection.records.update("batch_items", { batch_id: batchId, status: "pending" }, () => ({ status: "cancelled" as const, finished_at: now }));
   }
 
   async countFailed(batchId: string): Promise<number> {
-    const row = await this.connection.prepare(`
-      SELECT COUNT(*) AS count FROM batch_items WHERE batch_id = ? AND status = 'failed'
-    `).get(batchId) as { count: number };
-    return row.count;
+    return (await this.connection.records.find("batch_items", { batch_id: batchId, status: "failed" })).length;
   }
 
   async finishBatch(input: { batchId: string; status: BatchStatus; finishedAt: number }): Promise<void> {
-    await this.connection.prepare("UPDATE batches SET status = ?, finished_at = ? WHERE id = ?")
-      .run(input.status, input.finishedAt, input.batchId);
+    await this.connection.records.update("batches", { id: input.batchId }, () => ({ status: input.status, finished_at: input.finishedAt }));
   }
 }

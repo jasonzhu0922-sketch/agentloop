@@ -35,6 +35,44 @@ const completed = (seq: number, result: unknown): RuntimeEvent => ({ type: "tool
   toolCallId: `call-${seq}`, toolName: "computer_run_command", result: JSON.stringify(result), isError: false, operationStatus: "succeeded",
 } });
 
+test("prepared product provenance is invisible until commit acknowledgement", () => {
+  const context = new WorkProductContext("commit-boundary", { workspaceId: "w", goalId: "g", goal: "Build a product", ...memoryStore() });
+  const event = completed(1, { exitCode: 0, fileChanges: [{ path: "candidate.txt", changeType: "created", bytes: 2, sha256: "a".repeat(64) }] });
+  const prepared = context.prepare(event);
+  assert.equal(context.derive().observations.objects.length, 0);
+  assert.equal((prepared.data.workProductSequence as { seq: number }).seq, 1);
+  assert.deepEqual(context.prepare(event), prepared, "a failed sink can discard a prepared projection");
+  context.capture(prepared);
+  assert.equal(context.derive().observations.objects[0].path, "candidate.txt");
+  assert.equal((context.prepare(completed(2, {})).data.workProductSequence as { seq: number }).seq, 2);
+});
+
+test("a failed durable result sink cannot promote an uncommitted file version into the next decision", async () => {
+  let calls = 0, failed = false;
+  const events: RuntimeEvent[] = [];
+  await runAgentLoop({ runId: "failed-product-commit", input: "Create a draft", systemPrompt: "Preserve unknown effects", maxSteps: 2,
+    grant: createCapabilityGrant({ runId: "failed-product-commit", depth: 0, allowedToolNames: ["write"], allowedSkillIds: [] }),
+    workProductContext: { workspaceId: "w", goalId: "g", goal: "Create draft", ...memoryStore() },
+    tools: new ToolRegistry([{ name: "write", description: "Write draft", effect: "write", inputSchema: { type: "object" }, parse: value => value,
+      execute: async () => ({ exitCode: 0, fileChanges: [{ path: "uncommitted.txt", changeType: "created", bytes: 2, sha256: "a".repeat(64) }] }) }]),
+    emit: event => {
+      if (event.type === "tool.completed" && !failed) { failed = true; throw new Error("Synthetic persistence failure"); }
+      events.push(event);
+    },
+    model: { limits: TEST_MODEL_LIMITS, complete: async request => {
+      calls++;
+      if (calls === 1) return { content: "", toolCalls: [{ id: "write1", name: "write", arguments: {} }], finishReason: "tool_calls" };
+      const current = frame(request).currentDecisionView;
+      assert.equal(current.workProducts.currentObjects.length, 0);
+      assert.ok(request.messages.some(message => message.role === "tool" && message.isError));
+      return { content: "The effect must be reconciled before claiming a current version.", toolCalls: [], finishReason: "stop" };
+    } },
+  });
+  assert.equal(calls, 2);
+  assert.ok(events.some(event => event.type === "tool.failed"));
+  assert.equal(events.some(event => event.type === "tool.completed"), false);
+});
+
 for (const id of ["a", "b"]) test(`stage 3 fixture ${id}: actual model input preserves role, diagnosis and file facts under small tool previews`, async () => {
   const data = fixture(id);
   const storage = memoryStore();

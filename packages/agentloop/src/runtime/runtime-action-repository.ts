@@ -1,7 +1,6 @@
 import { RunInputRepository } from "./run-input-repository.ts";
-import type { SqlConnection } from "../storage/connection.ts";
-import { upsertSql } from "../storage/dialect-sql.ts";
-import { appendRunEvent } from "../storage/repositories/run-event-sequencer.ts";
+import { ascending, recordTransaction, runtimePersistence, type RuntimePersistence, type RuntimePersistenceInput } from "../storage/runtime-records.ts";
+import { appendRunEvent, appendRunEvents } from "../storage/repositories/run-event-sequencer.ts";
 import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import {
@@ -10,6 +9,7 @@ import {
   type RuntimeActionEffectState,
 } from "./action-effect.ts";
 import type { RuntimeResultRecord } from "./runtime-result.ts";
+import { runtimePerformanceSpan, withRuntimePerformanceContext } from "../diagnostics/runtime-performance.ts";
 
 export type RuntimeActionKind =
   | "planning"
@@ -86,16 +86,17 @@ interface RuntimeActionRow {
 }
 
 export class RuntimeActionRepository {
-  private readonly database: SqlConnection;
+  private readonly database: RuntimePersistence;
 
-  constructor(database: SqlConnection) {
-    this.database = database;
+  private readonly flushPendingEvents?: (runId: string) => Promise<void>;
+
+  constructor(database: RuntimePersistenceInput, flushPendingEvents?: (runId: string) => Promise<void>) {
+    this.database = runtimePersistence(database);
+    this.flushPendingEvents = flushPendingEvents;
   }
 
   async list(runId: string): Promise<RuntimeActionRecord[]> {
-    const rows = await this.database.prepare(`
-      SELECT * FROM runtime_actions WHERE run_id = ? ORDER BY created_at, id
-    `).all(runId) as unknown as RuntimeActionRow[];
+    const rows = (await this.database.records.find("runtime_actions", { run_id: runId })).sort(ascending("created_at", "id"));
     return rows.map(toRuntimeActionRecord);
   }
 
@@ -120,21 +121,40 @@ export class RuntimeActionRepository {
      */
     onDispatched?: (action: RuntimeActionRecord) => Promise<void> | void;
   }, operation: () => Promise<T>): Promise<T> {
-    const action = await this.dispatch(input);
-    try {
-      await input.onDispatched?.(action);
-      const value = await operation();
-      const resultFailureCode = input.resultFailureCode?.(value);
-      const result = await input.prepareResult?.(value, action);
-      await this.commitResult(action.id, action.fence, result, resultFailureCode === undefined ? undefined : {
-        code: resultFailureCode,
-        effectState: input.resultFailureEffectState?.(value) ?? failedResultEffectState(value),
+    const toolCallId = typeof input.metadata?.toolCallId === "string" ? input.metadata.toolCallId : undefined;
+    return await withRuntimePerformanceContext({
+      runId: input.runId, stepId: input.stepId, toolCallId,
+      ...(typeof input.metadata?.requestId === "string" ? { requestId: input.metadata.requestId } : {}),
+    }, async () => {
+      const action = await runtimePerformanceSpan("action.dispatch", {
+        category: "action", actionKind: input.kind, replayPolicy: input.replayPolicy,
+        ...(typeof input.metadata?.toolName === "string" ? { toolName: input.metadata.toolName } : {}),
+      }, async () => await this.dispatch(input));
+      return await withRuntimePerformanceContext({ actionId: action.id }, async () => {
+        try {
+          await runtimePerformanceSpan("action.on_dispatched", { category: "action", actionKind: input.kind },
+            async () => await input.onDispatched?.(action));
+          const value = await runtimePerformanceSpan(input.kind === "tool_call" ? "tool.function" : "action.operation", {
+            category: input.kind === "tool_call" ? "tool" : "action", actionKind: input.kind,
+            ...(typeof input.metadata?.toolName === "string" ? { toolName: input.metadata.toolName } : {}),
+          }, operation);
+          const resultFailureCode = input.resultFailureCode?.(value);
+          const result = await runtimePerformanceSpan("action.prepare_result", { category: "action", actionKind: input.kind },
+            async () => await input.prepareResult?.(value, action));
+          await this.flushPendingEvents?.(input.runId);
+          await runtimePerformanceSpan("action.commit_result", { category: "action", actionKind: input.kind }, async () =>
+            await this.commitResult(action.id, action.fence, result, resultFailureCode === undefined ? undefined : {
+              code: resultFailureCode,
+              effectState: input.resultFailureEffectState?.(value) ?? failedResultEffectState(value),
+            }));
+          return value;
+        } catch (error) {
+          await runtimePerformanceSpan("action.fail", { category: "action", actionKind: input.kind, code: errorCode(error) },
+            async () => await this.fail(action.id, action.fence, errorCode(error), failureEffectState(error)));
+          throw error;
+        }
       });
-      return value;
-    } catch (error) {
-      await this.fail(action.id, action.fence, errorCode(error), failureEffectState(error));
-      throw error;
-    }
+    });
   }
 
   async dispatch(input: {
@@ -149,188 +169,64 @@ export class RuntimeActionRepository {
     if (!Number.isSafeInteger(input.deadlineMs) || input.deadlineMs < 100 || input.deadlineMs > 3_600_000) {
       throw new TypeError("Runtime Action deadline must be between 100 and 3600000 milliseconds");
     }
+    await this.flushPendingEvents?.(input.runId);
     const id = randomUUID();
     const now = Date.now();
     const deadlineAt = now + input.deadlineMs;
     const metadata = input.metadata ?? {};
-    await this.database.transaction(async () => {
+    await recordTransaction(this.database, async () => {
       if (input.kind === "tool_call") await new RunInputRepository(this.database).assertDrained(input.runId);
-      const run = await this.database.prepare("SELECT status FROM runs WHERE id = ?").get(input.runId) as { status: string } | undefined;
+      const run = (await this.database.records.find("runs", { id: input.runId }))[0];
       if (run === undefined || run.status !== "running") {
         throw new AppError("CONFLICT", "Cannot dispatch an Action for a terminal Run", 409);
       }
-      await this.database.prepare(`
-        INSERT INTO runtime_actions(
-          id, run_id, plan_id, step_id, kind, state, attempt, max_attempts,
-          replay_policy, deadline_at, lease_until, fence, revision, metadata_json,
-          effect_state, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 'dispatched', 1, 1, ?, ?, ?, 1, 1, ?, 'not_started', ?, ?)
-      `).run(
-        id,
-        input.runId,
-        input.planId ?? null,
-        input.stepId ?? null,
-        input.kind,
-        input.replayPolicy,
-        deadlineAt,
-        deadlineAt,
-        JSON.stringify(metadata),
-        now,
-        now,
-      );
-      await this.appendEvent(input.runId, "action.created", {
-        actionId: id,
-        kind: input.kind,
-        planId: input.planId,
-        stepId: input.stepId,
-        replayPolicy: input.replayPolicy,
-        effectState: "not_started",
-        deadlineAt,
-      }, now);
-      await this.appendEvent(input.runId, "action.leased", { actionId: id, fence: 1, leaseUntil: deadlineAt }, now);
-      await this.appendEvent(input.runId, "action.dispatched", { actionId: id, fence: 1 }, now);
+      await this.database.records.insert("runtime_actions", { id, run_id: input.runId, plan_id: input.planId ?? null, step_id: input.stepId ?? null,
+        kind: input.kind, state: "dispatched", attempt: 1, max_attempts: 1, replay_policy: input.replayPolicy, deadline_at: deadlineAt,
+        lease_until: deadlineAt, fence: 1, revision: 1, metadata_json: JSON.stringify(metadata), effect_state: "not_started", created_at: now, updated_at: now });
+      await appendRunEvents(this.database, input.runId, [
+        { type: "action.created", data: {
+          actionId: id, kind: input.kind, planId: input.planId, stepId: input.stepId,
+          replayPolicy: input.replayPolicy, effectState: "not_started", deadlineAt,
+        }, createdAt: now },
+        { type: "action.leased", data: { actionId: id, fence: 1, leaseUntil: deadlineAt }, createdAt: now },
+        { type: "action.dispatched", data: { actionId: id, fence: 1 }, createdAt: now },
+      ]);
     });
     return await this.require(id);
   }
 
   async reconcileRunningRuns(runIds?: readonly string[]): Promise<InterruptedRunRecord[]> {
-    const scopedRunIds = runIds === undefined ? undefined : [...new Set(runIds)];
-    if (scopedRunIds !== undefined && scopedRunIds.length === 0) return [];
-    const runScope = `${scopedRunIds === undefined ? "" : ` AND runs.id IN (${scopedRunIds.map(() => "?").join(", ")})`}
-      AND NOT EXISTS (SELECT 1 FROM run_planning_recovery planning_recovery
-        WHERE planning_recovery.run_id = runs.id AND planning_recovery.state = 'resuming')`;
-    const now = Date.now();
-    const interrupted: InterruptedRunRecord[] = [];
-    await this.database.transaction(async () => {
-      const legacyRuns = await this.database.prepare(`
-        SELECT id FROM runs
-        WHERE status = 'running'
-          AND created_at <= ?
-          AND (
-            NOT EXISTS (SELECT 1 FROM runtime_actions WHERE runtime_actions.run_id = runs.id)
-            OR (
-              NOT EXISTS (SELECT 1 FROM canonical_run_states WHERE canonical_run_states.run_id = runs.id)
-              AND NOT EXISTS (
-                SELECT 1 FROM runtime_actions
-                WHERE runtime_actions.run_id = runs.id
-                  AND runtime_actions.state IN ('dispatched', 'recovery_required')
-              )
-            )
-          )
-          ${runScope}
-      `).all(now - LEGACY_ACTIONLESS_RUN_GRACE_MS, ...(scopedRunIds ?? [])) as unknown as Array<{ id: string }>;
-      for (const run of legacyRuns) {
-        interrupted.push({ runId: run.id, reason: "legacy_state_incomplete" });
+    const candidates = runIds === undefined ? (await this.database.records.find("runs", { status: "running" })).map(row => row.id) : [...new Set(runIds)];
+    const now = Date.now(), interrupted: InterruptedRunRecord[] = [];
+    // Each Run is its own reconciliation unit. Never hold unrelated Runs across persistence I/O.
+    for (const runId of candidates) await this.database.transaction(async () => {
+      const run = (await this.database.records.find("runs", { id: runId, status: "running" }))[0];
+      if (!run || (await this.database.records.find("run_planning_recovery", { run_id: runId, state: "resuming" })).length) return;
+      const actions = await this.database.records.find("runtime_actions", { run_id: runId });
+      if (run.created_at <= now - LEGACY_ACTIONLESS_RUN_GRACE_MS && (!actions.length ||
+        (!(await this.database.records.find("canonical_run_states", { run_id: runId })).length && !actions.some(row => row.state === "dispatched" || row.state === "recovery_required")))) {
+        interrupted.push({ runId, reason: "legacy_state_incomplete" });
       }
-
-      const expired = await this.database.prepare(`
-        SELECT actions.id, actions.run_id, actions.plan_id, actions.step_id,
-               actions.replay_policy, actions.fence, actions.deadline_at,
-               actions.lease_until, actions.revision
-        FROM runtime_actions AS actions
-        JOIN runs ON runs.id = actions.run_id
-        WHERE runs.status = 'running'
-          AND actions.state = 'dispatched'
-          AND (actions.deadline_at <= ? OR actions.lease_until <= ?)
-          ${runScope}
-      `).all(now, now, ...(scopedRunIds ?? [])) as unknown as Array<{
-        id: string; run_id: string; plan_id: string | null; step_id: string | null;
-        replay_policy: ReplayPolicy; fence: number; deadline_at: number; lease_until: number; revision: number;
-      }>;
-      for (const action of expired) {
-        const reason = action.deadline_at <= now ? "deadline_expired" : "worker_lease_expired";
-        const result = await this.database.prepare(`
-          UPDATE runtime_actions
-          SET state = 'failed', lease_until = NULL, error_code = 'EXECUTION_AUTHORITY_LOST', effect_state = 'unknown',
-              revision = revision + 1, updated_at = ?, closed_at = ?
-          WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
-        `).run(now, now, action.id, action.fence, action.revision) as { changes: number };
-        if (result.changes !== 1) continue;
-        await this.appendEvent(action.run_id, "action.interrupted", {
-          actionId: action.id,
-          fence: action.fence,
-          reason,
-          effectState: "unknown",
-        }, now);
-        interrupted.push({
-          runId: action.run_id,
-          actionId: action.id,
-          ...(action.plan_id === null ? {} : { planId: action.plan_id }),
-          ...(action.step_id === null ? {} : { stepId: action.step_id }),
-          reason,
-          replayPolicy: action.replay_policy,
-          fence: action.fence,
-        });
-      }
-
-      const expiredIds = expired.map((action) => action.id);
-      const excludedActions = expiredIds.length === 0 ? "SELECT ''" : expiredIds.map(() => "?").join(", ");
-      const stranded = await this.database.prepare(`
-        SELECT actions.id, actions.run_id, actions.plan_id, actions.step_id,
-               actions.replay_policy, actions.fence, actions.deadline_at, actions.lease_until
-        FROM runtime_actions AS actions
-        JOIN runs ON runs.id = actions.run_id
-        WHERE runs.status = 'running'
-          AND actions.state = 'failed'
-          AND actions.error_code = 'EXECUTION_AUTHORITY_LOST'
-          AND actions.id NOT IN (${excludedActions})
-          ${runScope}
-      `).all(...expiredIds, ...(scopedRunIds ?? [])) as unknown as Array<{
-        id: string; run_id: string; plan_id: string | null; step_id: string | null;
-        replay_policy: ReplayPolicy; fence: number; deadline_at: number | null; lease_until: number | null;
-      }>;
-      for (const action of stranded) interrupted.push({
-        runId: action.run_id,
-        actionId: action.id,
-        ...(action.plan_id === null ? {} : { planId: action.plan_id }),
-        ...(action.step_id === null ? {} : { stepId: action.step_id }),
-        reason: action.deadline_at !== null && action.deadline_at <= now ? "deadline_expired" : "worker_lease_expired",
-        replayPolicy: action.replay_policy,
-        fence: action.fence,
-      });
-
-      const legacyPaused = await this.database.prepare(`
-        SELECT actions.id, actions.run_id, actions.plan_id, actions.step_id,
-               actions.replay_policy, actions.fence, actions.metadata_json
-        FROM runtime_actions AS actions
-        JOIN runs ON runs.id = actions.run_id
-        JOIN run_recovery_states AS recovery ON recovery.action_id = actions.id
-        WHERE runs.status = 'running'
-          AND actions.state = 'recovery_required'
-          AND recovery.state = 'waiting_recovery'
-          ${runScope}
-      `).all(...(scopedRunIds ?? [])) as unknown as Array<{
-        id: string; run_id: string; plan_id: string | null; step_id: string | null;
-        replay_policy: ReplayPolicy; fence: number; metadata_json: string;
-      }>;
-      for (const action of legacyPaused) {
-        const reason = stringMetadataField(action.metadata_json, "reason");
-        if (reason === "assessment_failed_boundary" || reason === "human_loop_requested") continue;
-        const result = await this.database.prepare(`
-          UPDATE runtime_actions
-          SET state = 'failed', error_code = 'EXECUTION_AUTHORITY_LOST', effect_state = 'unknown', revision = revision + 1,
-              updated_at = ?, closed_at = ?
-          WHERE id = ? AND state = 'recovery_required'
-        `).run(now, now, action.id) as { changes: number };
-        if (result.changes !== 1) continue;
-        await this.database.prepare("DELETE FROM run_recovery_states WHERE run_id = ? AND action_id = ?")
-          .run(action.run_id, action.id);
-        await this.appendEvent(action.run_id, "action.interrupted", {
-          actionId: action.id,
-          fence: action.fence,
-          reason: reason ?? "worker_lease_expired",
-          migratedFrom: "waiting_recovery",
-          effectState: "unknown",
-        }, now);
-        interrupted.push({
-          runId: action.run_id,
-          actionId: action.id,
-          ...(action.plan_id === null ? {} : { planId: action.plan_id }),
-          ...(action.step_id === null ? {} : { stepId: action.step_id }),
-          reason: reason === "legacy_state_incomplete" ? "legacy_state_incomplete" : "worker_lease_expired",
-          replayPolicy: action.replay_policy,
-          fence: action.fence,
-        });
+      const recovery = (await this.database.records.find("run_recovery_states", { run_id: runId }))[0];
+      for (const action of actions) {
+        const expired = action.state === "dispatched" && ((action.deadline_at !== null && action.deadline_at <= now) || (action.lease_until !== null && action.lease_until <= now));
+        const stranded = action.state === "failed" && action.error_code === "EXECUTION_AUTHORITY_LOST";
+        const legacyPaused = action.state === "recovery_required" && recovery?.action_id === action.id && recovery.state === "waiting_recovery";
+        const legacyReason = stringMetadataField(action.metadata_json, "reason");
+        if (!expired && !stranded && (!legacyPaused || legacyReason === "assessment_failed_boundary" || legacyReason === "human_loop_requested")) continue;
+        if (!stranded) {
+          await this.database.records.update("runtime_actions", { id: action.id, state: action.state, fence: action.fence, revision: action.revision }, row =>
+            ({ state: "failed" as const, lease_until: expired ? null : row.lease_until, error_code: "EXECUTION_AUTHORITY_LOST", effect_state: "unknown" as const,
+              revision: row.revision + 1, updated_at: now, closed_at: now }));
+          if (legacyPaused) await this.database.records.remove("run_recovery_states", { run_id: runId, action_id: action.id });
+          await this.appendEvent(runId, "action.interrupted", { actionId: action.id, fence: action.fence,
+            reason: legacyPaused ? legacyReason ?? "worker_lease_expired" : action.deadline_at !== null && action.deadline_at <= now ? "deadline_expired" : "worker_lease_expired",
+            ...(legacyPaused ? { migratedFrom: "waiting_recovery" } : {}), effectState: "unknown" }, now);
+        }
+        interrupted.push({ runId, actionId: action.id, ...(action.plan_id === null ? {} : { planId: action.plan_id }),
+          ...(action.step_id === null ? {} : { stepId: action.step_id }), replayPolicy: action.replay_policy, fence: action.fence,
+          reason: legacyPaused ? legacyReason === "legacy_state_incomplete" ? "legacy_state_incomplete" : "worker_lease_expired" :
+            action.deadline_at !== null && action.deadline_at <= now ? "deadline_expired" : "worker_lease_expired" });
       }
     });
     return interrupted;
@@ -340,19 +236,11 @@ export class RuntimeActionRepository {
     const now = Date.now();
     let cancelled = 0;
     await this.database.transaction(async () => {
-      const actions = await this.database.prepare(`
-        SELECT id, fence, revision
-        FROM runtime_actions
-        WHERE run_id = ? AND state = 'dispatched'
-      `).all(runId) as unknown as Array<{ id: string; fence: number; revision: number }>;
+      const actions = await this.database.records.find("runtime_actions", { run_id: runId, state: "dispatched" });
       for (const action of actions) {
-        const result = await this.database.prepare(`
-          UPDATE runtime_actions
-          SET state = 'failed', lease_until = NULL, error_code = ?, effect_state = 'unknown', revision = revision + 1,
-              updated_at = ?, closed_at = ?
-          WHERE id = ? AND state = 'dispatched' AND revision = ?
-        `).run(code, now, now, action.id, action.revision) as { changes: number };
-        if (result.changes !== 1) continue;
+        const changed = await this.database.records.update("runtime_actions", { id: action.id, state: "dispatched", revision: action.revision }, row =>
+          ({ state: "failed" as const, lease_until: null, error_code: code, effect_state: "unknown" as const, revision: row.revision + 1, updated_at: now, closed_at: now }));
+        if (changed !== 1) continue;
         await this.appendEvent(runId, "action.failed", { actionId: action.id, fence: action.fence, code, effectState: "unknown" }, now);
         cancelled += 1;
       }
@@ -364,12 +252,9 @@ export class RuntimeActionRepository {
     const now = Date.now();
     await this.database.transaction(async () => {
       const row = await this.requireRow(actionId);
-      const result = await this.database.prepare(`
-        UPDATE runtime_actions
-        SET state = 'succeeded', revision = revision + 1, updated_at = ?, closed_at = ?
-        WHERE id = ? AND kind = 'recovery_review' AND state = 'recovery_required' AND revision = ?
-      `).run(now, now, actionId, row.revision) as { changes: number };
-      if (result.changes !== 1) throw new AppError("CONFLICT", "Recovery review is no longer pending", 409);
+      const changed = await this.database.records.update("runtime_actions", { id: actionId, kind: "recovery_review", state: "recovery_required", revision: row.revision }, value =>
+        ({ state: "succeeded" as const, revision: value.revision + 1, updated_at: now, closed_at: now }));
+      if (changed !== 1) throw new AppError("CONFLICT", "Recovery review is no longer pending", 409);
       await this.appendEvent(row.run_id, "action.result_committed", { actionId, fence: row.fence, effectState: "applied" }, now);
     });
   }
@@ -432,12 +317,9 @@ export class RuntimeActionRepository {
       ) {
         throw new AppError("CONFLICT", "Recovery review is no longer pending for Human-in-the-Loop replacement", 409);
       }
-      const closed = await this.database.prepare(`
-        UPDATE runtime_actions
-        SET state = 'succeeded', revision = revision + 1, updated_at = ?, closed_at = ?
-        WHERE id = ? AND kind = 'recovery_review' AND state = 'recovery_required' AND revision = ?
-      `).run(now, now, previous.id, previous.revision) as { changes: number };
-      if (closed.changes !== 1) throw new AppError("CONFLICT", "Recovery review changed before Human-in-the-Loop replacement", 409);
+      const changed = await this.database.records.update("runtime_actions", { id: previous.id, kind: "recovery_review", state: "recovery_required", revision: previous.revision }, value =>
+        ({ state: "succeeded" as const, revision: value.revision + 1, updated_at: now, closed_at: now }));
+      if (changed !== 1) throw new AppError("CONFLICT", "Recovery review changed before Human-in-the-Loop replacement", 409);
       await this.appendEvent(previous.run_id, "action.result_committed", {
         actionId: previous.id,
         fence: previous.fence,
@@ -466,11 +348,7 @@ export class RuntimeActionRepository {
     const now = Date.now();
     let actionId = "";
     await this.database.transaction(async () => {
-      const existing = await this.database.prepare(`
-        SELECT id FROM runtime_actions
-        WHERE run_id = ? AND state = 'recovery_required'
-        ORDER BY created_at DESC LIMIT 1
-      `).get(input.runId) as { id: string } | undefined;
+      const existing = (await this.database.records.find("runtime_actions", { run_id: input.runId, state: "recovery_required" })).sort(ascending("created_at")).at(-1);
       if (existing !== undefined) {
         actionId = existing.id;
         if (pauseRun) await this.upsertRecoveryState(input.runId, actionId, "waiting_recovery", undefined, now);
@@ -486,8 +364,7 @@ export class RuntimeActionRepository {
         createdAt: now,
       });
       if (!pauseRun) {
-        await this.database.prepare("DELETE FROM run_recovery_states WHERE run_id = ? AND action_id = ?")
-          .run(input.runId, actionId);
+        await this.database.records.remove("run_recovery_states", { run_id: input.runId, action_id: actionId });
       }
     });
     return await this.require(actionId);
@@ -496,7 +373,7 @@ export class RuntimeActionRepository {
   private async commitResult(actionId: string, fence: number, runtimeResult?: RuntimeResultRecord,
     failure?: { readonly code: string; readonly effectState: RuntimeActionEffectState }): Promise<void> {
     const now = Date.now();
-    await this.database.transaction(async () => {
+    await recordTransaction(this.database, async () => {
       const row = await this.requireRow(actionId);
       if (
         runtimeResult !== undefined
@@ -514,24 +391,11 @@ export class RuntimeActionRepository {
       const metadata = JSON.parse(row.metadata_json) as Record<string, unknown>;
       const resultRef = runtimeResult?.ref.resultId;
       const effectState = failure?.effectState ?? "applied";
-      const result = await this.database.prepare(`
-        UPDATE runtime_actions
-        SET state = ?, lease_until = NULL, error_code = ?, effect_state = ?, result_ref = ?, metadata_json = ?, revision = revision + 1,
-            updated_at = ?, closed_at = ?
-        WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
-      `).run(
-        failure === undefined ? "succeeded" : "failed",
-        failure?.code ?? null,
-        effectState,
-        resultRef ?? null,
-        JSON.stringify(runtimeResult === undefined ? metadata : { ...metadata, runtimeResult }),
-        now,
-        now,
-        actionId,
-        fence,
-        row.revision,
-      ) as { changes: number };
-      if (result.changes !== 1) throw new AppError("CONFLICT", "Runtime Action lease was lost before result commit", 409);
+      const changed = await this.database.records.update("runtime_actions", { id: actionId, state: "dispatched", fence, revision: row.revision }, value =>
+        ({ state: failure === undefined ? "succeeded" as const : "failed" as const, lease_until: null, error_code: failure?.code ?? null, effect_state: effectState,
+          result_ref: resultRef ?? null, metadata_json: JSON.stringify(runtimeResult === undefined ? metadata : { ...metadata, runtimeResult }),
+          revision: value.revision + 1, updated_at: now, closed_at: now }));
+      if (changed !== 1) throw new AppError("CONFLICT", "Runtime Action lease was lost before result commit", 409);
       await this.appendEvent(row.run_id, failure === undefined ? "action.result_committed" : "action.failed", {
         actionId,
         fence,
@@ -549,15 +413,11 @@ export class RuntimeActionRepository {
     effectState: RuntimeActionEffectState,
   ): Promise<void> {
     const now = Date.now();
-    await this.database.transaction(async () => {
+    await recordTransaction(this.database, async () => {
       const row = await this.requireRow(actionId);
-      const result = await this.database.prepare(`
-        UPDATE runtime_actions
-        SET state = 'failed', lease_until = NULL, error_code = ?, effect_state = ?, revision = revision + 1,
-            updated_at = ?, closed_at = ?
-        WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
-      `).run(code, effectState, now, now, actionId, fence, row.revision) as { changes: number };
-      if (result.changes !== 1) return;
+      const changed = await this.database.records.update("runtime_actions", { id: actionId, state: "dispatched", fence, revision: row.revision }, value =>
+        ({ state: "failed" as const, lease_until: null, error_code: code, effect_state: effectState, revision: value.revision + 1, updated_at: now, closed_at: now }));
+      if (changed !== 1) return;
       await this.appendEvent(row.run_id, "action.failed", { actionId, fence, code, effectState }, now);
     });
   }
@@ -573,23 +433,9 @@ export class RuntimeActionRepository {
   }): Promise<string> {
     const id = randomUUID();
     const metadata = { reason: input.reason, ...(input.metadata ?? {}) };
-    await this.database.prepare(`
-      INSERT INTO runtime_actions(
-        id, run_id, plan_id, step_id, kind, state, attempt, max_attempts,
-        replay_policy, deadline_at, lease_until, fence, revision, metadata_json,
-        effect_state, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 'recovery_review', 'recovery_required', 0, 0,
-                ?, NULL, NULL, 0, 1, ?, 'not_started', ?, ?)
-    `).run(
-      id,
-      input.runId,
-      input.planId ?? null,
-      input.stepId ?? null,
-      input.replayPolicy,
-      JSON.stringify(metadata),
-      input.createdAt,
-      input.createdAt,
-    );
+    await this.database.records.insert("runtime_actions", { id, run_id: input.runId, plan_id: input.planId ?? null, step_id: input.stepId ?? null,
+      kind: "recovery_review", state: "recovery_required", attempt: 0, max_attempts: 0, replay_policy: input.replayPolicy, fence: 0, revision: 1,
+      metadata_json: JSON.stringify(metadata), effect_state: "not_started", created_at: input.createdAt, updated_at: input.createdAt });
     await this.appendEvent(input.runId, "action.created", {
       actionId: id,
       kind: "recovery_review",
@@ -614,13 +460,7 @@ export class RuntimeActionRepository {
     question: string | undefined,
     now: number,
   ): Promise<void> {
-    await this.database.prepare(upsertSql({
-      dialect: this.database.dialect,
-      insert: "INSERT INTO run_recovery_states(run_id, state, action_id, question, updated_at) VALUES (?, ?, ?, ?, ?)",
-      conflictTarget: "run_id",
-      sqliteAndPostgresUpdate: "state = excluded.state, action_id = excluded.action_id, question = excluded.question, updated_at = excluded.updated_at",
-      tidbUpdate: "state = VALUES(state), action_id = VALUES(action_id), question = VALUES(question), updated_at = VALUES(updated_at)",
-    })).run(runId, state, actionId, question ?? null, now);
+    await this.database.records.insert("run_recovery_states", { run_id: runId, state, action_id: actionId, question: question ?? null, updated_at: now }, "replace");
   }
 
   private async require(actionId: string): Promise<RuntimeActionRecord> {
@@ -628,8 +468,7 @@ export class RuntimeActionRepository {
   }
 
   private async requireRow(actionId: string): Promise<RuntimeActionRow> {
-    const row = await this.database.prepare("SELECT * FROM runtime_actions WHERE id = ?")
-      .get(actionId) as RuntimeActionRow | undefined;
+    const row = (await this.database.records.find("runtime_actions", { id: actionId }))[0];
     if (row === undefined) throw new AppError("NOT_FOUND", "Runtime Action not found", 404);
     return row;
   }

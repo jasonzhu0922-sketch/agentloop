@@ -26,6 +26,80 @@ function intent(goal: string, mode = "execute", kind = "none") {
   };
 }
 
+for (const goal of [
+  "分析提供的数据，分析结果进入最终生成的 html 格式报告。",
+  "分析提供的数据，把分析结果生成一份 HTML 报告。",
+  "Analyze the uploaded data and create an HTML report with this analysis.",
+  "分析文本中“上一轮的分析结果”这个短语的含义，生成 HTML 报告。",
+]) for (const hasPriorResult of [false, true]) {
+  test(`a resolved new goal keeps its execution contract without history reconstruction (history=${hasPriorResult}): ${goal}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentloop-new-goal-"));
+    const database = new AppDatabase(":memory:");
+    const seedGoal = "Summarize the supplied reference data.";
+    let resolverAttempts = 0;
+    let plannerCalls = 0;
+    try {
+      const skills = new SkillService(database);
+      const skill = await skills.create("owner", {
+        name: "analysis-workflow", description: "Analyze supplied data and produce an HTML report.",
+        instructions: [
+          "---", "name: analysis-workflow", "description: Analyze supplied data and produce an HTML report.",
+          "agentloop:", "  roles:", "    - primary_builder", "  artifactKinds:", "    - html",
+          "  sourceKinds:", "    - database", "  producesEvidenceKinds:", "    - source_summary",
+          "---", "Analyze supplied data and produce the requested report.",
+        ].join("\n"),
+      });
+      const service = new RunService({
+        database, skills, workspaceRoot: root,
+        modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+          if (request.runId.startsWith("conversation-turn:")) {
+            resolverAttempts += 1;
+            const context = JSON.parse(request.runtimeContext!.content.split("\n")[1]);
+            assert.equal(context.conversationWorkingSet.reusableResultCandidates.length > 0, hasPriorResult);
+            return resolve({ ...intent(goal, "execute", "html"), evidenceStrategy: "source_grounded" });
+          }
+          return { content: "Historical reference data summary.", finishReason: "stop", toolCalls: [] };
+        } }),
+        plannerFactory: () => ({ plan: async task => {
+          if (task.canonicalState.intent.userInput === seedGoal) return singleStepTestPlanner().plan(task);
+          plannerCalls += 1;
+          const resolution = task.canonicalState.intent.turnResolution!;
+          assert.equal(resolution.mode, "execute");
+          assert.equal(resolution.relation, "new_goal");
+          assert.equal(resolution.inputMode, "none");
+          assert.equal(resolution.targetRunId, undefined);
+          assert.equal(resolution.targetResult, undefined);
+          assert.equal(resolution.evidenceDemand, "source_grounded");
+          assert.equal(resolution.taskIntent.deliverables[0].kind, "html");
+          assert.ok(task.availableSkills.some(candidate => candidate.id === skill.id));
+          assert.ok(task.availableToolNames.includes("load_skill"));
+          throw new AppError("PLANNING_ERROR", "new-goal boundary verified", 422);
+        } }),
+        assessorFactory: () => approvingTestAssessor(),
+      });
+      const seed = hasPriorResult ? await service.execute("owner", seedGoal) : undefined;
+      let runId: string | undefined;
+      await assert.rejects(() => service.executeConversation("owner", goal,
+        seed === undefined ? {} : { conversationId: seed.conversationId }), (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.match(error.message, /new-goal boundary verified/);
+        runId = String(error.details?.runId);
+        return true;
+      });
+      assert.equal(resolverAttempts, 1);
+      assert.equal(plannerCalls, 1);
+      assert.ok(runId);
+      const events = await service.events("owner", runId);
+      assert.equal(events.some(event => event.type.startsWith("conversation.turn.reconstruction_")), false);
+      assert.equal(events.some(event => event.type === "conversation.turn.resolution_rejected"), false);
+      assert.equal(events.find(event => event.type === "conversation.turn.resolved")?.data.mode, "execute");
+    } finally {
+      database.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
 for (const format of ["chart", "dashboard", "pdf"]) test(`unsatisfiable image format is repaired before canonical target admission (${format})`, async () => {
   const database = new AppDatabase(":memory:");
   let attempts = 0;

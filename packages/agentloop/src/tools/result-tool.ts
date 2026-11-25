@@ -9,6 +9,9 @@ const MAX_RESULT_ARRAY_ITEMS = 200;
 
 interface ReadResultInput {
   readonly resultId: string;
+  readonly view: "result" | "step_history" | "producer_exchange";
+  readonly toolCallId?: string;
+  readonly assistantEventSeq?: number;
   readonly pointer?: string;
   readonly offset: number;
   readonly limit: number;
@@ -17,12 +20,13 @@ interface ReadResultInput {
 }
 
 /** Read a bounded exact window from an authorized Runtime-owned result. */
-export function createResultTool(repository: RuntimeResultRepository): RuntimeTool<ReadResultInput> {
+export function createResultTool(repository: RuntimeResultRepository, options?: { readonly resolveEventData: (data: Readonly<Record<string, unknown>>, context: import("./tool-registry.ts").ToolExecutionContext) => Promise<Readonly<Record<string, unknown>>> }): RuntimeTool<ReadResultInput> {
   return {
     name: RESULT_READER_NAME,
     effect: "read",
     description: [
       "Read exact values from a committed Tool result, an assessed dependency Step result, an explicitly bound earlier Round result, or an explicitly bound completed Run result through one opaque Runtime result ref.",
+      'For current-Step history, use view="step_history", pointer="/entries", offset/limit to locate original toolCallIds. Then use view="producer_exchange" and toolCallId with the same anchor resultId to read the exact assistant statement, arguments and committed outcome. JSON pointers and character windows apply to these views too. History access never grants access to another Step or Run; default view="result" retains existing Result semantics.',
       "Pass resultId from agentloop.resultRef/v1; never supply a filesystem path or digest.",
       "For JSON results, use a pointer rooted in the persisted result envelope and optional array offset/limit. For agentloop.jsonRead/v1, use the returned resultPointer such as /queries/0/value; the displayed sourcePointer belongs to the original file and must not be passed to read_result. Omit pointer for a bounded serialized character window. If a pointer is accidentally sent for a text result, Runtime returns the exact text window with pointerApplied=false and a repair diagnostic; do not retry another pointer.",
       "For command output, pointer /stdout or /stderr selects the original stream in this same Result. String selections support characterOffset/characterLimit and nextCharacterOffset; no file path or digest is needed.",
@@ -33,6 +37,9 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
       additionalProperties: false,
       required: ["resultId"],
       properties: {
+        view: { type: "string", enum: ["result", "step_history", "producer_exchange"] },
+        toolCallId: { type: "string", minLength: 1, maxLength: 200 },
+        assistantEventSeq: { type: "integer", minimum: 1, description: "Exact history index event sequence to disambiguate a reused ToolCall id" },
         resultId: {
           type: "string",
           minLength: 39,
@@ -60,9 +67,17 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
       if (!isRuntimeResultId(resultId)) {
         throw badRequest("resultId must be the complete opaque Runtime result id from agentloop.resultRef/v1; abbreviated prefixes are invalid");
       }
+      const view = value.view ?? "result";
+      if (!["result", "step_history", "producer_exchange"].includes(String(view))) throw badRequest("Unknown Result view");
+      const toolCallId = value.toolCallId === undefined ? undefined : requireString(value.toolCallId, "toolCallId");
+      if (toolCallId !== undefined && (toolCallId.length > 200 || view !== "producer_exchange")) throw badRequest("toolCallId requires producer_exchange view");
+      if (value.assistantEventSeq !== undefined && view !== "producer_exchange") throw badRequest("assistantEventSeq requires producer_exchange view");
       const pointer = value.pointer === undefined ? undefined : requireString(value.pointer, "pointer");
       return {
         resultId,
+        view: view as ReadResultInput["view"],
+        ...(toolCallId === undefined ? {} : { toolCallId }),
+        ...(value.assistantEventSeq === undefined ? {} : { assistantEventSeq: boundedInteger(value.assistantEventSeq, "assistantEventSeq", 1, Number.MAX_SAFE_INTEGER, 1) }),
         ...(pointer === undefined ? {} : { pointer }),
         offset: boundedInteger(value.offset, "offset", 0, Number.MAX_SAFE_INTEGER, 0),
         limit: boundedInteger(value.limit, "limit", 1, MAX_RESULT_ARRAY_ITEMS, 50),
@@ -85,26 +100,48 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
         ...(context.grant.conversationId === undefined ? {} : { conversationId: context.grant.conversationId }),
       });
       if (record === undefined) throw notFound("Runtime result");
+      let payload = record.payload;
+      if (input.view !== "result") {
+        let history = await repository.readHistoryAuthorized({ resultId: input.resultId,
+          runId: context.grant.runId, planId, stepId, actorUserId: context.grant.actorUserId,
+          conversationId: context.grant.conversationId,
+          assistantEventSeq: input.assistantEventSeq,
+          ...(input.view === "producer_exchange" ? { toolCallId: input.toolCallId ?? record.producer.toolCallId } : {}) });
+        if (!history) throw notFound("Authorized execution history");
+        if (input.view === "producer_exchange" && history.assistant && typeof history.assistant === "object") {
+          const assistant = history.assistant as Record<string, unknown>;
+          const call = assistant.toolCall as Record<string, unknown>;
+          if (options) {
+            const resolved = await options.resolveEventData(call, context);
+            history = { ...history, assistant: { ...assistant, toolCall: resolved } };
+          } else if (call.argumentsRef !== undefined) {
+            history = { ...history, gaps: [...(Array.isArray(history.gaps) ? history.gaps : []), "Exact arguments require the host's ToolArgumentsReferenceStore resolver; the displayed arguments are a projection."] };
+          }
+        }
+        const content = JSON.stringify(history);
+        payload = { ...record.payload, resultSchema: String(history.schema), content, contentFormat: "json", characters: content.length, bytes: Buffer.byteLength(content) };
+      }
       const source = {
+        view: input.view,
         kind: record.kind,
         ...(record.producer.toolName === undefined ? {} : { toolName: record.producer.toolName }),
-        ...(record.payload.resultSchema === undefined ? {} : { resultSchema: record.payload.resultSchema }),
-        contentFormat: record.payload.contentFormat,
-        characters: record.payload.characters,
-        bytes: record.payload.bytes,
+        ...(payload.resultSchema === undefined ? {} : { resultSchema: payload.resultSchema }),
+        contentFormat: payload.contentFormat,
+        characters: payload.characters,
+        bytes: payload.bytes,
       };
       if (input.pointer === undefined) {
-        return readTextWindow(record.payload.content, record.ref, source, input.characterOffset, input.characterLimit);
+        return readTextWindow(payload.content, record.ref, source, input.characterOffset, input.characterLimit);
       }
-      if (record.payload.contentFormat !== "json") {
+      if (payload.contentFormat !== "json") {
         return {
-          ...readTextWindow(record.payload.content, record.ref, source, input.characterOffset, input.characterLimit),
+          ...readTextWindow(payload.content, record.ref, source, input.characterOffset, input.characterLimit),
           pointer: input.pointer,
           pointerApplied: false,
           repair: "Text Runtime results do not have JSON pointer selectors. The pointer was ignored; use characterOffset/characterLimit or omit pointer on the next read.",
         };
       }
-      const document = JSON.parse(record.payload.content) as unknown;
+      const document = JSON.parse(payload.content) as unknown;
       let selected: unknown;
       try {
         selected = resolveJsonPointer(document, input.pointer);
@@ -128,7 +165,7 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
         : selectedArray.slice(input.offset, input.offset + input.limit);
       const serialized = JSON.stringify(value);
       if (serialized.length > MAX_RESULT_WINDOW_CHARACTERS) {
-        throw badRequest(`Selected Runtime result exceeds ${MAX_RESULT_WINDOW_CHARACTERS} characters; use a narrower pointer or array window`);
+        throw oversizedJsonSelection(input.pointer, value, serialized.length);
       }
       return {
         schema: "agentloop.resultRead/v1",
@@ -149,6 +186,33 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
       };
     },
   };
+}
+
+function oversizedJsonSelection(pointer: string, value: unknown, characters: number) {
+  const type = Array.isArray(value) ? "array" : isRecord(value) ? "object" : value === null ? "null" : typeof value;
+  const childPointers = isRecord(value)
+    ? Object.keys(value).slice(0, 40).map((key) => `${pointer}/${escapePointerToken(key)}`)
+    : Array.isArray(value)
+      ? value.slice(0, 40).map((_, index) => `${pointer}/${index}`)
+      : [];
+  const repair = Array.isArray(value)
+    ? "Retry the same pointer with a smaller array limit, or select one listed child pointer. characterLimit applies only when the selected value is a string."
+    : isRecord(value)
+      ? "Select one of the listed child pointers. characterLimit applies only when the selected value is a string."
+      : "Select a narrower JSON Pointer. characterLimit applies only when the selected value is a string.";
+  return badRequest(
+    `Selected Runtime result ${pointer} is a ${type} whose serialized value is ${characters} characters, above the ${MAX_RESULT_WINDOW_CHARACTERS}-character model window. ${repair}`,
+    {
+      schema: "agentloop.resultReadDiagnostic/v1",
+      pointer,
+      selectedType: type,
+      selectedCharacters: characters,
+      maximumCharacters: MAX_RESULT_WINDOW_CHARACTERS,
+      childPointers,
+      omittedChildPointers: Math.max(0, (Array.isArray(value) ? value.length : isRecord(value) ? Object.keys(value).length : 0) - childPointers.length),
+      repair,
+    },
+  );
 }
 
 /** Provenance of an exact stored JSON read window, never a redirected read. */
@@ -209,6 +273,10 @@ function resolveJsonPointer(document: unknown, pointer: string): unknown {
     current = (current as Record<string, unknown>)[token];
   }
   return current;
+}
+
+function escapePointerToken(value: string): string {
+  return value.replace(/~/gu, "~0").replace(/\//gu, "~1");
 }
 
 /**

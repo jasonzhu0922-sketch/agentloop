@@ -1,6 +1,6 @@
+import { readRunEvents } from "../storage/run-event-store.ts";
 import { randomUUID } from "node:crypto";
-import type { SqlConnection } from "../storage/connection.ts";
-import { upsertSql } from "../storage/dialect-sql.ts";
+import { ascending, runtimePersistence, type RuntimePersistence, type RuntimePersistenceInput } from "../storage/runtime-records.ts";
 import { appendRunEvent } from "../storage/repositories/run-event-sequencer.ts";
 import { AppError } from "../shared/errors.ts";
 import type { PlanProposal, PlanRevisionAssessment } from "../planning/contracts.ts";
@@ -74,38 +74,32 @@ interface RecoveryStateRow {
 }
 
 export class RecoveryRepository {
-  private readonly database: SqlConnection;
+  private readonly database: RuntimePersistence;
   private readonly eventLogSink?: RecoveryEventLogSink;
 
-  constructor(database: SqlConnection, eventLogSink?: RecoveryEventLogSink) {
-    this.database = database;
+  constructor(database: RuntimePersistenceInput, eventLogSink?: RecoveryEventLogSink) {
+    this.database = runtimePersistence(database);
     this.eventLogSink = eventLogSink;
   }
 
   async state(runId: string): Promise<RunRecoveryState | undefined> {
-    const row = await this.database.prepare("SELECT * FROM run_recovery_states WHERE run_id = ?")
-      .get(runId) as RecoveryStateRow | undefined;
+    const row = (await this.database.records.find("run_recovery_states", { run_id: runId }))[0];
     return row === undefined ? undefined : toRecoveryState(row);
   }
 
   async list(runId: string): Promise<RecoveryDecisionRecord[]> {
-    const rows = await this.database.prepare(`
-      SELECT * FROM recovery_decisions WHERE run_id = ? ORDER BY created_at, id
-    `).all(runId) as unknown as DecisionRow[];
+    const rows = (await this.database.records.find("recovery_decisions", { run_id: runId })).sort(ascending("created_at", "id"));
     return rows.map(toDecisionRecord);
   }
 
   /** Serialize durable candidate reservations on the owning Action across Runtime workers. */
   async beginProposalAttempt(runId: string, actionId: string, revision: number, limit: number): Promise<number> {
     return this.database.transaction(async () => {
-      const action = await this.database.prepare(`SELECT state, revision FROM runtime_actions WHERE id = ? AND run_id = ?${
-        this.database.dialect === "sqlite" ? "" : " FOR UPDATE"
-      }`).get<{ state: string; revision: number }>(actionId, runId);
+      const action = (await this.database.records.find("runtime_actions", { id: actionId, run_id: runId }))[0];
       if (action?.state !== "recovery_required" || action.revision !== revision) {
         throw new AppError("CONFLICT", "Recovery Action changed before proposal reservation", 409);
       }
-      const rows = await this.database.prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND type = 'recovery.proposal_attempt_started'")
-        .all<{ payload_json: string }>(runId);
+      const rows = await readRunEvents(this.database, runId, "recovery.proposal_attempt_started");
       const attempt = rows.map(row => JSON.parse(row.payload_json) as { actionId: string; expectedActionRevision: number })
         .filter(data => data.actionId === actionId && data.expectedActionRevision === revision).length + 1;
       if (attempt > limit) throw new AppError("PLANNING_ERROR", "Recovery proposal budget exhausted for this Action revision", 422,
@@ -121,9 +115,7 @@ export class RecoveryRepository {
     const now = Date.now();
     const id = randomUUID();
     await this.database.transaction(async () => {
-      const action = await this.database.prepare(`
-        SELECT run_id, state, revision FROM runtime_actions WHERE id = ?
-      `).get(proposal.actionId) as { run_id: string; state: string; revision: number } | undefined;
+      const action = (await this.database.records.find("runtime_actions", { id: proposal.actionId }))[0];
       if (action === undefined || action.run_id !== runId) throw new AppError("NOT_FOUND", "Recovery Action not found", 404);
       if (action.state !== "recovery_required") {
         throw new AppError("CONFLICT", "Recovery decision requires a recovery_required Action", 409);
@@ -131,27 +123,12 @@ export class RecoveryRepository {
       if (action.revision !== proposal.expectedActionRevision) {
         throw new AppError("CONFLICT", "Recovery Action revision changed before decision submission", 409);
       }
-      const unresolved = await this.database.prepare(`
-        SELECT id FROM recovery_decisions WHERE action_id = ? AND state = 'submitted' LIMIT 1
-      `).get(proposal.actionId) as { id: string } | undefined;
+      const unresolved = (await this.database.records.find("recovery_decisions", { action_id: proposal.actionId, state: "submitted" }))[0];
       if (unresolved !== undefined) throw new AppError("CONFLICT", "Recovery Action already has a current decision", 409);
-      await this.database.prepare(`
-        INSERT INTO recovery_decisions(
-          id, run_id, action_id, expected_action_revision, decision, rationale,
-          evidence_refs_json, plan_revision_json, question, state, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?)
-      `).run(
-        id,
-        runId,
-        proposal.actionId,
-        proposal.expectedActionRevision,
-        proposal.decision,
-        proposal.rationale,
-        JSON.stringify(proposal.evidenceRefs),
-        proposal.planRevision === undefined ? null : JSON.stringify(proposal.planRevision),
-        proposal.question ?? null,
-        now,
-      );
+      await this.database.records.insert("recovery_decisions", { id, run_id: runId, action_id: proposal.actionId,
+        expected_action_revision: proposal.expectedActionRevision, decision: proposal.decision, rationale: proposal.rationale,
+        evidence_refs_json: JSON.stringify(proposal.evidenceRefs), plan_revision_json: proposal.planRevision === undefined ? null : JSON.stringify(proposal.planRevision),
+        question: proposal.question ?? null, state: "submitted", created_at: now });
       await this.appendEvent(runId, "recovery.decision_submitted", {
         decisionId: id,
         actionId: proposal.actionId,
@@ -171,8 +148,7 @@ export class RecoveryRepository {
     const now = Date.now();
     await this.database.transaction(async () => {
       const decision = await this.requireRow(decisionId);
-      const action = await this.database.prepare(`SELECT state, revision FROM runtime_actions WHERE id = ?`)
-        .get(decision.action_id) as { state: string; revision: number } | undefined;
+      const action = (await this.database.records.find("runtime_actions", { id: decision.action_id }))[0];
       if (
         decision.state !== "submitted"
         || action?.state !== "recovery_required"
@@ -180,20 +156,12 @@ export class RecoveryRepository {
       ) {
         throw new AppError("CONFLICT", "Recovery facts changed before decision admission", 409);
       }
-      await this.database.prepare(`
-        UPDATE recovery_decisions SET state = 'admitted', resolved_at = ? WHERE id = ? AND state = 'submitted'
-      `).run(now, decisionId);
+      await this.database.records.update("recovery_decisions", { id: decisionId, state: "submitted" }, () => ({ state: "admitted" as const, resolved_at: now }));
       if (state === undefined) {
-        await this.database.prepare("DELETE FROM run_recovery_states WHERE run_id = ? AND action_id = ?")
-          .run(decision.run_id, decision.action_id);
+        await this.database.records.remove("run_recovery_states", { run_id: decision.run_id, action_id: decision.action_id });
       } else {
-        await this.database.prepare(upsertSql({
-          dialect: this.database.dialect,
-          insert: "INSERT INTO run_recovery_states(run_id, state, action_id, question, updated_at) VALUES (?, ?, ?, ?, ?)",
-          conflictTarget: "run_id",
-          sqliteAndPostgresUpdate: "state = excluded.state, action_id = excluded.action_id, question = excluded.question, updated_at = excluded.updated_at",
-          tidbUpdate: "state = VALUES(state), action_id = VALUES(action_id), question = VALUES(question), updated_at = VALUES(updated_at)",
-        })).run(decision.run_id, state.kind, decision.action_id, state.question ?? null, now);
+        await this.database.records.insert("run_recovery_states", { run_id: decision.run_id, state: state.kind,
+          action_id: decision.action_id, question: state.question ?? null, updated_at: now }, "replace");
       }
       await this.appendEvent(decision.run_id, "recovery.decision_admitted", {
         decisionId,
@@ -208,12 +176,9 @@ export class RecoveryRepository {
     const now = Date.now();
     await this.database.transaction(async () => {
       const decision = await this.requireRow(decisionId);
-      const result = await this.database.prepare(`
-        UPDATE recovery_decisions
-        SET state = 'rejected', rejection_code = ?, resolved_at = ?
-        WHERE id = ? AND state = 'submitted'
-      `).run(code, now, decisionId) as { changes: number };
-      if (result.changes !== 1) throw new AppError("CONFLICT", "Recovery decision is no longer pending", 409);
+      const changed = await this.database.records.update("recovery_decisions", { id: decisionId, state: "submitted" },
+        () => ({ state: "rejected" as const, rejection_code: code, resolved_at: now }));
+      if (changed !== 1) throw new AppError("CONFLICT", "Recovery decision is no longer pending", 409);
       await this.appendEvent(decision.run_id, "recovery.decision_rejected", {
         decisionId,
         actionId: decision.action_id,
@@ -230,28 +195,18 @@ export class RecoveryRepository {
     const now = Date.now();
     let actionId = "";
     await this.database.transaction(async () => {
-      const state = await this.database.prepare(`
-        SELECT state, action_id FROM run_recovery_states WHERE run_id = ?
-      `).get(runId) as { state: RunRecoveryStateKind; action_id: string } | undefined;
+      const state = (await this.database.records.find("run_recovery_states", { run_id: runId }))[0];
       if (state?.state !== "waiting_user") {
         throw new AppError("CONFLICT", "Run is not waiting for a user recovery response", 409);
       }
-      const action = await this.database.prepare(`
-        SELECT state FROM runtime_actions WHERE id = ? AND run_id = ?
-      `).get(state.action_id, runId) as { state: string } | undefined;
+      const action = (await this.database.records.find("runtime_actions", { id: state.action_id, run_id: runId }))[0];
       if (action?.state !== "recovery_required") {
         throw new AppError("CONFLICT", "Recovery Action is no longer available", 409);
       }
       actionId = state.action_id;
-      await this.database.prepare(`
-        INSERT INTO recovery_user_responses(id, run_id, action_id, response, created_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(id, runId, actionId, response, now);
-      await this.database.prepare(`
-        UPDATE run_recovery_states
-        SET state = 'waiting_recovery', question = NULL, updated_at = ?
-        WHERE run_id = ? AND state = 'waiting_user' AND action_id = ?
-      `).run(now, runId, actionId);
+      await this.database.records.insert("recovery_user_responses", { id, run_id: runId, action_id: actionId, response, created_at: now });
+      await this.database.records.update("run_recovery_states", { run_id: runId, state: "waiting_user", action_id: actionId },
+        () => ({ state: "waiting_recovery" as const, question: null, updated_at: now }));
       await this.appendEvent(runId, "recovery.user_responded", { actionId, response }, now);
     });
     return { id, runId, actionId, response, createdAt: now };
@@ -260,17 +215,12 @@ export class RecoveryRepository {
   async beginResume(runId: string, actionId: string): Promise<void> {
     const now = Date.now();
     await this.database.transaction(async () => {
-      const state = await this.database.prepare(`
-        SELECT state, action_id FROM run_recovery_states WHERE run_id = ?
-      `).get(runId) as { state: RunRecoveryStateKind; action_id: string } | undefined;
-      const action = await this.database.prepare(`
-        SELECT state FROM runtime_actions WHERE id = ? AND run_id = ?
-      `).get(actionId, runId) as { state: string } | undefined;
+      const state = (await this.database.records.find("run_recovery_states", { run_id: runId }))[0];
+      const action = (await this.database.records.find("runtime_actions", { id: actionId, run_id: runId }))[0];
       if (state?.state !== "ready_to_resume" || state.action_id !== actionId || action?.state !== "recovery_required") {
         throw new AppError("CONFLICT", "Run is not ready to resume this Recovery Action", 409);
       }
-      await this.database.prepare("DELETE FROM run_recovery_states WHERE run_id = ? AND action_id = ?")
-        .run(runId, actionId);
+      await this.database.records.remove("run_recovery_states", { run_id: runId, action_id: actionId });
       await this.appendEvent(runId, "recovery.resume_started", { actionId }, now);
     });
   }
@@ -278,30 +228,17 @@ export class RecoveryRepository {
   async restoreRecovery(runId: string, actionId: string, reason: string): Promise<void> {
     const now = Date.now();
     await this.database.transaction(async () => {
-      const action = await this.database.prepare(`
-        SELECT state FROM runtime_actions WHERE id = ? AND run_id = ?
-      `).get(actionId, runId) as { state: string } | undefined;
+      const action = (await this.database.records.find("runtime_actions", { id: actionId, run_id: runId }))[0];
       if (action?.state !== "recovery_required") {
         throw new AppError("CONFLICT", "Recovery Action is no longer available", 409);
       }
-      await this.database.prepare(upsertSql({
-        dialect: this.database.dialect,
-        insert: "INSERT INTO run_recovery_states(run_id, state, action_id, question, updated_at) VALUES (?, 'waiting_recovery', ?, NULL, ?)",
-        conflictTarget: "run_id",
-        sqliteAndPostgresUpdate: "state = excluded.state, action_id = excluded.action_id, question = NULL, updated_at = excluded.updated_at",
-        tidbUpdate: "state = VALUES(state), action_id = VALUES(action_id), question = NULL, updated_at = VALUES(updated_at)",
-      })).run(runId, actionId, now);
+      await this.database.records.insert("run_recovery_states", { run_id: runId, state: "waiting_recovery", action_id: actionId, question: null, updated_at: now }, "replace");
       await this.appendEvent(runId, "recovery.resume_interrupted", { actionId, reason }, now);
     });
   }
 
   async userResponses(runId: string): Promise<RecoveryUserResponse[]> {
-    const rows = await this.database.prepare(`
-      SELECT id, run_id, action_id, response, created_at
-      FROM recovery_user_responses WHERE run_id = ? ORDER BY created_at, id
-    `).all(runId) as unknown as Array<{
-      id: string; run_id: string; action_id: string; response: string; created_at: number;
-    }>;
+    const rows = (await this.database.records.find("recovery_user_responses", { run_id: runId })).sort(ascending("created_at", "id"));
     return rows.map((row) => ({
       id: row.id,
       runId: row.run_id,
@@ -323,19 +260,9 @@ export class RecoveryRepository {
       if (decision.state !== "submitted" || decision.decision !== "revise_plan") {
         throw new AppError("CONFLICT", "Plan revision assessment requires a submitted revise_plan decision", 409);
       }
-      await this.database.prepare(`
-        INSERT INTO plan_revision_assessments(
-          id, recovery_decision_id, plan_id, approved, feedback, evidence_refs_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        id,
-        input.decisionId,
-        input.planId,
-        input.assessment.approved ? 1 : 0,
-        input.assessment.feedback,
-        JSON.stringify(input.assessment.evidenceRefs),
-        now,
-      );
+      await this.database.records.insert("plan_revision_assessments", { id, recovery_decision_id: input.decisionId, plan_id: input.planId,
+        approved: input.assessment.approved ? 1 : 0, feedback: input.assessment.feedback,
+        evidence_refs_json: JSON.stringify(input.assessment.evidenceRefs), created_at: now });
       await this.appendEvent(decision.run_id, "plan.revision_assessed", {
         decisionId: input.decisionId,
         planId: input.planId,
@@ -355,18 +282,8 @@ export class RecoveryRepository {
   }
 
   async planRevisionAssessments(runId: string): Promise<PlanRevisionAssessmentRecord[]> {
-    const rows = await this.database.prepare(`
-      SELECT assessments.id, assessments.recovery_decision_id, assessments.plan_id,
-             assessments.approved, assessments.feedback, assessments.evidence_refs_json,
-             assessments.created_at
-      FROM plan_revision_assessments AS assessments
-      JOIN recovery_decisions AS decisions ON decisions.id = assessments.recovery_decision_id
-      WHERE decisions.run_id = ?
-      ORDER BY assessments.created_at, assessments.id
-    `).all(runId) as unknown as Array<{
-      id: string; recovery_decision_id: string; plan_id: string; approved: number;
-      feedback: string; evidence_refs_json: string; created_at: number;
-    }>;
+    const decisions = await this.database.records.find("recovery_decisions", { run_id: runId });
+    const rows = (await Promise.all(decisions.map(row => this.database.records.find("plan_revision_assessments", { recovery_decision_id: row.id })))).flat().sort(ascending("created_at", "id"));
     return rows.map((row) => ({
       id: row.id,
       recoveryDecisionId: row.recovery_decision_id,
@@ -383,8 +300,7 @@ export class RecoveryRepository {
   }
 
   private async requireRow(id: string): Promise<DecisionRow> {
-    const row = await this.database.prepare("SELECT * FROM recovery_decisions WHERE id = ?")
-      .get(id) as DecisionRow | undefined;
+    const row = (await this.database.records.find("recovery_decisions", { id }))[0];
     if (row === undefined) throw new AppError("NOT_FOUND", "Recovery decision not found", 404);
     return row;
   }

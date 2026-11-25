@@ -146,6 +146,7 @@ export interface CurrentDecisionViewProjection {
   };
   readonly workProducts: {
     readonly currentObjects: readonly CurrentDecisionView["workProducts"]["objects"][number][];
+    readonly deletedObjects: readonly CurrentDecisionView["workProducts"]["objects"][number][];
     readonly currentIssues: readonly CurrentDecisionView["workProducts"]["issues"][number][];
     readonly diagnostics: readonly CurrentDecisionView["workProducts"]["diagnostics"][number][];
     readonly deliveryTargets: readonly CurrentDecisionView["workProducts"]["deliveryTargets"][number][];
@@ -315,6 +316,7 @@ export function projectCurrentDecisionView(view: CurrentDecisionView): CurrentDe
     } }),
     workProducts: {
       currentObjects: objects,
+      deletedObjects: view.workProducts.objects.filter(object => object.presence === "deleted"),
       currentIssues: issues,
       diagnostics: displayedDiagnostics,
       deliveryTargets: view.workProducts.deliveryTargets,
@@ -344,7 +346,7 @@ function currentObjects(facts: CurrentDecisionWorkProductFacts): CurrentDecision
       ...(version?.sha256 === undefined ? {} : { sha256: version.sha256 }),
       ...(observation === undefined ? {} : { observedBy: observation.source.toolCallId }),
       role: roles.get(object.path)?.role ?? "unknown",
-      checks: object.checks.map((check) => ({ id: check.id, status: check.status, binding: check.binding })),
+      checks: object.checks.filter(check => check.binding !== "historical").map((check) => ({ id: check.id, status: check.status, binding: check.binding })),
     };
   }).sort((left, right) => left.path.localeCompare(right.path, "en"));
 }

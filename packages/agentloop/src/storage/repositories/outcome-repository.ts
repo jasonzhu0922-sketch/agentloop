@@ -1,13 +1,14 @@
-import type { SqlConnection } from "../connection.ts";
+import { runtimePersistence, type RuntimePersistence, type RuntimePersistenceInput } from "../runtime-records.ts";
+import { AppError } from "../../shared/errors.ts";
 import type { RuntimeResultRecord } from "../../runtime/runtime-result.ts";
 
 export type RunOutcomeStatus = "completed" | "failed" | "cancelled";
 
 export class RunOutcomeRepository {
-  private readonly connection: SqlConnection;
+  private readonly connection: RuntimePersistence;
 
-  constructor(connection: SqlConnection) {
-    this.connection = connection;
+  constructor(connection: RuntimePersistenceInput) {
+    this.connection = runtimePersistence(connection);
   }
 
   /** Commit a successfully assessed Plan: mark plan/run completed and record the outcome, atomically. */
@@ -35,18 +36,12 @@ export class RunOutcomeRepository {
     ) throw new TypeError("Run outcome requires a matching published Runtime result");
     const output = input.result.payload.content;
     await this.connection.transaction(async () => {
-      await this.connection.prepare("UPDATE plans SET status = 'completed', updated_at = ? WHERE id = ?")
-        .run(now, input.planId);
-      await this.connection.prepare(`
-        INSERT INTO run_outcomes(run_id, plan_id, status, output, result_ref, result_json, reason_code, committed_at)
-        VALUES (?, ?, 'completed', ?, ?, ?, ?, ?)
-      `).run(input.runId, input.planId, output, input.result.ref.resultId, JSON.stringify(input.result), input.reasonCode, now);
-      await this.connection.prepare(`
-        UPDATE runs SET status = 'completed', output = ?, error_code = NULL, finished_at = ?
-        WHERE id = ? AND status = 'running'
-      `).run(output, now, input.runId);
-      await this.connection.prepare("DELETE FROM run_recovery_states WHERE run_id = ?")
-        .run(input.runId);
+      await this.assertRunning(input.runId, input.planId);
+      await this.connection.records.update("plans", { id: input.planId }, () => ({ status: "completed" as const, updated_at: now }));
+      await this.connection.records.insert("run_outcomes", { run_id: input.runId, plan_id: input.planId, status: "completed", output,
+        result_ref: input.result.ref.resultId, result_json: JSON.stringify(input.result), reason_code: input.reasonCode, committed_at: now });
+      await this.connection.records.update("runs", { id: input.runId, status: "running" }, () => ({ status: "completed" as const, output, error_code: null, finished_at: now }));
+      await this.connection.records.remove("run_recovery_states", { run_id: input.runId });
     });
   }
 
@@ -61,20 +56,19 @@ export class RunOutcomeRepository {
     const now = Date.now();
     const output = input.status === "failed" ? input.output ?? null : null;
     await this.connection.transaction(async () => {
-      if (input.planId !== undefined) {
-        await this.connection.prepare("UPDATE plans SET status = 'failed', updated_at = ? WHERE id = ?")
-          .run(now, input.planId);
-      }
-      await this.connection.prepare(`
-        INSERT INTO run_outcomes(run_id, plan_id, status, output, reason_code, committed_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(input.runId, input.planId ?? null, input.status, output, input.reasonCode, now);
-      await this.connection.prepare(`
-        UPDATE runs SET status = ?, output = ?, error_code = ?, finished_at = ?
-        WHERE id = ? AND status = 'running'
-      `).run(input.status, output, input.reasonCode, now, input.runId);
-      await this.connection.prepare("DELETE FROM run_recovery_states WHERE run_id = ?")
-        .run(input.runId);
+      await this.assertRunning(input.runId, input.planId);
+      if (input.planId !== undefined) await this.connection.records.update("plans", { id: input.planId }, () => ({ status: "failed" as const, updated_at: now }));
+      await this.connection.records.insert("run_outcomes", { run_id: input.runId, plan_id: input.planId ?? null, status: input.status, output, reason_code: input.reasonCode, committed_at: now });
+      await this.connection.records.update("runs", { id: input.runId, status: "running" }, () => ({ status: input.status, output, error_code: input.reasonCode, finished_at: now }));
+      await this.connection.records.remove("run_recovery_states", { run_id: input.runId });
     });
   }
+  private async assertRunning(runId: string, planId?: string): Promise<void> {
+    const run = (await this.connection.records.find("runs", { id: runId }))[0];
+    if (run?.status !== "running") throw new AppError("CONFLICT", "Run is already terminal", 409);
+    if (planId !== undefined && !(await this.connection.records.find("plans", { id: planId, run_id: runId })).length) {
+      throw new AppError("CONFLICT", "Outcome Plan belongs to another Run", 409);
+    }
+  }
+
 }

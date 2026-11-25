@@ -231,3 +231,8 @@ The Desktop development launcher/Web/API and persisted model settings now use
 these root APIs. Connector configuration migration, cloud authentication,
 OS SecretStore, installers and real-provider acceptance remain subsequent work. See
 [the implementation plan](../../docs/LOCAL-RUNTIME-AND-DESKTOP-APP-DESIGN.md).
+
+
+Runtime 状态后端更新：设备 Desktop/Local Runtime/Local Agent 默认磁盘 SQLite；服务端 Runtime Host 默认内核原生 Redis（`AGENTLOOP_RUNTIME_STATE_BACKEND=sqlite|redis`）。Router/身份/业务 SQL 配置保持独立。旧文中 Runtime SQL 部署参数只适用于历史数据迁移。共享工作目录和归档卷必须持久化，Redis 需要 AOF、appendfsync always、noeviction；无故障降级、无启动自动迁移、无自动清理历史。完整接入、迁移与验证见仓库 `docs/RUNTIME-NATIVE-RECORDS-STATUS.md`。
+
+可选 Redis：Desktop 在设备 `.env` 设置 `AGENTLOOP_RUNTIME_STATE_BACKEND=redis`、`AGENTLOOP_RUNTIME_REDIS_URL`、`AGENTLOOP_RUNTIME_REDIS_NAMESPACE` 后重启；设备 base namespace 应唯一，应用继续按账户和 Runtime 隔离。Local Runtime 可通过类型化 `stateConfig(definition)` 传入内核配置，Local Agent 支持同名环境变量。默认仍是磁盘 SQLite；本机配置和 Memory 库独立，执行证据均从统一状态接口读取。切换不自动复制历史，须使用内核离线迁移命令；安装包提供 `agentloop-runtime-state`。

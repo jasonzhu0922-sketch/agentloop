@@ -41,6 +41,6 @@ test("the kernel package exports and ships only the published library", () => {
   };
   assert.equal(packageJson.exports?.["."]?.types, "./dist/index.d.ts");
   assert.equal(packageJson.exports?.["."]?.default, "./dist/index.js");
-  assert.deepEqual(packageJson.files, ["dist", "README.md", "THIRD_PARTY_NOTICES.md"]);
+  assert.deepEqual(packageJson.files, ["dist", "README.md", "THIRD_PARTY_NOTICES.md", "scripts/transfer-runtime-state.mjs"]);
   assert.ok(!packageJson.files.some((entry) => entry.includes("skills")));
 });

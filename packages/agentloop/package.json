@@ -17,14 +17,19 @@
   "files": [
     "dist",
     "README.md",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "scripts/transfer-runtime-state.mjs"
   ],
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && node -e \"require('node:fs').cpSync('src/assets', 'dist/assets', { recursive: true })\"",
     "test": "npm run test:unit && npm run test:kernel",
     "test:unit": "node scripts/run-test-suite.mjs unit",
     "test:kernel": "node scripts/run-test-suite.mjs kernel",
-    "test:full": "node --test --test-isolation=process tests/*.test.ts"
+    "test:full": "node --test --test-isolation=process tests/*.test.ts",
+    "test:runtime-records": "node --test tests/runtime-records-contract.test.ts",
+    "check:runtime-record-schema": "node scripts/generate-runtime-record-schema.mjs --check",
+    "benchmark:runtime-records": "node scripts/benchmark-runtime-records.mjs",
+    "test:history": "node --test tests/runtime-history.test.ts"
   },
   "dependencies": {
     "@ai-sdk/alibaba": "2.0.89",
@@ -34,6 +39,7 @@
     "@ai-sdk/provider": "4.0.37",
     "docx": "^9.7.1",
     "eventsource-parser": "3.1.1",
+    "htmlparser2": "10.1.0",
     "jszip": "^3.10.1",
     "playwright-core": "^1.62.1",
     "pptxgenjs": "^4.0.1",
@@ -52,5 +58,8 @@
     "@types/pg": "^8.23.1",
     "pg": "^8.23.0",
     "typescript": "^7.0.2"
+  },
+  "bin": {
+    "agentloop-runtime-state": "scripts/transfer-runtime-state.mjs"
   }
 }

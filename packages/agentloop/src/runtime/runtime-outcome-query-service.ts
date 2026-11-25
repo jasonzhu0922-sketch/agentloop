@@ -1,4 +1,4 @@
-import type { SqlConnection } from "../storage/connection.ts";
+import { runtimePersistence, type RuntimePersistence, type RuntimePersistenceInput } from "../storage/runtime-records.ts";
 import type { RuntimeDeliveryReceipt } from "./contracts.ts";
 import { type RuntimeResultRecord, parseRuntimeResultJson } from "./runtime-result.ts";
 import { RuntimeResultRepository } from "./runtime-result-repository.ts";
@@ -15,25 +15,16 @@ export interface RuntimeOutcomeProjection {
 
 /** Read-only canonical Outcome projection; it does not infer completion from events or artifacts. */
 export class RuntimeOutcomeQueryService {
-  private readonly database: SqlConnection;
+  private readonly database: RuntimePersistence;
   private readonly results: RuntimeResultRepository;
 
-  constructor(database: SqlConnection, results: RuntimeResultRepository) {
-    this.database = database;
+  constructor(database: RuntimePersistenceInput, results: RuntimeResultRepository) {
+    this.database = runtimePersistence(database);
     this.results = results;
   }
 
   async read(runId: string): Promise<RuntimeOutcomeProjection | undefined> {
-    const row = await this.database.prepare(`
-      SELECT status, reason_code, plan_id, output, result_json, committed_at FROM run_outcomes WHERE run_id = ?
-    `).get(runId) as {
-      status: string;
-      reason_code: string;
-      plan_id: string | null;
-      output: string | null;
-      result_json: string | null;
-      committed_at: number;
-    } | undefined;
+    const row = (await this.database.records.find("run_outcomes", { run_id: runId }))[0];
     if (row === undefined) return undefined;
     const deliveryReceipt = row.status === "completed"
       ? await this.results.readDeliveryReceiptForRun(runId)

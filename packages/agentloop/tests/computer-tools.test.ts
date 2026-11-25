@@ -144,6 +144,7 @@ test("computer_read_json returns structured pointer windows for durable artifact
       sourcePointer: "/schema",
       resultPointer: "/queries/0/value",
       found: true,
+      complete: true,
       summary: { type: "string" },
       value: "agentloop.visibleTableExtraction/v1",
       sourceRange: "/schema",
@@ -218,10 +219,22 @@ test("computer_read_json distinguishes root values from profiles and preserves b
     assert.deepEqual((await read("object.json")).queries, []);
     const object = await read("object.json", [{ pointer: "" }]);
     const value = object.queries[0]!.value as { rows: unknown[]; text: string };
-    assert.equal(value.rows.length, 50);
-    assert.equal(value.text.length, 4003);
-    assert.match(object.caveats.join("\n"), /truncated to 50 of 60/);
-    assert.match(object.caveats.join("\n"), /truncated to 4000/);
+    assert.equal(value.rows.length, 60);
+    assert.equal(value.text.length, 5000);
+    assert.equal((object.queries[0] as any).complete, true);
+    assert.deepEqual(object.caveats, []);
+    const deep = { a: { b: { c: { d: { exact: "essential leaf", uncertainty: "unverified" } } } } };
+    await fs.writeFile(join(root, "deep.json"), JSON.stringify(deep));
+    const selected = await read("deep.json", [{ pointer: "" }]);
+    assert.deepEqual(selected.queries[0]?.value, deep);
+    assert.equal((selected.queries[0] as any).complete, true);
+    await fs.writeFile(join(root, "large.json"), JSON.stringify({ rows: Array.from({ length: 60 }, (_, i) => i), text: "x".repeat(15000) }));
+    const large = await read("large.json", [{ pointer: "" }]);
+    assert.equal((large.queries[0] as any).complete, false);
+    assert.equal((large.queries[0]?.value as any).rows.length, 50);
+    assert.equal((large.queries[0]?.value as any).text.length, 4003);
+    assert.match(large.caveats.join("\n"), /truncated to 50 of 60/);
+    assert.match(large.caveats.join("\n"), /truncated to 4000/);
     assert.equal((await read("object.json", [{ pointer: "/" }])).queries[0]?.value, "empty key");
     assert.equal((await read("object.json", [{ pointer: "/ " }])).queries[0]?.value, "space key");
     assert.equal((await read("object.json", [{ pointer: "/tail " }])).queries[0]?.value, "trailing key");
@@ -829,6 +842,32 @@ test("verify_artifact_acceptance records aggregate HTML-PPT evidence and rendere
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+test("HTML acceptance rejects CSS appended after a closed document without confusing embedded end-tag text", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-html-document-boundary-"));
+  try {
+    const service = new ArtifactAcceptanceService();
+    const executor = new ComputerExecutor(root);
+    const prefix = '<!doctype html><html><head><style>.nav{display:flex}</style></head><body></body></html>';
+    const css = '\n.hero{display:grid}\n';
+    const body = '<main class="hero">Portal</main><script>const endTag = "</html>";</script>';
+    await fs.writeFile(join(root, "broken.html"), prefix + css + '</style></head><body>' + body + '</body></html>');
+    const broken = await service.verify(executor, { artifactPath: "broken.html" });
+    assert.equal(broken.verdict, "rejected");
+    assert.ok(broken.evidenceKinds.failed.includes("artifact_acceptance"));
+    assert.ok(broken.evidenceKinds.failed.includes("format_matches_request"));
+    assert.equal(check(broken, "html_document_boundary")?.status, "failed");
+    assert.equal(check(broken, "html_document_boundary")?.evidence.documentEndLine, 1);
+    assert.equal(check(broken, "html_document_boundary")?.evidence.firstTrailingContentLine, 1);
+    assert.match(check(broken, "html_document_boundary")?.diagnostics ?? "", /appended after/);
+    const valid = '<!doctype html><html><head><style>.hero{display:grid}</style></head><body>' + body
+      + '<div title="</html>">End</div><textarea></html></textarea></body></html>\n<!-- trailing comment: </html> -->';
+    await fs.writeFile(join(root, "valid.html"), valid);
+    const accepted = await service.verify(executor, { artifactPath: "valid.html" });
+    assert.notEqual(accepted.verdict, "rejected");
+    assert.equal(check(accepted, "html_document_boundary")?.status, "passed");
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
 test("verify_artifact_acceptance rejects HTML with invalid inline script syntax", async () => {

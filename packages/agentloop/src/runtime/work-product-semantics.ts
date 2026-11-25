@@ -113,6 +113,8 @@ export function deriveWorkProductSemantics(input: {
     if (!Array.isArray(payload?.updates) || payload.updates.length > 20) { reject(-1, "invalid_updates"); continue; }
     for (const [index, raw] of payload.updates.entries()) {
       const value = record(raw);
+      // Context carry-forward shares this envelope, but never creates file facts or bindings.
+      if (value?.kind === "context") continue;
       const id = digest(JSON.stringify([event.runId, event.workspaceId, goalId, event.modelStep, index])).slice(0, 20);
       const fingerprint = digest(JSON.stringify([event.contentSha256, raw]));
       if (seen.has(id)) {

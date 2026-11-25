@@ -11,6 +11,8 @@ import { encodeOpenAICompatiblePrompt, type RuntimeContextPlacement } from "./pr
 import { type OpenAICompatibleModelOptions, type ResponsesReasoningContinuationStore } from "./model-provider-options.ts";
 import { ProviderTransport, JsonProviderResponse, normalizeJsonPayload, type ProviderProtocol } from "./model-provider-transport.ts";
 import * as policy from "./model-provider-policy.ts";
+import { performance } from "node:perf_hooks";
+import { runtimePerformanceSpan } from "../diagnostics/runtime-performance.ts";
 export { InMemoryResponsesReasoningContinuationStore } from "./model-provider-options.ts";
 export type { OpenAICompatibleModelOptions, ResponsesReasoningContinuationStore } from "./model-provider-options.ts";
 
@@ -18,6 +20,7 @@ class AiSdkModel implements ModelAdapter {
   readonly limits: Readonly<{ contextWindowTokens: number; maxOutputTokens: number }>;
   readonly completeTimeoutMs: number;
   readonly operationTimeoutMs: number;
+  readonly completedExchangePolicy: "retain" | "releasable";
   readonly reasoningVisibility: "visible" | "hidden";
   private readonly providerKind: ModelProviderKind;
   private readonly reasoning?: ModelReasoning;
@@ -49,6 +52,7 @@ class AiSdkModel implements ModelAdapter {
   private readonly protocol: ProviderProtocol;
   constructor(options: OpenAICompatibleModelOptions, protocol: ProviderProtocol) {
     this.protocol = protocol;
+    this.completedExchangePolicy = options.reasoningEncryptedContent ? "retain" : "releasable";
     this.providerKind = options.providerKind ?? "openai-compatible";
     const definition = modelProviderDefinition(this.providerKind);
     if (!(definition.protocols as readonly string[]).includes(protocol)) throw new TypeError("SDK provider does not support the configured protocol");
@@ -347,7 +351,7 @@ class AiSdkModel implements ModelAdapter {
           await policy.retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, signal ?? policy.NEVER_ABORT_SIGNAL, undefined, request, result);
           continue;
         }
-        return result;
+        return { ...result, performanceTiming: transport.performanceTiming() };
       } catch (caught) {
         // A sink/Runtime failure takes precedence over transport read-ahead.
         // SDK wrappers may otherwise obscure the original transport failure.
@@ -383,7 +387,8 @@ class AiSdkModel implements ModelAdapter {
               : new AppError("MODEL_ERROR", "Model provider returned an unreadable response", 502, { attempts: attempt, causeCode: policy.transportCauseCode(error), request });
         }
         if (response) error = policy.withProviderRequestIdentity(error as AppError, response);
-        throw redactModelError(error as AppError, this.apiKey);
+        const redacted = redactModelError(error as AppError, this.apiKey);
+        throw policy.attachModelPerformanceTiming(redacted, transport.performanceTiming());
       } finally { timeout.dispose(); }
     }
     throw new AppError("MODEL_ERROR", "Model request exhausted its attempts", 502);
@@ -401,8 +406,16 @@ class AiSdkModel implements ModelAdapter {
     const ready = new Set<string>();
     const emit = async (event: Parameters<ModelStreamSink>[0]) => {
       transport.diagnostics.hadSinkEmission = true;
-      try { await sink(event); }
+      const started = performance.now();
+      try {
+        await runtimePerformanceSpan("model.runtime_sink_callback", { category: "model_sink", eventType: event.type },
+          async () => await sink(event));
+      }
       catch (error) { throw new policy.StreamConsumptionError("consume_event", error, transport.diagnostics); }
+      finally {
+        transport.diagnostics.sinkCallbackCount = (transport.diagnostics.sinkCallbackCount ?? 0) + 1;
+        transport.diagnostics.sinkCallbackWaitMs = (transport.diagnostics.sinkCallbackWaitMs ?? 0) + Math.max(0, performance.now() - started);
+      }
     };
     const finishCall = async (id: string, name: string, raw: string, early: boolean) => {
       const existing = inputs.get(id);
@@ -499,15 +512,23 @@ class AiSdkModel implements ModelAdapter {
       for (const tool of toolCalls) await emit({ type: "tool_call_ready", index: inputs.get(tool.id)?.index ?? 0, ...tool });
     }
     const streamReceipt = await transport.collector!.build(policy.streamAnomalyReasons(response, transport.diagnostics));
-    return { ...response, streamReceipt };
+    return { ...response, streamReceipt, performanceTiming: transport.performanceTiming() };
   }
 }
 
 function sdkUsage(usage: LanguageModelV4GenerateResult["usage"]): ModelResponse["usage"] {
   const inputTokens = usage.inputTokens.total;
   const outputTokens = usage.outputTokens.total;
-  return inputTokens === undefined && outputTokens === undefined ? undefined : {
-    ...(inputTokens === undefined ? {} : { inputTokens }), ...(outputTokens === undefined ? {} : { outputTokens }),
+  const inputTokensNoCache = usage.inputTokens.noCache;
+  const cacheReadInputTokens = usage.inputTokens.cacheRead;
+  const cacheWriteInputTokens = usage.inputTokens.cacheWrite;
+  const hasCacheDetail = (cacheReadInputTokens ?? 0) > 0 || (cacheWriteInputTokens ?? 0) > 0;
+  return inputTokens === undefined && outputTokens === undefined && !hasCacheDetail ? undefined : {
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(!hasCacheDetail || inputTokensNoCache === undefined ? {} : { inputTokensNoCache }),
+    ...(!hasCacheDetail || cacheReadInputTokens === undefined ? {} : { cacheReadInputTokens }),
+    ...(!hasCacheDetail || cacheWriteInputTokens === undefined ? {} : { cacheWriteInputTokens }),
   };
 }
 

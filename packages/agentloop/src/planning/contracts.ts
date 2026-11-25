@@ -767,6 +767,16 @@ export interface StepAssessmentInput {
   readonly skills: readonly PrivateSkill[];
   readonly evidence: StepEvidence;
   readonly modelEvidence?: StepEvidence;
+  readonly contextReads?: {
+    readonly definitions: readonly import("../runtime/contracts.ts").ModelToolDefinition[];
+    readonly execute: (call: import("../runtime/contracts.ts").ModelToolCall, signal?: AbortSignal) => Promise<string>;
+  };
+  readonly decisionWorkingSet?: import("../runtime/decision-working-set.ts").DecisionWorkingSet;
+  readonly currentDecisionView?: import("../runtime/current-decision-view.ts").CurrentDecisionViewProjection;
+  /** Server-authored ordered lifecycle for the cited Tool evidence. A later
+   * event can establish only later state; it never rewrites an earlier call's
+   * prerequisites or outcome. */
+  readonly evidenceTimeline?: readonly PersistedEvidenceTimelineEntry[];
   /**
    * Server-authorized profile facts already supplied to this response-only
    * execution turn. Assessment may use them as evidence for the same reply.
@@ -816,12 +826,23 @@ export interface PlanRevisionAssessmentInput {
   readonly currentPlan: ExecutionPlan;
   readonly proposal: PlanProposal;
   readonly retiredStepIds: readonly string[];
+  /** Ordered persisted evidence relevant to the failed boundary. */
+  readonly evidenceTimeline?: readonly PersistedEvidenceTimelineEntry[];
   readonly recoveryAction: Readonly<{
     id: string;
     kind: string;
     replayPolicy: "safe" | "idempotent" | "unsafe";
     metadata: Readonly<Record<string, unknown>>;
   }>;
+}
+
+export interface PersistedEvidenceTimelineEntry {
+  readonly seq: number;
+  readonly createdAt: number;
+  readonly type: string;
+  readonly toolCallId?: string;
+  readonly toolName?: string;
+  readonly data: Readonly<Record<string, unknown>>;
 }
 
 export interface PlanRevisionAssessment {
@@ -831,5 +852,5 @@ export interface PlanRevisionAssessment {
 }
 
 export interface PlanRevisionAssessor {
-  assess(input: PlanRevisionAssessmentInput, signal?: AbortSignal): Promise<PlanRevisionAssessment>;
+  assess(input: PlanRevisionAssessmentInput, signal?: AbortSignal, emit?: RuntimeEventSink): Promise<PlanRevisionAssessment>;
 }

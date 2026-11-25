@@ -254,7 +254,13 @@ export async function previewProcessArtifact(input: {
   readonly workspaceRoot: string;
 }): Promise<ProcessArtifactPreview> {
   const content = await readProcessArtifact(input);
-  const extension = extensionFor(input.artifact.path);
+  return previewProcessArtifactContent(input.artifact, content);
+}
+
+/** Preview immutable history content with the same renderer used by live workspace artifacts. */
+export function previewProcessArtifactContent(artifact: ProcessArtifact, content: Buffer): ProcessArtifactPreview {
+  const input = { artifact };
+  const extension = extensionFor(artifact.path);
   if (extension === "docx") {
     return {
       kind: "docx",

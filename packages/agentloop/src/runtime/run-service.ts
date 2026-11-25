@@ -1,3 +1,6 @@
+import { DurableRunEventSubscriptions } from "./durable-run-event-subscription.ts";
+import { RedisRunEventJournal } from "./redis-run-event-journal.ts";
+import { readRunEvents } from "../storage/run-event-store.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { isMemoryApplicability, MEMORY_APPLICABILITY_SCHEMA } from "./memory-plugin.ts";
 import { RunInputRepository, type RunInputMessage } from "./run-input-repository.ts";
@@ -75,7 +78,8 @@ import { readSkillExecutionManifest } from "../skills/skill-execution-manifest.t
 import type { PrivateSkill, SkillService } from "../skills/skill-service.ts";
 import type { SkillLoadDiagnostic } from "../skills/skill-directory.ts";
 import { hasSkillSourceContract } from "../skills/agentloop-metadata.ts";
-import type { SqlConnection } from "../storage/connection.ts";
+import { runtimePersistence, type RuntimePersistence, type RuntimePersistenceInput } from "../storage/runtime-records.ts";
+import { assembleRuntimeEventPersistence } from "./runtime-event-persistence.ts";
 import { RunRepository, type RunRow } from "../storage/repositories/run-repository.ts";
 import { SourceRepository, sourceSummary } from "../storage/repositories/source-repository.ts";
 import { AppError, forbidden, notFound } from "../shared/errors.ts";
@@ -148,6 +152,7 @@ import {
   ModelPlanRevisionAssessor,
   ModelRecoveryPlanner,
   recoveryContinuationStepIds,
+  recoveryRevisionCorrection,
   type RecoveryDecisionProposal,
   type RecoveryPlanner,
   type RecoveryPlannerInput,
@@ -171,7 +176,9 @@ import {
   resolveSkillWorkflowEvidenceBindings,
 } from "./decision-binding.ts";
 import { toolOperationFailureCode } from "./tool-operation-outcome.ts";
-import { RunEventHub, type LiveRunEvent } from "./run-event-hub.ts";
+import { RunEventBatchQueue, BATCHED_OBSERVATION_EVENTS, type RunEventBatchOptions } from "./run-event-batch-queue.ts";
+import { appendRunEvents } from "../storage/repositories/run-event-sequencer.ts";
+import { RunEventHub, type LiveRunProgress, type LiveRunEvent } from "./run-event-hub.ts";
 import {
   artifactPathsFromCommandFileChanges,
   artifactPathsMentionedInCommandOutput,
@@ -212,6 +219,14 @@ import { assertNoInferredCalendarDates, createRuntimeClock, parseRecurringTimeCo
 import { temporalEvidenceGap } from "./temporal-evidence.ts";
 import { CONVERSATION_TASK_INTENT_SCHEMA, parseConversationTaskIntent } from "./conversation-task-intent.ts";
 import { decideRoundProgress } from "./round-progress.ts";
+import {
+  createRuntimePerformanceDiagnosticsFromEnvironment,
+  currentRuntimePerformanceContext,
+  currentRuntimePerformanceDiagnostics,
+  runtimePerformanceSpan,
+  withRuntimePerformanceContext,
+  type RuntimePerformanceDiagnostics,
+} from "../diagnostics/runtime-performance.ts";
 
 export type ModelFactory = (onRetry?: ModelRetryReporter, modelKey?: string) => ModelAdapter;
 
@@ -428,8 +443,10 @@ export interface RunStartPersistence {
 }
 
 export class RunService {
+  private readonly continuations = new Map<string, Set<Promise<unknown>>>();
   private readonly executionIdle = new Map<string, Promise<void>>();
-  private readonly database: SqlConnection;
+  private readonly database: RuntimePersistence;
+  private readonly executionRuntimeId?: string;
   private readonly runs: RunRepository;
   private readonly rounds: RunRoundRepository;
   private readonly planningBudgets: PlanningBudgetRepository;
@@ -481,7 +498,12 @@ export class RunService {
   private readonly actionQueries: RuntimeActionQueryService;
   private readonly hostRunQueries: RuntimeHostRunProjectionQueryService<RunRecord>;
   private readonly eventHub = new RunEventHub();
+  private readonly eventSubscriptions: DurableRunEventSubscriptions;
+  private readonly progressListeners = new Map<string, Set<(event: LiveRunProgress) => void>>();
+  private readonly eventBatchQueue?: RunEventBatchQueue;
+  private readonly eventJournal?: RedisRunEventJournal;
   private readonly runEventLogSink?: RunEventLogSink;
+  private readonly performanceDiagnostics?: RuntimePerformanceDiagnostics;
   private readonly skillLoadDiagnostics?: readonly SkillLoadDiagnostic[];
   private readonly activeRunControllers = new Map<string, AbortController>();
   /** Provider waits can stop for Steer without cancelling dispatched Tool effects. */
@@ -493,7 +515,9 @@ export class RunService {
   private readonly memory?: AgentLoopMemoryPlugin;
 
   constructor(options: {
-    database: SqlConnection;
+    database: RuntimePersistenceInput;
+    /** Stable deployment partition. Control commands must reach the persisted executor; no automatic takeover. */
+    executionRuntimeId?: string;
     skills: SkillService;
     /** Host-discovered packages excluded before they could reach SkillService. */
     skillLoadDiagnostics?: readonly SkillLoadDiagnostic[];
@@ -532,6 +556,10 @@ export class RunService {
     requireExplicitModel?: boolean;
     modelKeys?: readonly string[];
     runEventLogSink?: RunEventLogSink;
+    /** A sequenced durable outbox isolates all event writes; legacy batching buffers observations only. */
+    eventBatching?: RunEventBatchOptions;
+    /** Independent, best-effort Runtime performance diagnostics. Never persisted as Run events. */
+    performanceDiagnostics?: RuntimePerformanceDiagnostics;
     planningExtensions?: readonly PlanningExtension[];
     stepExecutionStrategy?: StepExecutionStrategy;
     toolExecutionPlugins?: readonly ToolExecutionPlugin[];
@@ -540,7 +568,8 @@ export class RunService {
     /** Optional Local Agent-only Memory SPI. Cloud Runtime hosts leave this unset. */
     memory?: AgentLoopMemoryPlugin;
   }) {
-    this.database = options.database;
+    this.database = runtimePersistence(options.database);
+    this.executionRuntimeId = options.executionRuntimeId;
     this.skills = options.skills;
     this.modelFactory = options.modelFactory;
     this.runToolProvider = options.runToolProvider;
@@ -578,6 +607,7 @@ export class RunService {
       providers: options.acceptanceProviders,
     });
     this.runs = new RunRepository(options.database);
+    this.eventSubscriptions = new DurableRunEventSubscriptions((runId, after) => this.runs.eventsByRunAfter(runId, after));
     this.rounds = new RunRoundRepository(options.database);
     this.planningBudgets = new PlanningBudgetRepository(options.database);
     this.planningRecovery = new PlanningRecoveryRepository(options.database);
@@ -590,7 +620,16 @@ export class RunService {
     this.planQueries = new RuntimePlanQueryService({ plans: this.plans, rounds: this.rounds, run: async (actorUserId, runId) => await this.get(actorUserId, runId) });
     this.stepResults = new StepResultCommitter(this.plans);
     this.sources = new SourceRepository(options.database);
-    this.actions = new RuntimeActionRepository(options.database);
+    const eventPersistence = assembleRuntimeEventPersistence(options.database, options.eventBatching, (runId, seq, event) => {
+      this.eventHub.publish(runId, publicRunEvent({ seq, ...event }));
+      this.logRunEvent(runId, seq, event, event.createdAt);
+    }, (runId, error) => {
+      this.activeRunControllers.get(runId)?.abort(error);
+      this.publishProgress(runId, { type: "runtime.persistence_failed", createdAt: Date.now(), data: { code: "EVENT_PERSISTENCE_FAILED" } });
+    });
+    this.eventJournal = eventPersistence.journal;
+    this.eventBatchQueue = eventPersistence.queue;
+    this.actions = new RuntimeActionRepository(options.database, runId => this.eventJournal ? Promise.resolve() : this.flushRunEvents(runId));
     this.actionQueries = new RuntimeActionQueryService({
       actions: this.actions,
       authorizeRun: async (actorUserId, runId) => { await this.get(actorUserId, runId); },
@@ -663,9 +702,10 @@ export class RunService {
     );
     this.checkpoints = new RunCheckpointRepository(options.database);
     this.runEventLogSink = options.runEventLogSink;
+    this.performanceDiagnostics = options.performanceDiagnostics ?? createRuntimePerformanceDiagnosticsFromEnvironment();
     this.skillLoadDiagnostics = options.skillLoadDiagnostics;
     const recoveryEventLogSink: RecoveryEventLogSink = (event) => {
-      this.logRunEvent(event.runId, event.seq, { type: event.type, data: event.data }, event.createdAt);
+      if (!this.eventJournal) this.logRunEvent(event.runId, event.seq, { type: event.type, data: event.data }, event.createdAt);
     };
     this.recovery = new RecoveryRepository(options.database, recoveryEventLogSink);
     this.planningExtensions = options.planningExtensions ?? [];
@@ -726,7 +766,21 @@ export class RunService {
   isRunExecuting(runId: string): boolean { return this.activeRunControllers.has(runId); }
 
   /** Settles after a start/startConversation execution has unwound, including cancellation. */
-  whenRunIdle(runId: string): Promise<void> { return this.executionIdle.get(runId) ?? Promise.resolve(); }
+  private whenExecutionIdle(runId: string): Promise<void> { return this.executionIdle.get(runId) ?? Promise.resolve(); }
+  async whenRunIdle(runId: string): Promise<void> {
+    for (;;) {
+      const pending = [...(this.continuations.get(runId) ?? []), ...(this.executionIdle.has(runId) ? [this.executionIdle.get(runId)!] : [])];
+      if (!pending.length) return;
+      await Promise.allSettled(pending);
+    }
+  }
+  private trackRunContinuation(runId: string, operation: Promise<unknown>): void {
+    let pending = this.continuations.get(runId);
+    if (!pending) this.continuations.set(runId, pending = new Set());
+    pending.add(operation);
+    const done = () => { pending!.delete(operation); if (!pending!.size) this.continuations.delete(runId); };
+    void operation.then(done, () => { done(); this.publishProgress(runId, { type: "runtime.continuation_failed", createdAt: this.clock(), data: { code: "CONTINUATION_FAILED" } }); });
+  }
 
   private async startInternal(
     actorUserId: string,
@@ -782,8 +836,38 @@ export class RunService {
     return this.toRunRecordWithSources(row);
   }
 
+  private async recoveryScope(runIds?: readonly string[]): Promise<string[] | undefined> {
+    if (this.executionRuntimeId === undefined) return runIds === undefined ? undefined : [...new Set(runIds)];
+    if (runIds !== undefined) {
+      for (const id of runIds) await this.assertExecutionOwner(id);
+      return [...new Set(runIds)];
+    }
+    const ids = new Set((await this.database.records.find("runtime_executors", { runtime_id: this.executionRuntimeId })).map(row => row.remote_run_id));
+    for (const id of ids) for (const child of await this.database.records.find("runs", { parent_run_id: id })) ids.add(child.id);
+    return [...ids];
+  }
+
+  private async assertExecutionOwner(runId: string): Promise<void> {
+    if (this.executionRuntimeId === undefined) return;
+    // Child Runs inherit their root executor; the immutable ledger is created
+    // in the admission transaction, not acquired through a writer lease.
+    const visited = new Set<string>();
+    let current: string | null = runId;
+    while (current !== null && !visited.has(current)) {
+      visited.add(current);
+      const owner = (await this.database.records.find("runtime_executors", { remote_run_id: current }))[0];
+      if (owner) {
+        if (owner.runtime_id !== this.executionRuntimeId) throw new AppError("CONFLICT", "Run control must be routed to its execution Runtime", 409,
+          { reason: "runtime_execution_owner_mismatch", runtimeId: owner.runtime_id, runId });
+        return;
+      }
+      current = (await this.runs.get(current))?.parent_run_id ?? null;
+    }
+  }
+
   async submitInput(actorUserId: string, runId: string, input: { requestId: string; text: string }): Promise<RunInputMessage> {
     await this.get(actorUserId, runId);
+    await this.assertExecutionOwner(runId);
     const message = await new RunInputRepository(this.database).accept(actorUserId, runId, input);
     if (message.status === "accepted" || message.status === "processing") {
       for (const controller of this.executionModelControllers.get(runId) ?? []) {
@@ -830,6 +914,7 @@ export class RunService {
     return {
       limits: model.limits, completeTimeoutMs: model.completeTimeoutMs, operationTimeoutMs: model.operationTimeoutMs,
       reasoningVisibility: model.reasoningVisibility,
+      completedExchangePolicy: model.completedExchangePolicy,
       estimateInputTokens: model.estimateInputTokens?.bind(model), requestLogContext: model.requestLogContext?.bind(model),
       complete: (request, signal) => invoke(request, signal, combined => model.complete(request, combined)),
       ...(model.streamComplete === undefined ? {} : {
@@ -898,7 +983,7 @@ export class RunService {
 
   private async userAuthority(runId: string, state: CanonicalRunState): Promise<RuntimeUserAuthorityContext> {
     const [humanLoopAnswers, rows] = await Promise.all([this.humanLoops.answers(runId),
-      this.database.prepare("SELECT type, payload_json FROM run_events WHERE run_id = ? AND type = 'decision.committed' ORDER BY seq").all(runId),
+      readRunEvents(this.database, runId, "decision.committed"),
     ]);
     const events = (rows as Array<{ type: string; payload_json: string }>).map(row => ({ type: row.type,
       data: JSON.parse(row.payload_json) as Record<string, unknown> }));
@@ -907,6 +992,8 @@ export class RunService {
   }
 
   async respondHumanLoop(actorUserId: string, runId: string, requestId: string, value: unknown, expectedRevision: unknown): Promise<HumanLoopResponse> {
+    await this.get(actorUserId, runId);
+    await this.assertExecutionOwner(runId);
     if ((await this.get(actorUserId, runId)).status !== "running") throw new AppError("CONFLICT", "Run is no longer accepting Human-in-the-Loop responses", 409);
     const revision = optionalPositiveInteger(expectedRevision, "expectedRevision", 1, Number.MAX_SAFE_INTEGER);
     if (revision === undefined) throw new AppError("BAD_REQUEST", "expectedRevision is required", 400);
@@ -922,14 +1009,14 @@ export class RunService {
           text: String(optionalRecord(response.value).clarification) });
         if (request.planId === undefined) await this.planningRecovery.resumeInput(runId, requestId, this.clock());
       });
-      void this.resumeInputClarification(actorUserId, runId, request.planId).catch(async error => {
+      this.trackRunContinuation(runId, this.resumeInputClarification(actorUserId, runId, request.planId).catch(async error => {
         if (error instanceof AppError && error.code === "HUMAN_LOOP_REQUIRED") return;
         if (error instanceof AppError && error.code === "CANCELLED") await this.cancel(actorUserId, runId);
         else {
           await this.terminal.commitStopped({ runId, ...(request.planId === undefined ? {} : { planId: request.planId }), status: "failed", reasonCode: error instanceof AppError ? error.code : "INTERNAL_ERROR" });
           await this.appendRunEvent(runId, { type: "run.failed", data: { runId, code: error instanceof AppError ? error.code : "INTERNAL_ERROR" } });
         }
-      });
+      }));
       return response;
     }
     if (request.origin === "planner") {
@@ -948,10 +1035,10 @@ export class RunService {
       if (isRejectedRecoveryConfirmation(response.value)) {
         await this.cancel(actorUserId, runId);
       } else {
-        void this.resumePlanningRun(actorUserId, runId).catch(async (error) => {
+        this.trackRunContinuation(runId, this.resumePlanningRun(actorUserId, runId).catch(async (error) => {
           if (process.env.AGENTLOOP_DEBUG_ERRORS === "1") console.error(error);
           await this.appendRunEvent(runId, { type: "planning.resume_failed", data: { code: error instanceof AppError ? error.code : "INTERNAL_ERROR" } });
-        });
+        }));
       }
       return response;
     }
@@ -976,13 +1063,13 @@ export class RunService {
         await this.cancel(actorUserId, runId);
         return response;
       }
-      void this.advanceRecovery(actorUserId, runId).catch(async (error) => {
+      this.trackRunContinuation(runId, this.advanceRecovery(actorUserId, runId).catch(async (error) => {
         if (process.env.AGENTLOOP_DEBUG_ERRORS === "1") console.error(error);
         await this.appendRunEvent(runId, {
           type: "human_loop.resume_failed",
           data: { requestId, code: error instanceof AppError ? error.code : "INTERNAL_ERROR" },
         });
-      });
+      }));
       return response;
     }
     if (request.actionId !== undefined) {
@@ -996,20 +1083,20 @@ export class RunService {
           evidenceRefs: [request.id, response.id],
         });
         await this.recovery.admit(decision.id, { kind: "ready_to_resume" });
-        void this.resumeRecovery(actorUserId, runId).catch(async (error) => {
+        this.trackRunContinuation(runId, this.resumeRecovery(actorUserId, runId).catch(async (error) => {
           if (process.env.AGENTLOOP_DEBUG_ERRORS === "1") console.error(error);
           await this.appendRunEvent(runId, {
             type: "human_loop.resume_failed",
             data: { requestId, code: error instanceof AppError ? error.code : "INTERNAL_ERROR" },
           });
-        });
+        }));
       }
     }
     return response;
   }
 
   private async resumePlanningRun(actorUserId: string, runId: string, existingLeaseToken?: string): Promise<void> {
-    await this.whenRunIdle(runId);
+    await this.whenExecutionIdle(runId);
     const run = await this.get(actorUserId, runId);
     const recovery = await this.planningRecovery.get(runId);
     if (run.status !== "running" || recovery?.state !== "resuming") return;
@@ -1055,6 +1142,7 @@ export class RunService {
   async cancel(actorUserId: string, runId: string): Promise<RunRecord> {
     const run = await this.get(actorUserId, runId);
     if (run.status !== "running") return run;
+    await this.assertExecutionOwner(runId);
     const plan = await optionalPlanByRun(this.plans, runId);
     const controller = this.activeRunControllers.get(runId);
     const aborted = controller !== undefined;
@@ -1180,7 +1268,7 @@ export class RunService {
   }
 
   async deleteConversation(actorUserId: string, conversationId: string): Promise<void> {
-    await this.reconcileInterruptedRuns();
+    // Startup recovery is executor-scoped. Deletion must never reconcile other live hosts.
     await this.runs.deleteConversation(actorUserId, conversationId);
   }
 
@@ -1347,9 +1435,36 @@ export class RunService {
     return await this.toolArgumentsQueries.read(actorUserId, runId, toolCallId);
   }
 
+  /** Transient observation channel. No durable seq; never use as a replay cursor. */
+  subscribeRunProgress(runId: string, listener: (event: LiveRunProgress) => void): () => void {
+    let listeners = this.progressListeners.get(runId);
+    if (!listeners) { listeners = new Set(); this.progressListeners.set(runId, listeners); }
+    listeners.add(listener);
+    return () => { listeners!.delete(listener); if (!listeners!.size) this.progressListeners.delete(runId); };
+  }
+
+  private publishProgress(runId: string, event: LiveRunProgress): void {
+    const projected = publicRunEvent({ ...event, seq: 0 });
+    const { seq: _seq, ...progress } = projected;
+    for (const listener of [...(this.progressListeners.get(runId) ?? [])]) {
+      try { listener(progress); } catch { /* Observers cannot fail execution. */ }
+    }
+  }
+
+  async flushRunEvents(runId: string): Promise<void> { if (this.eventJournal) await this.eventJournal.flush(); else await this.eventBatchQueue?.flush(runId); }
+  async initializeRunEvents(): Promise<void> { await (this.eventJournal?.ready ?? this.eventBatchQueue?.ready); }
+  async closeRunEvents(): Promise<void> { this.eventSubscriptions.close(); if (this.eventJournal) await this.eventJournal.close(); else await this.eventBatchQueue?.close(); }
+
   /** Subscribe to live run events as they are durably appended. */
-  subscribeRunEvents(runId: string, listener: (event: LiveRunEvent) => void): () => void {
-    return this.eventHub.subscribe(runId, listener);
+  subscribeRunEvents(runId: string, listener: (event: LiveRunEvent) => void, afterSeq = 0): () => void {
+    return this.eventSubscriptions.subscribe(runId, afterSeq,
+      row => {
+        const deliver = () => listener(publicRunEvent({ seq: row.seq, type: row.type, data: JSON.parse(row.payload_json), createdAt: row.created_at }));
+        if (this.performanceDiagnostics) this.performanceDiagnostics.runWithContext({ runId }, () => this.performanceDiagnostics!.spanSync("event.deliver", { category: "event_callback", eventType: row.type, seq: row.seq }, deliver));
+        else deliver();
+      },
+      poll => this.eventHub.subscribe(runId, poll),
+      () => this.publishProgress(runId, { type: "runtime.subscription_failed", createdAt: Date.now(), data: { code: "EVENT_SUBSCRIPTION_FAILED" } }));
   }
 
   async actionsForRun(actorUserId: string, runId: string): Promise<RuntimeActionRecord[]> {
@@ -1372,6 +1487,8 @@ export class RunService {
   }
 
   async advanceRecovery(actorUserId: string, runId: string): Promise<RecoveryDetail> {
+    await this.get(actorUserId, runId);
+    await this.assertExecutionOwner(runId);
     if (this.isRunExecuting(runId)) throw new AppError("CONFLICT", "Run is already executing", 409);
     const controller = new AbortController();
     this.activeRunControllers.set(runId, controller);
@@ -1475,12 +1592,16 @@ export class RunService {
 
   async respondRecovery(actorUserId: string, runId: string, responseValue: unknown): Promise<RecoveryDetail> {
     await this.get(actorUserId, runId);
+    await this.assertExecutionOwner(runId);
+    await this.get(actorUserId, runId);
     const response = requireString(responseValue, "response", { max: 20_000 });
     await this.recovery.submitUserResponse(runId, response);
     return this.recoveryForRun(actorUserId, runId);
   }
 
   async resumeRecovery(actorUserId: string, runId: string): Promise<RunRecord> {
+    await this.get(actorUserId, runId);
+    await this.assertExecutionOwner(runId);
     const run = await this.get(actorUserId, runId);
     if (run.status !== "running") throw new AppError("CONFLICT", "Only a running Run can resume recovery", 409);
     const state = await this.recovery.state(runId);
@@ -1763,20 +1884,16 @@ export class RunService {
    * the historical global reconciliation behavior.
    */
   async reconcileInterruptedRuns(runIds?: readonly string[]): Promise<number> {
-    const scopedRunIds = runIds === undefined ? undefined : [...new Set(runIds)];
+    const scopedRunIds = await this.recoveryScope(runIds);
     if (scopedRunIds !== undefined && scopedRunIds.length === 0) return 0;
-    const runScope = scopedRunIds === undefined ? "" : ` AND runs.id IN (${scopedRunIds.map(() => "?").join(", ")})`;
     let reconciled = 0;
-    const pausedAssessments = await this.database.prepare(`
-      SELECT runs.id AS run_id, runs.owner_user_id, actions.metadata_json
-      FROM runs
-      JOIN run_recovery_states recovery ON recovery.run_id = runs.id
-      JOIN runtime_actions actions ON actions.id = recovery.action_id
-      WHERE runs.status = 'running'
-        AND recovery.state = 'waiting_recovery'
-        AND actions.state = 'recovery_required'
-        ${runScope}
-    `).all(...(scopedRunIds ?? [])) as unknown as Array<{ run_id: string; owner_user_id: string; metadata_json: string }>;
+    const pausedAssessments: Array<{ run_id: string; owner_user_id: string; metadata_json: string }> = [];
+    for (const run of await this.runningRunRows(scopedRunIds)) {
+      const recovery = (await this.database.records.find("run_recovery_states", { run_id: run.id, state: "waiting_recovery" }))[0];
+      if (!recovery) continue;
+      const action = (await this.database.records.find("runtime_actions", { id: recovery.action_id, state: "recovery_required" }))[0];
+      if (action) pausedAssessments.push({ run_id: run.id, owner_user_id: run.owner_user_id, metadata_json: action.metadata_json });
+    }
     for (const paused of pausedAssessments) {
       if (stringField(JSON.parse(paused.metadata_json) as unknown, "reason") !== "assessment_failed_boundary") continue;
       try {
@@ -1864,15 +1981,14 @@ export class RunService {
   }
 
   async reconcileRunInputs(runIds?: readonly string[]): Promise<number> {
-    const scopedRunIds = runIds === undefined ? undefined : [...new Set(runIds)];
+    const scopedRunIds = await this.recoveryScope(runIds);
     if (scopedRunIds?.length === 0) return 0;
     let reconciled = 0;
-    const pendingScope = scopedRunIds === undefined ? "" : ` AND runs.id IN (${scopedRunIds.map(() => "?").join(", ")})`;
-    const pending = await this.database.prepare(`SELECT runs.id, runs.owner_user_id FROM runs
-      JOIN run_input_controls controls ON controls.run_id = runs.id
-      WHERE runs.status = 'running' AND controls.received_seq > controls.consumed_seq
-        AND (controls.lease_until IS NULL OR controls.lease_until <= ?) ${pendingScope}`)
-      .all<{ id: string; owner_user_id: string }>(Date.now(), ...(scopedRunIds ?? []));
+    const pending: RunRow[] = [];
+    for (const run of await this.runningRunRows(scopedRunIds)) {
+      const control = (await this.database.records.find("run_input_controls", { run_id: run.id }))[0];
+      if (control && control.received_seq > control.consumed_seq && (control.lease_until === null || control.lease_until <= Date.now())) pending.push(run);
+    }
     for (const run of pending) {
       if (this.isRunExecuting(run.id) || !await this.humanLoops.hasOpen(run.id)) continue;
       try { await this.drainPausedInputs(run.owner_user_id, run.id); reconciled++; }
@@ -1885,36 +2001,34 @@ export class RunService {
   }
 
   async reconcilePlanningRecoveries(runIds?: readonly string[]): Promise<number> {
-    const scopedRunIds = runIds === undefined ? undefined : [...new Set(runIds)];
+    const scopedRunIds = await this.recoveryScope(runIds);
     if (scopedRunIds !== undefined && scopedRunIds.length === 0) return 0;
-    const runScope = scopedRunIds === undefined ? "" : ` AND runs.id IN (${scopedRunIds.map(() => "?").join(", ")})`;
     let reconciled = 0;
-    const interruptedPlanning = await this.database.prepare(`
-      SELECT runs.id AS run_id, runs.owner_user_id
-      FROM runs JOIN run_planning_recovery recovery ON recovery.run_id = runs.id
-      WHERE runs.status = 'running' AND recovery.state = 'resuming'
-        AND (recovery.lease_until IS NULL OR recovery.lease_until <= ?)
-        ${runScope}
-    `).all(Date.now(), ...(scopedRunIds ?? [])) as unknown as Array<{ run_id: string; owner_user_id: string }>;
+    const interruptedPlanning: Array<{ run_id: string; owner_user_id: string }> = [];
+    for (const run of await this.runningRunRows(scopedRunIds)) {
+      const recovery = (await this.database.records.find("run_planning_recovery", { run_id: run.id, state: "resuming" }))[0];
+      if (recovery && (recovery.lease_until === null || recovery.lease_until <= Date.now())) interruptedPlanning.push({ run_id: run.id, owner_user_id: run.owner_user_id });
+    }
     for (const item of interruptedPlanning) {
       if (this.activeRunControllers.has(item.run_id)) continue;
       const now = Date.now();
-      const active = await this.database.prepare(`SELECT id FROM runtime_actions
-        WHERE run_id = ? AND state = 'dispatched' AND (deadline_at > ? AND lease_until > ?) LIMIT 1`)
-        .get(item.run_id, now, now);
+      const active = (await this.database.records.find("runtime_actions", { run_id: item.run_id, state: "dispatched" }))
+        .find(row => Number(row.deadline_at) > now && Number(row.lease_until) > now);
       if (active !== undefined) continue;
-      await this.database.prepare(`UPDATE runtime_actions
-        SET state = 'failed', error_code = 'PLANNING_RETRY_INTERRUPTED', effect_state = 'unknown',
-            lease_until = NULL, revision = revision + 1, updated_at = ?, closed_at = ?
-        WHERE run_id = ? AND state = 'dispatched' AND plan_id IS NULL
-          AND kind IN ('planning', 'model_turn') AND (deadline_at <= ? OR lease_until <= ?)`)
-        .run(now, now, item.run_id, now, now);
+      await this.database.records.update("runtime_actions", { run_id: item.run_id, state: "dispatched", plan_id: null }, row =>
+        (row.kind === "planning" || row.kind === "model_turn") && ((row.deadline_at !== null && row.deadline_at <= now) || (row.lease_until !== null && row.lease_until <= now)) ?
+          { state: "failed" as const, error_code: "PLANNING_RETRY_INTERRUPTED", effect_state: "unknown" as const, lease_until: null, revision: row.revision + 1, updated_at: now, closed_at: now } : undefined);
       void this.resumePlanningRun(item.owner_user_id, item.run_id).catch((error) => {
         if (process.env.AGENTLOOP_DEBUG_ERRORS === "1") console.error(error);
       });
       reconciled += 1;
     }
     return reconciled;
+  }
+
+  private async runningRunRows(runIds?: readonly string[]): Promise<RunRow[]> {
+    return runIds === undefined ? await this.database.records.find("runs", { status: "running" }) :
+      (await Promise.all(runIds.map(id => this.database.records.find("runs", { id, status: "running" })))).flat();
   }
 
   private async connectorToolsForRun(input: {
@@ -1961,6 +2075,43 @@ export class RunService {
     resumePlanning?: { readonly runId: string; readonly context: PlanningRecoveryContext; readonly leaseToken: string },
   ): Promise<RunRecord> {
     const runId = resumePlanning?.runId ?? randomUUID();
+    const diagnostics = this.performanceDiagnostics ?? currentRuntimePerformanceDiagnostics();
+    const run = async () => await withRuntimePerformanceContext({ runId }, async () => {
+      try {
+        return await runtimePerformanceSpan("run.total", { category: "run" }, async () =>
+          await this.executeInternalWithDiagnostics(
+            actorUserId, input, executeOptions, conversationEntry, onRunStarted, continuation, persistence, resumePlanning, runId,
+          ));
+      } finally {
+        await this.eventBatchQueue?.release(runId);
+        await diagnostics?.finishRun(runId, {
+          kernelVersion: "0.1.0",
+          ...(this.database.diagnostics?.() ?? {}),
+          ...(executeOptions.modelKey === undefined ? {} : { modelKey: executeOptions.modelKey }),
+          evidenceBoundary: "inclusive_client_and_runtime_spans;overlap_and_backpressure_are_not_subtracted_as_pure_provider_or_tool_time",
+        });
+      }
+    });
+    return diagnostics === undefined ? await run() : await diagnostics.runWithContext({ runId }, run);
+  }
+
+  /** Flushes only the independent performance channel; formal Runtime persistence is unchanged. */
+  async closePerformanceDiagnostics(): Promise<void> {
+    await this.performanceDiagnostics?.close();
+  }
+
+  private async executeInternalWithDiagnostics(
+    actorUserId: string,
+    input: string,
+    executeOptions: ExecuteOptions,
+    conversationEntry: boolean,
+    onRunStarted?: (run: RunRecord) => void,
+    continuation?: ContinuationOptions,
+    persistence?: RunStartPersistence,
+    resumePlanning?: { readonly runId: string; readonly context: PlanningRecoveryContext; readonly leaseToken: string },
+    assignedRunId?: string,
+  ): Promise<RunRecord> {
+    const runId = resumePlanning?.runId ?? assignedRunId ?? randomUUID();
     const runController = new AbortController();
     const modelKey = this.resolveRunModelKey(executeOptions.modelKey);
     const requestedVisibleDirectories = await resolveVisibleDirectories(executeOptions.visibleDirectories);
@@ -2031,6 +2182,10 @@ export class RunService {
       await this.planningRecovery.create(runId, planningRecoveryContext, createdAt);
       await persistence?.persist({ id: runId, ownerUserId: actorUserId, conversationId });
     });
+    // A newly inserted Run has an empty event ledger. Seed the durable event
+    // journal so its first accepted event does not make a remote MAX(seq)
+    // round trip. Resumed/legacy Runs still reconcile their floor lazily.
+    if (resumePlanning === undefined) await this.database.eventStore?.seedRun?.(runId, 0);
     if (resumePlanning !== undefined) {
       planningRecoveryContext = resumePlanning.context;
       const currentSources = mergeUploadedSources(await Promise.all(
@@ -2102,6 +2257,11 @@ export class RunService {
       }
       const privateSkills = resumePlanning?.context.allowedSkillIds === undefined ? currentSkills
         : currentSkills.filter((skill) => resumePlanning.context.allowedSkillIds!.includes(skill.id));
+      currentRuntimePerformanceDiagnostics()?.instant("run.environment", {
+        category: "run_environment",
+        skillVersions: privateSkills.map((skill) => ({ id: skill.id, contentHash: skill.contentHash,
+          ...(skill.package === undefined ? {} : { packageHash: skill.package.packageHash }) })),
+      });
       if (resumePlanning !== undefined && (!Array.isArray(resumePlanning.context.skillVersions)
         || privateSkills.length !== resumePlanning.context.allowedSkillIds?.length
         || privateSkills.some((skill) => !resumePlanning.context.skillVersions!.some((version) =>
@@ -2720,7 +2880,7 @@ export class RunService {
               await this.planningRecovery.finishLease(runId, resumePlanning.leaseToken, Date.now());
               const recoveryAction = (await this.actions.list(runId)).find((action) => action.kind === "recovery_review" && action.state === "recovery_required");
               if (recoveryAction !== undefined) await this.actions.resolveRecoveryReview(recoveryAction.id);
-              await this.database.prepare("DELETE FROM run_recovery_states WHERE run_id = ?").run(runId);
+              await this.database.records.remove("run_recovery_states", { run_id: runId });
             }
           });
           break;
@@ -2864,7 +3024,7 @@ export class RunService {
           const recovery = await this.planningRecovery.get(runId);
           const phase = await this.canonicalStates.getOptional(runId) === undefined ? "intent" : "plan";
           const table = phase === "intent" ? "run_intent_budgets" : "run_planning_budgets";
-          const budget = await this.database.prepare(`SELECT run_id FROM ${table} WHERE run_id = ?`).get(runId);
+          const budget = (await this.database.records.find(table, { run_id: runId }))[0];
           const recoverableState = resumePlanning === undefined ? recovery?.state === "prepared" : recovery?.state === "resuming";
           if (recoverableState && recovery?.resume_attempts === 0 && budget !== undefined
             && planningRecoveryContext.allowedToolNames !== undefined) {
@@ -2954,6 +3114,7 @@ export class RunService {
   /** Every completion entrance shares the same input fence, including recovery and HIL. */
   private async finishPlanAfterInputs(actorUserId: string, runId: string, initialPlan: ExecutionPlan,
     emit: (event: RuntimeEvent) => Promise<void>): Promise<{ plan: ExecutionPlan; output: string; reasonCode: string; nextRound: boolean }> {
+    if (!this.eventJournal) await this.flushRunEvents(runId);
     let plan = initialPlan;
     for (;;) {
       const output = finalPlanOutput(plan, await this.canonicalStates.get(runId));
@@ -3208,7 +3369,7 @@ export class RunService {
   }
 
   private async resumeInputClarification(actorUserId: string, runId: string, planId?: string): Promise<void> {
-    await this.whenRunIdle(runId);
+    await this.whenExecutionIdle(runId);
     if (planId === undefined) return this.resumePlanningRun(actorUserId, runId);
     if (this.isRunExecuting(runId)) throw new AppError("CONFLICT", "Run is already executing", 409);
     const controller = new AbortController();
@@ -3254,11 +3415,8 @@ export class RunService {
         const events = await this.runtimeEvents(input.runId);
         const actions = await this.actions.list(input.runId);
         const humanLoop = await this.humanLoops.current(input.runId);
-        const clarification = message.requestId.startsWith("hil_")
-          ? await this.database.prepare(`SELECT requests.prompt, requests.evidence_refs_json FROM human_loop_responses responses
-              JOIN human_loop_requests requests ON requests.id = responses.request_id
-              WHERE responses.id = ? AND responses.run_id = ? AND requests.status = 'answered'`)
-              .get<{ prompt: string; evidence_refs_json: string }>(message.requestId.slice(4), input.runId) : undefined;
+        const response = message.requestId.startsWith("hil_") ? (await this.database.records.find("human_loop_responses", { id: message.requestId.slice(4), run_id: input.runId }))[0] : undefined;
+        const clarification = response === undefined ? undefined : (await this.database.records.find("human_loop_requests", { id: response.request_id, status: "answered" }))[0];
         const clarificationSource = clarification === undefined ? undefined : {
           question: clarification.prompt,
           originalMessages: (await queue.list(input.runId)).filter(prior => (JSON.parse(clarification.evidence_refs_json) as string[]).includes(prior.id)),
@@ -3756,7 +3914,7 @@ export class RunService {
         // a HIL/recovery pause. Otherwise the resumed step can produce and
         // verify artifacts while the canonical targets remain open.
         deliveryTargets: activeStep.executionBinding.targetIds.map((id) => canonicalState.targets[id]!),
-        ...(fileOutputStep || Object.values(canonicalState.targets).some((target) => target.surface === "workspace_artifact") ? {
+        ...{
           workProductContext: {
             goalId: `${plan.id}:v${plan.version}:${activeStep.id}`,
             goal: activeStep.objective,
@@ -3841,7 +3999,7 @@ export class RunService {
               reason: "delivery_target_binding_updated",
             });
           },
-        } : {}),
+        },
         systemPrompt: buildStepSystemPrompt(
           this.systemPrompt,
           stepTaskProfile,
@@ -4033,6 +4191,61 @@ export class RunService {
         },
         deferFailureReport: true,
         failureReportContext: () => this.latestFailureReportContext(input.runId),
+        onLocalRepairExhausted: async (failure) => {
+          await new RunInputRepository(this.database).checkpoint(input.runId);
+          assessmentAttempt += 1;
+          const evidence: StepEvidence = {
+            candidateOutput: "",
+            toolCalls: mergeAssessmentToolEvidence(inheritedAssessmentToolEvidence, failure.toolEvidence),
+            modelSteps: failure.modelSteps,
+          };
+          const assessment: SkillComplianceAssessment = {
+            id: randomUUID(),
+            planId: plan.id,
+            stepId: activeStep.id,
+            attempt: assessmentAttempt,
+            assessmentProfile: "deterministic",
+            assessmentMethod: "rule",
+            approved: false,
+            criteria: [],
+            skills: [],
+            evidenceDigest: createHash("sha256").update(JSON.stringify({
+              reason: failure.reason,
+              failedBoundary: failure.failedBoundary,
+              toolCalls: evidence.toolCalls,
+            })).digest("hex"),
+            feedback: failure.feedback,
+            failedBoundary: failure.failedBoundary,
+            createdAt: Date.now(),
+          };
+          await commitAssessment(assessment, evidence);
+          await input.emit({
+            type: "skill.compliance.assessed",
+            data: {
+              planId: plan.id,
+              stepId: activeStep.id,
+              attempt: assessment.attempt,
+              assessmentProfile: assessment.assessmentProfile,
+              assessmentMethod: assessment.assessmentMethod,
+              approved: false,
+              evidenceDigest: assessment.evidenceDigest,
+              criteria: [],
+              skills: [],
+              feedback: assessment.feedback,
+              failedBoundary: assessment.failedBoundary,
+            },
+          });
+          await input.emit({
+            type: "assessment.failed_boundary",
+            data: {
+              planId: plan.id,
+              stepId: activeStep.id,
+              attempt: assessment.attempt,
+              failedBoundary: assessment.failedBoundary,
+              reason: failure.reason,
+            },
+          });
+        },
         evaluateCandidate: async (candidate) => {
           await new RunInputRepository(this.database).checkpoint(input.runId);
           assessmentAttempt += 1;
@@ -4118,6 +4331,7 @@ export class RunService {
             activatedSkills: activatedStepSkills,
             evidence,
             modelEvidence,
+            decisionWorkingSet: candidate.decisionWorkingSet,
             openEvidenceConcerns,
             ...(temporalScopeGap === undefined ? {} : { temporalEvidenceGap: temporalScopeGap }),
             ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
@@ -4181,6 +4395,34 @@ export class RunService {
             skills: activatedStepSkills,
             evidence,
             modelEvidence,
+            decisionWorkingSet: candidate.decisionWorkingSet,
+            currentDecisionView: candidate.currentDecisionView,
+            ...(candidate.decisionWorkingSet?.history === undefined ? {} : {
+              contextReads: {
+                definitions: input.registry.materialize(stepGrant).definitions.filter(tool => tool.name === "read_result"),
+                execute: async (call: import("./contracts.ts").ModelToolCall, signal?: AbortSignal) => {
+                  if (call.name !== "read_result") throw new AppError("TOOL_POLICY_DENIED", "Assessment can only read existing evidence", 403);
+                  const prepared = input.registry.materialize(stepGrant).prepare(call);
+                  return JSON.stringify(await this.actions.execute({
+                    runId: input.runId, planId: plan.id, stepId: activeStep.id, kind: "tool_call", replayPolicy: "safe",
+                    deadlineMs: toolActionDeadlineMs(undefined),
+                    metadata: { phase: "assessment", toolName: call.name, toolCallId: call.id, arguments: call.arguments },
+                  }, () => prepared.execute({ grant: stepGrant, signal })));
+                },
+              },
+            }),
+            evidenceTimeline: persistedEvidenceTimeline(
+              await this.eventQueries.storedForRun(input.runId),
+              [...new Set([
+                ...candidate.projectedToolEvidence.map(call => call.toolCallId),
+                ...(candidate.decisionWorkingSet?.currentDecision?.evidence ?? []).map(ref => ref.toolCallId),
+                ...(candidate.decisionWorkingSet?.currentDecision ? [candidate.decisionWorkingSet.currentDecision.source.toolCallId] : []),
+                ...(candidate.decisionWorkingSet?.parallelDecisions ?? []).flatMap(frame => [frame.source.toolCallId, ...frame.evidence.map(ref => ref.toolCallId)]),
+                ...(candidate.decisionWorkingSet?.items ?? []).flatMap(item => item.evidence.map(ref => ref.toolCallId)),
+                ...(candidate.currentDecisionView?.workProducts.currentObjects ?? []).flatMap(object => object.observedBy === undefined ? [] : [object.observedBy]),
+                ...openEvidenceConcerns.flatMap(gap => (gap.evidenceConcerns ?? []).flatMap(concern => [...concern.evidenceRefs, ...concern.affectedEvidenceRefs])),
+              ])],
+            ),
             ...(temporalScopeGap === undefined ? {} : { temporalEvidenceGap: temporalScopeGap }),
             ...(input.confirmedResponseMemory?.facts === undefined ? {} : {
               confirmedResponseMemory: {
@@ -4309,7 +4551,7 @@ export class RunService {
     userResponses?: readonly RecoveryUserResponse[];
   }) {
     const catalog = await this.recoveryExecutionCatalog(input.actorUserId, input.run);
-    const events = await this.events(input.actorUserId, input.run.id);
+    const events = await this.resolveToolArgumentReferences(await this.events(input.actorUserId, input.run.id));
     const belongs = (event: { data: Readonly<Record<string, unknown>> }) =>
       event.data.actionId === input.action.id && event.data.expectedActionRevision === input.action.revision;
     const feedback = events.filter(event => event.type === "recovery.proposal_rejected" && belongs(event))
@@ -4321,10 +4563,17 @@ export class RunService {
     const results = input.currentPlan === undefined ? [] : await this.results.listPlanResults({
       runId: input.run.id, planId: input.currentPlan.id, actorUserId: input.actorUserId,
     });
+    const storedEvents = await this.eventQueries.storedForRun(input.run.id);
+    const recoveryEvidenceBoundary = input.failedBoundary ?? input.canonicalGap;
     const context: RecoveryPlannerInput = {
       runId: input.run.id, userInput: input.run.input, action: input.action, plan: input.currentPlan,
+      workspaceId: this.runWorkspaceRoot(input.run),
       canonicalState: catalog.canonicalState, canonicalGap: input.canonicalGap,
       failedBoundary: input.failedBoundary, events,
+      evidenceTimeline: persistedEvidenceTimeline(
+        storedEvents,
+        boundaryEvidenceCallIds(storedEvents, recoveryEvidenceBoundary),
+      ),
       userAuthority: await this.userAuthority(input.run.id, catalog.canonicalState),
       availableTools: catalog.availableToolSummaries,
       availableCapabilities: [...planningCapabilitiesFromTools(catalog.availableToolSummaries, catalog.sources),
@@ -4347,7 +4596,11 @@ export class RunService {
       let stage = "parse";
       try {
         proposal = revalidatePending ? pending : attempt === 1 && input.initialProposal !== undefined
-          ? input.initialProposal : await this.recoveryPlannerFactory(input.model).decide({ ...context, revisionFeedback: feedback }, this.activeRunControllers.get(input.run.id)?.signal);
+          ? input.initialProposal : await this.recoveryPlannerFactory(input.model).decide(
+            { ...context, revisionFeedback: feedback },
+            this.activeRunControllers.get(input.run.id)?.signal,
+            (event) => this.appendRunEvent(input.run.id, event),
+          );
         if (input.failedBoundary !== undefined) proposal = preventAssessmentAcceptancePause({
           action: input.action, failedBoundary: input.failedBoundary, proposal,
         });
@@ -4372,6 +4625,8 @@ export class RunService {
           feedback: stringField(error.details, "feedback") ?? error.message,
           evidenceRefs: Array.isArray(error.details?.evidenceRefs) ? error.details.evidenceRefs as string[] : [],
           proposal: proposal ?? error.details?.rejectedProposal,
+          correction: recoveryRevisionCorrection(input.currentPlan, input.failedBoundary,
+            stringField(error.details, "feedback") ?? error.message),
         };
         feedback.push(diagnostic);
         await this.appendRunEvent(input.run.id, { type: "recovery.proposal_rejected", data: {
@@ -4477,6 +4732,7 @@ export class RunService {
     if (repairGap !== undefined && (!retiredStepIds.includes(repairGap.stepId!) || continuationIds.length === 0)) {
       throw new AppError("PLAN_NOT_ADMITTED", "A GoalGap revision must replace its failed Step and bind an admitted continuation", 422);
     }
+    const revisionEvents = await this.eventQueries.storedForRun(input.run.id);
     const assessment = await this.planRevisionAssessorFactory(input.model).assess({
       runId: input.run.id,
       userInput: input.run.input,
@@ -4487,6 +4743,10 @@ export class RunService {
       // persisted retained Steps, rather than a lossy model proposal.
       proposal: { ...planRevision, steps: admitted.steps },
       retiredStepIds,
+      evidenceTimeline: persistedEvidenceTimeline(
+        revisionEvents,
+        boundaryEvidenceCallIds(revisionEvents, repairGap),
+      ),
       recoveryAction: {
         id: input.action.id,
         kind: input.action.kind,
@@ -4496,7 +4756,7 @@ export class RunService {
           ...(unresolvedRetiredActionEffects.length === 0 ? {} : { unresolvedRetiredActionEffects }),
         },
       },
-    }, this.activeRunControllers.get(input.run.id)?.signal);
+    }, this.activeRunControllers.get(input.run.id)?.signal, (event) => this.appendRunEvent(input.run.id, event));
     await this.recovery.savePlanRevisionAssessment({
       decisionId: input.decision.id,
       planId: input.currentPlan.id,
@@ -4578,7 +4838,7 @@ export class RunService {
       if (input.action.kind === "recovery_review") await this.actions.resolveRecoveryReview(input.action.id);
       return { revised, revisedCanonicalState };
     });
-    for (const { seq, event, createdAt } of committedEvents) {
+    for (const { seq, event, createdAt } of this.eventJournal ? [] : committedEvents) {
       this.eventHub.publish(input.run.id, publicRunEvent({ seq, type: event.type, data: event.data, createdAt }));
       this.logRunEvent(input.run.id, seq, event, createdAt);
     }
@@ -5109,31 +5369,61 @@ export class RunService {
   }
 
   private async appendRunEvent(runId: string, event: RuntimeEvent): Promise<void> {
-    const createdAt = Date.now();
-    const data = this.projectRunEventDataForStorage(event);
-    const projectedEvent: RuntimeEvent = { type: event.type, data };
-    const seq = await this.database.transaction(async () => {
-      if (event.type === "planning.started" && typeof data.maxPlanningTurns === "number") {
-        await this.planningBudgets.initialize(runId, data.maxPlanningTurns, createdAt);
+    const append = async () => await withRuntimePerformanceContext({
+      runId,
+      ...(typeof event.data.stepId === "string" ? { stepId: event.data.stepId } : {}),
+      ...(typeof event.data.actionId === "string" ? { actionId: event.data.actionId } : {}),
+      ...(typeof event.data.requestId === "string" ? { requestId: event.data.requestId } : {}),
+      ...(typeof event.data.toolCallId === "string" ? { toolCallId: event.data.toolCallId } : {}),
+    }, async () => {
+      const createdAt = Date.now();
+      const data = await runtimePerformanceSpan("event.project", { category: "event_persistence", eventType: event.type },
+        async () => this.projectRunEventDataForStorage(event));
+      const projectedEvent: RuntimeEvent = { type: event.type, data };
+      if (this.eventBatchQueue && BATCHED_OBSERVATION_EVENTS.has(event.type)) {
+        await this.eventBatchQueue.enqueue(runId, { type: event.type, data, createdAt });
+        this.publishProgress(runId, { type: event.type, data, createdAt });
+        return;
       }
-      if (event.type === "planning.turn.started" && data.deterministic !== true) {
-        await this.planningBudgets.consume(runId, createdAt);
-      }
-      if (event.type === "conversation.turn.resolution_started" && typeof data.maxAttempts === "number") {
-        await this.planningBudgets.initialize(runId, data.maxAttempts, createdAt, "intent");
-      }
-      if (event.type === "conversation.turn.attempt_started") {
-        await this.planningBudgets.consume(runId, createdAt, "intent");
-      }
-      return await this.runs.appendEvent(runId, { type: event.type, data, createdAt });
+      // Preserve ledger order and fail before a semantic transition if a
+      // background batch failed. Critical writes never become fire-and-forget.
+      if (!this.eventJournal) await this.flushRunEvents(runId);
+      const seq = await runtimePerformanceSpan("event.persist_through_commit", {
+        category: "event_persistence", eventType: event.type,
+        semantics: "includes_outer_transaction_completion_and_commit",
+      }, async () => {
+        const persist = async () => {
+        if (event.type === "planning.started" && typeof data.maxPlanningTurns === "number") {
+          await this.planningBudgets.initialize(runId, data.maxPlanningTurns, createdAt);
+        }
+        if (event.type === "planning.turn.started" && data.deterministic !== true) {
+          await this.planningBudgets.consume(runId, createdAt);
+        }
+        if (event.type === "conversation.turn.resolution_started" && typeof data.maxAttempts === "number") {
+          await this.planningBudgets.initialize(runId, data.maxAttempts, createdAt, "intent");
+        }
+        if (event.type === "conversation.turn.attempt_started") {
+          await this.planningBudgets.consume(runId, createdAt, "intent");
+        }
+        return await this.runs.appendEvent(runId, { type: event.type, data, createdAt });
+        };
+        const budgetEvent = ["planning.started", "planning.turn.started", "conversation.turn.resolution_started", "conversation.turn.attempt_started"].includes(event.type);
+        // Event repositories own their append transaction (including native
+        // sequence-conflict reconciliation). An unconditional outer transaction
+        // hides that boundary from the backend and makes concurrent stream
+        // observations fail as unretryable domain transitions. Only budget
+        // events need the additional atomic budget+event domain boundary.
+        return budgetEvent ? await this.database.transaction(persist) : await persist();
+      });
+      if (this.eventJournal) return; // Published after Redis confirmation and state transaction commit.
+      await runtimePerformanceSpan("event.publish", { category: "event_callback", eventType: event.type, seq }, async () => {
+        this.eventHub.publish(runId, publicRunEvent({ seq, type: event.type, data, createdAt }));
+      });
+      await runtimePerformanceSpan("event.log", { category: "event_callback", eventType: event.type, seq }, async () => {
+        this.logRunEvent(runId, seq, projectedEvent, createdAt);
+      });
     });
-    this.eventHub.publish(runId, publicRunEvent({
-      seq,
-      type: event.type,
-      data,
-      createdAt,
-    }));
-    this.logRunEvent(runId, seq, projectedEvent, createdAt);
+    return this.performanceDiagnostics === undefined ? await append() : await this.performanceDiagnostics.runWithContext({ runId }, append);
   }
 
   private projectRunEventDataForStorage(event: RuntimeEvent): Readonly<Record<string, unknown>> {
@@ -5440,6 +5730,9 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
     if (usage !== undefined) {
       addNumber(details, "inputTokens", usage.inputTokens);
       addNumber(details, "outputTokens", usage.outputTokens);
+      addNumber(details, "inputTokensNoCache", usage.inputTokensNoCache);
+      addNumber(details, "cacheReadInputTokens", usage.cacheReadInputTokens);
+      addNumber(details, "cacheWriteInputTokens", usage.cacheWriteInputTokens);
     }
   }
   if (
@@ -5460,6 +5753,9 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
     if (usage !== undefined) {
       addNumber(details, "inputTokens", usage.inputTokens);
       addNumber(details, "outputTokens", usage.outputTokens);
+      addNumber(details, "inputTokensNoCache", usage.inputTokensNoCache);
+      addNumber(details, "cacheReadInputTokens", usage.cacheReadInputTokens);
+      addNumber(details, "cacheWriteInputTokens", usage.cacheWriteInputTokens);
     }
     const streamReceipt = asRecord(data.streamReceipt);
     if (streamReceipt !== undefined) {
@@ -7248,6 +7544,7 @@ function isInformativeCjkPlanningPhrase(phrase: string): boolean {
 
 class ActionTrackedModel implements ModelAdapter {
   readonly limits: ModelAdapter["limits"];
+  readonly completedExchangePolicy: ModelAdapter["completedExchangePolicy"];
   readonly completeTimeoutMs: number;
   readonly operationTimeoutMs: number;
   readonly reasoningVisibility: "visible" | "hidden" | undefined;
@@ -7276,6 +7573,7 @@ class ActionTrackedModel implements ModelAdapter {
     this.temporalScope = temporalScope;
     this.recurringTime = recurringTime;
     this.limits = model.limits;
+    this.completedExchangePolicy = model.completedExchangePolicy;
     this.completeTimeoutMs = model.completeTimeoutMs ?? model.operationTimeoutMs ?? 120_000;
     this.operationTimeoutMs = model.operationTimeoutMs ?? 120_000;
     this.reasoningVisibility = model.reasoningVisibility;
@@ -7294,6 +7592,7 @@ class ActionTrackedModel implements ModelAdapter {
   complete(invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse> {
     invocation = withRuntimeClock(invocation, this.runtimeClock, this.temporalScope, this.recurringTime);
     const scope = this.scope();
+    const requestId = invocation.runId;
     return this.actions.execute({
       runId: this.runId,
       planId: scope.planId,
@@ -7301,7 +7600,7 @@ class ActionTrackedModel implements ModelAdapter {
       kind: actionKindForPhase(invocation.phase),
       replayPolicy: "safe",
       deadlineMs: this.completeTimeoutMs + 15_000,
-      metadata: { phase: invocation.phase, requestId: invocation.runId },
+      metadata: { phase: invocation.phase, requestId },
     }, async () => {
       const response = await this.model.complete(invocation, signal);
       throwIfAbortSignal(signal);
@@ -7317,6 +7616,7 @@ class ActionTrackedModel implements ModelAdapter {
   ): Promise<ModelResponse> {
     invocation = withRuntimeClock(invocation, this.runtimeClock, this.temporalScope, this.recurringTime);
     const scope = this.scope();
+    const requestId = invocation.runId;
     let action: RuntimeActionRecord | undefined;
     return this.actions.execute({
       runId: this.runId,
@@ -7325,21 +7625,24 @@ class ActionTrackedModel implements ModelAdapter {
       kind: actionKindForPhase(invocation.phase),
       replayPolicy: "safe",
       deadlineMs: this.completeTimeoutMs + 15_000,
-      metadata: { phase: invocation.phase, purpose: base.purpose },
+      metadata: { phase: invocation.phase, purpose: base.purpose, requestId },
       onDispatched: (dispatched) => { action = dispatched; },
     }, async () => {
       if (action === undefined) throw new Error("Model Action was not dispatched");
-      return await completeWithRequestTelemetry({
-        model: this.model,
-        invocation,
-        emit,
-        signal,
-        base: {
-          ...base,
-          actionId: action.id,
-          ...(action.deadlineAt === undefined ? {} : { actionDeadlineAt: action.deadlineAt }),
-        },
-      });
+      const dispatchedAction = action;
+      return await withRuntimePerformanceContext({ requestId: dispatchedAction.id }, async () =>
+        await completeWithRequestTelemetry({
+          model: this.model,
+          invocation,
+          emit,
+          signal,
+          base: {
+            ...base,
+            requestId,
+            actionId: dispatchedAction.id,
+            ...(dispatchedAction.deadlineAt === undefined ? {} : { actionDeadlineAt: dispatchedAction.deadlineAt }),
+          },
+        }));
     });
   }
 
@@ -7351,6 +7654,7 @@ class ActionTrackedModel implements ModelAdapter {
     invocation = withRuntimeClock(invocation, this.runtimeClock, this.temporalScope, this.recurringTime);
     const scope = this.scope();
     const stream = this.model.streamComplete;
+    const requestId = invocation.runId;
     return this.actions.execute({
       runId: this.runId,
       planId: scope.planId,
@@ -7358,11 +7662,12 @@ class ActionTrackedModel implements ModelAdapter {
       kind: actionKindForPhase(invocation.phase),
       replayPolicy: "safe",
       deadlineMs: (stream === undefined ? this.completeTimeoutMs : this.operationTimeoutMs) + 15_000,
-      metadata: { phase: invocation.phase },
+      metadata: { phase: invocation.phase, requestId },
     }, async () => {
-      const response = stream === undefined
-        ? await this.model.complete(invocation, signal)
-        : await stream.call(this.model, invocation, sink, signal);
+      const response = await withRuntimePerformanceContext({ requestId: currentRuntimePerformanceContext()?.actionId }, async () =>
+        stream === undefined
+          ? await this.model.complete(invocation, signal)
+          : await stream.call(this.model, invocation, sink, signal));
       throwIfAbortSignal(signal);
       return response;
     });
@@ -8074,6 +8379,7 @@ function stepAssessmentSignature(input: {
   activatedSkills: readonly PrivateSkill[];
   evidence: StepEvidence;
   modelEvidence: StepEvidence;
+  decisionWorkingSet?: import("./decision-working-set.ts").DecisionWorkingSet;
   openEvidenceConcerns: readonly { readonly gapId: string; readonly evidenceConcerns: CanonicalGoalGap["evidenceConcerns"] }[];
   temporalEvidenceGap?: string;
   runtimeCapabilitySnapshot?: RuntimeCapabilitySnapshot;
@@ -8094,6 +8400,7 @@ function stepAssessmentSignature(input: {
       .sort((left, right) => left.id.localeCompare(right.id, "en")),
     evidence: assessmentEvidenceSignature(input.evidence),
     modelEvidence: assessmentEvidenceSignature(input.modelEvidence),
+    decisionWorkingSet: input.decisionWorkingSet,
     openEvidenceConcerns: input.openEvidenceConcerns,
     ...(input.temporalEvidenceGap === undefined ? {} : { temporalEvidenceGap: input.temporalEvidenceGap }),
     ...(input.runtimeCapabilitySnapshot === undefined ? {} : { runtimeCapabilitySnapshot: input.runtimeCapabilitySnapshot }),
@@ -8213,6 +8520,65 @@ function mergeAssessmentToolEvidence(
   const byCallId = new Map<string, ToolEvidence>();
   for (const item of [...inherited, ...current]) byCallId.set(item.toolCallId, item);
   return [...byCallId.values()];
+}
+
+/** Preserve persisted causal order without asking an assessor to reconstruct
+ * it from prose or unordered evidence references. */
+export function persistedEvidenceTimeline(
+  events: readonly StoredRunEvent[],
+  referencedToolCallIds: readonly string[],
+): readonly import("../planning/contracts.ts").PersistedEvidenceTimelineEntry[] {
+  const referenced = new Set(referencedToolCallIds);
+  if (referenced.size === 0) return [];
+  return events.filter(event => {
+    const toolCallId = typeof event.data.toolCallId === "string" ? event.data.toolCallId : undefined;
+    return toolCallId !== undefined && referenced.has(toolCallId)
+      && ["assistant.tool_call.committed", "tool.planned", "tool.dispatched", "tool.result_committed", "tool.completed", "tool.failed", "tool.rejected"].includes(event.type);
+  }).map(event => {
+    const toolCallId = event.data.toolCallId as string;
+    const toolName = typeof event.data.toolName === "string" ? event.data.toolName
+      : typeof event.data.name === "string" ? event.data.name : undefined;
+    return {
+      seq: event.seq,
+      createdAt: event.createdAt,
+      type: event.type,
+      toolCallId,
+      ...(toolName === undefined ? {} : { toolName }),
+      data: timelineData(event.data),
+    };
+  });
+}
+
+function boundaryEvidenceCallIds(
+  events: readonly StoredRunEvent[],
+  boundary: Pick<CanonicalGoalGap, "evidenceRefs" | "reusableEvidenceRefs" | "unmetCriteria" | "evidenceConcerns"> | FailedBoundary | undefined,
+): readonly string[] {
+  if (boundary === undefined) return [];
+  const refs = new Set([
+    ...("evidenceRefs" in boundary ? boundary.evidenceRefs : []),
+    ...(boundary.reusableEvidenceRefs ?? []),
+    ...(boundary.unmetCriteria ?? []).flatMap(item => item.evidenceRefs),
+    ...(boundary.evidenceConcerns ?? []).flatMap(item => [...item.evidenceRefs, ...item.affectedEvidenceRefs]),
+  ]);
+  const callIds = new Set<string>();
+  for (const event of events) {
+    const toolCallId = typeof event.data.toolCallId === "string" ? event.data.toolCallId : undefined;
+    if (toolCallId === undefined) continue;
+    const resultRef = event.data.resultRef;
+    const resultId = typeof resultRef === "object" && resultRef !== null && "resultId" in resultRef
+      && typeof resultRef.resultId === "string" ? resultRef.resultId : undefined;
+    if (refs.has(toolCallId) || (resultId !== undefined && refs.has(resultId))) callIds.add(toolCallId);
+  }
+  return [...callIds];
+}
+
+function timelineData(data: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+  const keep = ["arguments", "invocationStatus", "operationStatus", "exitCode", "isError", "failurePhase", "error", "resultPreview", "resultRef"];
+  return Object.fromEntries(keep.flatMap(key => {
+    const value = data[key];
+    if (value === undefined) return [];
+    return [[key, value]];
+  }));
 }
 
 function selectAssessmentProfile(
@@ -8629,7 +8995,7 @@ export function buildStepSystemPrompt(
       "Use only currently exposed tools. Tool success alone does not prove the step is complete.",
       ...(clarificationOnly ? [
         "This is an intentionally tool-free clarification step because required user input is unresolved. Do not claim that MCP servers, Skills, or Tools are unavailable, disconnected, or misconfigured merely because this step exposes none.",
-        "State the unresolved input precisely and ask the user for its value. Do not claim to have performed the requested substantive work or generated its deliverables.",
+        "Ask only about the unresolved user decision identified by the turn resolution, using user-facing names and choices. Do not ask the user for internal identifiers or implementation parameters, invent additional prerequisites, or replace a history-target question with a source-configuration question. Internal name-to-identifier resolution belongs to the authorized execution workflow. Do not claim to have performed the requested substantive work or generated its deliverables.",
       ] : []),
     ],
     taskProfile,
@@ -8813,13 +9179,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function finalPlanOutput(plan: ExecutionPlan, state: CanonicalRunState): string {
+export function finalPlanOutput(plan: ExecutionPlan, state: CanonicalRunState): string {
   const effectiveSteps = activeLeafSteps(plan);
   const terminalSteps = effectiveSteps.filter((candidate) =>
     !effectiveSteps.some((other) => other.dependencies.includes(candidate.id))
   );
+  // Compose assessed bodies in Plan order, retaining identical independent deliveries.
   const output = terminalSteps.length === 1 ? terminalSteps[0].output ?? ""
-    : JSON.stringify(terminalSteps.map((step) => ({ stepId: step.id, output: step.output ?? "" })));
+    : terminalSteps.map((step) => step.output?.trim() ?? "").filter(Boolean).join("\n\n");
   // Delivery belongs to the Run. Scheduling position and Step retirement must
   // not decide whether an independently accepted result reaches the user.
   const acceptedMaterial = Object.values(state.targets).flatMap((target) => {
@@ -9325,7 +9692,7 @@ async function resolveConversationTurn(
       const inherited = inheritContinuedConversationIntent(relationBound, context.conversationWorkingSet);
       const inheritedBinding = inheritPriorWorkProductBinding(inherited, context.conversationWorkingSet);
       const resultBound = inheritBoundResultTemporalScope(
-        bindUnambiguousPriorResult(inheritedBinding, input, context.conversationWorkingSet),
+        bindUnambiguousPriorResult(inheritedBinding, context.conversationWorkingSet),
         context.conversationWorkingSet,
       );
       const nonExecutableArtifactFeedback = conversationTurnNonExecutableArtifactFeedback(resultBound);
@@ -9376,8 +9743,6 @@ async function resolveConversationTurn(
           ...conversationTurnResolutionAttemptSummary(response, input),
         },
       });
-      lastFailureWasBinding = resultBound.mode === "execute" && referencesPriorConversationResult(input) && resultBound.targetResult === undefined;
-      if (lastFailureWasBinding) await beginReconstruction(attempt);
       continue;
     }
     retainRepairFeedback(parsed.feedback, response);
@@ -9646,7 +10011,6 @@ function conversationTaskMutatesArtifact(intent: ConversationTaskIntent | undefi
 /** A published Runtime Result remains reusable independently of its producer kind. */
 function bindUnambiguousPriorResult(
   resolution: ConversationTurnResolution,
-  input: string,
   workset: ConversationWorkingSet | undefined,
 ): ConversationTurnResolution {
   if (
@@ -9666,22 +10030,17 @@ function bindUnambiguousPriorResult(
       source: "model_guarded",
     };
   }
-  const targetCandidates = resolution.targetRunId === undefined
-    ? []
-    : workset?.resultCards?.filter((item) => item.producer.runId === resolution.targetRunId) ?? [];
-  const candidates = targetCandidates.length > 0
-    ? targetCandidates
-    : referencesPriorConversationResult(input)
-      ? workset?.resultCards ?? []
-      : [];
+  // Relation and input ownership come from the validated semantic frame.
+  // Text mentioning results or report production cannot turn an independent
+  // new goal into consumption of an arbitrary historical Result.
+  if (resolution.relation === "new_goal" || resolution.targetRunId === undefined) return resolution;
+  const candidates = workset?.resultCards?.filter((item) => item.producer.runId === resolution.targetRunId) ?? [];
   if (candidates.length !== 1) return resolution;
   const candidate = candidates[0];
   if (candidate === undefined) return resolution;
   return {
     ...resolution,
-    relation: resolution.relation === "new_goal" ? "refine_prior" : resolution.relation,
     inputMode: "prior_result",
-    targetRunId: resolution.targetRunId ?? candidate.producer.runId,
     targetResult: candidate.result,
     source: "model_guarded",
   };
@@ -9693,15 +10052,6 @@ function conversationTurnSemanticFeedback(
   workset: ConversationWorkingSet | undefined,
 ): string | undefined {
   if (resolution.mode !== "execute") return undefined;
-  if (referencesPriorConversationResult(input) && resolution.targetResult === undefined) {
-    const candidates = workset?.resultCards ?? [];
-    if (candidates.length === 0) {
-      return "The user refers to a prior result, but no completed reusable Outcome is available. Ask the user to clarify or provide the content; do not silently reacquire sources.";
-    }
-    return candidates.length === 1
-      ? "The user refers to the available prior result. Set inputMode=prior_result and select result_candidate_1."
-      : "The user refers to a prior result, but multiple reusable results are available. Select the matching opaque resultCandidateId from reusableResultCandidates; if the transcript does not distinguish them, return clarify.";
-  }
   return unsupportedPriorArtifactDeliverableFeedback(resolution, input, workset);
 }
 
@@ -9788,16 +10138,6 @@ function unsupportedPriorArtifactDeliverableFeedback(
   if (unsupported.length === 0) return undefined;
   const ids = unsupported.map((deliverable) => deliverable.targetId ?? deliverable.purpose ?? deliverable.kind).join(", ");
   return `Remove unrequested terminal deliverable(s): ${ids}. A prior-artifact transformation may preserve the target artifact family, but any additional terminal artifact family must be explicitly requested in the latest user turn. Keep helper and intermediate artifacts out of taskIntent.deliverables.`;
-}
-
-export function referencesPriorConversationResult(input: string): boolean {
-  if (!requestsArtifactBuildFromIntent(input)) return false;
-  // “这个文件/这个内容” normally points at an uploaded or otherwise
-  // user-supplied source, not at a published Runtime Result.  Only explicit
-  // prior-work markers may enter the reusable-result binding path; otherwise
-  // the resolver would turn a source-backed generation request into a
-  // clarification and Planner would never receive the PPTX request.
-  return /(?:\b(?:this|that|the\s+above|above|previous|prior|earlier|last|latest)\s+(?:analysis|result|answer|summary|report|findings?)\b|\b(?:analysis|result|answer|summary|findings?)\s+from\s+(?:the\s+)?(?:previous|prior|last|earlier)\b|(?:上述|前述|之前的|先前的|刚才的|上一轮的?|上轮的?)(?:分析(?:结果)?|结果|结论|回答|总结|报告|内容|材料)|(?:分析结果|上述结论|前述结论).{0,12}(?:生成|制作|导出|转换|转成|保存))/iu.test(input);
 }
 
 /** Enforce selected input semantics without rediscovering evidence demand from keywords. */
@@ -9925,6 +10265,7 @@ function strongerConversationEvidenceDemand(
 function conversationTurnResolverPrompt(repairFeedback: string | undefined): string {
   return [
       "Resolve the latest user turn against the full conversation transcript and canonical prior-Run metadata.",
+      "Classify task relation semantically before selecting historical inputs. A self-contained new request is new_goal with inputMode=none unless the user asks to consume or refresh prior work; similar subjects, result-related words, and the presence or absence of historical Results do not establish that dependency. Mentioning the current task's future result does not require an existing published Result. Never replace an actionable new goal with a historical-target clarification solely because no prior Outcome is available.",
       USER_DELIVERY_SCOPE_INSTRUCTION,
       "Do not interpret an elliptical follow-up in isolation. Rebind corrections, challenges, refinements, and continuations to the concrete prior goal they modify.",
       "An acknowledgement, thanks, or statement that the user will handle the next action is reply-only: naming prior work does not by itself authorize Runtime to execute that work again.",
@@ -9948,6 +10289,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "When the user disputes an unsupported prior factual answer, bind to that prior Run, use correct_prior or challenge_prior, and require source_grounded evidence.",
       "Use strict_user_source only when the user explicitly requires official, authoritative, or exact-source verification.",
       "Use clarify when the semantic target or requested external side effect is materially ambiguous. This resolution never grants permission for destructive or external side effects.",
+      "Clarification asks for a missing user decision in user-facing terms, never internal identifiers or implementation parameters. Resolving a supplied name into internal identifiers belongs to the authorized Skill/Tool workflow; do not invent a missing prerequisite before that workflow runs.",
       "availableTools is the authorized capability catalog for this Run, including connected services. Its metadata is available for intent classification even though those tools cannot be invoked in this resolver phase. A tool-free resolver is not an unavailable service. Do not return clarify merely because no visible directory or uploaded source is bound when the request can acquire evidence through this catalog.",
       "A user may describe the needed capability without naming a provider or tool. Preserve that functional need; replies may use matching authorized readers, while task workflows require execute. Catalog availability is not by itself a request to use a tool, and must not narrow or replace the user's semantic goal.",
       "Candidate selectors are closed-world Runtime handles, not values you may construct. Use only selector fields and enum values exposed by the current tool schema; never infer an ID from its pattern.",

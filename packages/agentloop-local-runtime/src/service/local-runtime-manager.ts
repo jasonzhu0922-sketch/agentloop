@@ -65,6 +65,7 @@ export interface LocalRuntimeManagerOptions {
   readonly computerCommandEnvironment?: Readonly<Record<string, string>>;
   readonly runEventLogSink?: LocalRuntimeHostOptions["runEventLogSink"];
   readonly computerCommandSandbox?: LocalRuntimeHostOptions["computerCommandSandbox"];
+  readonly stateConfig?: LocalRuntimeHostOptions["stateConfig"];
   /** Trusted host opt-in; credentials are never exposed through configuration APIs. */
   readonly webSearch?: WebToolsOptions;
   readonly planningMaxTurns?: number;
@@ -143,7 +144,7 @@ export async function createLocalRuntimeManager(options: LocalRuntimeManagerOpti
   const connectors = options.connectorModules === undefined ? undefined : new ConnectorSettings(database,
     options.connectorSecrets ?? new (await import("../persistence/encrypted-local-runtime-secret-store.ts")).EncryptedLocalRuntimeSecretStore(join(options.dataDirectory, "private", "connector-secrets")), options.connectorModules);
   const factory = new LocalRuntimeFactory({ databasePath: join(options.dataDirectory, "runtime.db"),
-    runtimeDataRoot: join(options.dataDirectory, "runtimes"), skillPackageStoreRoot: join(options.dataDirectory, "skill-packages"),
+    stateConfig: options.stateConfig, runtimeDataRoot: join(options.dataDirectory, "runtimes"), skillPackageStoreRoot: join(options.dataDirectory, "skill-packages"),
     models: options.models, identity: options.identity,
     computerCommandEnvironment: options.computerCommandEnvironment, runEventLogSink: options.runEventLogSink,
     computerCommandSandbox: options.computerCommandSandbox,

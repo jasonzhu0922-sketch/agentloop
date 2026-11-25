@@ -1,4 +1,5 @@
-import type { SqlConnection } from "../connection.ts";
+import { readRunEvents } from "../run-event-store.ts";
+import { runtimePersistence, ascending, type RuntimePersistence, type RuntimePersistenceInput } from "../runtime-records.ts";
 import { appendRunEvent } from "./run-event-sequencer.ts";
 import { AppError, notFound } from "../../shared/errors.ts";
 import type { VisibleDirectoryGrant } from "../../runtime/contracts.ts";
@@ -40,285 +41,117 @@ export interface ConversationSummaryRow extends ConversationRow {
   run_count: number;
 }
 
-const RUN_COLUMNS = `
-  id, owner_user_id, conversation_id, parent_run_id, depth, allow_dangerous_tools,
-  model_key, status, input, output, error_code, created_at, finished_at
-`;
-
 export class RunRepository {
-  private readonly connection: SqlConnection;
-
-  constructor(connection: SqlConnection) {
-    this.connection = connection;
-  }
-
-  async get(runId: string): Promise<RunRow | undefined> {
-    return await this.connection.prepare(`
-      SELECT ${RUN_COLUMNS}
-      FROM runs WHERE id = ?
-    `).get(runId) as RunRow | undefined;
-  }
-
+  private readonly state: RuntimePersistence;
+  constructor(connection: RuntimePersistenceInput) { this.state = runtimePersistence(connection); }
+  async get(runId: string): Promise<RunRow | undefined> { return (await this.state.records.find("runs", { id: runId }))[0] as RunRow | undefined; }
   async getByOwner(runId: string, ownerUserId: string): Promise<RunRow | undefined> {
-    return await this.connection.prepare(`
-      SELECT ${RUN_COLUMNS}
-      FROM runs WHERE id = ? AND owner_user_id = ?
-    `).get(runId, ownerUserId) as RunRow | undefined;
+    return (await this.state.records.find("runs", { id: runId, owner_user_id: ownerUserId }))[0] as RunRow | undefined;
   }
-
   async listByOwner(ownerUserId: string, limit: number): Promise<RunRow[]> {
-    return await this.connection.prepare(`
-      SELECT ${RUN_COLUMNS}
-      FROM runs WHERE owner_user_id = ? AND parent_run_id IS NULL
-      ORDER BY created_at DESC LIMIT ?
-    `).all(ownerUserId, limit) as unknown as RunRow[];
+    return (await this.state.records.find("runs", { owner_user_id: ownerUserId, parent_run_id: null })).sort(ascending("created_at")).reverse().slice(0, limit) as RunRow[];
   }
-
-  async insertRun(input: {
-    id: string;
-    ownerUserId: string;
-    conversationId?: string;
-    parentRunId?: string;
-    depth?: number;
-    allowDangerousTools: boolean;
-    modelKey?: string;
-    input: string;
-    createdAt: number;
-  }): Promise<void> {
-    await this.connection.prepare(`
-      INSERT INTO runs(
-        id, owner_user_id, conversation_id, parent_run_id, depth, allow_dangerous_tools,
-        model_key, status, input, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
-    `).run(
-      input.id,
-      input.ownerUserId,
-      input.conversationId ?? null,
-      input.parentRunId ?? null,
-      input.depth ?? 0,
-      input.allowDangerousTools ? 1 : 0,
-      input.modelKey ?? null,
-      input.input,
-      input.createdAt,
-    );
+  async insertRun(input: { id: string; ownerUserId: string; conversationId?: string; parentRunId?: string; depth?: number; allowDangerousTools: boolean; modelKey?: string; input: string; createdAt: number }): Promise<void> {
+    await this.state.records.insert("runs", { id: input.id, owner_user_id: input.ownerUserId, conversation_id: input.conversationId ?? null,
+      parent_run_id: input.parentRunId ?? null, depth: input.depth ?? 0, allow_dangerous_tools: input.allowDangerousTools ? 1 : 0,
+      model_key: input.modelKey ?? null, status: "running", input: input.input, created_at: input.createdAt });
   }
-
-  async bindRunVisibleDirectories(input: {
-    runId: string;
-    visibleDirectories: readonly VisibleDirectoryGrant[];
-  }): Promise<void> {
-    if (input.visibleDirectories.length === 0) return;
-    const insert = this.connection.prepare(`
-      INSERT INTO run_visible_directories(run_id, directory_id, name, path, position)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    for (const [position, directory] of input.visibleDirectories.entries()) {
-      await insert.run(input.runId, directory.id, directory.name, directory.path, position);
-    }
+  async bindRunVisibleDirectories(input: { runId: string; visibleDirectories: readonly VisibleDirectoryGrant[] }): Promise<void> {
+    for (const [position, directory] of input.visibleDirectories.entries()) await this.state.records.insert("run_visible_directories", {
+      run_id: input.runId, directory_id: directory.id, name: directory.name, path: directory.path, position,
+    });
   }
-
   async visibleDirectoriesForRun(runId: string): Promise<VisibleDirectoryGrant[]> {
-    return await this.connection.prepare(`
-      SELECT directory_id AS id, name, path
-      FROM run_visible_directories
-      WHERE run_id = ?
-      ORDER BY position ASC
-    `).all(runId) as unknown as VisibleDirectoryGrant[];
+    return (await this.state.records.find("run_visible_directories", { run_id: runId })).sort(ascending("position")).map(row => ({ id: row.directory_id, name: row.name, path: row.path }));
   }
-
-  async listConversationSummaries(
-    ownerUserId: string,
-    page?: { readonly limit: number; readonly offset: number },
-  ): Promise<ConversationSummaryRow[]> {
-    return await this.connection.prepare(`
-      SELECT c.id, c.title, c.created_at, c.updated_at,
-             c.visible_directories_json,
-             (SELECT COUNT(*) FROM runs r WHERE r.conversation_id = c.id AND r.parent_run_id IS NULL) AS run_count
-      FROM conversations c
-      WHERE c.owner_user_id = ?
-      ORDER BY c.updated_at DESC
-      ${page === undefined ? "" : "LIMIT ? OFFSET ?"}
-    `).all(
-      ownerUserId,
-      ...(page === undefined ? [] : [page.limit, page.offset]),
-    ) as unknown as ConversationSummaryRow[];
+  async listConversationSummaries(ownerUserId: string, page?: { readonly limit: number; readonly offset: number }): Promise<ConversationSummaryRow[]> {
+    return await this.state.transaction(async () => {
+      let conversations = (await this.state.records.find("conversations", { owner_user_id: ownerUserId })).sort(ascending("updated_at")).reverse();
+      if (page) conversations = conversations.slice(page.offset, page.offset + page.limit);
+      return await Promise.all(conversations.map(async conversation => ({ ...conversation,
+        run_count: (await this.state.records.find("runs", { conversation_id: conversation.id, parent_run_id: null })).length,
+      })));
+    });
   }
-
   async lastTopLevelStatus(conversationId: string): Promise<{ status: RunStatus } | undefined> {
-    return await this.connection.prepare(`
-      SELECT status FROM runs WHERE conversation_id = ? AND parent_run_id IS NULL
-      ORDER BY created_at DESC LIMIT 1
-    `).get(conversationId) as { status: RunStatus } | undefined;
+    const row = (await this.topLevelRunsInConversation(conversationId)).at(-1); return row ? { status: row.status } : undefined;
   }
-
   async findConversation(ownerUserId: string, conversationId: string): Promise<ConversationRow | undefined> {
-    return await this.connection.prepare(`
-      SELECT id, title, visible_directories_json, created_at, updated_at
-      FROM conversations WHERE id = ? AND owner_user_id = ?
-    `).get(conversationId, ownerUserId) as ConversationRow | undefined;
+    return (await this.state.records.find("conversations", { id: conversationId, owner_user_id: ownerUserId }))[0];
   }
-
   async topLevelRunsInConversation(conversationId: string): Promise<RunRow[]> {
-    return await this.connection.prepare(`
-      SELECT ${RUN_COLUMNS}
-      FROM runs WHERE conversation_id = ? AND parent_run_id IS NULL
-      ORDER BY created_at ASC
-    `).all(conversationId) as unknown as RunRow[];
+    return (await this.state.records.find("runs", { conversation_id: conversationId, parent_run_id: null })).sort(ascending("created_at")) as RunRow[];
   }
-
   async touchConversation(conversationId: string, now: number): Promise<void> {
-    await this.connection.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(now, conversationId);
+    await this.state.records.update("conversations", { id: conversationId }, () => ({ updated_at: now }));
   }
-
-  async setConversationVisibleDirectories(
-    ownerUserId: string,
-    conversationId: string,
-    visibleDirectories: readonly string[],
-    now: number,
-  ): Promise<ConversationRow> {
-    const updated = await this.connection.prepare(`
-      UPDATE conversations
-      SET visible_directories_json = ?, updated_at = ?
-      WHERE id = ? AND owner_user_id = ?
-    `).run(JSON.stringify([...visibleDirectories]), now, conversationId, ownerUserId);
-    if (updated.changes === 0) throw notFound("Conversation");
-    return await this.findConversation(ownerUserId, conversationId) as ConversationRow;
+  async setConversationVisibleDirectories(ownerUserId: string, conversationId: string, visibleDirectories: readonly string[], now: number): Promise<ConversationRow> {
+    return await this.state.transaction(async () => {
+      if (await this.state.records.update("conversations", { id: conversationId, owner_user_id: ownerUserId }, () => ({ visible_directories_json: JSON.stringify([...visibleDirectories]), updated_at: now })) !== 1) throw notFound("Conversation");
+      return (await this.findConversation(ownerUserId, conversationId))!;
+    });
   }
-
   async insertConversation(input: { id: string; ownerUserId: string; title: string; createdAt: number }): Promise<void> {
-    await this.connection.prepare(`
-      INSERT INTO conversations(id, owner_user_id, title, visible_directories_json, created_at, updated_at)
-      VALUES (?, ?, ?, '[]', ?, ?)
-    `).run(input.id, input.ownerUserId, input.title, input.createdAt, input.createdAt);
+    await this.state.records.insert("conversations", { id: input.id, owner_user_id: input.ownerUserId, title: input.title, visible_directories_json: "[]", created_at: input.createdAt, updated_at: input.createdAt });
   }
-
-  /** Provision a Router-owned conversation id while preserving owner isolation. */
   async ensureConversation(input: { id: string; ownerUserId: string; title: string; now: number }): Promise<void> {
-    await this.connection.transaction(async () => {
-      const existing = await this.connection.prepare(`
-        SELECT owner_user_id FROM conversations WHERE id = ?
-      `).get(input.id) as { owner_user_id: string } | undefined;
-      if (existing !== undefined) {
+    await this.state.transaction(async () => {
+      const existing = (await this.state.records.find("conversations", { id: input.id }))[0];
+      if (existing) {
         if (existing.owner_user_id !== input.ownerUserId) throw notFound("Conversation");
         await this.touchConversation(input.id, input.now);
-        return;
-      }
-      await this.connection.prepare(`
-        INSERT INTO conversations(id, owner_user_id, title, visible_directories_json, created_at, updated_at)
-        VALUES (?, ?, ?, '[]', ?, ?)
-      `).run(input.id, input.ownerUserId, input.title, input.now, input.now);
+      } else await this.insertConversation({ ...input, createdAt: input.now });
     });
   }
-
   async deleteConversation(ownerUserId: string, conversationId: string): Promise<void> {
-    await this.connection.transaction(async () => {
-      const conversation = await this.connection.prepare(`
-        SELECT id FROM conversations WHERE id = ? AND owner_user_id = ?
-      `).get(conversationId, ownerUserId) as { id: string } | undefined;
-      if (conversation === undefined) throw notFound("Conversation");
-
-      const active = await this.connection.prepare(`
-        WITH RECURSIVE run_tree(id, status) AS (
-          SELECT id, status FROM runs WHERE conversation_id = ? AND owner_user_id = ?
-          UNION ALL
-          SELECT child.id, child.status
-          FROM runs child JOIN run_tree parent ON child.parent_run_id = parent.id
-          WHERE child.owner_user_id = ?
-        )
-        SELECT id FROM run_tree
-        WHERE status = 'running'
-          AND (
-            EXISTS (
-              SELECT 1 FROM runtime_actions action
-              WHERE action.run_id = run_tree.id AND action.state = 'dispatched'
-            )
-            OR NOT EXISTS (
-              SELECT 1
-              FROM run_recovery_states state
-              JOIN runtime_actions action ON action.id = state.action_id
-              WHERE state.run_id = run_tree.id AND action.state = 'recovery_required'
-            )
-          )
-        LIMIT 1
-      `).get(conversationId, ownerUserId, ownerUserId) as { id: string } | undefined;
-      if (active !== undefined) {
-        throw new AppError("CONFLICT", "Cannot delete a conversation while one of its runs is active", 409);
+    await this.state.transaction(async () => {
+      if (!(await this.findConversation(ownerUserId, conversationId))) throw notFound("Conversation");
+      const tree = new Map<string, RunRow>();
+      const visit = async (row: RunRow) => {
+        if (tree.has(row.id)) return; tree.set(row.id, row);
+        for (const child of await this.state.records.find("runs", { parent_run_id: row.id, owner_user_id: ownerUserId })) await visit(child as RunRow);
+      };
+      for (const row of await this.state.records.find("runs", { conversation_id: conversationId, owner_user_id: ownerUserId })) await visit(row as RunRow);
+      for (const row of tree.values()) {
+        if (row.status !== "running") continue;
+        const actions = await this.state.records.find("runtime_actions", { run_id: row.id });
+        const recovery = (await this.state.records.find("run_recovery_states", { run_id: row.id }))[0];
+        if (actions.some(action => action.state === "dispatched") || !actions.some(action => action.id === recovery?.action_id && action.state === "recovery_required"))
+          throw new AppError("CONFLICT", "Cannot delete a conversation while one of its runs is active", 409);
       }
-
-      await this.connection.prepare(`
-        WITH RECURSIVE run_tree(id) AS (
-          SELECT id FROM runs WHERE conversation_id = ? AND owner_user_id = ?
-          UNION ALL
-          SELECT child.id FROM runs child JOIN run_tree parent ON child.parent_run_id = parent.id
-          WHERE child.owner_user_id = ?
-        )
-        DELETE FROM run_recovery_states WHERE run_id IN (SELECT id FROM run_tree)
-      `).run(conversationId, ownerUserId, ownerUserId);
-      await this.connection.prepare(`
-        WITH RECURSIVE run_tree(id) AS (
-          SELECT id FROM runs WHERE conversation_id = ? AND owner_user_id = ?
-          UNION ALL
-          SELECT child.id FROM runs child JOIN run_tree parent ON child.parent_run_id = parent.id
-          WHERE child.owner_user_id = ?
-        )
-        DELETE FROM run_sources WHERE run_id IN (SELECT id FROM run_tree)
-      `).run(conversationId, ownerUserId, ownerUserId);
-      await this.connection.prepare(`
-        DELETE FROM source_chunks
-        WHERE source_id IN (
-          SELECT id FROM sources WHERE conversation_id = ? AND owner_user_id = ?
-        )
-      `).run(conversationId, ownerUserId);
-      await this.connection.prepare(`
-        DELETE FROM sources WHERE conversation_id = ? AND owner_user_id = ?
-      `).run(conversationId, ownerUserId);
-      await this.connection.prepare(`
-        WITH RECURSIVE run_tree(id) AS (
-          SELECT id FROM runs WHERE conversation_id = ? AND owner_user_id = ?
-          UNION ALL
-          SELECT child.id FROM runs child JOIN run_tree parent ON child.parent_run_id = parent.id
-          WHERE child.owner_user_id = ?
-        )
-        DELETE FROM runs WHERE id IN (SELECT id FROM run_tree)
-      `).run(conversationId, ownerUserId, ownerUserId);
-      await this.connection.prepare("DELETE FROM conversations WHERE id = ? AND owner_user_id = ?")
-        .run(conversationId, ownerUserId);
+      for (const row of tree.values()) {
+        await this.state.records.remove("run_recovery_states", { run_id: row.id });
+        await this.state.records.remove("run_sources", { run_id: row.id });
+      }
+      for (const source of await this.state.records.find("sources", { conversation_id: conversationId, owner_user_id: ownerUserId })) {
+        await this.state.records.remove("source_chunks", { source_id: source.id });
+        await this.state.records.remove("sources", { id: source.id });
+      }
+      for (const row of [...tree.values()].reverse()) {
+        const sequence = (await this.state.records.find("run_event_sequences", { run_id: row.id }))[0];
+        const latest = await this.latestEventByRun(row.id);
+        await this.state.records.insert("runtime_deletions", { run_id: row.id, last_seq: Math.max(sequence?.next_seq ?? 1, (latest?.seq ?? 0) + 1), deleted_at: Date.now() });
+        await this.state.records.remove("runs", { id: row.id });
+      }
+      await this.state.records.remove("conversations", { id: conversationId, owner_user_id: ownerUserId });
     });
   }
-
   async conversationTranscript(conversationId: string): Promise<Array<{ input: string; output: string | null }>> {
-    return await this.connection.prepare(`
-      SELECT input, output FROM runs
-      WHERE conversation_id = ? AND parent_run_id IS NULL
-      ORDER BY created_at ASC
-    `).all(conversationId) as unknown as Array<{ input: string; output: string | null }>;
+    return (await this.topLevelRunsInConversation(conversationId)).map(row => ({ input: row.input, output: row.output }));
   }
-
-  async eventsByRun(runId: string): Promise<RunEventRow[]> {
-    return await this.connection.prepare(`
-      SELECT seq, type, payload_json, created_at
-      FROM run_events WHERE run_id = ? ORDER BY seq
-    `).all(runId) as unknown as RunEventRow[];
-  }
-
+  async eventsByRun(runId: string): Promise<RunEventRow[]> { return await readRunEvents(this.state, runId); }
   async eventsByRunAfter(runId: string, afterSeq: number): Promise<RunEventRow[]> {
-    return await this.connection.prepare(`
-      SELECT seq, type, payload_json, created_at
-      FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq
-    `).all(runId, afterSeq) as unknown as RunEventRow[];
+    if (!this.state.eventPage) return (await this.eventsByRun(runId)).filter(row => row.seq > afterSeq);
+    const rows: RunEventRow[] = [];
+    for (;;) {
+      const page = await this.state.eventPage(runId, afterSeq, 500);
+      rows.push(...page);
+      if (page.length < 500) return rows;
+      afterSeq = page.at(-1)!.seq;
+    }
   }
-
-  async latestEventByRun(runId: string): Promise<RunEventRow | undefined> {
-    return await this.connection.prepare(`
-      SELECT seq, type, payload_json, created_at
-      FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1
-    `).get(runId) as unknown as RunEventRow | undefined;
-  }
-
-  async appendEvent(
-    runId: string,
-    input: { type: string; data: Readonly<Record<string, unknown>>; createdAt: number },
-  ): Promise<number> {
-    return await appendRunEvent(this.connection, runId, input);
+  async latestEventByRun(runId: string): Promise<RunEventRow | undefined> { return this.state.eventPage ? (await this.state.eventPage(runId, 0, 1, true))[0] : (await this.eventsByRun(runId)).at(-1); }
+  async appendEvent(runId: string, input: { type: string; data: Readonly<Record<string, unknown>>; createdAt: number }): Promise<number> {
+    return await appendRunEvent(this.state, runId, input);
   }
 }

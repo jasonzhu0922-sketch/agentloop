@@ -30,6 +30,8 @@ import { AppError } from "../src/shared/errors.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { createResultTool } from "../src/tools/result-tool.ts";
+import { ToolArgumentsReferenceStore } from "../src/runtime/tool-arguments-reference-store.ts";
+import { createCoreTools } from "../src/tools/compose.ts";
 import { ToolRegistry, type RuntimeTool } from "../src/tools/tool-registry.ts";
 import { singleStepTestPlanner, testOwner } from "./runtime-test-helpers.ts";
 
@@ -206,6 +208,40 @@ test("read_result schema and parser reject abbreviated Runtime result ids", () =
       && error.message.includes("complete opaque Runtime result id")
       && error.message.includes("abbreviated prefixes are invalid"),
   );
+});
+
+test("read_result diagnoses oversized objects and array elements with type-correct JSON pointers", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const ownerUserId = await seedRun(database);
+    const actions = new RuntimeActionRepository(database);
+    let ref: RuntimeResultRef | undefined;
+    await actions.execute({ runId, planId, stepId, kind: "tool_call", replayPolicy: "safe", deadlineMs: 1_000,
+      metadata: { toolCallId: "large-object", toolName: "produce_json" },
+      prepareResult: async (value, action) => {
+        const result = createRuntimeResult({ kind: "tool", producer: { actionId: action.id, runId, planId, stepId,
+          toolCallId: "large-object", toolName: "produce_json" }, value, publication: { status: "committed" } });
+        ref = result.ref;
+        return result;
+      },
+    }, async () => ({ rows: [{ id: 1, payload: "大".repeat(13_000) }], meta: { count: 1 } }));
+    assert.ok(ref);
+    const reader = createResultTool(new RuntimeResultRepository(database));
+    const grant = createCapabilityGrant({ actorUserId: ownerUserId, runId, planId, stepId, depth: 0,
+      allowedToolNames: ["read_result"], allowedSkillIds: [] });
+    await assert.rejects(
+      () => reader.execute({ grant }, reader.parse({ resultId: ref!.resultId, pointer: "/rows/0", characterLimit: 12_000 })),
+      (error: unknown) => error instanceof AppError
+        && error.details?.selectedType === "object"
+        && Array.isArray(error.details.childPointers)
+        && error.details.childPointers.includes("/rows/0/payload")
+        && String(error.details.repair).includes("characterLimit applies only when the selected value is a string"),
+    );
+    const payload = await reader.execute({ grant }, reader.parse({ resultId: ref.resultId, pointer: "/rows/0/payload", characterLimit: 12_000 })) as Record<string, any>;
+    assert.equal(payload.pointerApplied, true);
+    assert.equal(payload.returnedCharacters, 12_000);
+    assert.equal(payload.nextCharacterOffset, 12_000);
+  } finally { await database.close(); }
 });
 
 async function seedRun(database: AppDatabase): Promise<string> {
@@ -1314,4 +1350,82 @@ test("Step result publication is fenced once its Run is terminal", async () => {
   } finally {
     await database.close();
   }
+});
+
+test("Result history views read exact old exchanges from the existing ledger within the owning Step and hide private reasoning", async () => {
+  const database = new AppDatabase(":memory:");
+  const historyRoot = await fs.mkdtemp(join(tmpdir(), "agentloop-history-arguments-"));
+  try {
+    const owner = await seedRun(database);
+    const results = new RuntimeResultRepository(database);
+    const actions = new RuntimeActionRepository(database);
+    let anchor: RuntimeResultRef | undefined;
+    await actions.execute({ runId, planId, stepId, kind: "tool_call", replayPolicy: "safe", deadlineMs: 1000,
+      metadata: { toolCallId: "source-old", toolName: "inspect" },
+      prepareResult: async (value, action) => {
+        const result = createRuntimeResult({ kind: "tool", producer: { runId, planId, stepId, actionId: action.id,
+          toolCallId: "source-old", toolName: "inspect" }, value, publication: { status: "committed" } });
+        anchor = result.ref; return result;
+      },
+    }, async () => ({ rows: [{ population: "A", period: "2026", amount: 42 }], limitation: "B is unknown" }));
+    const { RunRepository } = await import("../src/storage/repositories/run-repository.ts");
+    const runs = new RunRepository(database);
+    const identity = { runId, planId, stepId, viewId: "original-view", decisionBasisDigest: "basis", reducerVersion: "v1", eventWatermark: 1 };
+    await runs.appendEvent(runId, { type: "assistant.committed", createdAt: 0, data: {
+      executionHistoryBasis: { identity: { ...identity, stepId: "other-step" }, toolEffects: { inspect: "read" } },
+      toolCalls: [{ id: "source-old", name: "inspect", arguments: {} }], content: "UNAUTHORIZED_REUSED_CALL" } });
+    await runs.appendEvent(runId, { type: "tool.completed", createdAt: 0, data: { toolCallId: "source-old", toolName: "inspect",
+      result: "UNAUTHORIZED_OTHER_STEP_RESULT", invocationStatus: "completed", operationStatus: "succeeded" } });
+    await runs.appendEvent(runId, { type: "assistant.committed", createdAt: 1, data: { step: 1,
+      content: "Compare the scope before delivery; preserve unknown B.", privateReasoningContent: "PRIVATE_REASONING_SENTINEL",
+      executionHistoryBasis: { identity, toolEffects: { inspect: "read" } },
+      toolCalls: [{ id: "source-old", name: "inspect", arguments: { population: "A", exactSelector: "revision-1" } }],
+    } });
+    await runs.appendEvent(runId, { type: "tool.completed", createdAt: 2, data: { toolCallId: "source-old", toolName: "inspect",
+      result: '{"rows":[{"population":"A","period":"2026","amount":42}],"limitation":"B is unknown"}',
+      resultRef: anchor, invocationStatus: "completed", operationStatus: "succeeded", isError: false } });
+    await runs.appendEvent(runId, { type: "assistant.committed", createdAt: 3, data: { content: "OTHER_STEP_SENTINEL",
+      executionHistoryBasis: { identity: { ...identity, stepId: "other-step" } }, toolCalls: [{ id: "other-call", name: "inspect", arguments: {} }] } });
+    const tool = createResultTool(results);
+    const context = { grant: createCapabilityGrant({ actorUserId: owner, runId, planId, stepId, depth: 0,
+      allowedToolNames: ["read_result"], allowedSkillIds: [] }) };
+    const index = await tool.execute(context, tool.parse({ resultId: anchor!.resultId, view: "step_history", pointer: "/entries", limit: 1 })) as any;
+    assert.deepEqual(index.value, [{ toolCallId: "source-old", toolName: "inspect", assistantEventSeq: index.value[0].assistantEventSeq }]);
+    const exact = await tool.execute(context, tool.parse({ resultId: anchor!.resultId, view: "producer_exchange", toolCallId: "source-old" })) as any;
+    assert.match(exact.content, /Compare the scope before delivery/);
+    assert.match(exact.content, /revision-1/);
+    assert.match(exact.content, /B is unknown/);
+    assert.doesNotMatch(exact.content, /PRIVATE_REASONING_SENTINEL|OTHER_STEP_SENTINEL|UNAUTHORIZED/);
+    const body = await tool.execute(context, tool.parse({ resultId: anchor!.resultId, view: "producer_exchange", toolCallId: "source-old", pointer: "/outcome/result", characterOffset: 0, characterLimit: 12000 })) as any;
+    assert.equal(JSON.parse(body.content).rows[0].amount, 42);
+    await assert.rejects(() => tool.execute(context, tool.parse({ resultId: anchor!.resultId, view: "producer_exchange", toolCallId: "other-call" })), /history/);
+    await assert.rejects(() => tool.execute({ grant: { ...context.grant, stepId: "other-step" } }, tool.parse({ resultId: anchor!.resultId, view: "step_history" })), /result/i);
+    assert.equal(await results.readHistoryAuthorized({ resultId: anchor!.resultId, runId, planId, stepId, actorUserId: "wrong-owner" }), undefined);
+    const restored = new RuntimeResultRepository(database);
+    assert.deepEqual(await restored.readHistoryAuthorized({ resultId: anchor!.resultId, runId, planId, stepId }),
+      await results.readHistoryAuthorized({ resultId: anchor!.resultId, runId, planId, stepId }));
+    await runs.appendEvent(runId, { type: "assistant.committed", createdAt: 4, data: { executionHistoryBasis: {identity,toolEffects:{inspect:"write"}},
+      toolCalls:[{id:"source-old",name:"inspect",arguments:{revision:2}}],content:"Later same-Step incarnation" } });
+    await runs.appendEvent(runId, {type:"tool.completed",createdAt:5,data:{toolCallId:"source-old",toolName:"inspect",result:"partial write",invocationStatus:"completed",operationStatus:"failed"}});
+    const ambiguous=await results.readHistoryAuthorized({resultId:anchor!.resultId,runId,planId,stepId,toolCallId:"source-old"}) as any;
+    assert.match(ambiguous.gaps[0],/Ambiguous/);
+    assert.equal(ambiguous.outcome,undefined);
+    const original=await results.readHistoryAuthorized({resultId:anchor!.resultId,runId,planId,stepId,toolCallId:"source-old",assistantEventSeq:index.value[0].assistantEventSeq}) as any;
+    assert.match(original.outcome.result,/amount/);
+    const latest=await results.readHistoryAuthorized({resultId:anchor!.resultId,runId,planId,stepId,toolCallId:"source-old",assistantEventSeq:ambiguous.candidates[1].assistantEventSeq}) as any;
+    assert.equal(latest.outcome.result,"partial write");
+    assert.ok(latest.gaps.length,"failed writes retain unknown-effect warning");
+    const argumentsValue={body:"EXACT_OLD_ARGUMENTS_".repeat(5000)};
+    const projected=new ToolArgumentsReferenceStore(historyRoot).project(argumentsValue);
+    assert.ok(projected.argumentsRef);
+    await runs.appendEvent(runId,{type:"assistant.committed",createdAt:6,data:{executionHistoryBasis:{identity,toolEffects:{inspect:"read"}},
+      toolCalls:[{id:"source-ref",name:"inspect",...projected}],content:"Original argument content is stored once"}});
+    await runs.appendEvent(runId,{type:"tool.completed",createdAt:7,data:{toolCallId:"source-ref",toolName:"inspect",result:"observed",invocationStatus:"completed",operationStatus:"succeeded"}});
+    const coreReader=createCoreTools({executor:new ComputerExecutor(historyRoot),results}).find(tool=>tool.name==="read_result")!;
+    const scopedContext={grant:{...context.grant,workspaceRoot:join(historyRoot,"nested-conversation")}};
+    const originalArguments=await coreReader.execute(scopedContext,coreReader.parse({resultId:anchor!.resultId,view:"producer_exchange",toolCallId:"source-ref",pointer:"/assistant/toolCall/arguments/body",characterLimit:19})) as any;
+    assert.equal(originalArguments.content,"EXACT_OLD_ARGUMENTS");
+    const missingResolver=await tool.execute(context,tool.parse({resultId:anchor!.resultId,view:"producer_exchange",toolCallId:"source-ref",pointer:"/gaps"})) as any;
+    assert.match(missingResolver.value.join(" "),/resolver/);
+  } finally { await database.close(); await fs.rm(historyRoot,{recursive:true,force:true}); }
 });

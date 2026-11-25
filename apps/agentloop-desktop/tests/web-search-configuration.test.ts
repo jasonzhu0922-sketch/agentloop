@@ -99,3 +99,17 @@ test("incomplete legacy Bocha environment does not block Desktop startup", async
   await writeFile(join(root, ".env"), "WEB_SEARCH_DISABLED=0\nWEB_SEARCH_PROVIDER=bocha\nWEB_SEARCH_ENDPOINT=https://search.example/v1\n");
   assert.deepEqual(await desktopRuntimeEnvironment(root), {});
 });
+
+test("Desktop backend selection is explicit and provides isolated Runtime namespaces", async t => {
+  const root = await mkdtemp(join(tmpdir(), "desktop-runtime-state-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, ".env"), "AGENTLOOP_RUNTIME_STATE_BACKEND=redis\nAGENTLOOP_RUNTIME_REDIS_URL=redis://127.0.0.1:1\nAGENTLOOP_RUNTIME_REDIS_NAMESPACE=device\n");
+  const settings = await desktopRuntimeEnvironment(root);
+  const first = settings.stateConfig!({ id: "a", storageKey: "a", displayName: "A", isDefault: true });
+  const second = settings.stateConfig!({ id: "b", storageKey: "b", displayName: "B", isDefault: false });
+  assert.equal(first.backend, "redis"); assert.notDeepEqual(first, second);
+  await writeFile(join(root, ".env"), "AGENTLOOP_RUNTIME_STATE_BACKEND=sqlite\nAGENTLOOP_RUNTIME_REDIS_URL=invalid\n");
+  assert.equal((await desktopRuntimeEnvironment(root, settings)).stateConfig, undefined);
+  await writeFile(join(root, ".env"), "AGENTLOOP_RUNTIME_STATE_BACKEND=redis\n");
+  await assert.rejects(desktopRuntimeEnvironment(root), /runtime_state_configuration_invalid/);
+});

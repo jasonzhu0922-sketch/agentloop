@@ -1,5 +1,6 @@
 import { AppError } from "../shared/errors.ts";
-import type { SqlConnection } from "../storage/connection.ts";
+import { runtimePersistence, type RuntimePersistence, type RuntimePersistenceInput } from "../storage/runtime-records.ts";
+import type { RuntimeRows } from "../storage/runtime-record-schema.ts";
 
 export interface PlanningRecoveryRecord {
   readonly run_id: string;
@@ -15,94 +16,82 @@ export interface PlanningRecoveryRecord {
 }
 
 export class PlanningRecoveryRepository {
-  private readonly database: SqlConnection;
-  constructor(database: SqlConnection) { this.database = database; }
+  private readonly database: RuntimePersistence;
+  constructor(database: RuntimePersistenceInput) { this.database = runtimePersistence(database); }
 
   async get(runId: string): Promise<PlanningRecoveryRecord | undefined> {
-    return await this.database.prepare("SELECT * FROM run_planning_recovery WHERE run_id = ?").get<PlanningRecoveryRecord>(runId);
+    const row = (await this.database.records.find("run_planning_recovery", { run_id: runId }))[0];
+    if (!row) return undefined;
+    if (row.failure_phase !== null && row.failure_phase !== "intent" && row.failure_phase !== "plan") throw new TypeError("Invalid planning recovery phase");
+    return { ...row, failure_phase: row.failure_phase };
   }
 
   async create(runId: string, context: unknown, now: number): Promise<void> {
-    await this.database.prepare(`INSERT INTO run_planning_recovery(run_id, state, context_json, revision, updated_at)
-      VALUES (?, 'prepared', ?, 1, ?)` ).run(runId, JSON.stringify(context), now);
+    await this.database.records.insert("run_planning_recovery", { run_id: runId, state: "prepared", context_json: JSON.stringify(context), revision: 1, updated_at: now });
+  }
+
+  private async change(runId: string, now: number, predicate: (row: RuntimeRows["run_planning_recovery"]) => boolean,
+    patch: Partial<RuntimeRows["run_planning_recovery"]> | ((row: RuntimeRows["run_planning_recovery"]) => Partial<RuntimeRows["run_planning_recovery"]>),
+    error?: string, running = false): Promise<boolean> {
+    return await this.database.transaction(async () => {
+      if (running && !(await this.database.records.find("runs", { id: runId, status: "running" })).length) {
+        if (error) throw new AppError("CONFLICT", error, 409);
+        return false;
+      }
+      const changed = await this.database.records.update("run_planning_recovery", { run_id: runId }, row => predicate(row) ?
+        { revision: row.revision + 1, updated_at: now, ...(typeof patch === "function" ? patch(row) : patch) } : undefined);
+      if (changed !== 1 && error) throw new AppError("CONFLICT", error, 409);
+      return changed === 1;
+    });
   }
 
   async updateContext(runId: string, context: unknown, now: number): Promise<void> {
-    const result = await this.database.prepare(`UPDATE run_planning_recovery
-      SET context_json = ?, revision = revision + 1, updated_at = ?
-      WHERE run_id = ? AND state IN ('prepared', 'resuming')`).run(JSON.stringify(context), now, runId);
-    if (result.changes !== 1) throw new AppError("CONFLICT", "Planning recovery context is no longer mutable", 409);
+    await this.change(runId, now, row => row.state === "prepared" || row.state === "resuming",
+      { context_json: JSON.stringify(context) }, "Planning recovery context is no longer mutable");
   }
 
   async prepareNextRound(runId: string, context: unknown, now: number): Promise<void> {
-    const result = await this.database.prepare(`UPDATE run_planning_recovery
-      SET state = 'resuming', context_json = ?, failure_phase = NULL, error_code = NULL,
-          request_id = NULL, lease_token = NULL, lease_until = NULL, resume_attempts = 0,
-          revision = revision + 1, updated_at = ?
-      WHERE run_id = ? AND state = 'completed'`).run(JSON.stringify(context), now, runId);
-    if (result.changes !== 1) throw new AppError("CONFLICT", "Run cannot start another planning Round", 409);
+    await this.change(runId, now, row => row.state === "completed", { state: "resuming", context_json: JSON.stringify(context),
+      failure_phase: null, error_code: null, request_id: null, lease_token: null, lease_until: null, resume_attempts: 0 }, "Run cannot start another planning Round");
   }
 
   async wait(runId: string, phase: "intent" | "plan", code: string, requestId: string, now: number): Promise<void> {
-    const result = await this.database.prepare(`UPDATE run_planning_recovery
-      SET state = 'waiting', failure_phase = ?, error_code = ?, request_id = ?, revision = revision + 1, updated_at = ?
-          , lease_token = NULL, lease_until = NULL
-      WHERE run_id = ? AND state IN ('prepared', 'resuming')
-        AND EXISTS (SELECT 1 FROM runs WHERE runs.id = run_planning_recovery.run_id AND runs.status = 'running')`)
-      .run(phase, code, requestId, now, runId);
-    if (result.changes !== 1) throw new AppError("CONFLICT", "Planning recovery cannot enter waiting state", 409);
+    await this.change(runId, now, row => row.state === "prepared" || row.state === "resuming",
+      { state: "waiting", failure_phase: phase, error_code: code, request_id: requestId, lease_token: null, lease_until: null },
+      "Planning recovery cannot enter waiting state", true);
   }
 
   async claim(runId: string, requestId: string, now: number): Promise<void> {
-    const result = await this.database.prepare(`UPDATE run_planning_recovery
-      SET state = 'resuming', resume_attempts = resume_attempts + 1, revision = revision + 1, updated_at = ?
-      WHERE run_id = ? AND state = 'waiting' AND request_id = ? AND resume_attempts < 1
-        AND EXISTS (SELECT 1 FROM runs WHERE runs.id = run_planning_recovery.run_id AND runs.status = 'running')`)
-      .run(now, runId, requestId);
-    if (result.changes !== 1) throw new AppError("CONFLICT", "Planning recovery is no longer actionable", 409);
+    await this.change(runId, now, row => row.state === "waiting" && row.request_id === requestId && row.resume_attempts < 1,
+      row => ({ state: "resuming", resume_attempts: row.resume_attempts + 1 }), "Planning recovery is no longer actionable", true);
   }
 
   async finish(runId: string, state: "completed" | "cancelled", now: number): Promise<void> {
-    await this.database.prepare(`UPDATE run_planning_recovery SET state = ?, revision = revision + 1, updated_at = ?
-      WHERE run_id = ? AND state IN ('prepared', 'waiting', 'resuming')`).run(state, now, runId);
+    await this.change(runId, now, row => ["prepared", "waiting", "resuming"].includes(row.state), { state });
   }
 
   async resumeInput(runId: string, requestId: string, now: number): Promise<void> {
-    const result = await this.database.prepare(`UPDATE run_planning_recovery
-      SET state = 'resuming', revision = revision + 1, updated_at = ?
-      WHERE run_id = ? AND state = 'waiting' AND request_id = ? AND error_code = 'RUN_INPUT_CLARIFICATION'`)
-      .run(now, runId, requestId);
-    if (result.changes !== 1) throw new AppError("CONFLICT", "Input clarification is no longer actionable", 409);
+    await this.change(runId, now, row => row.state === "waiting" && row.request_id === requestId && row.error_code === "RUN_INPUT_CLARIFICATION",
+      { state: "resuming" }, "Input clarification is no longer actionable");
   }
 
   async acquireLease(runId: string, token: string, now: number, duration: number): Promise<boolean> {
-    const result = await this.database.prepare(`UPDATE run_planning_recovery
-      SET lease_token = ?, lease_until = ?, revision = revision + 1, updated_at = ?
-      WHERE run_id = ? AND state = 'resuming' AND (lease_until IS NULL OR lease_until <= ?)
-        AND EXISTS (SELECT 1 FROM runs WHERE runs.id = run_planning_recovery.run_id AND runs.status = 'running')`)
-      .run(token, now + duration, now, runId, now);
-    return result.changes === 1;
+    return await this.change(runId, now, row => row.state === "resuming" && (row.lease_until === null || row.lease_until <= now),
+      { lease_token: token, lease_until: now + duration }, undefined, true);
   }
 
   async renewLease(runId: string, token: string, now: number, duration: number): Promise<boolean> {
-    const result = await this.database.prepare(`UPDATE run_planning_recovery SET lease_until = ?, updated_at = ?
-      WHERE run_id = ? AND state = 'resuming' AND lease_token = ? AND lease_until > ?`)
-      .run(now + duration, now, runId, token, now);
-    return result.changes === 1;
+    return await this.change(runId, now, row => row.state === "resuming" && row.lease_token === token && Number(row.lease_until) > now,
+      row => ({ lease_until: now + duration, revision: row.revision }));
   }
 
   async guardLease(runId: string, token: string, now: number): Promise<void> {
-    const result = await this.database.prepare(`UPDATE run_planning_recovery SET revision = revision + 1, updated_at = ?
-      WHERE run_id = ? AND state = 'resuming' AND lease_token = ? AND lease_until > ?`)
-      .run(now, runId, token, now);
-    if (result.changes !== 1) throw new AppError("CONFLICT", "Planning recovery lease was lost", 409);
+    await this.change(runId, now, row => row.state === "resuming" && row.lease_token === token && Number(row.lease_until) > now,
+      {}, "Planning recovery lease was lost");
   }
 
   async finishLease(runId: string, token: string, now: number): Promise<void> {
-    const result = await this.database.prepare(`UPDATE run_planning_recovery
-      SET state = 'completed', lease_token = NULL, lease_until = NULL, revision = revision + 1, updated_at = ?
-      WHERE run_id = ? AND state = 'resuming' AND lease_token = ? AND lease_until > ?`)
-      .run(now, runId, token, now);
-    if (result.changes !== 1) throw new AppError("CONFLICT", "Planning recovery lease was lost", 409);
+    await this.change(runId, now, row => row.state === "resuming" && row.lease_token === token && Number(row.lease_until) > now,
+      { state: "completed", lease_token: null, lease_until: null }, "Planning recovery lease was lost");
   }
 }

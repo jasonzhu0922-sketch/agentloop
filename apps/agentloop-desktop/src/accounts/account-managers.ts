@@ -1,6 +1,6 @@
 import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { parseEnv } from "node:util";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { AppError } from "@zhujun/agentloop";
@@ -25,7 +25,7 @@ async function directory(path: string): Promise<void> {
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("desktop_account_directory_invalid");
 }
 
-export async function desktopRuntimeEnvironment(dataDirectory: string, defaults: Pick<LocalRuntimeManagerOptions, "webSearch" | "planningMaxTurns" | "stepMaxTurns"> = {}): Promise<Pick<LocalRuntimeManagerOptions, "webSearch" | "planningMaxTurns" | "stepMaxTurns">> {
+export async function desktopRuntimeEnvironment(dataDirectory: string, defaults: Pick<LocalRuntimeManagerOptions, "webSearch" | "planningMaxTurns" | "stepMaxTurns" | "stateConfig"> = {}): Promise<Pick<LocalRuntimeManagerOptions, "webSearch" | "planningMaxTurns" | "stepMaxTurns" | "stateConfig">> {
   let content: string;
   try { content = await readFile(join(dataDirectory, ".env"), "utf8"); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return defaults; throw error; }
@@ -36,6 +36,15 @@ export async function desktopRuntimeEnvironment(dataDirectory: string, defaults:
     if (!/^[0-9]+$/.test(value) || Number(value) < 1 || Number(value) > max) throw new Error(`desktop_${name.toLowerCase()}_invalid`);
     return Number(value);
   };
+  let stateConfig = defaults.stateConfig;
+  if (env.AGENTLOOP_RUNTIME_STATE_BACKEND !== undefined) {
+    const backend = env.AGENTLOOP_RUNTIME_STATE_BACKEND;
+    if (backend === "sqlite") stateConfig = undefined;
+    else if (backend === "redis" && env.AGENTLOOP_RUNTIME_REDIS_URL && env.AGENTLOOP_RUNTIME_REDIS_NAMESPACE) {
+      const url = env.AGENTLOOP_RUNTIME_REDIS_URL, namespace = env.AGENTLOOP_RUNTIME_REDIS_NAMESPACE;
+      stateConfig = definition => ({ backend: "redis", url, namespace: `${namespace}:local:${definition.storageKey}` });
+    } else throw new TypeError("desktop_runtime_state_configuration_invalid");
+  }
   const planningMaxTurns = limit("PLANNING_MAX_TURNS", 64), stepMaxTurns = limit("STEP_MAX_TURNS", 256);
   let webSearch: LocalRuntimeManagerOptions["webSearch"] = defaults.webSearch;
   if (env.WEB_SEARCH_DISABLED === "1") webSearch = undefined;
@@ -49,14 +58,14 @@ export async function desktopRuntimeEnvironment(dataDirectory: string, defaults:
       ...(env.WEB_SEARCH_ENDPOINT ? { searchEndpoint: env.WEB_SEARCH_ENDPOINT } : {}),
       ...(env.WEB_SEARCH_API_KEY ? { searchApiKey: env.WEB_SEARCH_API_KEY } : {}) };
   }
-  const { webSearch: _defaultSearch, ...turnDefaults } = defaults;
-  return { ...turnDefaults, ...(webSearch === undefined ? {} : { webSearch }), ...(planningMaxTurns === undefined ? {} : { planningMaxTurns }), ...(stepMaxTurns === undefined ? {} : { stepMaxTurns }) };
+  const { webSearch: _defaultSearch, stateConfig: _defaultState, ...turnDefaults } = defaults;
+  return { ...turnDefaults, ...(stateConfig === undefined ? {} : { stateConfig }), ...(webSearch === undefined ? {} : { webSearch }), ...(planningMaxTurns === undefined ? {} : { planningMaxTurns }), ...(stepMaxTurns === undefined ? {} : { stepMaxTurns }) };
 }
 
 type Options = Pick<LocalRuntimeManagerOptions, "models" | "identity" | "bundledSkillDirectories" | "connectorModules" | "computerCommandEnvironment" | "runEventLogSink"> & {
   readonly dataDirectory: string;
   readonly runtimeEnvironmentDirectory?: string;
-  readonly runtimeTurnDefaults?: Pick<LocalRuntimeManagerOptions, "webSearch" | "planningMaxTurns" | "stepMaxTurns">;
+  readonly runtimeTurnDefaults?: Pick<LocalRuntimeManagerOptions, "webSearch" | "planningMaxTurns" | "stepMaxTurns" | "stateConfig">;
   readonly defaultRuntimeId: string;
 };
 
@@ -170,8 +179,14 @@ export class DesktopAccountManagers {
       }
       readOnlyRoots.push(canonical);
     }
+    const runtimeEnvironment = await desktopRuntimeEnvironment(this.options.runtimeEnvironmentDirectory ?? this.options.dataDirectory, this.options.runtimeTurnDefaults);
+    const configuredState = runtimeEnvironment.stateConfig;
     const manager = await createLocalRuntimeManager({ ...this.options, dataDirectory: root,
-      ...await desktopRuntimeEnvironment(this.options.runtimeEnvironmentDirectory ?? this.options.dataDirectory, this.options.runtimeTurnDefaults),
+      ...runtimeEnvironment,
+      stateConfig: configuredState === undefined ? undefined : definition => {
+        const config = configuredState(definition);
+        return config.backend === "redis" ? { ...config, namespace: `${config.namespace}:account:${createHash("sha256").update(owner).digest("hex").slice(0, 24)}` } : config;
+      },
       workspaceRoot: join(boundary, "workspace"), uploadStorageRoot: join(boundary, "uploads"), authorizeStorage,
       modelSecrets: new EncryptedLocalRuntimeSecretStore(join(root, "private", "model-secrets")),
       secrets: new EncryptedLocalRuntimeSecretStore(join(root, "private", "mcp-secrets")),

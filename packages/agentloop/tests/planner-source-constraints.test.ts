@@ -933,7 +933,8 @@ test("Recovery Planner retains referenced evidence outside the recent event wind
   };
   await new ModelRecoveryPlanner({ limits: { contextWindowTokens: 40_000, maxOutputTokens: 4_096 }, async complete(request) {
     const context = JSON.parse(request.runtimeContext!.content);
-    assert.equal(context.events.length, 100);
+    assert.deepEqual(context.events.map((event: any) => event.seq), [1, 2], "the recovery view is selected by failure dependencies rather than a recent-N window");
+    assert.equal(context.historyNavigation.runId, input.runId);
     assert.deepEqual(context.referencedEvidenceEvents.map((event: any) => event.seq), [1, 2]);
     assert.match(context.referencedEvidenceEvents[1].dataPreview, /actual condition/);
     assert.match(request.systemPrompt, /unverified hypotheses/);

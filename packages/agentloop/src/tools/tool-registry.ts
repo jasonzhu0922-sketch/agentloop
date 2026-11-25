@@ -8,7 +8,7 @@ import { AppError, badRequest, forbidden } from "../shared/errors.ts";
 import { markActionFailedBeforeEffect } from "../runtime/action-effect.ts";
 import type { RuntimeDecisionCommit } from "../runtime/decision-ledger.ts";
 import type { ToolExecutionPlugin } from "./tool-execution-plugin.ts";
-import { assertToolContentBudget, projectBoundedToolDefinition, type BoundedToolContent, type ToolContentBudget } from "../runtime/tool-content-budget.ts";
+import { projectBoundedToolDefinition, type BoundedToolContent, type ToolContentBudget } from "../runtime/tool-content-budget.ts";
 
 export interface ToolExecutionContext {
   readonly grant: CapabilityGrant;
@@ -171,9 +171,6 @@ export class ToolRegistry {
         if (tool === undefined) throw forbidden(`Tool "${call.name}" is not available in this run`);
         let input: unknown;
         try {
-          if (tool.boundedContent !== undefined && options.contentBudget !== undefined) {
-            assertToolContentBudget(call, tool.boundedContent, options.contentBudget);
-          }
           input = tool.parse(call.arguments);
         } catch (error) {
           const details: Record<string, unknown> | undefined = error instanceof AppError && error.code === "BAD_REQUEST"

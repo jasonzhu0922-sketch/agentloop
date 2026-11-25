@@ -1,4 +1,4 @@
-import { RuntimeResultRepository, type SqlConnection } from "@zhujun/agentloop";
+import { RuntimeResultRepository, runtimePersistence, ascending, type RuntimePersistence, type RuntimePersistenceInput } from "@zhujun/agentloop";
 import { memoryFeedbackEffect } from "./local-memory-feedback-semantics.ts";
 import { createHash } from "node:crypto";
 import { memorySafeText, memoryEntities, type MemorySettlementEvidence, type MemorySettlementReader, type MemoryRunScope, type MemorySourceRef } from "@zhujun/agentloop-memory";
@@ -50,10 +50,10 @@ interface RuntimeActionRow {
 
 /** Reads only canonical local Run/Outcome/Assessment rows for settlement. */
 export class LocalMemorySettlementReader implements MemorySettlementReader {
-  private readonly databases: () => readonly SqlConnection[];
+  private readonly databases: () => readonly RuntimePersistenceInput[];
   private readonly tenantId: string;
 
-  constructor(database: SqlConnection | (() => readonly SqlConnection[]), tenantId: string) {
+  constructor(database: RuntimePersistenceInput | (() => readonly RuntimePersistenceInput[]), tenantId: string) {
     this.databases = typeof database === "function" ? database : () => [database];
     this.tenantId = tenantId;
   }
@@ -61,10 +61,9 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
   async isDeleted(input: { tenantId: string; ownerUserId: string; runId: string }): Promise<boolean> {
     if (input.tenantId !== this.tenantId) throw new Error("settlement_tenant_mismatch");
     for (const database of this.databases()) {
-      const table = await database.prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'local_run_admissions'").get();
-      if (table === undefined) continue;
-      const row = await database.prepare("SELECT run_deleted FROM local_run_admissions WHERE owner_user_id = ? AND run_id = ?").get<{ run_deleted: number }>(input.ownerUserId, input.runId);
-      if (row?.run_deleted === 1) return true;
+      const state = runtimePersistence(database);
+      const admission = (await state.records.find("local_run_admissions", { owner_user_id: input.ownerUserId, run_id: input.runId }))[0];
+      if (admission?.run_deleted === 1 || admission && (await state.records.find("runtime_deletions", { run_id: input.runId })).length) return true;
     }
     return false;
   }
@@ -72,29 +71,25 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
   async read(input: { tenantId: string; ownerUserId: string; runId: string; terminalCommitRef: string }): Promise<MemorySettlementEvidence | undefined> {
     if (input.tenantId !== this.tenantId) throw new Error("settlement_tenant_mismatch");
     let row: OutcomeRow | undefined;
-    let database: SqlConnection | undefined;
+    let database: RuntimePersistence | undefined;
     for (const candidate of this.databases()) {
-      const found = await candidate.prepare(`
-      SELECT r.owner_user_id, r.conversation_id, r.input AS user_input, o.status, o.reason_code, o.plan_id, o.result_ref, o.committed_at, o.delivery_receipt_json, o.result_json,
-             p.goal AS plan_goal, p.selected_skill_ids_json,
-             c.state_json
-      FROM runs r
-      JOIN run_outcomes o ON o.run_id = r.id
-      LEFT JOIN plans p ON p.id = o.plan_id
-      LEFT JOIN canonical_run_states c ON c.run_id = r.id
-      WHERE r.id = ? AND r.owner_user_id = ?
-      `).get<OutcomeRow>(input.runId, input.ownerUserId);
-      if (found !== undefined) { row = found; database = candidate; break; }
+      const state = runtimePersistence(candidate);
+      const found = await state.transaction(async (): Promise<OutcomeRow | undefined> => {
+        const run = (await state.records.find("runs", { id: input.runId, owner_user_id: input.ownerUserId }))[0];
+        const outcome = (await state.records.find("run_outcomes", { run_id: input.runId }))[0];
+        if (!run || !outcome) return undefined;
+        const plan = outcome.plan_id ? (await state.records.find("plans", { id: outcome.plan_id }))[0] : undefined;
+        const canonical = (await state.records.find("canonical_run_states", { run_id: input.runId }))[0];
+        return { ...outcome, owner_user_id: run.owner_user_id, conversation_id: run.conversation_id, user_input: run.input,
+          plan_goal: plan?.goal ?? null, selected_skill_ids_json: plan?.selected_skill_ids_json ?? null, state_json: canonical?.state_json ?? null };
+      });
+      if (found !== undefined) { row = found; database = state; break; }
     }
     if (row === undefined) return undefined;
     const actualCommitRef = row.result_ref ?? `${input.runId}:${row.committed_at}`;
     if (actualCommitRef !== input.terminalCommitRef) throw new Error("settlement_terminal_commit_mismatch");
-    const assessment = row.plan_id === null
-      ? { count: 0, approved: 0 }
-      : await database!.prepare(`
-          SELECT COUNT(*) AS count, COALESCE(SUM(CASE WHEN approved = 1 THEN 1 ELSE 0 END), 0) AS approved
-          FROM skill_compliance_assessments WHERE plan_id = ?
-        `).get<AssessmentRow>(row.plan_id) ?? { count: 0, approved: 0 };
+    const assessments = row.plan_id === null ? [] : await database!.records.find("skill_compliance_assessments", { plan_id: row.plan_id });
+    const assessment = { count: assessments.length, approved: assessments.filter(item => item.approved === 1).length };
     const state = parseJsonRecord(row.state_json);
     const understanding = recordAt(state, ["intent", "understanding"]);
     const deliverable = recordAt(understanding, ["deliverable"]);
@@ -107,12 +102,11 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
       && Number(assessment.count) === Number(assessment.approved);
     const feedback: { run_id: string; seq: number; type: string; payload_json: string; created_at: number }[] = [];
     if (row.conversation_id !== null) for (const feedbackDatabase of this.databases()) {
-      feedback.push(...await feedbackDatabase.prepare(`
-        SELECT e.run_id, e.seq, e.type, e.payload_json, e.created_at FROM run_events e JOIN runs r ON r.id = e.run_id
-        WHERE r.owner_user_id = ? AND r.conversation_id = ?
-          AND e.type IN ('conversation.outcome.disputed', 'conversation.outcome.superseded') ORDER BY e.created_at`)
-        .all<{ run_id: string; seq: number; type: string; payload_json: string; created_at: number }>(input.ownerUserId, row.conversation_id));
+      const source = runtimePersistence(feedbackDatabase);
+      for (const run of await source.records.find("runs", { owner_user_id: input.ownerUserId, conversation_id: row.conversation_id }))
+        feedback.push(...(await source.records.find("run_events", { run_id: run.id })).filter(event => ["conversation.outcome.disputed", "conversation.outcome.superseded"].includes(event.type)));
     }
+    feedback.sort(ascending("created_at"));
     const targetedFeedback = feedback.filter(event => parseJsonRecord(event.payload_json).targetRunId === input.runId);
     const laterDisputed = targetedFeedback.some(event => event.type === 'conversation.outcome.disputed');
     const laterCorrected = targetedFeedback.some(event => memoryFeedbackEffect(event.type, parseJsonRecord(event.payload_json)) === 'corrected');
@@ -123,29 +117,19 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
     };
     const outcomeRef = row.result_ref ?? `${input.runId}:${row.committed_at}`;
     const selectedSkills = parseStringArray(row.selected_skill_ids_json);
-    const planSkeleton = row.plan_id === null ? [] : await database!.prepare(`
-      SELECT step_id, position, objective, role, dependencies_json, required_facts_json,
-             skill_ids_json, required_capabilities_json, recommended_tool_names_json,
-             execution_binding_json, evidence_contract_json, success_criteria_json
-      FROM plan_steps WHERE plan_id = ? ORDER BY position
-    `).all<PlanStepRow>(row.plan_id);
-    const observedActions = await database!.prepare(`
-      SELECT id, step_id, metadata_json, state, error_code, kind, created_at
-      FROM runtime_actions
-      WHERE run_id = ? AND kind IN ('tool_call', 'recovery_review')
-      ORDER BY created_at ASC
-    `).all<RuntimeActionRow>(input.runId);
+    const planSkeleton: PlanStepRow[] = row.plan_id === null ? [] : (await database!.records.find("plan_steps", { plan_id: row.plan_id })).sort(ascending("position"));
+    const observedActions: RuntimeActionRow[] = (await database!.records.find("runtime_actions", { run_id: input.runId }))
+      .filter(action => ["tool_call", "recovery_review"].includes(action.kind)).sort(ascending("created_at"));
+    const events = (await database!.records.find("run_events", { run_id: input.runId })).sort(ascending("seq"));
     const entities = memoryEntities([row.plan_goal ?? "", ...planSkeleton.map((step) => step.objective)]);
     const safe = (value: string, max = 500) => memorySafeText(value, entities, max);
-    const actionArguments = await database!.prepare(`SELECT seq, payload_json FROM run_events
-      WHERE run_id = ? AND type = 'tool.planned' ORDER BY seq`).all<{ seq: number; payload_json: string }>(input.runId);
+    const actionArguments = events.filter(event => event.type === "tool.planned");
     const actionSequences = new Map(actionArguments.map(({ seq, payload_json }) => [recordString(parseJsonRecord(payload_json), "toolCallId"), seq]));
     const argumentsByCall = new Map(actionArguments.map(({ payload_json }) => {
       const payload = parseJsonRecord(payload_json);
       return [recordString(payload, "toolCallId"), parseJsonRecord(JSON.stringify(payload.arguments ?? {}))] as const;
     }));
-    const activations = await database!.prepare(`SELECT seq, payload_json FROM run_events
-      WHERE run_id = ? AND type = 'prompt_augmentation.activated' ORDER BY seq`).all<{ seq: number; payload_json: string }>(input.runId);
+    const activations = events.filter(event => event.type === "prompt_augmentation.activated");
     const methodHandoffs = activations.flatMap(({ seq, payload_json }) => {
       const data = parseJsonRecord(payload_json), stepId = recordString(data, "stepId");
       if (!stepId || !planSkeleton.some(step => step.step_id === stepId)) return [];
@@ -164,16 +148,13 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
       });
     });
     const observedToolsByStep = new Map<string, string[]>();
-    const committedActions = await database!.prepare(`SELECT seq, payload_json FROM run_events
-      WHERE run_id = ? AND type = 'action.result_committed' ORDER BY seq`).all<{ seq: number; payload_json: string }>(input.runId);
+    const committedActions = events.filter(event => event.type === "action.result_committed");
     const committedSequences = new Map(committedActions.map(event => [recordString(parseJsonRecord(event.payload_json), "actionId"), event.seq]));
     const recalledHandoffs: Array<{ seq: number; stepId: string; projectionId: string; memoryRevisionId: string; knowledgeId: string; sourceRef: MemorySourceRef }> = [];
     const observations: NonNullable<MemorySettlementEvidence["observations"]>[number][] = [];
     const positions = new Map<string, { at: number; seq: number }>();
     const dependencies: NonNullable<MemorySettlementEvidence["dependencies"]>[number][] = [];
-    const semanticEvents = await database!.prepare(`SELECT seq, type, payload_json, created_at FROM run_events
-      WHERE run_id = ? AND type IN ('human_loop.answered', 'conversation.turn.resolved', 'memory.recalled') ORDER BY seq`)
-      .all<{ seq: number; type: string; payload_json: string; created_at: number }>(input.runId);
+    const semanticEvents = events.filter(event => ["human_loop.answered", "conversation.turn.resolved", "memory.recalled"].includes(event.type));
     const safeValue = (value: unknown, depth = 0): unknown => {
       if (depth > 4) return "[OMITTED]";
       if (typeof value === "string") return safe(value, 600);
@@ -187,8 +168,7 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
       if (event.type === "human_loop.answered") {
         const requestId = recordString(payload, "requestId");
         if (!requestId) continue;
-        const request = await database!.prepare(`SELECT title, prompt, rationale, response_schema_json, plan_id, step_id, evidence_refs_json FROM human_loop_requests
-          WHERE id = ? AND run_id = ?`).get<{ title: string; prompt: string; rationale: string; response_schema_json: string; plan_id: string | null; step_id: string | null; evidence_refs_json: string }>(requestId, input.runId);
+        const request = (await database!.records.find("human_loop_requests", { id: requestId, run_id: input.runId }))[0];
         if (!request) continue;
         const schema = parseJsonRecord(request.response_schema_json);
         const options = Array.isArray(schema.options) ? schema.options : [];
@@ -343,9 +323,7 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
     }
     // Runtime control decisions are observable applications too. A stop after
     // recall must not borrow a later recall or a different leaf's failures.
-    const controlEvents = await database!.prepare(`SELECT seq, payload_json, created_at FROM run_events
-      WHERE run_id = ? AND type = 'candidate.repair_stopped' ORDER BY seq`)
-      .all<{ seq: number; payload_json: string; created_at: number }>(input.runId);
+    const controlEvents = events.filter(event => event.type === "candidate.repair_stopped");
     for (const event of controlEvents) {
       const payload = parseJsonRecord(event.payload_json), boundary = recordAt(payload, ["failedBoundary"]);
       const stepId = recordString(boundary, "stepId"), stepOrder = planSkeleton.findIndex(step => step.step_id === stepId) + 1;
@@ -369,8 +347,7 @@ export class LocalMemorySettlementReader implements MemorySettlementReader {
       positions.set(id, { at: event.created_at, seq: event.seq });
     }
     const normalizedPlanSkeleton: Readonly<Record<string, unknown>>[] = planSkeleton.map((step, i) => ({ ...planStepForMemory(step, observedToolsByStep.get(step.step_id) ?? []), stepId: `step_${i + 1}`, objective: safe(step.objective), cautions: [], successCriteria: parseJsonArray(step.success_criteria_json).map((item) => safe(typeof item === "string" ? item : String((item as Record<string, unknown>)?.description ?? ""))).filter(Boolean).slice(0, 6) }));
-    const assessmentDetails = row.plan_id === null ? [] : await database!.prepare(`SELECT id, step_id, approved, feedback, criteria_json, created_at FROM skill_compliance_assessments WHERE plan_id = ? ORDER BY created_at`)
-      .all<{ id: string; step_id: string; approved: number; feedback: string; criteria_json: string; created_at: number }>(row.plan_id);
+    const assessmentDetails = assessments.sort(ascending("created_at"));
     for (const assessment of assessmentDetails) {
       const stepOrder = planSkeleton.findIndex(step => step.step_id === assessment.step_id) + 1;
       const relatedObservationIds = [...new Set(parseJsonArray(assessment.criteria_json).flatMap(criterion =>

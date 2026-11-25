@@ -5,18 +5,13 @@ import { join } from "node:path";
 import test from "node:test";
 import type { PlanProposal, Planner, TaskSpec } from "../src/planning/contracts.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
-import { referencesPriorConversationResult, RunService } from "../src/runtime/run-service.ts";
+import { RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { SourceRepository } from "../src/storage/repositories/source-repository.ts";
 import type { RuntimeTool } from "../src/tools/tool-registry.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS, testOwner } from "./runtime-test-helpers.ts";
-
-test("uploaded-source wording is not mistaken for a prior reusable Result", () => {
-  assert.equal(referencesPriorConversationResult("阅读这个文件，结合这个内容给我生成一份介绍 ppt"), false);
-  assert.equal(referencesPriorConversationResult("把上一轮的分析结果生成一份 PPTX"), true);
-});
 
 test("stable general knowledge can be answered without invoking available readers", async () => {
   const database = new AppDatabase(":memory:");
@@ -1126,7 +1121,7 @@ test("clarification turns do not misrepresent their intentionally tool-free step
                   mode: "clarify",
                   relation: "new_goal",
                   inputMode: "none",
-                  effectiveGoal: "A database analysis was requested, but the target table name is still missing.",
+                  effectiveGoal: "Analysis was requested, but the user has not identified which dataset to analyze.",
                   taskIntent: {
                     schema: "agentloop.conversationTaskIntent/v1",
                     operation: "analysis",
@@ -1135,15 +1130,17 @@ test("clarification turns do not misrepresent their intentionally tool-free step
                   },
                   evidenceStrategy: "none",
                   sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-                  userConstraints: ["Ask for the concrete database schema and table name before analysis."], memoryAction: "none", memoryIntents: [],
+                  userConstraints: ["Ask which dataset the user wants to analyze using its user-facing name."], memoryAction: "none", memoryIntents: [],
                 },
               }],
             };
           }
           assert.match(request.systemPrompt, /intentionally tool-free clarification step/);
           assert.match(request.systemPrompt, /Do not claim that MCP servers, Skills, or Tools are unavailable/);
+          assert.match(request.systemPrompt, /Do not ask the user for internal identifiers or implementation parameters/);
+          assert.match(request.systemPrompt, /Internal name-to-identifier resolution belongs to the authorized execution workflow/);
           return {
-            content: "请提供实际的数据域和表名（schema.table_name），收到后才能开始查询和建模。",
+            content: "你希望分析哪一组数据？请提供它的名称或说明。",
             finishReason: "stop",
             toolCalls: [],
           };
@@ -1151,10 +1148,10 @@ test("clarification turns do not misrepresent their intentionally tool-free step
       }),
     });
 
-    const run = await runs.executeConversation(owner.user.id, "请分析数据库中的目标表");
+    const run = await runs.executeConversation(owner.user.id, "请分析数据");
 
     assert.equal(run.status, "completed");
-    assert.match(run.output ?? "", /请提供实际的数据域和表名/);
+    assert.match(run.output ?? "", /分析哪一组数据/);
     assert.doesNotMatch(run.output ?? "", /MCP.*不可用|工具.*不可用/);
     const events = await runs.events(owner.user.id, run.id);
     assert.equal(events.find((event) => event.type === "conversation.intent.classified")?.data.resolutionMode, "clarify");

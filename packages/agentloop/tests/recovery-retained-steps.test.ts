@@ -5,7 +5,7 @@ import { admitPlan } from "../src/planning/admission.ts";
 import { goalCriterionBasis } from "../src/planning/criterion-basis.ts";
 import { PlanRepository } from "../src/planning/plan-repository.ts";
 import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
-import { ModelRecoveryPlanner, parseRecoveryDecision, recoveryContinuationStepIds } from "../src/runtime/recovery-planning.ts";
+import { ModelRecoveryPlanner, parseRecoveryDecision, recoveryContinuationStepIds, recoveryRevisionCorrection } from "../src/runtime/recovery-planning.ts";
 import { RunService } from "../src/runtime/run-service.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
 import { createRuntimeResult, runtimeResultBindingsForStep, type RuntimeResultBinding } from "../src/runtime/runtime-result.ts";
@@ -43,6 +43,17 @@ function revision(goal: string) {
     successCriteria: [{ id: "comparison", description: "State the difference.", source: "task" as const }],
   }] };
 }
+
+test("recovery correction identifies the exact invalid revision field", () => {
+  const { plan } = fixture();
+  for (const [message, invalidField] of [
+    ["Step repair has unknown parent retired", "planRevision.steps[].parentId"],
+    ["retainedStepIds must not contain duplicates", "planRevision.retainedStepIds"],
+    ["Step replacement failed must be unique", "planRevision.stepReplacements"],
+    ["Existing Step failed must be referenced, not rewritten", "planRevision.steps[].id"],
+    ["Plan dependency graph has a cycle", "planRevision.steps[].dependencies"],
+  ]) assert.equal(recoveryRevisionCorrection(plan, undefined, message)?.invalidField, invalidField);
+});
 
 function call(planRevision: unknown) {
   return { id: "decision", name: "submit_recovery_decision", arguments: { actionId: "review", expectedActionRevision: 1,
@@ -402,4 +413,26 @@ test("explicit replacements rewire unfinished dependents while preserving contra
   assert.throws(() => buildRecoveryRevision({ ...proposal, retainedStepIds: ["answer", "answer"] }, old), /must be unique/);
   // Without an explicit replacement declaration, Runtime never silently renames or rewrites a retained Step.
   assert.deepEqual(buildRecoveryRevision({ ...proposal, stepReplacements: [] }, old).retainedStepIds, ["answer"]);
+});
+
+test("repair provenance never becomes parentId while an active milestone ancestor remains legal", () => {
+  const { state, plan } = fixture();
+  const milestone = { ...plan.steps[1]!, id: "delivery-stage", kind: "milestone" as const, parentId: undefined,
+    dependencies: [], status: "pending" as const, refinementState: "ready_to_refine" as const,
+    requiredCapabilities: [], executionBinding: { ...plan.steps[1]!.executionBinding, requiredCapabilities: [], targetIds: [] } };
+  const failed = { ...plan.steps[1]!, id: "delivery-leaf", parentId: milestone.id, dependencies: ["facts"], status: "failed" as const };
+  const current = { ...plan, steps: [plan.steps[0]!, milestone, failed, { ...plan.steps[1]!, id: "retired-origin", retiredAt: 2, status: "failed" as const }] };
+  const base = { goal: plan.goal, shape: "recovery_patch" as const, selectedSkillIds: [], retainedStepIds: ["facts", milestone.id],
+    stepReplacements: [{ stepId: failed.id, replacementStepId: "delivery-leaf.repair.2" }],
+    steps: [{ id: "delivery-leaf.repair.2", kind: "leaf" as const, parentId: milestone.id, objective: failed.objective,
+      dependencies: ["facts"], skillIds: [], requiredCapabilities: ["conversation_delivery"], targetIds: ["answer"],
+      successCriteria: [{ id: "comparison", description: "State the difference.", source: "task" as const }] }] };
+  const admitted = admitPlan({ runId: state.runId, canonicalState: state, currentPlan: current,
+    proposal: buildRecoveryRevision(base, current), availableSkills: [], availableToolNames: new Set() });
+  assert.equal(admitted.steps.find(step => step.id === "delivery-leaf.repair.2")!.parentId, milestone.id);
+  for (const invalid of [
+    { ...base, steps: [{ ...base.steps[0]!, parentId: "retired-origin" }] },
+    { ...base, steps: [{ ...base.steps[0]!, parentId: "facts" }] },
+  ]) assert.throws(() => admitPlan({ runId: state.runId, canonicalState: state, currentPlan: current,
+    proposal: buildRecoveryRevision(invalid, current), availableSkills: [], availableToolNames: new Set() }), /unknown parent|must be a milestone/);
 });

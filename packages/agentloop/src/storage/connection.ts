@@ -1,3 +1,4 @@
+import type { RunEventStore } from "./run-event-store.ts";
 /**
  * Data-access boundary. Services and repositories depend on `SqlConnection`,
  * never on a concrete engine. The API is promise-based so both synchronous
@@ -30,6 +31,10 @@ export interface SqlStatement {
 
 export interface SqlConnection {
   readonly dialect: SqlDialect;
+  runEventStore?: RunEventStore;
+  readonly supportsRunEventTransactions?: boolean;
+  /** Sanitized deployment facts for diagnostics; never contains credentials or query data. */
+  diagnosticEnvironment?(): Readonly<Record<string, unknown>>;
   exec(sql: string): Promise<void>;
   prepare(sql: string): SqlStatement;
   transaction<T>(operation: () => T | Promise<T>): Promise<T>;

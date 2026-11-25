@@ -19,12 +19,36 @@ export interface StreamFailureDiagnostics {
   finishReasonObserved: boolean;
   observedDeltaFields: Set<string>;
   streamReceipt?: ModelStreamReceipt;
+  transportRequestStartedAt?: number;
+  transportRequestStartedMono?: number;
+  responseHeadersReceivedAt?: number;
+  responseHeadersReceivedMono?: number;
+  firstRawChunkReceivedAt?: number;
+  firstRawChunkReceivedMono?: number;
+  streamEndedAt?: number;
+  streamEndedMono?: number;
+  sinkCallbackCount?: number;
+  sinkCallbackWaitMs?: number;
 }
 
 export interface StreamEventSummary {
   readonly dataKind: "done" | "json" | "non-json";
   readonly byteLength: number;
   readonly shape?: readonly string[];
+}
+
+const modelPerformanceTimingByError = new WeakMap<object, Readonly<Record<string, unknown>>>();
+
+export function attachModelPerformanceTiming<T>(error: T, timing: Readonly<Record<string, unknown>>): T {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    modelPerformanceTimingByError.set(error as object, timing);
+  }
+  return error;
+}
+
+export function modelPerformanceTimingFromError(error: unknown): Readonly<Record<string, unknown>> | undefined {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    ? modelPerformanceTimingByError.get(error as object) : undefined;
 }
 
 export class StreamConsumptionError extends Error {

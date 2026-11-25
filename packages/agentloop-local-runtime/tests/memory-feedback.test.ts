@@ -17,7 +17,7 @@ for (const relation of ["refine_prior", "continue_prior", undefined]) test(`repl
   await poller.poll();
   assert.deepEqual(await store.invalidatedRuns(scope), []);
   assert.deepEqual(await store.settlementJobs(scope, "target"), []);
-  assert.equal((await store.feedbackCursor("device:runtime"))!.eventKey, "next:1");
+  assert.equal((await store.feedbackCursor("device:runtime:next"))!.eventKey, "next:1");
 });
 
 for (const backend of ["memory", "sqlite"] as const) test(`${backend}: canonical feedback schedules only the owner/chat target and survives a busy worker, restart and rowid reuse`, async t => {
@@ -40,11 +40,12 @@ for (const backend of ["memory", "sqlite"] as const) test(`${backend}: canonical
   await poller.poll();
   assert.deepEqual(await store.invalidatedRuns(scope), ["target"], "busy workers cannot delay the persistent recall fence");
   assert.deepEqual(await store.invalidatedRuns({ ...scope, ownerUserId: "bob" }), []);
-  assert.equal((await store.feedbackCursor("device:runtime"))!.eventKey, "otherchat:1", "busy valid target cannot be acknowledged");
+  assert.equal((await store.feedbackCursor("device:runtime:otherchat"))!.eventKey, "otherchat:1", "other-chat feedback is acknowledged independently");
+  assert.equal(await store.feedbackCursor("device:runtime:source"), undefined, "busy target cannot be acknowledged");
   await store.finishSettlement({ job: initial, now: 2, maxAttempts: 3, outcome: "succeeded" });
   await poller.poll();
   assert.equal((await store.settlementJobs(scope, "target"))[0]!.status, "queued");
-  assert.equal((await store.feedbackCursor("device:runtime"))!.eventKey, "source:1");
+  assert.equal((await store.feedbackCursor("device:runtime:source"))!.eventKey, "source:1");
   assert.deepEqual(await store.settlementJobs({ ...scope, ownerUserId: "bob" }, "target"), []);
   const replay = (await store.claimSettlement({ now: 10, maxAttempts: 3 }))!;
   await store.finishSettlement({ job: replay, now: 11, maxAttempts: 3, outcome: "succeeded" });
@@ -57,7 +58,7 @@ for (const backend of ["memory", "sqlite"] as const) test(`${backend}: canonical
   await addFeedback("source", 2);
   await restarted.poll();
   assert.equal((await reloaded.settlementJobs(scope, "target"))[0]!.status, "queued", "a reused SQLite rowid cannot hide a new correction");
-  assert.equal((await reloaded.feedbackCursor("device:runtime"))!.eventKey, "source:2");
+  assert.equal((await reloaded.feedbackCursor("device:runtime:source"))!.eventKey, "source:2");
 });
 
 test("feedback follows the same owner and conversation across local Runtime databases", async t => {
