@@ -1,0 +1,42 @@
+{
+  "schema": "agentloop.kernelInstallVerification/v1",
+  "package": {
+    "filename": "zhujun-agentloop-0.1.0-basis-02982d06ecab.tgz",
+    "sha256": "02982d06ecabe5831109075124d59386bf067121ecd41840dfcdcb63e30f7527"
+  },
+  "hosts": [
+    {
+      "host": "data-agent",
+      "dependency": "file:vendor/zhujun-agentloop-0.1.0-basis-02982d06ecab.tgz",
+      "distFilesExact": 394,
+      "changedJsonPaths": {
+        "package.json": [
+          "/dependencies/@zhujun/agentloop"
+        ],
+        "package-lock.json": [
+          "/packages//dependencies/@zhujun/agentloop",
+          "/packages/node_modules/@zhujun/agentloop/integrity",
+          "/packages/node_modules/@zhujun/agentloop/resolved"
+        ]
+      }
+    },
+    {
+      "host": "report-agent",
+      "dependency": "file:vendor/zhujun-agentloop-0.1.0-basis-02982d06ecab.tgz",
+      "distFilesExact": 394,
+      "changedJsonPaths": {
+        "package.json": [
+          "/dependencies/@zhujun/agentloop"
+        ],
+        "package-lock.json": [
+          "/packages//dependencies/@zhujun/agentloop",
+          "/packages/node_modules/@zhujun/agentloop/integrity",
+          "/packages/node_modules/@zhujun/agentloop/resolved"
+        ]
+      }
+    }
+  ],
+  "sharedServicesRestarted": false,
+  "committed": false,
+  "pushed": false
+}

@@ -8,7 +8,9 @@ import test from "node:test";
 import { ComputerExecutor } from "../src/computer/computer-executor.ts";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
+import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
 import { ContextAssembler, estimateTextTokens } from "../src/runtime/context-assembler.ts";
+import { deriveCurrentDecisionView } from "../src/runtime/current-decision-view.ts";
 import type { ModelInvocation, ModelMessage, RuntimeEvent } from "../src/runtime/contracts.ts";
 import { artifactStepToolProgressPolicy, deriveRuntimeStepEvidenceState } from "../src/runtime/tool-progress-policy.ts";
 import { WorkProductContext, WORK_PRODUCT_CONTEXT_MAX_CHARACTERS } from "../src/runtime/work-product-context.ts";
@@ -257,6 +259,47 @@ test("a rejected evidence-repair candidate cannot trigger another Assessment unt
     (error: any) => error?.code === "STEP_NOT_COMPLETED" && error?.details?.repairExhausted === true,
   );
   assert.equal(assessed, 1);
+});
+
+test("latest committed explicit identity supersedes stale canonical identity in the decision view", () => {
+  const target = { targetId: "report", deliveryTargetId: "report", purpose: "Report", kind: "document", format: "docx" };
+  const context = new WorkProductContext("duplicate-current", {
+    goalId: "plan:duplicate-current:produce",
+    goal: target.purpose,
+    workspaceId: "workspace",
+    deliveryTargets: [target],
+    storeSnapshot: memoryStore().storeSnapshot,
+  });
+  const write = (toolCallId: string, path: string, sha256: string): RuntimeEvent => completed(toolCallId === "first" ? 1 : 2, {
+    exitCode: 0,
+    fileChanges: [{ path, changeType: "created", bytes: 42, sha256 }],
+    outputBindings: [{ targetId: "report", path }],
+  });
+  context.capture(write("first", "reports/first.docx", "1".repeat(64)));
+  context.capture(write("second", "reports/second.docx", "2".repeat(64)));
+  const binding = {
+    stepId: "produce", declarationId: "binding", path: "reports/first.docx", versionId: "first",
+    sha256: "1".repeat(64), bytes: 42, observedByToolCallId: "call-1", boundAt: 1,
+  };
+  const base = createCanonicalRunState({ runId: "duplicate-current", userInput: "Report", understanding: {} as any, now: 1 });
+  const canonicalState = {
+    ...base,
+    targets: {
+      report: {
+        targetId: "report", purpose: "Report", surface: "workspace_artifact" as const, kind: "document", format: "docx",
+        expectedCount: 1, terminalRequired: true as const, status: "open" as const, ownerStepIds: ["produce"], claims: [],
+        artifactBinding: binding, artifactBindings: [binding],
+      },
+    },
+  };
+  const view = deriveCurrentDecisionView({
+    runId: "duplicate-current",
+    context: { canonicalState, stepId: "produce" },
+    workProducts: context.derive(),
+  });
+  assert.equal(context.derive().semantics.deliveryTargets?.length, 1, "latest committed selection is unambiguous");
+  assert.equal(view.workProducts.deliveryTargets[0]?.path, "reports/second.docx");
+  assert.deepEqual(view.currentGap.unboundDeliveryTargetIds, []);
 });
 
 const SUMMARY = "## Goal\nContinue task\n## Constraints & Preferences\n- Original constraints\n## Progress\n### Done\n- Some work\n### In Progress\n- Task\n### Blocked\n- None\n## Key Decisions\n- None\n## Evidence\n- See Runtime\n## Next Steps\n1. Continue\n## Critical Context\n- Original goal";

@@ -1,0 +1,62 @@
+{
+  "runId": "9ee53c0d-f65f-4367-a0a0-7e3e16d231d0",
+  "conversationId": "76a89fa8-4828-4e1c-ba24-6ea40348b2b3",
+  "status": "completed",
+  "toolNames": [
+    "load_skill"
+  ],
+  "actionCount": 5,
+  "events": 89,
+  "streamEvents": 8,
+  "contiguousEvents": true,
+  "historySource": "tidb",
+  "runSource": "history",
+  "historyKinds": [
+    {
+      "kind": "archives",
+      "count": 1
+    },
+    {
+      "kind": "conversations",
+      "count": 1
+    },
+    {
+      "kind": "plans",
+      "count": 1
+    },
+    {
+      "kind": "run_outcomes",
+      "count": 1
+    },
+    {
+      "kind": "run_round_results",
+      "count": 1
+    },
+    {
+      "kind": "runs",
+      "count": 1
+    }
+  ],
+  "archives": 1,
+  "usage": {
+    "planningTurns": 0,
+    "intentTurns": 1,
+    "inputTokens": 84422,
+    "outputTokens": 1217
+  },
+  "historyStatus": {
+    "source": "tidb",
+    "archive": {
+      "archivedRuns": 21,
+      "projectedRuns": 0,
+      "archivePending": false,
+      "projectionPending": false
+    },
+    "pendingCount": 0,
+    "oldestAgeMs": 0,
+    "lastSuccessAt": "1795582618719",
+    "lastLatencyMs": "397",
+    "acknowledged": "92"
+  },
+  "packageSha256": "f4d2a57db3654b7487e3a3f9963b3c06724e2a99903b875d3bba4f12aefe6bc0"
+}

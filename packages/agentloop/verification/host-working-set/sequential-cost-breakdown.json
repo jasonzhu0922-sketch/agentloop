@@ -1,0 +1,107 @@
+[
+  {
+    "file": "packages/agentloop/verification/decision-working-set/live-sequential-final.json",
+    "reports": [
+      {
+        "policy": "canonical",
+        "chars": {
+          "toolSchemas": 27648,
+          "runtimeContext": 86847,
+          "otherToolResults": 104918
+        },
+        "inputTokens": 55115,
+        "outputTokens": 1077,
+        "cacheReadInputTokens": 1664,
+        "inputTokensNoCache": 35692,
+        "calls": 9,
+        "historyReads": 0,
+        "durationMs": 10814
+      },
+      {
+        "policy": "current",
+        "chars": {
+          "toolSchemas": 81236,
+          "runtimeContext": 176830,
+          "otherToolResults": 39712
+        },
+        "inputTokens": 88286,
+        "outputTokens": 3998,
+        "cacheReadInputTokens": 1664,
+        "inputTokensNoCache": 34078,
+        "calls": 13,
+        "historyReads": 4,
+        "durationMs": 23345
+      }
+    ]
+  },
+  {
+    "file": "packages/agentloop/verification/host-working-set/live-sequential-v2.json",
+    "reports": [
+      {
+        "policy": "canonical",
+        "chars": {
+          "toolSchemas": 27648,
+          "runtimeContext": 86847,
+          "otherToolResults": 104918
+        },
+        "inputTokens": 54576,
+        "outputTokens": 918,
+        "cacheReadInputTokens": 2816,
+        "inputTokensNoCache": 45618,
+        "calls": 9,
+        "historyReads": 0,
+        "durationMs": 9758
+      },
+      {
+        "policy": "current",
+        "chars": {
+          "toolSchemas": 45696,
+          "runtimeContext": 126708,
+          "otherToolResults": 23298
+        },
+        "inputTokens": 55548,
+        "outputTokens": 2794,
+        "cacheReadInputTokens": 1536,
+        "inputTokensNoCache": 34891,
+        "calls": 9,
+        "historyReads": 0,
+        "durationMs": 15629
+      }
+    ]
+  },
+  {
+    "file": "packages/agentloop/verification/host-working-set/live-sequential-v2-repeat.json",
+    "reports": [
+      {
+        "policy": "canonical",
+        "chars": {
+          "toolSchemas": 27648,
+          "runtimeContext": 86847,
+          "otherToolResults": 104918
+        },
+        "inputTokens": 54869,
+        "outputTokens": 1050,
+        "cacheReadInputTokens": 2176,
+        "inputTokensNoCache": 34946,
+        "calls": 9,
+        "historyReads": 0,
+        "durationMs": 11041
+      },
+      {
+        "policy": "current",
+        "chars": {
+          "toolSchemas": 51024,
+          "runtimeContext": 149952,
+          "otherToolResults": 24070
+        },
+        "inputTokens": 64719,
+        "outputTokens": 2627,
+        "cacheReadInputTokens": 8192,
+        "inputTokensNoCache": 43052,
+        "calls": 10,
+        "historyReads": 1,
+        "durationMs": 16661
+      }
+    ]
+  }
+]

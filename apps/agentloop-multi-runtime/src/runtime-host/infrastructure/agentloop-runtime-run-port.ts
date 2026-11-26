@@ -30,8 +30,8 @@ export class AgentLoopRuntimeRunPort implements RuntimeHostRunPort {
     readonly connectorConnectionIds?: readonly string[];
     readonly allowDangerousTools?: boolean;
     readonly modelKey?: string;
-  }): Promise<RuntimeHostRun> {
-    return await this.runs.startConversation(actorUserId, input, options);
+  }, persistence?: { persist(run: { id: string; ownerUserId: string; conversationId?: string }): Promise<void> }): Promise<RuntimeHostRun> {
+    return await this.runs.startConversation(actorUserId, input, options, persistence);
   }
 
   async get(actorUserId: string, runId: string): Promise<RuntimeHostRun> {

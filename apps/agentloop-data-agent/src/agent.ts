@@ -1,14 +1,21 @@
+import { hostname } from "node:os";
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { AppDatabase, AppError, RunService, SkillService, type ModelFactory, type PrivateSkill, type SqlConnection } from "@zhujun/agentloop";
+import { AppDatabase, AppError, RunService, SkillService, openRuntimeState, runtimePersistence, RuntimeHostStateRepository, RuntimeRecordMaintenance, FileRuntimeArchiveStore, createRuntimeHistory, RuntimeHistoryView, type RuntimeHistoryConfig, type RuntimeHistoryStore, type RuntimeArchiveStore, type RuntimeStateConfig, type RuntimePersistence, type ModelFactory, type PrivateSkill, type SqlConnection } from "@zhujun/agentloop";
 import { fixedDataAnalysisPlanner } from "./fixed-planner.ts";
-import { acquireLease, type HostLeaseOptions } from "./tidb-state.ts";
 import { fixedSkillExecutionPolicy } from "./skill-policy.ts";
 
 export const OWNER = "data-agent-local-owner";
 export interface AgentOptions {
+  /** Catalogue/control persistence, separate from Runtime execution state. */
   connection: SqlConnection;
+  stateConfig?: RuntimeStateConfig;
+  /** Stable deployment partition; different live processes must use different IDs. */
+  runtimeId?: string;
+  runtimeHistoryConfig?: RuntimeHistoryConfig;
+  runtimeHistoryStore?: RuntimeHistoryStore;
+  runtimeArchiveStore?: RuntimeArchiveStore;
   fileDirectory: string;
   skillRoot: string;
   python: string;
@@ -46,25 +53,24 @@ export interface DataAgentMcpCallStore {
 }
 
 export async function createDataAgent(options: AgentOptions) {
-  if (options.connection.dialect !== "tidb") throw new TypeError("问数 Agent 仅支持 TiDB 持久化");
-  let lease: Awaited<ReturnType<typeof acquireLease>> | undefined;
-  let leaseLostError: Error | undefined;
-  const leaseLostHandlers = new Set<(error: Error) => void>();
-  const onLeaseLost: HostLeaseOptions["onLost"] = error => {
-    if (leaseLostError) return;
-    leaseLostError = error;
-    for (const handler of leaseLostHandlers) handler(error);
-  };
+  let state: RuntimePersistence | undefined;
+  let maintenance: RuntimeRecordMaintenance | undefined;
+  let history: ReturnType<typeof createRuntimeHistory> | undefined;
+  let database: AppDatabase | undefined;
+  if ("runtimeState" in options && options.runtimeState) throw new TypeError("Legacy changeset state requires explicit migration; use stateConfig");
+  if (!options.stateConfig && options.connection.dialect !== "sqlite") throw new TypeError("Runtime execution requires sqlite or redis stateConfig");
   try {
-    lease = await acquireLease(options.connection, { onLost: onLeaseLost });
-    const hostLease = lease;
     const workspaceRoot = join(options.fileDirectory, "workspace");
     await mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
-    const database = await AppDatabase.open({ connection: options.connection });
-    await database.exec(`CREATE TABLE IF NOT EXISTS data_agent_mcp_calls (
-      id VARCHAR(191) PRIMARY KEY, scenario_id VARCHAR(64) NOT NULL, started_at BIGINT NOT NULL,
-      payload_json LONGTEXT NOT NULL
-    )`);
+    database = await AppDatabase.open({ connection: options.connection });
+    state = options.stateConfig ? await openRuntimeState(options.stateConfig) : runtimePersistence(database);
+    const archiveStore = options.runtimeArchiveStore ?? new FileRuntimeArchiveStore(join(options.fileDirectory, "runtime-archives"));
+    if (state.historyOutbox) history = createRuntimeHistory({ state, namespace: options.stateConfig!.backend === "redis" ? options.stateConfig!.namespace : "sqlite",
+      config: options.runtimeHistoryConfig, store: options.runtimeHistoryStore, content: archiveStore,
+      onError: error => console.error("Runtime history projection:", error.message) });
+    history?.worker?.start();
+    const runtimeId = options.runtimeId ?? `${hostname()}:${process.env.DATA_AGENT_PORT ?? process.env.REPORT_AGENT_PORT ?? "local"}`;
+    const hostState = new RuntimeHostStateRepository(state, "data-agent");
     const skills = new SkillService(database, {
       skillPackageRoots: [resolve(options.skillRoot)],
       packageStoreRoot: join(options.fileDirectory, "skill-packages"),
@@ -75,7 +81,8 @@ export async function createDataAgent(options: AgentOptions) {
     let skill: PrivateSkill | undefined = available.find(s => s.name === "data-analysis");
     if (!skill) throw new Error("data-analysis Skill 无法加载，请检查应用内的 Skill 包。");
     const runs = new RunService({
-      database, skills, workspaceRoot, sourceStorageRoot: join(workspaceRoot, "sources"),
+    executionRuntimeId: runtimeId,
+      database: state, skills, workspaceRoot, sourceStorageRoot: join(workspaceRoot, "sources"),
       ownerScopedWorkspace: true,
       modelFactory: options.modelFactory, modelKeys: options.modelKeys, defaultModelKey: options.defaultModelKey,
       requireExplicitModel: true, timeZone: "Asia/Shanghai",
@@ -97,11 +104,15 @@ export async function createDataAgent(options: AgentOptions) {
         "不支持的工作说明范围；只有实体候选会改变答案、没有候选/来源，或指标与期间业务定义会改变答案时才使用 request_human_loop。用户已给出的物理编码、唯一命中和可证明同口径候选直接继续；计划包装、schema、绑定字段和执行器错误属于技术故障，自动修复一次后如实报告，不向用户询问内部 JSON。",
       ].join("\n"),
     });
-    // This app's admission ledger binds client retries in the same transaction as the Kernel Run.
-    await database.exec(`CREATE TABLE IF NOT EXISTS data_agent_requests (
-      request_id VARCHAR(191) PRIMARY KEY, fingerprint VARCHAR(64) NOT NULL, run_id VARCHAR(191) NOT NULL UNIQUE
-    )`);
-    await runs.reconcileInterruptedRuns();
+    if (options.stateConfig) {
+      maintenance = new RuntimeRecordMaintenance({ state, namespace: options.stateConfig.backend === "redis" ? options.stateConfig.namespace : options.stateConfig.filename,
+        archive: archiveStore, artifacts: runId => runs.processArtifacts(OWNER, runId),
+        artifactContent: async artifact => (await runs.readProcessArtifact(OWNER,artifact.runId,artifact.id)).content });
+      maintenance.start();
+    }
+    await runs.initializeRunEvents();
+    const owned = options.stateConfig ? (await state.records.find("runtime_executors", { runtime_id: runtimeId })).map(row => row.remote_run_id) : undefined;
+    await runs.reconcileInterruptedRuns(owned);
     let queue = Promise.resolve();
     let closing = false;
     let closeOperation: Promise<void> | undefined;
@@ -110,25 +121,22 @@ export async function createDataAgent(options: AgentOptions) {
     function start(message: StartMessage) {
       const operation = queue.then(async () => {
         if (closing) throw new AppError("CONFLICT", "服务正在关闭", 409);
-        await hostLease.assert();
         if (!modelKeys.includes(message.modelKey)) throw new AppError("BAD_REQUEST", "模型不可用", 400);
         const fingerprint = createHash("sha256").update(JSON.stringify(message)).digest("hex");
-        const prior = await database.prepare("SELECT fingerprint, run_id FROM data_agent_requests WHERE request_id = ?")
-          .get(message.requestId) as { fingerprint: string; run_id: string } | undefined;
+        const prior = await hostState.request(message.requestId);
         if (prior) {
           if (prior.fingerprint !== fingerprint) throw new AppError("CONFLICT", "该请求 ID 已用于不同消息", 409);
-          return runs.get(OWNER, prior.run_id);
+          return runs.get(OWNER, prior.runId);
         }
-        const active = await database.prepare("SELECT id FROM runs WHERE owner_user_id = ? AND conversation_id = ? AND status = 'running'")
-          .get(OWNER, message.conversationId);
+        const active = (await state!.records.find("runs", { owner_user_id: OWNER, conversation_id: message.conversationId, status: "running" }))[0];
         if (active) throw new AppError("CONFLICT", "请先完成或停止当前查询", 409);
         if (inFlight.size >= 4) throw new AppError("CONFLICT", "查询并发已满，请稍后重试", 429);
         await runs.ensureConversation(OWNER, message.conversationId, message.input);
         const run = await runs.startConversation(OWNER, message.input, {
           conversationId: message.conversationId, modelKey: message.modelKey, allowDangerousTools: true,
         }, { persist: async record => {
-          await database.prepare("INSERT INTO data_agent_requests(request_id, fingerprint, run_id) VALUES (?, ?, ?)")
-            .run(message.requestId, fingerprint, record.id);
+          await hostState.admit({ requestId: message.requestId, fingerprint, runId: record.id, ownerUserId: OWNER, runtimeId,
+            conversationId: message.conversationId });
         } });
         inFlight.add(run.id);
         void runs.whenRunIdle(run.id).finally(() => inFlight.delete(run.id));
@@ -153,40 +161,26 @@ export async function createDataAgent(options: AgentOptions) {
         if (payload.length > 1_000_000) payload = JSON.stringify({ id: call.id, tool: call.tool, scenarioId: call.scenarioId, status: call.status,
           runId: call.runId, startedAt: call.startedAt, finishedAt: call.finishedAt, durationMs: call.durationMs,
           arguments: {}, events: [], payload_truncated: true });
-        if (create) {
-          await database.prepare("INSERT INTO data_agent_mcp_calls(id, scenario_id, started_at, payload_json) VALUES (?, ?, ?, ?)")
-            .run(call.id, call.scenarioId, call.startedAt, payload);
-        } else {
-          await database.prepare("UPDATE data_agent_mcp_calls SET payload_json = ? WHERE id = ? AND scenario_id = ?")
-            .run(payload, call.id, call.scenarioId);
-        }
+        await hostState.observe({ id: call.id, category: call.scenarioId, createdAt: call.startedAt, payload: JSON.parse(payload) }, create);
       },
-      async list(limit = 50) {
-        const bounded = Math.max(1, Math.min(100, Math.trunc(limit)));
-        const rows = await database.prepare("SELECT payload_json FROM data_agent_mcp_calls ORDER BY started_at DESC, id DESC LIMIT ?").all(bounded) as { payload_json: string }[];
-        return rows.map(row => JSON.parse(row.payload_json) as DataAgentMcpCall);
-      },
-      async get(id) {
-        const row = await database.prepare("SELECT payload_json FROM data_agent_mcp_calls WHERE id = ?").get(id) as { payload_json: string } | undefined;
-        return row ? JSON.parse(row.payload_json) as DataAgentMcpCall : undefined;
-      },
+      async list(limit = 50) { return await hostState.observations(limit) as DataAgentMcpCall[]; },
+      async get(id) { return await hostState.observation(id) as DataAgentMcpCall | undefined; },
     };
+
     return {
       runs, start, mcpCalls,
+      history: history ? new RuntimeHistoryView(state, history.reader, runs, archiveStore) : undefined,
+      historyStatus: async () => ({ source: history ? "tidb" : "sqlite", archive: maintenance?.status(), ...(await state!.historyOutbox?.status() ?? {}) }),
+      runtimeStateStatus: () => ({ backend: options.stateConfig?.backend ?? "sqlite", history: history ? "tidb" : "sqlite" }),
       get defaultModelKey() { return options.defaultModelKey; },
       get skill() { return { id: skill!.id, name: skill!.name, contentHash: skill!.contentHash }; },
       setModelKeys(keys: readonly string[]) { modelKeys = keys; runs.setModelKeys(keys); },
-      onHostLeaseLost(handler: (error: Error) => void) {
-        if (leaseLostError) queueMicrotask(() => handler(leaseLostError!));
-        else leaseLostHandlers.add(handler);
-        return () => leaseLostHandlers.delete(handler);
-      },
+      onHostLeaseLost(_handler: (error: Error) => void) { return () => {}; },
       /** Serialize host configuration with Run admission, including waiting HIL. */
       configure<T>(action: () => Promise<T>, refreshPackage = false): Promise<T> {
         const operation = queue.then(async () => {
           if (closing) throw new AppError("CONFLICT", "应用正在关闭", 409);
-          await hostLease.assert();
-          const active = await database.prepare("SELECT id FROM runs WHERE owner_user_id = ? AND status NOT IN ('completed', 'failed', 'cancelled') LIMIT 1").get(OWNER);
+          const active = (await state!.records.find("runs", { owner_user_id: OWNER, status: "running" }))[0];
           if (active) throw new AppError("CONFLICT", "请先完成或停止正在进行的分析，再保存配置", 409);
           const result = await action();
           if (refreshPackage) {
@@ -206,20 +200,22 @@ export async function createDataAgent(options: AgentOptions) {
           // Shutdown owns cancellation; closing a database beneath live model/tool work is unsafe.
           // A terminal Run may still be unwinding its persisted delivery events.
           // Include it when awaiting liveness, especially after a resumed HIL.
-          const rows = await database.prepare("SELECT id, status FROM runs WHERE owner_user_id = ?").all(OWNER) as { id: string; status: string }[];
+          const rows = await state!.records.find("runs", { owner_user_id: OWNER });
           for (const row of rows) {
             if (await runs.currentHumanLoop(OWNER, row.id)) await runs.whenRunIdle(row.id);
             else if (row.status === "running" && runs.isRunExecuting(row.id)) await runs.cancel(OWNER, row.id);
           }
           await Promise.all([...new Set([...inFlight, ...rows.map(r => r.id)])].map(id => runs.whenRunIdle(id)));
-          await hostLease.release();
-          await database.close();
+          await runs.closeRunEvents();
+          await maintenance?.close(); await history?.close();
+          if (options.stateConfig) await state!.close();
+          await database!.close();
         })();
       },
     };
   } catch (error) {
     // Cleanup must not replace the initialization failure with a closed-pool error.
-    try { await lease?.release(); } catch { /* AppDatabase may already have closed the connection. */ }
+    try { await maintenance?.close(); await history?.close(); if (options.stateConfig) await state?.close(); await database?.close(); } catch { /* Preserve initialization error. */ }
     try { await options.connection.close(); } catch { /* Preserve the original initialization error. */ }
     throw error;
   }

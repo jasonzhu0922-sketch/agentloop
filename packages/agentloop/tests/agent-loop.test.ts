@@ -211,7 +211,7 @@ test("plural delivery claim requires every bound instance to have matching accep
   const bindings = targets.map((target, index) => ({ ...target, path: `part${index + 1}.pdf`, versionId: `v${index}`,
     bytes: 10, sha256: String(index + 1).repeat(64), observedByToolCallId: "split" }));
   const evidence = bindings.map((binding, index) => ({ toolCallId: `verify-${index}`, toolName: "verify_artifact_acceptance", isError: false,
-    result: JSON.stringify({ schema: "agentloop.artifactAcceptance/v1", artifact: { path: binding.path, sha256: binding.sha256 }, verdict: "accepted" }) }));
+    result: JSON.stringify({ schema: "agentloop.artifactAcceptance/v1", artifact: { path: binding.path, versionId: binding.versionId, sha256: binding.sha256 }, verdict: "accepted" }) }));
   assert.deepEqual(deliveryClaimsForCurrentTargetBindings(bindings, evidence.slice(0, 2), targets), []);
   const claims = deliveryClaimsForCurrentTargetBindings(bindings, evidence, targets);
   assert.equal(claims.length, 1);

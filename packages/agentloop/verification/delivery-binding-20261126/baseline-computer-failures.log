@@ -1,0 +1,70 @@
+✖ computer_write_file append fails closed when the target is missing (3.776417ms)
+✖ visible directory tools read only from explicitly granted local directories (4.678833ms)
+✖ computer_aggregate_table_artifact derives complete group counts from structured records (13.261166ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 0
+ℹ fail 3
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 202.845
+
+✖ failing tests:
+
+test at ../../../../private/tmp/agentloop-delivery-baseline/tests/computer-tools.test.ts:2195:1
+✖ computer_write_file append fails closed when the target is missing (3.776417ms)
+  AssertionError [ERR_ASSERTION]: The validation function is expected to return "true". Received false
+  
+  Caught error:
+  
+  AppError: Path not found: reports/missing.md
+      at async TestContext.<anonymous> (file:///private/tmp/agentloop-delivery-baseline/tests/computer-tools.test.ts:2205:5)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: AppError: Path not found: reports/missing.md
+        at file:///private/tmp/agentloop-delivery-baseline/src/computer/computer-executor.ts:2220:15
+        at async ComputerExecutor.resolveExisting (file:///private/tmp/agentloop-delivery-baseline/src/computer/computer-executor.ts:2218:23)
+        at async ComputerExecutor.resolveReadablePath (file:///private/tmp/agentloop-delivery-baseline/src/computer/computer-executor.ts:2143:26)
+        at async ComputerExecutor.resolveReadableFile (file:///private/tmp/agentloop-delivery-baseline/src/computer/computer-executor.ts:2116:14)
+        at async ComputerExecutor.inspectFile (file:///private/tmp/agentloop-delivery-baseline/src/computer/computer-executor.ts:530:26)
+        at async Object.preflight (file:///private/tmp/agentloop-delivery-baseline/src/tools/computer-tools.ts:493:38)
+        at async Object.execute (file:///private/tmp/agentloop-delivery-baseline/src/tools/tool-registry.ts:236:13)
+        at async waitForActual (node:assert:615:5)
+        at async strict.rejects (node:assert:738:25)
+        at async TestContext.<anonymous> (file:///private/tmp/agentloop-delivery-baseline/tests/computer-tools.test.ts:2205:5),
+    operator: 'rejects',
+    diff: 'simple'
+  }
+
+test at ../../../../private/tmp/agentloop-delivery-baseline/tests/computer-tools.test.ts:3698:1
+✖ visible directory tools read only from explicitly granted local directories (4.678833ms)
+  AssertionError [ERR_ASSERTION]: Missing expected rejection.
+      at async TestContext.<anonymous> (file:///private/tmp/agentloop-delivery-baseline/tests/computer-tools.test.ts:3784:5)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    operator: 'rejects',
+    diff: 'simple'
+  }
+
+test at ../../../../private/tmp/agentloop-delivery-baseline/tests/computer-tools.test.ts:4221:1
+✖ computer_aggregate_table_artifact derives complete group counts from structured records (13.261166ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  true !== false
+  
+      at TestContext.<anonymous> (file:///private/tmp/agentloop-delivery-baseline/tests/computer-tools.test.ts:4331:12)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

@@ -37,3 +37,6 @@ pkcs11.txt
 dist/
 
 apps/agentloop-desktop/release/
+
+# Immutable local kernel releases and atomic current channel
+.releases/

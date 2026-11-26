@@ -212,7 +212,7 @@ up() {
   local previous driver job
   previous=$(active_compose) || previous=
   if [ -n "$previous" ]; then
-    driver=$(docker exec agentloop-runtime-general-01-1 printenv AGENTLOOP_RUNTIME_STATE_DRIVER) || return
+    driver=$(docker exec agentloop-runtime-general-01-1 sh -c 'printf "%s" "${AGENTLOOP_RUNTIME_STATE_BACKEND:-${AGENTLOOP_RUNTIME_STATE_DRIVER:-legacy}}"') || return
     if [ "$driver" = postgres ]; then
       job=$(mktemp -d "${TMPDIR:-/tmp}/agentloop-topology.XXXXXX")
       AGENTLOOP_DEPLOY_ROOT="$DEPLOY_ROOT" bash "$SCRIPT_DIR/../production/server-operations.sh" topology "$job" '' '' "$SCRIPT_DIR" || return

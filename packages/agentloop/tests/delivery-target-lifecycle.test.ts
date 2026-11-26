@@ -39,7 +39,7 @@ test("candidate claims enumerate the canonical surfaces without letting prose re
   const binding = { targetId: "figure", deliveryTargetId: "figure", path: "figure.html", versionId: "v1", bytes: 100,
     sha256: "a".repeat(64), observedByToolCallId: "write", declarationId: "binding", bindingAuthority: "runtime" as const };
   const receipt = { toolCallId: "verify", toolName: "verify_artifact_acceptance", isError: false,
-    result: JSON.stringify({ schema: "agentloop.artifactAcceptance/v1", verdict: "accepted", artifact: { path: binding.path, sha256: binding.sha256 } }) };
+    result: JSON.stringify({ schema: "agentloop.artifactAcceptance/v1", verdict: "accepted", artifact: { path: binding.path, versionId: binding.versionId, sha256: binding.sha256 } }) };
   const input = { output: originalAnswer, deliveryTargets: Object.values(initialState().targets),
     artifactBindings: [binding], artifactTargets: [{ targetId: "figure", purpose: "figure", kind: "html" }], toolEvidence: [receipt] };
   assert.deepEqual(buildRuntimeDeliveryCandidate(input).deliveryClaims.map((claim) => claim.targetId), ["figure", "findings"]);
@@ -47,6 +47,64 @@ test("candidate claims enumerate the canonical surfaces without letting prose re
   assert.deepEqual(buildRuntimeDeliveryCandidate({ ...input, output: " " }).deliveryClaims.map((claim) => claim.targetId), ["figure"]);
   assert.deepEqual(buildRuntimeDeliveryCandidate({ ...input, artifactBindings: [{ ...binding, sha256: "b".repeat(64) }] })
     .deliveryClaims.map((claim) => claim.targetId), ["findings"]);
+});
+
+test("a partial multi-file command keeps its bound target through later read/verify observations", () => {
+  const base = initialState();
+  const binding = {
+    targetId: "figure",
+    deliveryTargetId: "figure",
+    path: "figure.html",
+    versionId: "v1",
+    bytes: 100,
+    sha256: "a".repeat(64),
+    declarationId: "binding",
+    observedByToolCallId: "write",
+    bindingAuthority: "runtime" as const,
+  };
+  const state = {
+    ...base,
+    steps: {
+      produce: { stepId: "produce", targetIds: ["figure"], status: "running" as const, evidenceRefs: [], updatedAt: 1 },
+    },
+    targets: {
+      ...base.targets,
+      figure: {
+        ...base.targets.figure,
+        ownerStepIds: ["produce"],
+      },
+    },
+  };
+  const bound = reconcileCanonicalDeliveryTargetBindings(state, { stepId: "produce", bindings: [binding], now: 2 });
+  assert.equal(bound.targets.figure.artifactBinding?.path, binding.path);
+
+  // The producing command also wrote auxiliary files but declared only the
+  // final figure. A subsequent read/verify callback has no new delivery
+  // binding to report and must not revoke the already observed identity.
+  const readObservations = deriveWorkProductObservations({
+    runId: base.runId,
+    workspaceId: "workspace",
+    events: [{
+      runId: base.runId,
+      workspaceId: "workspace",
+      seq: 1,
+      evidence: {
+        toolCallId: "read",
+        toolName: "computer_read_json",
+        isError: false,
+        result: JSON.stringify(binding),
+      },
+    }],
+  });
+  const afterRead = reconcileCanonicalDeliveryTargetBindings(bound, {
+    stepId: "produce",
+    bindings: [],
+    observations: readObservations,
+    now: 3,
+  });
+  assert.equal(afterRead, bound);
+  assert.equal(afterRead.targets.figure.artifactBinding?.versionId, "v1");
+  assert.equal(afterRead.targets.figure.status, "open");
 });
 
 for (const { repair, sequential, direct } of [
@@ -156,6 +214,8 @@ for (const { repair, sequential, direct } of [
       const plan = await new PlanRepository(database).getByRun(run.id);
       if (repair !== undefined) assert.ok(plan.steps.find((step) => step.id === "mixed")?.retiredAt);
       const target = state.targets.figure;
+      assert.deepEqual((await runs.processArtifacts("owner", run.id)).filter(artifact => artifact.role === "final").map(artifact => artifact.path),
+        [target.artifactBinding!.path], "recovery retirement preserves the exact accepted file in the download projection");
       assert.equal(await readFile(join(String(events.find((event) => event.type === "run.started")!.data.workspaceRoot), target.artifactBinding!.path), "utf8"), html);
     } finally { database.close(); await rm(root, { recursive: true, force: true }); }
   });
@@ -182,4 +242,56 @@ for (const change of ["modified", "deleted", "hashless_write", "same_content_wri
   assert.equal(next.targets.figure.artifactBinding, undefined);
   assert.equal(next.gaps.find((gap) => gap.targetId === "figure")!.status, "open");
   assert.deepEqual(next.targets.figure.claims, target.claims, "historical acceptance remains auditable");
+});
+
+test("Plan with one logical report delivers its execution-selected main file and attachments through TerminalCommitter", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-logical-bundle-"));
+  const database = new AppDatabase(":memory:");
+  const files = ["main.html", "attachment-one.html", "attachment-two.html"];
+  let writes = 0, selected = false;
+  try {
+    const runs = new RunService({ database, workspaceRoot: root, skills: new SkillService(database), maxSteps: 8,
+      plannerFactory: () => ({ plan: async () => ({ goal: "Deliver report with attachments", selectedSkillIds: [], steps: [{
+        id: "produce", objective: "Create the complete report with attachments", dependencies: [], skillIds: [],
+        targetIds: ["report"], requiredCapabilities: fileCapabilities,
+        successCriteria: [{ id: "content", description: "Report and attachments fulfill the request", source: "task" }],
+      }] }) }),
+      assessorFactory: () => ({ assess: async input => {
+        assert.equal(input.step.executionBinding.artifactTargets?.length, 1, "Plan does not enumerate physical attachments");
+        assert.equal(input.evidence.deliveryCandidate?.deliveryClaims[0]?.artifacts?.length, 3);
+        return approvingTestAssessor().assess(input);
+      } }),
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async request => {
+        if (request.tools[0]?.name === "resolve_conversation_turn") return { content: "", finishReason: "tool_calls", toolCalls: [{
+          id: "resolve-bundle", name: "resolve_conversation_turn", arguments: { mode: "execute", relation: "new_goal", inputMode: "none",
+            effectiveGoal: "Deliver the report and its complete supporting attachments", evidenceStrategy: "none", sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+            userConstraints: [], memoryAction: "none", memoryIntents: [], requiredCapabilityReferences: [], taskIntent: {
+              schema: "agentloop.conversationTaskIntent/v1", operation: "create_artifact", requiresExecution: true,
+              deliverables: [{ targetId: "report", purpose: "Complete report", expectedArtifactCount: 1, action: "create", kind: "html", format: "html", surface: "workspace_artifact" }],
+            } },
+        }] };
+        if (writes < files.length) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: `write-${writes}`, name: "computer_write_file",
+          arguments: { path: files[writes++], content: html } }] };
+        if (!selected) {
+          selected = true;
+          const view = JSON.parse(request.runtimeContext!.content.match(/<loop_step_frame source="server">\n([^\n]+)\n/)![1]).currentDecisionView;
+          const artifacts = files.map(path => ({ path, versionId: view.workProducts.currentObjects.find((object: any) => object.path === path).currentVersionId }));
+          return { content: `<work_product_progress>${JSON.stringify({ updates: [{ kind: "delivery_target", targetId: "report", ...artifacts[0], artifacts }] })}</work_product_progress>`,
+            finishReason: "tool_calls", toolCalls: [{ id: "verify-main", name: "verify_artifact_acceptance", arguments: { artifactPath: files[0] } }] };
+        }
+        return { content: "The report and its two attachments are ready.", finishReason: "stop", toolCalls: [] };
+      } }),
+    });
+    const run = await runs.executeConversation("owner", "Deliver an HTML report with its complete supporting attachments");
+    assert.equal(run.status, "completed");
+    const state = await new CanonicalRunStateRepository(database).get(run.id);
+    assert.deepEqual(Object.keys(state.targets), ["report"]);
+    assert.equal(state.targets.report.expectedCount, 1);
+    assert.equal(acceptedCanonicalDelivery(state.targets.report)?.artifacts?.length, 3);
+    for (const path of files) assert.ok(run.output!.includes(path));
+    const projected = await runs.processArtifacts("owner", run.id);
+    assert.deepEqual(projected.filter(artifact => artifact.role === "final").map(artifact => artifact.path).sort(), [...files].sort());
+    const events = await runs.events("owner", run.id);
+    assert.equal(events.filter(event => event.type === "tool.completed" && event.data.toolName === "verify_artifact_acceptance").length, 3);
+  } finally { database.close(); await rm(root, { recursive: true, force: true }); }
 });

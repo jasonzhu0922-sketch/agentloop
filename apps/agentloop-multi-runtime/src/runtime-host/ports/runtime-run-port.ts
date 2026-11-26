@@ -27,7 +27,7 @@ export interface RuntimeHostRunPort {
     readonly connectorConnectionIds?: readonly string[];
     readonly allowDangerousTools?: boolean;
     readonly modelKey?: string;
-  }): Promise<RuntimeHostRun>;
+  }, persistence?: { persist(run: { id: string; ownerUserId: string; conversationId?: string }): Promise<void> }): Promise<RuntimeHostRun>;
   get(actorUserId: string, runId: string): Promise<RuntimeHostRun>;
   submitInput?(actorUserId: string, runId: string, input: { readonly requestId: string; readonly text: string }): Promise<RuntimeRunInputMessage>;
   inputMessages?(actorUserId: string, runId: string): Promise<readonly RuntimeRunInputMessage[]>;

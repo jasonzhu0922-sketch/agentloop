@@ -1,0 +1,55 @@
+{
+  "channel": {
+    "schema": "agentloop.kernelRelease/v1",
+    "releaseId": "0.1.0-a09cff0f83175f25",
+    "version": "0.1.0",
+    "artifactSha256": "585e9c3d5b5dac7b5ea961d8eb9c8fd7df28f2a05489bd59dbeb258bc62cc1d8",
+    "artifact": "zhujun-agentloop-0.1.0.tgz",
+    "createdAt": "2026-11-26T06:27:39.829Z",
+    "packagePath": "node_modules/@zhujun/agentloop",
+    "runtimePeers": {
+      "pg": "8.23.0",
+      "mysql2": "3.24.4"
+    },
+    "dependencyLockSha256": "06f9d6465c991037000ba04210203eabe170d96c334cf2a77ecb828ac55fb943",
+    "installationLockSha256": "e42012ad43fa98785391ae8e2cfc61ad6630de62a4eb1cbb633bd57e907c8db0",
+    "releaseRoot": "/Users/zhujun/coding/agentloop/.releases/kernel/releases/0.1.0-a09cff0f83175f25",
+    "packageRoot": "/Users/zhujun/coding/agentloop/.releases/kernel/releases/0.1.0-a09cff0f83175f25/node_modules/@zhujun/agentloop"
+  },
+  "consumers": [
+    {
+      "project": "/Users/zhujun/coding/report-agent",
+      "entry": "/Users/zhujun/coding/agentloop/.releases/kernel/releases/0.1.0-a09cff0f83175f25/node_modules/@zhujun/agentloop/dist/index.js",
+      "bindings": [
+        {
+          "path": "reports/banned-supplier-5651-202610-v3.docx",
+          "versionId": "7ed9ffd9ce0a68b83d2b68921d66590435f8d15771e5122b5f57b69ba24ff1aa",
+          "sha256": "e2a82fcec3dc1dac65583971bcafb63330db121e8ed9025247af137877e97932"
+        }
+      ],
+      "observedFiles": 54,
+      "drivers": {
+        "pg": "/Users/zhujun/coding/agentloop/.releases/kernel/releases/0.1.0-a09cff0f83175f25/node_modules/pg/lib/index.js",
+        "mysql2": "/Users/zhujun/coding/agentloop/.releases/kernel/releases/0.1.0-a09cff0f83175f25/node_modules/mysql2/index.js"
+      }
+    },
+    {
+      "project": "/Users/zhujun/coding/data-agent",
+      "entry": "/Users/zhujun/coding/agentloop/.releases/kernel/releases/0.1.0-a09cff0f83175f25/node_modules/@zhujun/agentloop/dist/index.js",
+      "bindings": [
+        {
+          "path": "reports/banned-supplier-5651-202610-v3.docx",
+          "versionId": "7ed9ffd9ce0a68b83d2b68921d66590435f8d15771e5122b5f57b69ba24ff1aa",
+          "sha256": "e2a82fcec3dc1dac65583971bcafb63330db121e8ed9025247af137877e97932"
+        }
+      ],
+      "observedFiles": 54,
+      "drivers": {
+        "pg": "/Users/zhujun/coding/agentloop/.releases/kernel/releases/0.1.0-a09cff0f83175f25/node_modules/pg/lib/index.js",
+        "mysql2": "/Users/zhujun/coding/agentloop/.releases/kernel/releases/0.1.0-a09cff0f83175f25/node_modules/mysql2/index.js"
+      }
+    }
+  ],
+  "consumerManifestsUnchangedAcrossPublication": true,
+  "servicesRestarted": false
+}

@@ -1,0 +1,27 @@
+npm warn Unknown builtin config "electron_mirror". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+
+> agentloop-data-agent@0.1.0 test:runtime-state
+> node --test tests/runtime-storage.test.ts tests/redis-runtime-state.test.ts
+
+✔ real Redis Data Agent: SQL outage, concurrency, HIL, idempotency, file evidence and Redis restart (3040.286209ms)
+ℹ Initializing real Redis Runtime with SQL unavailable
+ℹ HTTP service admitted a new native Redis Run
+ℹ Run started: 8d11cc70-51d3-4025-8ad4-6c6154a4ff6e
+ℹ Native HIL persisted
+ℹ Host closed
+ℹ Host reopened with HIL
+ℹ Two parallel Runs admitted; overflow and HIL resume rejected without losing confirmation
+ℹ Host closed
+✔ Redis version conflicts reject stale writers without leases and replay the accepted state (136.323ms)
+✔ Redis capacity protects existing commits and rejects new admission before full (127.685584ms)
+✔ Data Agent defaults to native Redis and preserves the legacy namespace formula (0.9705ms)
+✔ SQLite ignores Runtime Redis and Runtime TiDB settings (18.183583ms)
+✔ SQLite -> Redis -> SQLite uses the installed kernel and isolates histories, with no TiDB (146.061042ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3758.311083

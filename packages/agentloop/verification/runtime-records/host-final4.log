@@ -1,0 +1,14 @@
+✔ Docker Compose separates Router SQL from native Redis Runtime state (4.704292ms)
+✔ Host persists dispatch idempotency across a process restart (6.394833ms)
+✔ a shared state database reports active Runs only to their accepting Host (2.640583ms)
+✔ a Runtime Host reconciles only Runs durably accepted by its own executor ledger (2.341583ms)
+✔ persistent Router forwards cancellation to the assigned Host and persists terminal state (4.904959ms)
+✔ persistent Router forwards recovery advance and resume to the assigned Host (3.874041ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 445.776958

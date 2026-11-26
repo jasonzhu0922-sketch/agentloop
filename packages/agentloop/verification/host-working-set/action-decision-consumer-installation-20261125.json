@@ -1,0 +1,80 @@
+{
+  "schema": "agentloop.consumerKernelInstallation/v1",
+  "createdAt": "2026-11-25T12:50:00.623Z",
+  "sourceSha256": "188630615a05710eda877e434c7b2f7aa7fe9c80ff679414e6454984e5640bb4",
+  "applications": [
+    {
+      "application": "report-agent",
+      "filename": "zhujun-agentloop-0.1.0-decision-063b36ce6061.tgz",
+      "sha256": "063b36ce60610cc04fcb452994d4051a0a0f4ea900417f9807376b06e09406b0",
+      "commandRunnerPreserved": false,
+      "dependency": "file:vendor/zhujun-agentloop-0.1.0-decision-063b36ce6061.tgz",
+      "integrity": "sha512-/umcYVM5e5QtDb1ELLc3EbrccgXEsyuH+vSVHLyGf4uPwybOLgbesg/HrLghbtutO1Vz3eRVzH9I+gCnTZDetQ==",
+      "distFilesMatched": 398,
+      "javascriptFilesMatched": 198,
+      "installedDecisionSmoke": {
+        "requiredOnFirstAction": true,
+        "progressBoundToCommittedOutcome": true,
+        "unknownPreserved": true,
+        "exactEvidence": true,
+        "hostMetadataStripped": true,
+        "modelCalls": 0
+      },
+      "unrelatedFilesAndStagingPreserved": true,
+      "typecheck": "passed",
+      "onlyKernelDependencyChanged": true,
+      "regression": {
+        "tests": 18,
+        "pass": 18,
+        "fail": 0
+      }
+    },
+    {
+      "application": "data-agent",
+      "filename": "zhujun-agentloop-0.1.0-decision-runner-1b0bc14b8e25.tgz",
+      "sha256": "1b0bc14b8e2537022c563c9b3c47524501d7cfe853b00d9d8029fe67737a25b4",
+      "commandRunnerPreserved": true,
+      "dependency": "file:vendor/zhujun-agentloop-0.1.0-decision-runner-1b0bc14b8e25.tgz",
+      "integrity": "sha512-Gj5QREnHrK0tYdVuag/XGGcqPujho56l3kZBCMmKaJC5/+VOJHGTdquVKHcuuHoxU6VgGNwv4097c1K4oOOwaw==",
+      "distFilesMatched": 398,
+      "javascriptFilesMatched": 198,
+      "installedDecisionSmoke": {
+        "requiredOnFirstAction": true,
+        "progressBoundToCommittedOutcome": true,
+        "unknownPreserved": true,
+        "exactEvidence": true,
+        "hostMetadataStripped": true,
+        "modelCalls": 0
+      },
+      "unrelatedFilesAndStagingPreserved": true,
+      "typecheck": "passed",
+      "onlyKernelDependencyChanged": true,
+      "regression": {
+        "hostContracts": {
+          "tests": 12,
+          "pass": 12,
+          "fail": 0
+        },
+        "sharedPythonConfiguredInterpreter": {
+          "tests": 7,
+          "pass": 7,
+          "fail": 0
+        }
+      },
+      "initialDefaultPythonRun": {
+        "failed": 7,
+        "configuredInterpreterRerun": "7/7 passed"
+      }
+    }
+  ],
+  "dataAgentPreservedPatch": {
+    "path": "/Users/zhujun/coding/data-agent/vendor/patches/host-command-runner.patch",
+    "sha256": "9dcdf57d81aab7ddd7153d057fbd9cf62a0512842f3a60fe15cdabd032d05be3",
+    "appliedToStagedPackage": true,
+    "existingExecutorImplementationByteIdentical": true
+  },
+  "servicesRestarted": false,
+  "committed": false,
+  "pushed": false,
+  "scope": "Local package installation and isolated checks. Already running processes retain loaded modules; start new processes manually to use these packages. No real model or business replay."
+}

@@ -1,0 +1,40 @@
+{
+  "schema": "agentloop.decisionWorkingSetVerification/v1",
+  "suites": [
+    {
+      "suite": "unit",
+      "tests": 334,
+      "pass": 333,
+      "fail": 1,
+      "skipped": 0
+    },
+    {
+      "suite": "kernel",
+      "tests": 662,
+      "pass": 659,
+      "fail": 1,
+      "skipped": 2
+    }
+  ],
+  "build": "npm run build:kernel passed",
+  "knownFailures": [
+    {
+      "test": "goal-loop-contract.test.ts: TiDB CHECK migration",
+      "actual": "SHOW CREATE TABLE skill_compliance_assessments",
+      "expected": "information_schema.CHECK_CONSTRAINTS"
+    },
+    {
+      "test": "failure-report.test.ts: no_progress exit",
+      "actual": "STEP_NOT_COMPLETED",
+      "expected": "RUN_LIMIT_EXCEEDED"
+    }
+  ],
+  "baselineQualification": "Failures were reproduced with the new working-set branch disabled in the current dirty source; this is not proof against a clean pre-change checkout.",
+  "notPerformed": [
+    "consumer dependency update",
+    "shared service restart",
+    "production host acceptance",
+    "commit",
+    "push"
+  ]
+}

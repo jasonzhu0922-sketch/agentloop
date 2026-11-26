@@ -1,0 +1,3 @@
+npm warn Unknown builtin config "electron_mirror". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+apps/agentloop-multi-runtime/local-agent-runtime/src/main.ts(13,57): error TS2724: '"../../scripts/local-runtime-tools.mjs"' has no exported member named 'localRuntimeToolsEnvironment'. Did you mean 'localRuntimeHostEnvironment'?
+apps/agentloop-multi-runtime/local-agent-runtime/src/main.ts(153,57): error TS18048: 'value.length' is possibly 'undefined'.

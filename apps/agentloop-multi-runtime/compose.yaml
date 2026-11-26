@@ -8,6 +8,15 @@ x-runtime-environment: &runtime_environment
   # This exact in-container location is mounted from one shared volume on every
   # Runtime Host. RunService isolates task files by conversations/<conversationId>.
   WORKSPACE_ROOT: /app/apps/agentloop-multi-runtime/workspace
+  RUNTIME_HISTORY_TIDB_URL: ${RUNTIME_HISTORY_TIDB_URL:-${RUNTIME_SUMMARY_TIDB_URL:-}}
+  RUNTIME_HISTORY_TIMEOUT_MS: ${RUNTIME_HISTORY_TIMEOUT_MS:-3000}
+  RUNTIME_HISTORY_CONNECTION_LIMIT: ${RUNTIME_HISTORY_CONNECTION_LIMIT:-2}
+  RUNTIME_HISTORY_BATCH_SIZE: ${RUNTIME_HISTORY_BATCH_SIZE:-100}
+  RUNTIME_HISTORY_INTERVAL_MS: ${RUNTIME_HISTORY_INTERVAL_MS:-1000}
+  AGENTLOOP_RUNTIME_STATE_BACKEND: ${AGENTLOOP_RUNTIME_STATE_BACKEND:-redis}
+  AGENTLOOP_RUNTIME_REDIS_URL: ${AGENTLOOP_RUNTIME_REDIS_URL:-redis://runtime-redis:6379}
+  AGENTLOOP_RUNTIME_REDIS_NAMESPACE: ${AGENTLOOP_RUNTIME_REDIS_NAMESPACE:-agentloop-runtime-state}
+  RUNTIME_ARCHIVE_ROOT: /app/apps/agentloop-multi-runtime/workspace/runtime-archives
   MAX_CONCURRENT_RUNS: 20
   PLANNING_MAX_TURNS: ${PLANNING_MAX_TURNS:-4}
   STEP_MAX_TURNS: ${STEP_MAX_TURNS:-32}
@@ -37,6 +46,15 @@ x-app-build: &app_build
 x-app-image: &app_image ${MULTI_RUNTIME_IMAGE:-agentloop-multi-runtime:runtime-baseline-local}
 
 services:
+  runtime-redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always", "--maxmemory-policy", "noeviction"]
+    volumes: ["runtime-redis-data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
   router:
     image: *app_image
     build: *app_build
@@ -84,10 +102,6 @@ services:
       <<: *runtime_environment
       RUNTIME_ID: general-01
       PORT: 8791
-      AGENTLOOP_RUNTIME_STATE_DRIVER: ${AGENTLOOP_RUNTIME_STATE_DRIVER:-${AGENTLOOP_STATE_DRIVER:-sqlite}}
-      AGENTLOOP_RUNTIME_STATE_SQLITE_PATH: ${AGENTLOOP_RUNTIME_STATE_SQLITE_PATH:-${AGENTLOOP_STATE_SQLITE_PATH:-./data/state/agentloop.db}}
-      AGENTLOOP_RUNTIME_STATE_DATABASE_URL: ${AGENTLOOP_RUNTIME_STATE_DATABASE_URL:-${AGENTLOOP_STATE_DATABASE_URL:-}}
-      AGENTLOOP_RUNTIME_STATE_POOL_SIZE: ${AGENTLOOP_RUNTIME_STATE_POOL_SIZE:-${AGENTLOOP_STATE_POOL_SIZE:-}}
     depends_on:
       router:
         condition: service_healthy
@@ -101,10 +115,6 @@ services:
       <<: *runtime_environment
       RUNTIME_ID: general-02
       PORT: 8792
-      AGENTLOOP_RUNTIME_STATE_DRIVER: ${AGENTLOOP_RUNTIME_STATE_DRIVER:-${AGENTLOOP_STATE_DRIVER:-sqlite}}
-      AGENTLOOP_RUNTIME_STATE_SQLITE_PATH: ${AGENTLOOP_RUNTIME_STATE_SQLITE_PATH:-${AGENTLOOP_STATE_SQLITE_PATH:-./data/state/agentloop.db}}
-      AGENTLOOP_RUNTIME_STATE_DATABASE_URL: ${AGENTLOOP_RUNTIME_STATE_DATABASE_URL:-${AGENTLOOP_STATE_DATABASE_URL:-}}
-      AGENTLOOP_RUNTIME_STATE_POOL_SIZE: ${AGENTLOOP_RUNTIME_STATE_POOL_SIZE:-${AGENTLOOP_STATE_POOL_SIZE:-}}
     depends_on:
       router:
         condition: service_healthy
@@ -130,6 +140,7 @@ services:
     ports: ["5174:5174"]
 
 volumes:
+  runtime-redis-data: {}
   router-data: {}
   runtime-state: {}
   runtime-general-01-data: {}

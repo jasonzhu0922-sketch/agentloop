@@ -4,29 +4,29 @@
 
 本目录交付的是一台 CentOS 7 Docker 主机上的完整单机服务端拓扑：一个 Router、可配置数量的 Runtime Host（默认两个）和一个 Web。浏览器经 Web 的同源 `/api` 访问 Router；已安装在用户电脑上的 Local Runtime Agent 则直接连接 `PUBLIC_ROUTER_URL`，所以 Router 也必须有一个可从用户设备访问的公网入口。模型和 Skill 密钥只注入 Runtime Host。
 
-它不是多机高可用方案：默认 SQLite 只能用于这台机器的本地 Docker 卷。要增加第二台 Router/Runtime 主机，先切换为独立的 Router/Runtime PostgreSQL 或 TiDB 数据库，并提供共享的附件、工作区和 Skill 存储；不能把 SQLite 放到 NFS/RWX。
+它不是多机高可用方案：默认 SQLite 只能用于这台机器的本地 Docker 卷。要增加第二台 Router/Runtime 主机，Router 使用独立控制面 PostgreSQL 或 TiDB，Runtime 使用共享持久 Redis，并提供共享的附件、工作区和 Skill 存储；不能把 SQLite 放到 NFS/RWX。
 
 CentOS 7 已停止维护，建议把它作为过渡宿主机。部署前确认 Docker Engine 与 Compose v2 能运行、CPU 架构为 `x86_64`、可用磁盘至少 30 GB、内存至少 8 GB（文档/PDF/浏览器类 Runtime 工作负载建议更多）。本包不会安装 Docker，也不会修改 firewalld；默认需允许 TCP 3001（Web）和 TCP 5001（Router）。Router 容器监听 `8788`，但宿主机将其发布为 `0.0.0.0:5001`，为浏览器无关的 API 客户端和 Local Runtime Agent 的 HTTP/WebSocket 控制通道提供独立入口。正式公网部署应由 Nginx/TLS 反代，并把 `PUBLIC_WEB_ORIGIN` 与 `PUBLIC_ROUTER_URL` 设为各自精确的 HTTPS 地址。
 
 ## 使用服务器本机 PostgreSQL
 
-已有 PostgreSQL 适合替换默认 SQLite，但 Docker 容器不能使用 `127.0.0.1` 连接它；那会连接到容器自身。部署 Compose 已把 `host.docker.internal` 映射到 Docker host gateway。先由服务器管理员创建两个独立数据库（不要使用 `postgres` 管理库）：
+已有 PostgreSQL 适合替换默认 SQLite，但 Docker 容器不能使用 `127.0.0.1` 连接它；那会连接到容器自身。部署 Compose 已把 `host.docker.internal` 映射到 Docker host gateway。先由服务器管理员创建 Router 控制面数据库（不要使用 `postgres` 管理库）：
 
 ```sql
 CREATE DATABASE agentloop_router;
-CREATE DATABASE agentloop_runtime;
 ```
 
-建议另建最小权限服务账号后授予这两个库所有权。密码若包含 `@`、`:`、`/`、`?`、`#` 或 `%`，必须 URL 编码。然后在服务器的 `/opt/agentloop/.env` 中设置，文件权限保持 `600`：
+建议另建最小权限服务账号后授予 Router 库所有权。密码若包含 `@`、`:`、`/`、`?`、`#` 或 `%`，必须 URL 编码。然后在服务器的 `/opt/agentloop/.env` 中设置，文件权限保持 `600`：
 
 ```dotenv
 AGENTLOOP_ROUTER_STATE_DRIVER=postgres
 AGENTLOOP_ROUTER_STATE_DATABASE_URL=postgresql://agentloop:URL_ENCODED_PASSWORD@host.docker.internal:5432/agentloop_router
-AGENTLOOP_RUNTIME_STATE_DRIVER=postgres
-AGENTLOOP_RUNTIME_STATE_DATABASE_URL=postgresql://agentloop:URL_ENCODED_PASSWORD@host.docker.internal:5432/agentloop_runtime
+AGENTLOOP_RUNTIME_STATE_BACKEND=redis
+AGENTLOOP_RUNTIME_REDIS_URL=redis://host.docker.internal:6379
+AGENTLOOP_RUNTIME_REDIS_NAMESPACE=agentloop-runtime-state
 ```
 
-`psql -h 127.0.0.1` 成功只证明宿主机回环连接有效，不能证明容器可连。PostgreSQL 必须监听 Docker gateway 可达的接口（通常设 `listen_addresses = '*'`，但防火墙不开放 5432 到公网），且 `pg_hba.conf` 必须只允许该 Docker 网络的 CIDR 使用该服务账号访问两库。修改后重载 PostgreSQL，并在 `deploy.sh up` 后以实际容器连接为准验证。Docker Engine 必须支持 `host-gateway`（20.10+）；旧版 CentOS Docker 要先升级 Engine，不能退回使用容器内 `127.0.0.1`。
+`psql -h 127.0.0.1` 成功只证明宿主机回环连接有效，不能证明容器可连。PostgreSQL 必须监听 Docker gateway 可达的接口（通常设 `listen_addresses = '*'`，但防火墙不开放 5432 到公网），且 `pg_hba.conf` 必须只允许该 Docker 网络的 CIDR 使用该服务账号访问 Router 库。修改后重载 PostgreSQL，并在 `deploy.sh up` 后以实际容器连接为准验证。Docker Engine 必须支持 `host-gateway`（20.10+）；旧版 CentOS Docker 要先升级 Engine，不能退回使用容器内 `127.0.0.1`。
 
 ## 方式 A：服务器拉取 Git 并构建
 
@@ -154,3 +154,8 @@ node scripts/publish-local-agent.mjs \
 ### 配置 Runtime 数量
 
 修改服务器 `.env` 的 `RUNTIME_COUNT`（1–256，默认 2），再执行本版本 `deploy.sh validate` / `deploy.sh up`。部署会从 `compose.yaml` 和 `runtime-host.yaml` 生成不可变的 Compose 与 Router 节点清单；源 Compose 是模板，不可直接启动。`health` / `logs` 自动读取实际运行的 Compose。生产 PostgreSQL 部署的无构建扩缩容也可使用 `deploy/production/configure-cloud.sh`，支持预览、备份、失败恢复和逐台就绪检查；先暂停新提交并等待现有任务完成。缩容保留数据卷。详见生产手册第 6 节。
+
+
+Runtime 状态后端更新：设备 Desktop/Local Runtime/Local Agent 默认磁盘 SQLite；服务端 Runtime Host 默认内核原生 Redis（`AGENTLOOP_RUNTIME_STATE_BACKEND=sqlite|redis`）。Router/身份/业务 SQL 配置保持独立。旧文中 Runtime SQL 部署参数只适用于历史数据迁移。共享工作目录和归档卷必须持久化，Redis 需要 AOF、appendfsync always、noeviction；无故障降级、无启动自动迁移、无自动清理历史。完整接入、迁移与验证见仓库 `docs/RUNTIME-NATIVE-RECORDS-STATUS.md`。
+
+Runtime Redis 要求 AOF、appendfsync always、noeviction。旧 PostgreSQL Runtime 迁移必须先导出并校验历史；生产旧 `server-operations.sh` 的 PostgreSQL 发布/备份流程不适用于新原生后端，应按离线迁移与备份流程后使用当前 Compose 模板部署。

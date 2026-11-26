@@ -1,0 +1,980 @@
+{
+  "schema": "nl2sql.semantic-metadata/v1",
+  "operation": "retrieve-knowledge",
+  "scenario_id": "group",
+  "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd",
+  "schema_verification": "stored_snapshot_only",
+  "sources": {
+    "items": [
+      {
+        "source_id": "v_fawhzhss0401",
+        "score": 85.824,
+        "matched_clues": [
+          "在岗员工人数",
+          "男职工人数",
+          "女职工人数",
+          "35岁以下职工人数",
+          "中共党员人数",
+          "管理岗位人数",
+          "技术岗位人数",
+          "操作岗位人数",
+          "员工人数",
+          "员工数",
+          "在岗人数",
+          "党员人数"
+        ],
+        "understanding_status": "stale",
+        "label": "人力资源月报",
+        "schema": "nl2sql_group",
+        "metric_refs": [
+          {
+            "source_id": "v_fawhzhss0401",
+            "metric_id": "hr_headcount_on_duty"
+          },
+          {
+            "source_id": "v_fawhzhss0401",
+            "metric_id": "hr_headcount_female"
+          },
+          {
+            "source_id": "v_fawhzhss0401",
+            "metric_id": "hr_headcount_male"
+          },
+          {
+            "source_id": "v_fawhzhss0401",
+            "metric_id": "hr_headcount_party_member"
+          },
+          {
+            "source_id": "v_fawhzhss0401",
+            "metric_id": "hr_headcount_post_management"
+          },
+          {
+            "source_id": "v_fawhzhss0401",
+            "metric_id": "hr_headcount_post_operation"
+          },
+          {
+            "source_id": "v_fawhzhss0401",
+            "metric_id": "hr_headcount_post_technical"
+          },
+          {
+            "source_id": "v_fawhzhss0401",
+            "metric_id": "hr_headcount_under35"
+          },
+          {
+            "source_id": "v_fawhzhss0401",
+            "metric_id": "hr_month_value"
+          }
+        ],
+        "business_context": {},
+        "matched_fields": [
+          {
+            "name": "report_item_des",
+            "score": 5.219
+          }
+        ],
+        "kind": "source",
+        "id": "v_fawhzhss0401",
+        "layer": "source",
+        "semantic_role": "physical_source",
+        "parent_ref": null,
+        "definition_ref": {
+          "kind": "source",
+          "source_id": "v_fawhzhss0401",
+          "id": "v_fawhzhss0401",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "scope": {
+          "completeness": "partial",
+          "kind": "source",
+          "scenario_id": "group",
+          "source_id": "v_fawhzhss0401"
+        },
+        "status": "confirmed",
+        "evidence": [
+          "table_catalog:v_fawhzhss0401"
+        ],
+        "gaps": []
+      },
+      {
+        "source_id": "t_dwd_fact_cwgl_merge_report",
+        "score": 4.24,
+        "matched_clues": [],
+        "understanding_status": "stale",
+        "label": "合并财务报表",
+        "schema": "nl2sql_group",
+        "metric_refs": [
+          {
+            "source_id": "t_dwd_fact_cwgl_merge_report",
+            "metric_id": "operating_cash_flow_net"
+          }
+        ],
+        "business_context": {},
+        "matched_fields": [],
+        "kind": "source",
+        "id": "t_dwd_fact_cwgl_merge_report",
+        "layer": "source",
+        "semantic_role": "physical_source",
+        "parent_ref": null,
+        "definition_ref": {
+          "kind": "source",
+          "source_id": "t_dwd_fact_cwgl_merge_report",
+          "id": "t_dwd_fact_cwgl_merge_report",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "scope": {
+          "completeness": "partial",
+          "kind": "source",
+          "scenario_id": "group",
+          "source_id": "t_dwd_fact_cwgl_merge_report"
+        },
+        "status": "confirmed",
+        "evidence": [
+          "table_catalog:t_dwd_fact_cwgl_merge_report"
+        ],
+        "gaps": []
+      },
+      {
+        "source_id": "mb_index_main_data",
+        "score": 0,
+        "matched_clues": [],
+        "understanding_status": "stale",
+        "label": "钢联指标时序数据",
+        "schema": "nl2sql_group",
+        "metric_refs": [],
+        "business_context": {},
+        "matched_fields": [],
+        "kind": "source",
+        "id": "mb_index_main_data",
+        "layer": "source",
+        "semantic_role": "physical_source",
+        "parent_ref": null,
+        "definition_ref": {
+          "kind": "source",
+          "source_id": "mb_index_main_data",
+          "id": "mb_index_main_data",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "scope": {
+          "completeness": "partial",
+          "kind": "source",
+          "scenario_id": "group",
+          "source_id": "mb_index_main_data"
+        },
+        "status": "confirmed",
+        "evidence": [
+          "table_catalog:mb_index_main_data"
+        ],
+        "gaps": [
+          {
+            "affected_refs": [
+              "source:mb_index_main_info:mb_index_main_info",
+              "source:mb_index_main_data:mb_index_main_data",
+              "term:mb_index_main_info:日照钢铁"
+            ],
+            "blocking": true,
+            "code": "entity_metric_binding_missing",
+            "evidence": [
+              "catalog_diagnostic:no_company_price_binding"
+            ],
+            "gap_id": "no_company_price_binding",
+            "meaning": "当前钢联价格来源没有已确认的生产企业与价格指标绑定。必须先澄清企业出厂价、山东市场价或全部地区市场价等口径，才能生成企业或地区筛选条件。",
+            "source_ids": [
+              "mb_index_main_info",
+              "mb_index_main_data"
+            ],
+            "status": "unresolved",
+            "term": "日照钢铁",
+            "trigger_terms": [
+              "日照钢铁",
+              "日钢",
+              "日照钢铁资源"
+            ]
+          }
+        ]
+      },
+      {
+        "source_id": "mb_index_main_info",
+        "score": 0,
+        "matched_clues": [],
+        "understanding_status": "stale",
+        "label": "钢联指标信息",
+        "schema": "nl2sql_group",
+        "metric_refs": [],
+        "business_context": {},
+        "matched_fields": [],
+        "kind": "source",
+        "id": "mb_index_main_info",
+        "layer": "source",
+        "semantic_role": "physical_source",
+        "parent_ref": null,
+        "definition_ref": {
+          "kind": "source",
+          "source_id": "mb_index_main_info",
+          "id": "mb_index_main_info",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "scope": {
+          "completeness": "partial",
+          "kind": "source",
+          "scenario_id": "group",
+          "source_id": "mb_index_main_info"
+        },
+        "status": "confirmed",
+        "evidence": [
+          "table_catalog:mb_index_main_info"
+        ],
+        "gaps": [
+          {
+            "affected_refs": [
+              "source:mb_index_main_info:mb_index_main_info",
+              "source:mb_index_main_data:mb_index_main_data",
+              "term:mb_index_main_info:日照钢铁"
+            ],
+            "blocking": true,
+            "code": "entity_metric_binding_missing",
+            "evidence": [
+              "catalog_diagnostic:no_company_price_binding"
+            ],
+            "gap_id": "no_company_price_binding",
+            "meaning": "当前钢联价格来源没有已确认的生产企业与价格指标绑定。必须先澄清企业出厂价、山东市场价或全部地区市场价等口径，才能生成企业或地区筛选条件。",
+            "source_ids": [
+              "mb_index_main_info",
+              "mb_index_main_data"
+            ],
+            "status": "unresolved",
+            "term": "日照钢铁",
+            "trigger_terms": [
+              "日照钢铁",
+              "日钢",
+              "日照钢铁资源"
+            ]
+          }
+        ]
+      },
+      {
+        "source_id": "t_ads_fact_bwg_ind_all_02_real",
+        "score": 0,
+        "matched_clues": [],
+        "understanding_status": "stale",
+        "label": "经营指标（二）",
+        "schema": "nl2sql_group",
+        "metric_refs": [],
+        "business_context": {},
+        "matched_fields": [],
+        "kind": "source",
+        "id": "t_ads_fact_bwg_ind_all_02_real",
+        "layer": "source",
+        "semantic_role": "physical_source",
+        "parent_ref": null,
+        "definition_ref": {
+          "kind": "source",
+          "source_id": "t_ads_fact_bwg_ind_all_02_real",
+          "id": "t_ads_fact_bwg_ind_all_02_real",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "scope": {
+          "completeness": "partial",
+          "kind": "source",
+          "scenario_id": "group",
+          "source_id": "t_ads_fact_bwg_ind_all_02_real"
+        },
+        "status": "confirmed",
+        "evidence": [
+          "table_catalog:t_ads_fact_bwg_ind_all_02_real"
+        ],
+        "gaps": [
+          {
+            "affected_refs": [
+              "time:t_ads_fact_bwg_ind_all_02_real:date_time"
+            ],
+            "blocking": true,
+            "code": "time_format_unresolved",
+            "evidence": [
+              "probe:query_160307982453440ea639d29087e59b23"
+            ],
+            "gap_id": "definition_gap:time:t_ads_fact_bwg_ind_all_02_real:date_time",
+            "meaning": "Period storage format is missing or conflicting; inspect the physical definition and probe representative values before binding a range.",
+            "source_ids": [
+              "t_ads_fact_bwg_ind_all_02_real"
+            ],
+            "status": "unresolved"
+          }
+        ]
+      }
+    ],
+    "total": 7,
+    "offset": 0,
+    "next_offset": 5,
+    "complete": false
+  },
+  "terms": [
+    {
+      "matched_text": "员工人数",
+      "match_scope": "context",
+      "definition": {
+        "aliases": [
+          "员工数",
+          "职工数"
+        ],
+        "meaning": "在岗员工人数",
+        "term": "员工人数"
+      },
+      "kind": "term",
+      "source_id": null,
+      "id": "员工人数",
+      "layer": "term",
+      "semantic_role": "lexical_definition",
+      "parent_ref": null,
+      "definition_ref": {
+        "kind": "term",
+        "source_id": null,
+        "id": "员工人数",
+        "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+      },
+      "scope": {
+        "completeness": "partial",
+        "kind": "domain",
+        "scenario_id": "group"
+      },
+      "status": "confirmed",
+      "evidence": [],
+      "gaps": []
+    }
+  ],
+  "metrics": {
+    "items": [
+      {
+        "source_id": "v_fawhzhss0401",
+        "metric_id": "hr_headcount_on_duty",
+        "label": "在岗员工人数",
+        "score": 18.011,
+        "semantic_properties": {
+          "measure_kind": "numeric",
+          "frequency": "month",
+          "aggregation": "sum",
+          "time_field": "ny",
+          "time_format": "%Y%m"
+        },
+        "matched_terms": [
+          "员工人数"
+        ],
+        "definition_ref": {
+          "kind": "metric",
+          "source_id": "v_fawhzhss0401",
+          "id": "hr_headcount_on_duty",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "kind": "metric",
+        "id": "hr_headcount_on_duty",
+        "layer": "measure",
+        "semantic_role": "measure",
+        "parent_ref": "source:v_fawhzhss0401:v_fawhzhss0401",
+        "scope": {
+          "completeness": "partial",
+          "kind": "source",
+          "scenario_id": "group",
+          "source_id": "v_fawhzhss0401"
+        },
+        "status": "provisional",
+        "evidence": [
+          "batch_1_probe_1",
+          "batch_1_probe_2",
+          "batch_1_probe_4",
+          "knowledge_596687dc8414"
+        ],
+        "gaps": []
+      },
+      {
+        "source_id": "v_fawhzhss0401",
+        "metric_id": "hr_headcount_female",
+        "label": "女职工人数",
+        "score": 7.277,
+        "semantic_properties": {
+          "measure_kind": "numeric",
+          "frequency": "month",
+          "aggregation": "sum",
+          "time_field": "ny",
+          "time_format": "%Y%m"
+        },
+        "matched_terms": [],
+        "definition_ref": {
+          "kind": "metric",
+          "source_id": "v_fawhzhss0401",
+          "id": "hr_headcount_female",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "kind": "metric",
+        "id": "hr_headcount_female",
+        "layer": "measure",
+        "semantic_role": "measure",
+        "parent_ref": "source:v_fawhzhss0401:v_fawhzhss0401",
+        "scope": {
+          "completeness": "partial",
+          "kind": "source",
+          "scenario_id": "group",
+          "source_id": "v_fawhzhss0401"
+        },
+        "status": "provisional",
+        "evidence": [
+          "batch_1_probe_1",
+          "batch_1_probe_2",
+          "knowledge_596687dc8414"
+        ],
+        "gaps": []
+      },
+      {
+        "source_id": "v_fawhzhss0401",
+        "metric_id": "hr_headcount_male",
+        "label": "男职工人数",
+        "score": 7.277,
+        "semantic_properties": {
+          "measure_kind": "numeric",
+          "frequency": "month",
+          "aggregation": "sum",
+          "time_field": "ny",
+          "time_format": "%Y%m"
+        },
+        "matched_terms": [],
+        "definition_ref": {
+          "kind": "metric",
+          "source_id": "v_fawhzhss0401",
+          "id": "hr_headcount_male",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "kind": "metric",
+        "id": "hr_headcount_male",
+        "layer": "measure",
+        "semantic_role": "measure",
+        "parent_ref": "source:v_fawhzhss0401:v_fawhzhss0401",
+        "scope": {
+          "completeness": "partial",
+          "kind": "source",
+          "scenario_id": "group",
+          "source_id": "v_fawhzhss0401"
+        },
+        "status": "provisional",
+        "evidence": [
+          "batch_1_probe_1",
+          "batch_1_probe_2",
+          "knowledge_596687dc8414"
+        ],
+        "gaps": []
+      },
+      {
+        "source_id": "v_fawhzhss0401",
+        "metric_id": "hr_headcount_party_member",
+        "label": "中共党员人数",
+        "score": 6.178,
+        "semantic_properties": {
+          "measure_kind": "numeric",
+          "frequency": "month",
+          "aggregation": "sum",
+          "time_field": "ny",
+          "time_format": "%Y%m"
+        },
+        "matched_terms": [],
+        "definition_ref": {
+          "kind": "metric",
+          "source_id": "v_fawhzhss0401",
+          "id": "hr_headcount_party_member",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "kind": "metric",
+        "id": "hr_headcount_party_member",
+        "layer": "measure",
+        "semantic_role": "measure",
+        "parent_ref": "source:v_fawhzhss0401:v_fawhzhss0401",
+        "scope": {
+          "completeness": "partial",
+          "kind": "source",
+          "scenario_id": "group",
+          "source_id": "v_fawhzhss0401"
+        },
+        "status": "provisional",
+        "evidence": [
+          "batch_1_probe_1",
+          "batch_1_probe_2",
+          "knowledge_596687dc8414"
+        ],
+        "gaps": []
+      },
+      {
+        "source_id": "v_fawhzhss0401",
+        "metric_id": "hr_headcount_post_management",
+        "label": "管理岗位人数",
+        "score": 5.773,
+        "semantic_properties": {
+          "measure_kind": "numeric",
+          "frequency": "month",
+          "aggregation": "sum",
+          "time_field": "ny",
+          "time_format": "%Y%m"
+        },
+        "matched_terms": [],
+        "definition_ref": {
+          "kind": "metric",
+          "source_id": "v_fawhzhss0401",
+          "id": "hr_headcount_post_management",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "kind": "metric",
+        "id": "hr_headcount_post_management",
+        "layer": "measure",
+        "semantic_role": "measure",
+        "parent_ref": "source:v_fawhzhss0401:v_fawhzhss0401",
+        "scope": {
+          "completeness": "partial",
+          "kind": "source",
+          "scenario_id": "group",
+          "source_id": "v_fawhzhss0401"
+        },
+        "status": "provisional",
+        "evidence": [
+          "batch_1_probe_1",
+          "batch_1_probe_2",
+          "knowledge_596687dc8414"
+        ],
+        "gaps": []
+      }
+    ],
+    "total": 10,
+    "offset": 0,
+    "next_offset": 5,
+    "complete": false
+  },
+  "semantic_objects": {
+    "items": [
+      {
+        "object_id": "term:员工人数",
+        "kind": "term",
+        "layer": "term",
+        "semantic_role": "lexical_definition",
+        "parent_ref": null,
+        "source_id": null,
+        "identity": "员工人数",
+        "label": "员工人数",
+        "score": 23.159,
+        "match_stage": "semantic_object",
+        "definition": {
+          "completeness": "partial",
+          "evidence": [],
+          "gap_refs": [],
+          "identity": "员工人数",
+          "kind": "term",
+          "label": "员工人数",
+          "layer": "term",
+          "object_id": "term:员工人数",
+          "scope": {
+            "completeness": "partial",
+            "kind": "domain",
+            "scenario_id": "group"
+          },
+          "semantic_role": "lexical_definition",
+          "source_id": null,
+          "status": "confirmed",
+          "definition_status": "current"
+        },
+        "id": "员工人数",
+        "definition_ref": {
+          "kind": "term",
+          "source_id": null,
+          "id": "员工人数",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "scope": {
+          "completeness": "partial",
+          "kind": "domain",
+          "scenario_id": "group"
+        },
+        "status": "confirmed",
+        "evidence": [],
+        "gaps": []
+      },
+      {
+        "object_id": "term:在岗员工人数",
+        "kind": "term",
+        "layer": "term",
+        "semantic_role": "lexical_definition",
+        "parent_ref": null,
+        "source_id": null,
+        "identity": "在岗员工人数",
+        "label": "在岗员工人数",
+        "score": 7.159,
+        "match_stage": "semantic_object",
+        "definition": {
+          "completeness": "partial",
+          "evidence": [
+            "batch_1_probe_1",
+            "knowledge_596687dc8414"
+          ],
+          "gap_refs": [],
+          "identity": "在岗员工人数",
+          "kind": "term",
+          "label": "在岗员工人数",
+          "layer": "term",
+          "object_id": "term:在岗员工人数",
+          "scope": {
+            "completeness": "partial",
+            "kind": "domain",
+            "scenario_id": "group"
+          },
+          "semantic_role": "lexical_definition",
+          "source_id": null,
+          "status": "confirmed",
+          "definition_status": "current"
+        },
+        "id": "在岗员工人数",
+        "definition_ref": {
+          "kind": "term",
+          "source_id": null,
+          "id": "在岗员工人数",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "scope": {
+          "completeness": "partial",
+          "kind": "domain",
+          "scenario_id": "group"
+        },
+        "status": "confirmed",
+        "evidence": [
+          "batch_1_probe_1",
+          "knowledge_596687dc8414"
+        ],
+        "gaps": []
+      },
+      {
+        "object_id": "metric:v_fawhzhss0401:hr_headcount_on_duty",
+        "kind": "metric",
+        "layer": "measure",
+        "semantic_role": "measure",
+        "parent_ref": "source:v_fawhzhss0401:v_fawhzhss0401",
+        "source_id": "v_fawhzhss0401",
+        "identity": "hr_headcount_on_duty",
+        "label": "在岗员工人数",
+        "score": 5.079,
+        "match_stage": "semantic_object",
+        "definition": {
+          "completeness": "partial",
+          "evidence": [
+            "batch_1_probe_1",
+            "batch_1_probe_2",
+            "batch_1_probe_4",
+            "knowledge_596687dc8414"
+          ],
+          "gap_refs": [],
+          "identity": "hr_headcount_on_duty",
+          "kind": "metric",
+          "label": "在岗员工人数",
+          "layer": "measure",
+          "object_id": "metric:v_fawhzhss0401:hr_headcount_on_duty",
+          "parent_ref": "source:v_fawhzhss0401:v_fawhzhss0401",
+          "scope": {
+            "completeness": "partial",
+            "kind": "source",
+            "scenario_id": "group",
+            "source_id": "v_fawhzhss0401"
+          },
+          "semantic_role": "measure",
+          "source_id": "v_fawhzhss0401",
+          "status": "provisional",
+          "definition_status": "current"
+        },
+        "id": "hr_headcount_on_duty",
+        "definition_ref": {
+          "kind": "metric",
+          "source_id": "v_fawhzhss0401",
+          "id": "hr_headcount_on_duty",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "scope": {
+          "completeness": "partial",
+          "kind": "source",
+          "scenario_id": "group",
+          "source_id": "v_fawhzhss0401"
+        },
+        "status": "provisional",
+        "evidence": [
+          "batch_1_probe_1",
+          "batch_1_probe_2",
+          "batch_1_probe_4",
+          "knowledge_596687dc8414"
+        ],
+        "gaps": []
+      },
+      {
+        "object_id": "term:35岁以下职工人数",
+        "kind": "term",
+        "layer": "term",
+        "semantic_role": "lexical_definition",
+        "parent_ref": null,
+        "source_id": null,
+        "identity": "35岁以下职工人数",
+        "label": "35岁以下职工人数",
+        "score": 4.773,
+        "match_stage": "semantic_object",
+        "definition": {
+          "completeness": "partial",
+          "evidence": [
+            "batch_1_probe_1",
+            "knowledge_596687dc8414"
+          ],
+          "gap_refs": [],
+          "identity": "35岁以下职工人数",
+          "kind": "term",
+          "label": "35岁以下职工人数",
+          "layer": "term",
+          "object_id": "term:35岁以下职工人数",
+          "scope": {
+            "completeness": "partial",
+            "kind": "domain",
+            "scenario_id": "group"
+          },
+          "semantic_role": "lexical_definition",
+          "source_id": null,
+          "status": "confirmed",
+          "definition_status": "current"
+        },
+        "id": "35岁以下职工人数",
+        "definition_ref": {
+          "kind": "term",
+          "source_id": null,
+          "id": "35岁以下职工人数",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "scope": {
+          "completeness": "partial",
+          "kind": "domain",
+          "scenario_id": "group"
+        },
+        "status": "confirmed",
+        "evidence": [
+          "batch_1_probe_1",
+          "knowledge_596687dc8414"
+        ],
+        "gaps": []
+      },
+      {
+        "object_id": "term:女职工人数",
+        "kind": "term",
+        "layer": "term",
+        "semantic_role": "lexical_definition",
+        "parent_ref": null,
+        "source_id": null,
+        "identity": "女职工人数",
+        "label": "女职工人数",
+        "score": 4.773,
+        "match_stage": "semantic_object",
+        "definition": {
+          "completeness": "partial",
+          "evidence": [
+            "batch_1_probe_1",
+            "knowledge_596687dc8414"
+          ],
+          "gap_refs": [],
+          "identity": "女职工人数",
+          "kind": "term",
+          "label": "女职工人数",
+          "layer": "term",
+          "object_id": "term:女职工人数",
+          "scope": {
+            "completeness": "partial",
+            "kind": "domain",
+            "scenario_id": "group"
+          },
+          "semantic_role": "lexical_definition",
+          "source_id": null,
+          "status": "confirmed",
+          "definition_status": "current"
+        },
+        "id": "女职工人数",
+        "definition_ref": {
+          "kind": "term",
+          "source_id": null,
+          "id": "女职工人数",
+          "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+        },
+        "scope": {
+          "completeness": "partial",
+          "kind": "domain",
+          "scenario_id": "group"
+        },
+        "status": "confirmed",
+        "evidence": [
+          "batch_1_probe_1",
+          "knowledge_596687dc8414"
+        ],
+        "gaps": []
+      }
+    ],
+    "total": 15,
+    "offset": 0,
+    "next_offset": 5,
+    "complete": false
+  },
+  "entities": {
+    "items": [],
+    "total": 0,
+    "offset": 0,
+    "next_offset": null,
+    "complete": true
+  },
+  "entity_recall": {
+    "order": [
+      "semantic_object",
+      "entity_definition",
+      "canonical_name",
+      "code_or_value_probe"
+    ],
+    "contract": "先确认来源绑定的通用 semantic_object 和可执行 entity_definition，再执行 resolve-entity；只有对象定义确定后才允许对其绑定字段做代码或值探查。",
+    "matched_entity_ids": [],
+    "matched_semantic_object_ids": [
+      "term:员工人数",
+      "term:在岗员工人数",
+      "metric:v_fawhzhss0401:hr_headcount_on_duty",
+      "term:35岁以下职工人数",
+      "term:女职工人数",
+      "term:男职工人数",
+      "metric:v_fawhzhss0401:hr_headcount_female",
+      "metric:v_fawhzhss0401:hr_headcount_male",
+      "metric:v_fawhzhss0401:hr_headcount_under35",
+      "term:中共党员人数",
+      "term:人数快照",
+      "metric:v_fawhzhss0401:hr_headcount_party_member",
+      "metric:v_fawhzhss0401:hr_headcount_post_management",
+      "metric:v_fawhzhss0401:hr_headcount_post_operation",
+      "metric:v_fawhzhss0401:hr_headcount_post_technical"
+    ]
+  },
+  "relationships": [
+    {
+      "cardinality": "many_to_one",
+      "evidence": [
+        "table_summary:mb_index_main_data.relationships.market_index_code",
+        "table_summary:mb_index_main_info.grain_status=verified_unique"
+      ],
+      "id": "market_index_code",
+      "joinable": true,
+      "kind": "relationship",
+      "left": {
+        "fields": [
+          "index_code"
+        ],
+        "source_id": "mb_index_main_data"
+      },
+      "left_cardinality": "many",
+      "meaning": "mb_index_main_data.index_code 通过 mb_index_main_info.index_code 解释指标名称、品种、度量、地区、单位和频度；信息表 index_code 已验证唯一。只在先完成元数据筛选后关联，避免重复放大观测值。",
+      "predicate": "identified_by",
+      "right": {
+        "fields": [
+          "index_code"
+        ],
+        "source_id": "mb_index_main_info"
+      },
+      "right_cardinality": "one",
+      "source_id": "mb_index_main_data",
+      "layer": "relationship",
+      "semantic_role": null,
+      "parent_ref": null,
+      "definition_ref": {
+        "kind": "relationship",
+        "source_id": "mb_index_main_data",
+        "id": "market_index_code",
+        "catalog_revision": "69bef882311f70dc0e078c01791f6c6932b4c0ecabec0f93b70b918035bb68bd"
+      },
+      "scope": {
+        "kind": "source",
+        "scenario_id": "group",
+        "source_id": "mb_index_main_data",
+        "completeness": "partial"
+      },
+      "status": "confirmed",
+      "gaps": [
+        {
+          "affected_refs": [
+            "source:mb_index_main_info:mb_index_main_info",
+            "source:mb_index_main_data:mb_index_main_data",
+            "term:mb_index_main_info:日照钢铁"
+          ],
+          "blocking": true,
+          "code": "entity_metric_binding_missing",
+          "evidence": [
+            "catalog_diagnostic:no_company_price_binding"
+          ],
+          "gap_id": "no_company_price_binding",
+          "meaning": "当前钢联价格来源没有已确认的生产企业与价格指标绑定。必须先澄清企业出厂价、山东市场价或全部地区市场价等口径，才能生成企业或地区筛选条件。",
+          "source_ids": [
+            "mb_index_main_info",
+            "mb_index_main_data"
+          ],
+          "status": "unresolved",
+          "term": "日照钢铁",
+          "trigger_terms": [
+            "日照钢铁",
+            "日钢",
+            "日照钢铁资源"
+          ]
+        }
+      ]
+    }
+  ],
+  "gaps": [],
+  "ambiguities": [
+    {
+      "code": "multiple_metric_candidates",
+      "metric_refs": [
+        {
+          "source_id": "v_fawhzhss0401",
+          "metric_id": "hr_headcount_on_duty"
+        },
+        {
+          "source_id": "v_fawhzhss0401",
+          "metric_id": "hr_headcount_female"
+        },
+        {
+          "source_id": "v_fawhzhss0401",
+          "metric_id": "hr_headcount_male"
+        },
+        {
+          "source_id": "v_fawhzhss0401",
+          "metric_id": "hr_headcount_party_member"
+        },
+        {
+          "source_id": "v_fawhzhss0401",
+          "metric_id": "hr_headcount_post_management"
+        },
+        {
+          "source_id": "v_fawhzhss0401",
+          "metric_id": "hr_headcount_post_operation"
+        },
+        {
+          "source_id": "v_fawhzhss0401",
+          "metric_id": "hr_headcount_post_technical"
+        },
+        {
+          "source_id": "v_fawhzhss0401",
+          "metric_id": "hr_headcount_under35"
+        },
+        {
+          "source_id": "t_dwd_fact_cwgl_merge_report",
+          "metric_id": "operating_cash_flow_net"
+        },
+        {
+          "source_id": "v_fawhzhss0401",
+          "metric_id": "hr_month_value"
+        }
+      ]
+    }
+  ],
+  "retrieval": {
+    "method": "hybrid_structured_v1",
+    "stages": [
+      "semantic_object_first",
+      "exact_term_alias",
+      "typed_metric_variant",
+      "char_ngram_lexical",
+      "source_binding_expansion",
+      "scope_status_rerank"
+    ],
+    "matched_gap_ids": []
+  },
+  "selection_contract": "Candidates guide attention, never authorize a source or confirm a business meaning. Expand with offset/search when coverage is insufficient."
+}

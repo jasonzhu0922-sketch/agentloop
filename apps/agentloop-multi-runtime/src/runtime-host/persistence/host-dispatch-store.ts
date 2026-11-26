@@ -1,4 +1,4 @@
-import { upsertSql, type SqlConnection } from "@zhujun/agentloop";
+import { runtimePersistence, type RuntimePersistence, type RuntimePersistenceInput, type SqlConnection } from "@zhujun/agentloop";
 import { TIDB_HOST_DISPATCH_SCHEMA_SQL } from "./tidb-schema.ts";
 import { migrateRuntimeState } from "./state-migrations.ts";
 
@@ -9,16 +9,18 @@ export type DispatchClaim =
 
 /** Durable dispatch idempotency and execution ownership ledger in the shared state store. */
 export class HostDispatchStore {
-  private readonly database: SqlConnection;
+  private readonly database: RuntimePersistence;
+  private readonly legacySchema?: SqlConnection;
   private readonly runtimeId: string;
 
-  constructor(database: SqlConnection, runtimeId = "legacy-runtime") {
-    this.database = database;
+  constructor(database: RuntimePersistenceInput, runtimeId = "legacy-runtime") {
+    this.database = runtimePersistence(database);
+    this.legacySchema = "records" in database ? undefined : database;
     this.runtimeId = runtimeId;
   }
 
   async ready(): Promise<void> {
-    await migrateRuntimeState(this.database);
+    // Kernel factory owns the execution schema. Legacy Host DDL remains available to the migration registry.
   }
 
   /** Invoked only by the versioned schema migration registry. */
@@ -47,69 +49,46 @@ export class HostDispatchStore {
       );
       CREATE INDEX IF NOT EXISTS mr_run_executors_runtime_idx ON mr_run_executors(runtime_id, accepted_at DESC);
     `;
-    await this.database.exec(this.database.dialect === "tidb" ? TIDB_HOST_DISPATCH_SCHEMA_SQL : canonicalSchema);
+    if (this.legacySchema) await this.legacySchema.exec(this.legacySchema.dialect === "tidb" ? TIDB_HOST_DISPATCH_SCHEMA_SQL : canonicalSchema);
   }
 
   async claim(input: { readonly dispatchKey: string; readonly assignmentId: string; readonly ownerUserId: string; readonly now: number; readonly leaseMs: number }): Promise<DispatchClaim> {
     return await this.database.transaction(async () => {
-      const existing = await this.database.prepare(`
-        SELECT owner_user_id, remote_run_id, state, lease_expires_at FROM mr_host_dispatches WHERE dispatch_key = ?
-      `).get(input.dispatchKey) as { owner_user_id: string; remote_run_id: string | null; state: string; lease_expires_at: number | null } | undefined;
+      const existing = (await this.database.records.find("runtime_dispatches", { dispatch_key: input.dispatchKey }))[0];
       if (existing?.state === "accepted" && existing.remote_run_id !== null) {
         return { kind: "accepted", remoteRunId: existing.remote_run_id, ownerUserId: existing.owner_user_id };
       }
       if (existing?.state === "starting" && (existing.lease_expires_at ?? 0) >= input.now) return { kind: "in_flight" };
-      if (existing === undefined) {
-        await this.database.prepare(`
-          INSERT INTO mr_host_dispatches(dispatch_key, assignment_id, owner_user_id, state, lease_expires_at, created_at, updated_at)
-          VALUES (?, ?, ?, 'starting', ?, ?, ?)
-        `).run(input.dispatchKey, input.assignmentId, input.ownerUserId, input.now + input.leaseMs, input.now, input.now);
-      } else {
-        await this.database.prepare(`
-          UPDATE mr_host_dispatches SET assignment_id = ?, owner_user_id = ?, state = 'starting', lease_expires_at = ?, updated_at = ? WHERE dispatch_key = ?
-        `).run(input.assignmentId, input.ownerUserId, input.now + input.leaseMs, input.now, input.dispatchKey);
-      }
+      await this.database.records.insert("runtime_dispatches", { dispatch_key: input.dispatchKey, assignment_id: input.assignmentId,
+        owner_user_id: input.ownerUserId, state: "starting", lease_expires_at: input.now + input.leaseMs,
+        created_at: existing?.created_at ?? input.now, updated_at: input.now }, "replace");
       return { kind: "claimed" };
     });
   }
 
   async accept(dispatchKey: string, remoteRunId: string, now = Date.now()): Promise<void> {
     await this.database.transaction(async () => {
-      const result = await this.database.prepare(`
-        UPDATE mr_host_dispatches SET remote_run_id = ?, state = 'accepted', lease_expires_at = NULL, updated_at = ?
-        WHERE dispatch_key = ? AND state = 'starting'
-      `).run(remoteRunId, now, dispatchKey);
-      if (result.changes === 0) throw new Error("Host dispatch claim was lost before Run acceptance");
-      const dispatch = await this.database.prepare(`
-        SELECT owner_user_id FROM mr_host_dispatches WHERE dispatch_key = ? AND remote_run_id = ?
-      `).get(dispatchKey, remoteRunId) as { owner_user_id: string } | undefined;
-      if (dispatch === undefined) throw new Error("Host dispatch receipt is missing its owner");
-      await this.database.prepare(upsertSql({
-        dialect: this.database.dialect,
-        insert: "INSERT INTO mr_run_executors(remote_run_id, runtime_id, dispatch_key, owner_user_id, accepted_at) VALUES (?, ?, ?, ?, ?)",
-        conflictTarget: "remote_run_id",
-        sqliteAndPostgresUpdate: "runtime_id = excluded.runtime_id, dispatch_key = excluded.dispatch_key, owner_user_id = excluded.owner_user_id, accepted_at = excluded.accepted_at",
-        tidbUpdate: "runtime_id = VALUES(runtime_id), dispatch_key = VALUES(dispatch_key), owner_user_id = VALUES(owner_user_id), accepted_at = VALUES(accepted_at)",
-      })).run(remoteRunId, this.runtimeId, dispatchKey, dispatch.owner_user_id, now);
+      const prior = (await this.database.records.find("runtime_dispatches", { dispatch_key: dispatchKey }))[0];
+      if (prior?.state === "accepted" && prior.remote_run_id === remoteRunId) return;
+      const changed = await this.database.records.update("runtime_dispatches", { dispatch_key: dispatchKey, state: "starting" },
+        () => ({ remote_run_id: remoteRunId, state: "accepted", lease_expires_at: null, updated_at: now }));
+      if (!changed || !prior) throw new Error("Host dispatch claim was lost before Run acceptance");
+      await this.database.records.insert("runtime_executors", { remote_run_id: remoteRunId, runtime_id: this.runtimeId,
+        dispatch_key: dispatchKey, owner_user_id: prior.owner_user_id, accepted_at: now });
     });
   }
 
   async release(dispatchKey: string): Promise<void> {
-    await this.database.prepare(`DELETE FROM mr_host_dispatches WHERE dispatch_key = ? AND state = 'starting'`).run(dispatchKey);
+    await this.database.records.remove("runtime_dispatches", { dispatch_key: dispatchKey, state: "starting" });
   }
 
   async ownerForRun(remoteRunId: string): Promise<string | undefined> {
-    const row = await this.database.prepare(`SELECT owner_user_id FROM mr_host_dispatches WHERE remote_run_id = ? AND state = 'accepted'`).get(remoteRunId) as { owner_user_id: string } | undefined;
+    const row = (await this.database.records.find("runtime_dispatches", { remote_run_id: remoteRunId, state: "accepted" }))[0];
     return row?.owner_user_id;
   }
 
   async ownedRunIds(): Promise<readonly string[]> {
-    const rows = await this.database.prepare(`
-      SELECT remote_run_id
-      FROM mr_run_executors
-      WHERE runtime_id = ?
-      ORDER BY accepted_at, remote_run_id
-    `).all(this.runtimeId) as Array<{ remote_run_id: string }>;
+    const rows = (await this.database.records.find("runtime_executors", { runtime_id: this.runtimeId })).sort((a, b) => a.accepted_at - b.accepted_at || a.remote_run_id.localeCompare(b.remote_run_id));
     return rows.map((row) => row.remote_run_id);
   }
 
@@ -119,17 +98,12 @@ export class HostDispatchStore {
    * model/tool action, so it must not retain an admission slot while it waits.
    */
   async activeRunCount(): Promise<number> {
-    const row = await this.database.prepare(`
-      SELECT COUNT(*) AS count
-      FROM mr_run_executors executors JOIN runs ON runs.id = executors.remote_run_id
-      WHERE executors.runtime_id = ?
-        AND runs.status = 'running'
-        AND NOT EXISTS (
-          SELECT 1 FROM run_recovery_states recovery
-          WHERE recovery.run_id = runs.id
-        )
-    `).get(this.runtimeId) as { count: number } | undefined;
-    return Number(row?.count ?? 0);
+    let count = 0;
+    for (const id of await this.ownedRunIds()) {
+      const run = (await this.database.records.find("runs", { id, status: "running" }))[0];
+      if (run && !(await this.database.records.find("run_recovery_states", { run_id: id })).length) count++;
+    }
+    return count;
   }
 }
 

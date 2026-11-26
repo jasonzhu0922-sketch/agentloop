@@ -17,10 +17,11 @@ type PendingAction = "restart" | "stop";
 export const DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS = 10;
 
 export type { LocalRuntimeDefinition, LocalRuntimeControl } from "../contracts/host.ts";
-import type { LocalRuntimeDefinition, LocalRuntimeControl } from "../contracts/host.ts";
+import type { LocalRuntimeDefinition, LocalRuntimeControl, LocalRuntimeMcpDiagnostic } from "../contracts/host.ts";
 
 export interface LocalRuntimeSummary extends LocalRuntimeDefinition {
   readonly skillDiagnostics?: readonly SkillLoadDiagnostic[];
+  readonly mcpDiagnostics?: readonly LocalRuntimeMcpDiagnostic[];
   readonly iconKey: string;
   readonly status: LocalRuntimeLifecycleStatus;
   readonly activeRunCount: number;
@@ -182,6 +183,8 @@ export class LocalRuntimeSupervisor {
         ...toDefinition(row),
         ...(this.instances.get(row.runtime_id)?.skillDiagnostics?.length
           ? { skillDiagnostics: this.instances.get(row.runtime_id)!.skillDiagnostics } : {}),
+        ...(this.instances.get(row.runtime_id)?.mcpDiagnostics?.length
+          ? { mcpDiagnostics: this.instances.get(row.runtime_id)!.mcpDiagnostics } : {}),
         iconKey: configuration.iconKey,
         status: row.status,
         activeRunCount: (this.instances.get(row.runtime_id)?.activeRunIds.size ?? 0) + (this.pendingAdmissions.get(row.runtime_id) ?? 0),

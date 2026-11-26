@@ -1,0 +1,121 @@
+
+  #  /opt/homebrew/Cellar/node/26.0.0/bin/node[70095]: void node::InternalCallbackScope::Close() at ../src/api/callback.cc:185
+  #  Assertion failed: (env_->execution_async_id()) == (0)
+
+----- Native stack trace -----
+
+ 1: 0x10663a6d8 node::Assert(node::AssertionInfo const&) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 2: 0x1066044d8 node::InternalCallbackScope::Close() (.cold.1) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 3: 0x105538120 node::InternalCallbackScope::Close() [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 4: 0x105537e18 node::InternalCallbackScope::~InternalCallbackScope() [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 5: 0x10562c25c node::PerIsolatePlatformData::RunForegroundTask(std::__1::unique_ptr<v8::Task, std::__1::default_delete<v8::Task>>) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 6: 0x10562b470 node::PerIsolatePlatformData::FlushForegroundTasksInternal() [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 7: 0x100b7a3cc uv__async_io [/opt/homebrew/Cellar/libuv/1.52.1/lib/libuv.1.0.0.dylib]
+ 8: 0x100b891b0 uv__io_poll [/opt/homebrew/Cellar/libuv/1.52.1/lib/libuv.1.0.0.dylib]
+ 9: 0x100b7ab64 uv_run [/opt/homebrew/Cellar/libuv/1.52.1/lib/libuv.1.0.0.dylib]
+10: 0x105538fd0 node::SpinEventLoopInternal(node::Environment*) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+11: 0x105609974 node::NodeMainInstance::Run(node::ExitCode*, node::Environment*) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+12: 0x1056096a8 node::NodeMainInstance::Run() [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+13: 0x1055ad2d0 node::Start(int, char**) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+14: 0x19f449d54 start [/usr/lib/dyld]
+✖ /tmp/agentloop-delivery-baseline/tests/command-sandbox.test.ts (263.349584ms)
+✔ the failure-report provider sees committed observations without assistant tool scaffolding (25.848167ms)
+✔ budget exit reports current work against the goal in one extra tool-free turn (6.521417ms)
+✖ no_progress exit reports current work against the goal in one extra tool-free turn (5.106792ms)
+✔ recoverable leaf defers reporting until the Run owner actually chooses failure (1.804416ms)
+✔ exhausted assessment adds exactly one tool-free report without reassessment or completion (1.018667ms)
+✔ failure reporting handles empty without exposing rejected drafts or claiming success (1.567291ms)
+✔ failure reporting handles tool without exposing rejected drafts or claiming success (1.446458ms)
+✔ failure reporting handles dsml_text without exposing rejected drafts or claiming success (0.670333ms)
+✔ failure reporting handles length without exposing rejected drafts or claiming success (0.574125ms)
+✔ failure reporting handles provider_error without exposing rejected drafts or claiming success (0.800167ms)
+✔ failure reporting handles cancelled without exposing rejected drafts or claiming success (0.583167ms)
+✔ failed Run persists its report in both snapshot and Outcome, never a delivery receipt (53.625125ms)
+✔ budget failure persists a goal-oriented summary without changing the original failure code (20.354709ms)
+
+  #  /opt/homebrew/Cellar/node/26.0.0/bin/node[70097]: void node::InternalCallbackScope::Close() at ../src/api/callback.cc:185
+  #  Assertion failed: (env_->execution_async_id()) == (0)
+
+----- Native stack trace -----
+
+ 1: 0x10607a6d8 node::Assert(node::AssertionInfo const&) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 2: 0x1060444d8 node::InternalCallbackScope::Close() (.cold.1) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 3: 0x104f78120 node::InternalCallbackScope::Close() [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 4: 0x104f77e18 node::InternalCallbackScope::~InternalCallbackScope() [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 5: 0x10506c25c node::PerIsolatePlatformData::RunForegroundTask(std::__1::unique_ptr<v8::Task, std::__1::default_delete<v8::Task>>) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 6: 0x10506b470 node::PerIsolatePlatformData::FlushForegroundTasksInternal() [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 7: 0x1007ea3cc uv__async_io [/opt/homebrew/Cellar/libuv/1.52.1/lib/libuv.1.0.0.dylib]
+ 8: 0x1007f91b0 uv__io_poll [/opt/homebrew/Cellar/libuv/1.52.1/lib/libuv.1.0.0.dylib]
+ 9: 0x1007eab64 uv_run [/opt/homebrew/Cellar/libuv/1.52.1/lib/libuv.1.0.0.dylib]
+10: 0x104f78fd0 node::SpinEventLoopInternal(node::Environment*) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+11: 0x105049974 node::NodeMainInstance::Run(node::ExitCode*, node::Environment*) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+12: 0x1050496a8 node::NodeMainInstance::Run() [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+13: 0x104fed2d0 node::Start(int, char**) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+14: 0x19f449d54 start [/usr/lib/dyld]
+✖ /tmp/agentloop-delivery-baseline/tests/runtime-history.test.ts (208.221208ms)
+
+  #  /opt/homebrew/Cellar/node/26.0.0/bin/node[70098]: void node::InternalCallbackScope::Close() at ../src/api/callback.cc:185
+  #  Assertion failed: (env_->execution_async_id()) == (0)
+
+----- Native stack trace -----
+
+ 1: 0x107ba66d8 node::Assert(node::AssertionInfo const&) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 2: 0x107b704d8 node::InternalCallbackScope::Close() (.cold.1) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 3: 0x106aa4120 node::InternalCallbackScope::Close() [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 4: 0x106aa3e18 node::InternalCallbackScope::~InternalCallbackScope() [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 5: 0x106b9825c node::PerIsolatePlatformData::RunForegroundTask(std::__1::unique_ptr<v8::Task, std::__1::default_delete<v8::Task>>) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 6: 0x106b97470 node::PerIsolatePlatformData::FlushForegroundTasksInternal() [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+ 7: 0x1022f63cc uv__async_io [/opt/homebrew/Cellar/libuv/1.52.1/lib/libuv.1.0.0.dylib]
+ 8: 0x1023051b0 uv__io_poll [/opt/homebrew/Cellar/libuv/1.52.1/lib/libuv.1.0.0.dylib]
+ 9: 0x1022f6b64 uv_run [/opt/homebrew/Cellar/libuv/1.52.1/lib/libuv.1.0.0.dylib]
+10: 0x106aa4fd0 node::SpinEventLoopInternal(node::Environment*) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+11: 0x106b75974 node::NodeMainInstance::Run(node::ExitCode*, node::Environment*) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+12: 0x106b756a8 node::NodeMainInstance::Run() [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+13: 0x106b192d0 node::Start(int, char**) [/opt/homebrew/Cellar/node/26.0.0/lib/libnode.147.dylib]
+14: 0x19f449d54 start [/usr/lib/dyld]
+✖ /tmp/agentloop-delivery-baseline/tests/runtime-records-contract.test.ts (477.700042ms)
+ℹ tests 16
+ℹ suites 0
+ℹ pass 12
+ℹ fail 4
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 574.151125
+
+✖ failing tests:
+
+test at ../../../../tmp/agentloop-delivery-baseline/tests/command-sandbox.test.ts:1:1
+✖ /tmp/agentloop-delivery-baseline/tests/command-sandbox.test.ts (263.349584ms)
+  'test failed'
+
+test at ../../../../private/tmp/agentloop-delivery-baseline/tests/failure-report.test.ts:58:3
+✖ no_progress exit reports current work against the goal in one extra tool-free turn (5.106792ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'STEP_NOT_COMPLETED'
+  - 'RUN_LIMIT_EXCEEDED'
+  
+      at Object.<anonymous> (file:///private/tmp/agentloop-delivery-baseline/tests/failure-report.test.ts:87:14)
+      at expectedException (node:assert:547:17)
+      at expectsError (node:assert:672:21)
+      at strict.rejects (node:assert:738:3)
+      at async TestContext.<anonymous> (file:///private/tmp/agentloop-delivery-baseline/tests/failure-report.test.ts:64:5)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'STEP_NOT_COMPLETED',
+    expected: 'RUN_LIMIT_EXCEEDED',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../../../../tmp/agentloop-delivery-baseline/tests/runtime-history.test.ts:1:1
+✖ /tmp/agentloop-delivery-baseline/tests/runtime-history.test.ts (208.221208ms)
+  'test failed'
+
+test at ../../../../tmp/agentloop-delivery-baseline/tests/runtime-records-contract.test.ts:1:1
+✖ /tmp/agentloop-delivery-baseline/tests/runtime-records-contract.test.ts (477.700042ms)
+  'test failed'

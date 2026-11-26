@@ -55,6 +55,8 @@ export interface WorkProductOperation {
   readonly source: WorkProductSource;
   readonly status: WorkProductObservation["operationStatus"];
   readonly contentRefs: readonly { readonly path: string; readonly sha256: string; readonly bytes?: number }[];
+  /** Structured producer selection, retained even if a declared member was not observed. */
+  readonly outputBindings?: readonly { readonly targetId: string; readonly path: string }[];
 }
 
 export interface WorkProductVersion {
@@ -120,7 +122,14 @@ export function normalizeWorkProductObservations(event: WorkProductToolEvent): {
       contentRefs.push({ path: ref.path, sha256: hash(ref.sha256)!, ...size(ref.bytes) });
     }
   }
-  const operation: WorkProductOperation = { source, status, contentRefs };
+  const outputBindings = evidence.toolName === "computer_run_command" && Array.isArray(root?.outputBindings)
+    ? root.outputBindings.flatMap((entry) => {
+      const value = record(entry);
+      return typeof value?.targetId === "string" && typeof value?.path === "string"
+        ? [{ targetId: value.targetId, path: value.path }] : [];
+    }) : undefined;
+  const operation: WorkProductOperation = { source, status, contentRefs,
+    ...(outputBindings === undefined ? {} : { outputBindings }) };
   if (root === undefined) {
     // Plain-text tools are valid, but they do not declare file observations.
     if (/^\s*[{[]/.test(evidence.result)) {
@@ -162,6 +171,11 @@ export function normalizeWorkProductObservations(event: WorkProductToolEvent): {
         const binding = outputBindings.find((candidate) => candidate.path === change.path);
         add(binding === undefined ? change : { ...change, deliveryTargetId: binding.targetId }, `/fileChanges/${index}`, change.changeType as WorkProductObservation["kind"], "file_change");
       } else issue("invalid_metadata", `/fileChanges/${index}`);
+    });
+    if (status === "succeeded" && Array.isArray(root.outputArtifacts)) root.outputArtifacts.forEach((value, index) => {
+      const artifact = record(value);
+      const binding = artifact === undefined ? undefined : outputBindings.find(binding => binding.path === artifact.path && binding.targetId === artifact.targetId);
+      if (artifact !== undefined && binding !== undefined) add({ ...artifact, deliveryTargetId: binding.targetId }, `/outputArtifacts/${index}`, "observed", "receipt");
     });
   }
   if (status === "succeeded" && evidence.toolName === "computer_write_file") {

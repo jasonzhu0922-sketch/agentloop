@@ -92,6 +92,6 @@ test("fixed planner refuses an unavailable or wrong application capability", () 
   assert.throws(() => fixedDataAnalysisPlanner({ ...skill, name: "other-skill" }), /requires/);
   assert.throws(() => fixedDataAnalysisPlanner({ ...skill, agentLoop: undefined }), /requires/);
 });
-test("application rejects any non-TiDB persistence before initializing a runtime", async () => {
-  await assert.rejects(createDataAgent({ connection: { dialect: "sqlite" } } as never), /仅支持 TiDB/);
+test("application rejects legacy SQL execution state without an explicit backend", async () => {
+  await assert.rejects(createDataAgent({ connection: { dialect: "tidb" } } as never), /sqlite or redis/);
 });

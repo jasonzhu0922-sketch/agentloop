@@ -1,0 +1,212 @@
+{
+  "schema": "agentloop.runWorkingSetReview/v1",
+  "runId": "e154278b-00e2-4a55-9020-8efe2fa60f2d",
+  "status": "failed",
+  "errorCode": "RUN_LIMIT_EXCEEDED",
+  "elapsedMs": 229480,
+  "archiveVerified": {
+    "events": 1872,
+    "lastEventSeq": 1872,
+    "sha256": "eee9ea159166961261a443099ca78802e6939a9c6d77fcc8d163a4d8025d4877"
+  },
+  "phases": [
+    {
+      "phase": "planning",
+      "calls": 1,
+      "inputTokens": 12260,
+      "outputTokens": 438,
+      "durationMs": 3951
+    },
+    {
+      "phase": "execution",
+      "calls": 66,
+      "inputTokens": 4350799,
+      "outputTokens": 19012,
+      "durationMs": 146427
+    },
+    {
+      "phase": "compaction",
+      "calls": 4,
+      "inputTokens": 208532,
+      "outputTokens": 11147,
+      "durationMs": 42858
+    }
+  ],
+  "selectedRounds": [
+    {
+      "step": 1,
+      "contextEventSeq": 39,
+      "modelCompletionEventSeq": 53,
+      "canonicalMessages": 1,
+      "projectedMessages": 1,
+      "estimatedInputTokens": 20354,
+      "providerInputTokens": 17882,
+      "itemCount": 0,
+      "historicalItemCount": 0,
+      "absorbedExchangeCount": 0,
+      "retainedExchangeCount": 0,
+      "rejectionCount": 0,
+      "gapCount": 0
+    },
+    {
+      "step": 10,
+      "contextEventSeq": 277,
+      "modelCompletionEventSeq": 291,
+      "canonicalMessages": 19,
+      "projectedMessages": 5,
+      "estimatedInputTokens": 37736,
+      "providerInputTokens": 35070,
+      "itemCount": 2,
+      "historicalItemCount": 1,
+      "absorbedExchangeCount": 7,
+      "retainedExchangeCount": 2,
+      "rejectionCount": 0,
+      "gapCount": 0
+    },
+    {
+      "step": 20,
+      "contextEventSeq": 556,
+      "modelCompletionEventSeq": 572,
+      "canonicalMessages": 39,
+      "projectedMessages": 9,
+      "estimatedInputTokens": 45975,
+      "providerInputTokens": 44450,
+      "itemCount": 8,
+      "historicalItemCount": 1,
+      "absorbedExchangeCount": 15,
+      "retainedExchangeCount": 4,
+      "rejectionCount": 1,
+      "gapCount": 1
+    },
+    {
+      "step": 30,
+      "contextEventSeq": 834,
+      "modelCompletionEventSeq": 849,
+      "canonicalMessages": 59,
+      "projectedMessages": 21,
+      "estimatedInputTokens": 65685,
+      "providerInputTokens": 65617,
+      "itemCount": 13,
+      "historicalItemCount": 1,
+      "absorbedExchangeCount": 19,
+      "retainedExchangeCount": 10,
+      "rejectionCount": 6,
+      "gapCount": 1
+    },
+    {
+      "step": 40,
+      "contextEventSeq": 1108,
+      "modelCompletionEventSeq": 1125,
+      "canonicalMessages": 79,
+      "projectedMessages": 31,
+      "estimatedInputTokens": 75336,
+      "providerInputTokens": 76047,
+      "itemCount": 16,
+      "historicalItemCount": 2,
+      "absorbedExchangeCount": 24,
+      "retainedExchangeCount": 15,
+      "rejectionCount": 9,
+      "gapCount": 1
+    },
+    {
+      "step": 50,
+      "contextEventSeq": 1375,
+      "modelCompletionEventSeq": 1390,
+      "canonicalMessages": 99,
+      "projectedMessages": 41,
+      "estimatedInputTokens": 82631,
+      "providerInputTokens": 84461,
+      "itemCount": 19,
+      "historicalItemCount": 4,
+      "absorbedExchangeCount": 29,
+      "retainedExchangeCount": 20,
+      "rejectionCount": 10,
+      "gapCount": 1
+    },
+    {
+      "step": 60,
+      "contextEventSeq": 1653,
+      "modelCompletionEventSeq": 1667,
+      "canonicalMessages": 119,
+      "projectedMessages": 55,
+      "estimatedInputTokens": 103701,
+      "providerInputTokens": 105820,
+      "itemCount": 20,
+      "historicalItemCount": 5,
+      "absorbedExchangeCount": 32,
+      "retainedExchangeCount": 27,
+      "rejectionCount": 16,
+      "gapCount": 1
+    },
+    {
+      "step": 61,
+      "contextEventSeq": 1678,
+      "modelCompletionEventSeq": 1695,
+      "canonicalMessages": 121,
+      "projectedMessages": 57,
+      "estimatedInputTokens": 105240,
+      "providerInputTokens": 107371,
+      "itemCount": 20,
+      "historicalItemCount": 5,
+      "absorbedExchangeCount": 32,
+      "retainedExchangeCount": 28,
+      "rejectionCount": 16,
+      "gapCount": 1
+    },
+    {
+      "step": 62,
+      "contextEventSeq": 1737,
+      "modelCompletionEventSeq": 1751,
+      "canonicalMessages": 123,
+      "projectedMessages": 19,
+      "estimatedInputTokens": 59654,
+      "providerInputTokens": 62573,
+      "itemCount": 20,
+      "historicalItemCount": 5,
+      "absorbedExchangeCount": 32,
+      "retainedExchangeCount": 29,
+      "rejectionCount": 17,
+      "gapCount": 1
+    },
+    {
+      "step": 65,
+      "contextEventSeq": 1817,
+      "modelCompletionEventSeq": 1831,
+      "canonicalMessages": 129,
+      "projectedMessages": 25,
+      "estimatedInputTokens": 63326,
+      "providerInputTokens": 66373,
+      "itemCount": 20,
+      "historicalItemCount": 5,
+      "absorbedExchangeCount": 32,
+      "retainedExchangeCount": 32,
+      "rejectionCount": 17,
+      "gapCount": 1
+    }
+  ],
+  "rejectionReasonCounts": {
+    "explicit_revision_required": 10,
+    "invalid_context_item": 5,
+    "uncommitted_or_out_of_scope_evidence": 2
+  },
+  "historyReadViews": {
+    "result": 4
+  },
+  "interpretationLimits": [
+    "No same-task pre-change replay; no optimization delta or billing claim.",
+    "Actual provider usage differs from character/token estimates.",
+    "First compaction call omits cache breakdown.",
+    "Offline state reduction was reconstructed from durable events; selected per-round counts are original telemetry."
+  ],
+  "correctness": {
+    "goalValueObtained": false,
+    "catalogSnapshotRunIdentityVerified": true,
+    "catalogSnapshotSha256": "a138d8cc2becb80da846834d1f40181b93b0eda6f86eceb863ce054d9ce59488",
+    "availableFields": 48,
+    "firstContextFields": 11,
+    "secondContextFields": 13,
+    "contextFieldsComplete": false,
+    "snapshotDecimalFields": 4,
+    "finalMissingNumericFieldClaimSupported": false
+  }
+}

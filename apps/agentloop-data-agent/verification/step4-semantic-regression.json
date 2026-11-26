@@ -1,0 +1,54 @@
+{
+  "schema": "nl2sql.step4-semantic-regression/v2",
+  "generated_at": "2026-11-21T03:58:40.681415+00:00",
+  "target": {
+    "catalog": "127.0.0.1:4000/nl2sql_skill",
+    "data": "127.0.0.1:4000/nl2sql_group"
+  },
+  "source_runs": [
+    "257d3263",
+    "e7b8a8bb",
+    "e0516ca1"
+  ],
+  "cases": [
+    {
+      "case_id": "bounded_probe_stays_source_local",
+      "expected": {
+        "status": "completed",
+        "scope": {
+          "source_id": "t_dwd_fact_cgcz_pcontract_info"
+        },
+        "global_coverage_promoted": false
+      },
+      "observed": {
+        "status": "completed",
+        "scope": {
+          "kind": "source",
+          "scenario_id": "group",
+          "source_id": "t_dwd_fact_cgcz_pcontract_info",
+          "completeness": "observed_only",
+          "field": "company_code"
+        },
+        "global_coverage_promoted": false
+      },
+      "status": "passed"
+    },
+    {
+      "case_id": "stale_source_signature_rejected",
+      "expected": {
+        "status": "rejected",
+        "code": "query_schema_changed"
+      },
+      "observed": {
+        "status": "rejected",
+        "code": "query_schema_changed"
+      },
+      "status": "passed"
+    }
+  ],
+  "summary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0
+  }
+}

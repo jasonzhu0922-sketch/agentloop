@@ -1,0 +1,1739 @@
+{
+  "schema": "agentloop.exactCurrentEvidenceReplay/v1",
+  "method": "same_frozen_events_component_projection_not_task_reexecution",
+  "builds": {
+    "baselineJavaScriptSha256": "6c6b6dbab128df77848e6929af566aae71c390927def4dd1e262165edc8dbf93",
+    "currentTypeScriptSha256": "0da147b51ad7ac125831356440f0ac6c426da0d255c8e7d1a7236aac41f93972"
+  },
+  "configuration": {
+    "contextWindowTokens": 2000000,
+    "maxOutputTokens": 4096,
+    "completedExchangePolicy": "releasable",
+    "toolDefinitionSha256": "df84f55f1029a0e402a2e3b258195224827e22880218c9ee7d0b3237c8137081"
+  },
+  "accounting": "Characters and estimates are not actual provider tokens or billing. Both builds use the same frozen events, goal, current view, reader definition and model limits. A large fixed context window excludes capacity summaries from this component measurement. Full host prompts/tool catalogs and changed model decisions are not replayed.",
+  "runs": [
+    {
+      "runPrefix": "c0bb6860",
+      "archiveExportSha256": "03bbb1900a5e103741243c47d04639c3c307816e4492fdf28fe2c0c2b154ef9e",
+      "executionDecisions": 43,
+      "beforeCharacters": 10080305,
+      "afterCharacters": 9120037,
+      "measurements": [
+        {
+          "step": 1,
+          "requestEventSeq": 40,
+          "before": {
+            "characters": 9587,
+            "estimatedTokens": 2417,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 0,
+            "projectedMessages": 1,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 8534,
+            "estimatedTokens": 2154,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 0,
+            "projectedMessages": 1,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 2,
+          "requestEventSeq": 66,
+          "before": {
+            "characters": 34795,
+            "estimatedTokens": 12476,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 1,
+            "projectedMessages": 3,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 34059,
+            "estimatedTokens": 12292,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 1,
+            "projectedMessages": 3,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 3,
+          "requestEventSeq": 93,
+          "before": {
+            "characters": 42919,
+            "estimatedTokens": 14518,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 2,
+            "projectedMessages": 5,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 40867,
+            "estimatedTokens": 14004,
+            "currentEvidenceCount": 1,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 1,
+            "projectedMessages": 3,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 4,
+          "requestEventSeq": 118,
+          "before": {
+            "characters": 51793,
+            "estimatedTokens": 16736,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 49534,
+            "estimatedTokens": 16171,
+            "currentEvidenceCount": 2,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 1,
+            "projectedMessages": 3,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 5,
+          "requestEventSeq": 143,
+          "before": {
+            "characters": 74678,
+            "estimatedTokens": 24468,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 4,
+            "projectedMessages": 9,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 72419,
+            "estimatedTokens": 23904,
+            "currentEvidenceCount": 2,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 2,
+            "projectedMessages": 5,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 6,
+          "requestEventSeq": 171,
+          "before": {
+            "characters": 74396,
+            "estimatedTokens": 22602,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 5,
+            "projectedMessages": 11,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 70303,
+            "estimatedTokens": 21579,
+            "currentEvidenceCount": 3,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 2,
+            "projectedMessages": 5,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 7,
+          "requestEventSeq": 196,
+          "before": {
+            "characters": 81828,
+            "estimatedTokens": 24500,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 6,
+            "projectedMessages": 13,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 77645,
+            "estimatedTokens": 23456,
+            "currentEvidenceCount": 4,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 2,
+            "projectedMessages": 5,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 8,
+          "requestEventSeq": 224,
+          "before": {
+            "characters": 90957,
+            "estimatedTokens": 26793,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 7,
+            "projectedMessages": 15,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 84412,
+            "estimatedTokens": 25157,
+            "currentEvidenceCount": 5,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 2,
+            "projectedMessages": 5,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 9,
+          "requestEventSeq": 249,
+          "before": {
+            "characters": 116735,
+            "estimatedTokens": 34184,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 8,
+            "projectedMessages": 17,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 110188,
+            "estimatedTokens": 32547,
+            "currentEvidenceCount": 5,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 10,
+          "requestEventSeq": 275,
+          "before": {
+            "characters": 115912,
+            "estimatedTokens": 33050,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 9,
+            "projectedMessages": 19,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 108281,
+            "estimatedTokens": 31143,
+            "currentEvidenceCount": 6,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 11,
+          "requestEventSeq": 300,
+          "before": {
+            "characters": 132993,
+            "estimatedTokens": 38144,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 10,
+            "projectedMessages": 21,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 120129,
+            "estimatedTokens": 34928,
+            "currentEvidenceCount": 7,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 12,
+          "requestEventSeq": 329,
+          "before": {
+            "characters": 141369,
+            "estimatedTokens": 40238,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 11,
+            "projectedMessages": 23,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 125563,
+            "estimatedTokens": 36286,
+            "currentEvidenceCount": 8,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 13,
+          "requestEventSeq": 354,
+          "before": {
+            "characters": 147822,
+            "estimatedTokens": 41851,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 12,
+            "projectedMessages": 25,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 131835,
+            "estimatedTokens": 37854,
+            "currentEvidenceCount": 9,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 14,
+          "requestEventSeq": 381,
+          "before": {
+            "characters": 152761,
+            "estimatedTokens": 43112,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 13,
+            "projectedMessages": 27,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 136773,
+            "estimatedTokens": 39115,
+            "currentEvidenceCount": 9,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 4,
+            "projectedMessages": 9,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 15,
+          "requestEventSeq": 408,
+          "before": {
+            "characters": 158006,
+            "estimatedTokens": 44441,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 14,
+            "projectedMessages": 29,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 141148,
+            "estimatedTokens": 40228,
+            "currentEvidenceCount": 9,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 5,
+            "projectedMessages": 11,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 16,
+          "requestEventSeq": 434,
+          "before": {
+            "characters": 162475,
+            "estimatedTokens": 45575,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 15,
+            "projectedMessages": 31,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 145617,
+            "estimatedTokens": 41359,
+            "currentEvidenceCount": 9,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 6,
+            "projectedMessages": 13,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 17,
+          "requestEventSeq": 459,
+          "before": {
+            "characters": 166230,
+            "estimatedTokens": 46529,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 16,
+            "projectedMessages": 33,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 149271,
+            "estimatedTokens": 42289,
+            "currentEvidenceCount": 10,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 6,
+            "projectedMessages": 13,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 18,
+          "requestEventSeq": 485,
+          "before": {
+            "characters": 170735,
+            "estimatedTokens": 47671,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 17,
+            "projectedMessages": 35,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 153775,
+            "estimatedTokens": 43431,
+            "currentEvidenceCount": 10,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 7,
+            "projectedMessages": 15,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 19,
+          "requestEventSeq": 511,
+          "before": {
+            "characters": 495325,
+            "estimatedTokens": 147873,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 18,
+            "projectedMessages": 37,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 475676,
+            "estimatedTokens": 142960,
+            "currentEvidenceCount": 10,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 8,
+            "projectedMessages": 17,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 20,
+          "requestEventSeq": 536,
+          "before": {
+            "characters": 262856,
+            "estimatedTokens": 70702,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 19,
+            "projectedMessages": 39,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 243195,
+            "estimatedTokens": 65786,
+            "currentEvidenceCount": 11,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 8,
+            "projectedMessages": 17,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 21,
+          "requestEventSeq": 561,
+          "before": {
+            "characters": 265222,
+            "estimatedTokens": 71323,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 20,
+            "projectedMessages": 41,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 244894,
+            "estimatedTokens": 66226,
+            "currentEvidenceCount": 12,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 8,
+            "projectedMessages": 17,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 22,
+          "requestEventSeq": 587,
+          "before": {
+            "characters": 268857,
+            "estimatedTokens": 72232,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 21,
+            "projectedMessages": 43,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 248528,
+            "estimatedTokens": 67135,
+            "currentEvidenceCount": 12,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 9,
+            "projectedMessages": 19,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 23,
+          "requestEventSeq": 613,
+          "before": {
+            "characters": 270937,
+            "estimatedTokens": 72771,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 22,
+            "projectedMessages": 45,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 250609,
+            "estimatedTokens": 67674,
+            "currentEvidenceCount": 12,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 10,
+            "projectedMessages": 21,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 24,
+          "requestEventSeq": 641,
+          "before": {
+            "characters": 276728,
+            "estimatedTokens": 74236,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 23,
+            "projectedMessages": 47,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 254567,
+            "estimatedTokens": 68681,
+            "currentEvidenceCount": 13,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 10,
+            "projectedMessages": 21,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 25,
+          "requestEventSeq": 667,
+          "before": {
+            "characters": 293520,
+            "estimatedTokens": 79138,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 24,
+            "projectedMessages": 49,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 271357,
+            "estimatedTokens": 73580,
+            "currentEvidenceCount": 13,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 11,
+            "projectedMessages": 23,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 26,
+          "requestEventSeq": 694,
+          "before": {
+            "characters": 286269,
+            "estimatedTokens": 76622,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 25,
+            "projectedMessages": 51,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 264105,
+            "estimatedTokens": 71064,
+            "currentEvidenceCount": 13,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 12,
+            "projectedMessages": 25,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 27,
+          "requestEventSeq": 718,
+          "before": {
+            "characters": 286757,
+            "estimatedTokens": 76744,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 26,
+            "projectedMessages": 53,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 264481,
+            "estimatedTokens": 71159,
+            "currentEvidenceCount": 13,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 13,
+            "projectedMessages": 27,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 28,
+          "requestEventSeq": 745,
+          "before": {
+            "characters": 294519,
+            "estimatedTokens": 79248,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 27,
+            "projectedMessages": 55,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 272248,
+            "estimatedTokens": 73665,
+            "currentEvidenceCount": 13,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 14,
+            "projectedMessages": 29,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 29,
+          "requestEventSeq": 770,
+          "before": {
+            "characters": 298468,
+            "estimatedTokens": 80241,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 28,
+            "projectedMessages": 57,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 274917,
+            "estimatedTokens": 74332,
+            "currentEvidenceCount": 14,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 14,
+            "projectedMessages": 29,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 30,
+          "requestEventSeq": 799,
+          "before": {
+            "characters": 307070,
+            "estimatedTokens": 82401,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 29,
+            "projectedMessages": 59,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 279402,
+            "estimatedTokens": 75463,
+            "currentEvidenceCount": 15,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 14,
+            "projectedMessages": 29,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 31,
+          "requestEventSeq": 824,
+          "before": {
+            "characters": 317089,
+            "estimatedTokens": 84942,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 30,
+            "projectedMessages": 61,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 288036,
+            "estimatedTokens": 77657,
+            "currentEvidenceCount": 16,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 14,
+            "projectedMessages": 29,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 32,
+          "requestEventSeq": 850,
+          "before": {
+            "characters": 321112,
+            "estimatedTokens": 85950,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 31,
+            "projectedMessages": 63,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 292058,
+            "estimatedTokens": 78665,
+            "currentEvidenceCount": 16,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 15,
+            "projectedMessages": 31,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 33,
+          "requestEventSeq": 880,
+          "before": {
+            "characters": 329719,
+            "estimatedTokens": 88144,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 32,
+            "projectedMessages": 65,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 298203,
+            "estimatedTokens": 80245,
+            "currentEvidenceCount": 17,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 15,
+            "projectedMessages": 31,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 34,
+          "requestEventSeq": 905,
+          "before": {
+            "characters": 334654,
+            "estimatedTokens": 89489,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 33,
+            "projectedMessages": 67,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 302990,
+            "estimatedTokens": 81552,
+            "currentEvidenceCount": 18,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 15,
+            "projectedMessages": 31,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 35,
+          "requestEventSeq": 935,
+          "before": {
+            "characters": 336922,
+            "estimatedTokens": 90073,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 34,
+            "projectedMessages": 69,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 302317,
+            "estimatedTokens": 81281,
+            "currentEvidenceCount": 18,
+            "historicalObservationCount": 1,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 15,
+            "projectedMessages": 31,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 36,
+          "requestEventSeq": 960,
+          "before": {
+            "characters": 343601,
+            "estimatedTokens": 91981,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 35,
+            "projectedMessages": 71,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 308879,
+            "estimatedTokens": 83160,
+            "currentEvidenceCount": 19,
+            "historicalObservationCount": 1,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 15,
+            "projectedMessages": 31,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 37,
+          "requestEventSeq": 998,
+          "before": {
+            "characters": 349555,
+            "estimatedTokens": 93534,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 36,
+            "projectedMessages": 73,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 308268,
+            "estimatedTokens": 82833,
+            "currentEvidenceCount": 18,
+            "historicalObservationCount": 2,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 16,
+            "projectedMessages": 33,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 38,
+          "requestEventSeq": 1027,
+          "before": {
+            "characters": 358201,
+            "estimatedTokens": 95746,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 37,
+            "projectedMessages": 75,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 312358,
+            "estimatedTokens": 83865,
+            "currentEvidenceCount": 19,
+            "historicalObservationCount": 2,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 16,
+            "projectedMessages": 33,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 39,
+          "requestEventSeq": 1051,
+          "before": {
+            "characters": 358727,
+            "estimatedTokens": 95878,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 38,
+            "projectedMessages": 77,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 312778,
+            "estimatedTokens": 83970,
+            "currentEvidenceCount": 19,
+            "historicalObservationCount": 2,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 17,
+            "projectedMessages": 35,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 40,
+          "requestEventSeq": 1078,
+          "before": {
+            "characters": 362639,
+            "estimatedTokens": 97323,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 39,
+            "projectedMessages": 79,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 315484,
+            "estimatedTokens": 85113,
+            "currentEvidenceCount": 20,
+            "historicalObservationCount": 2,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 17,
+            "projectedMessages": 35,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 41,
+          "requestEventSeq": 1105,
+          "before": {
+            "characters": 366731,
+            "estimatedTokens": 98535,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 40,
+            "projectedMessages": 81,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 318261,
+            "estimatedTokens": 85997,
+            "currentEvidenceCount": 21,
+            "historicalObservationCount": 2,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 17,
+            "projectedMessages": 35,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 42,
+          "requestEventSeq": 1134,
+          "before": {
+            "characters": 376815,
+            "estimatedTokens": 101096,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 41,
+            "projectedMessages": 83,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 324201,
+            "estimatedTokens": 87482,
+            "currentEvidenceCount": 22,
+            "historicalObservationCount": 2,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 17,
+            "projectedMessages": 35,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 43,
+          "requestEventSeq": 1163,
+          "before": {
+            "characters": 392021,
+            "estimatedTokens": 104996,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 42,
+            "projectedMessages": 85,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 331872,
+            "estimatedTokens": 89414,
+            "currentEvidenceCount": 23,
+            "historicalObservationCount": 2,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 17,
+            "projectedMessages": 35,
+            "contextEpoch": 0
+          }
+        }
+      ]
+    },
+    {
+      "runPrefix": "6a3f4c13",
+      "archiveExportSha256": "0da55e9a12cb8129a361bff9bd1608a2869d1a549055adbb2590764c59a0a965",
+      "executionDecisions": 28,
+      "beforeCharacters": 4616488,
+      "afterCharacters": 3640090,
+      "measurements": [
+        {
+          "step": 1,
+          "requestEventSeq": 40,
+          "before": {
+            "characters": 9589,
+            "estimatedTokens": 2410,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 0,
+            "projectedMessages": 1,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 8536,
+            "estimatedTokens": 2147,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 0,
+            "projectedMessages": 1,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 2,
+          "requestEventSeq": 66,
+          "before": {
+            "characters": 34797,
+            "estimatedTokens": 12470,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 1,
+            "projectedMessages": 3,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 34061,
+            "estimatedTokens": 12286,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 1,
+            "projectedMessages": 3,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 3,
+          "requestEventSeq": 93,
+          "before": {
+            "characters": 42867,
+            "estimatedTokens": 14494,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 2,
+            "projectedMessages": 5,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 40815,
+            "estimatedTokens": 13980,
+            "currentEvidenceCount": 1,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 1,
+            "projectedMessages": 3,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 4,
+          "requestEventSeq": 118,
+          "before": {
+            "characters": 50102,
+            "estimatedTokens": 16303,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 47926,
+            "estimatedTokens": 15758,
+            "currentEvidenceCount": 2,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 1,
+            "projectedMessages": 3,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 5,
+          "requestEventSeq": 143,
+          "before": {
+            "characters": 62842,
+            "estimatedTokens": 19578,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 4,
+            "projectedMessages": 9,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 55671,
+            "estimatedTokens": 17785,
+            "currentEvidenceCount": 3,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 1,
+            "projectedMessages": 3,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 6,
+          "requestEventSeq": 168,
+          "before": {
+            "characters": 76643,
+            "estimatedTokens": 24315,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 5,
+            "projectedMessages": 11,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 64583,
+            "estimatedTokens": 21300,
+            "currentEvidenceCount": 4,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 1,
+            "projectedMessages": 3,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 7,
+          "requestEventSeq": 197,
+          "before": {
+            "characters": 86609,
+            "estimatedTokens": 26813,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 6,
+            "projectedMessages": 13,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 71301,
+            "estimatedTokens": 22985,
+            "currentEvidenceCount": 5,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 1,
+            "projectedMessages": 3,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 8,
+          "requestEventSeq": 222,
+          "before": {
+            "characters": 94294,
+            "estimatedTokens": 28734,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 7,
+            "projectedMessages": 15,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 78860,
+            "estimatedTokens": 24875,
+            "currentEvidenceCount": 6,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 1,
+            "projectedMessages": 3,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 9,
+          "requestEventSeq": 247,
+          "before": {
+            "characters": 109330,
+            "estimatedTokens": 32571,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 8,
+            "projectedMessages": 17,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 88346,
+            "estimatedTokens": 27325,
+            "currentEvidenceCount": 7,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 1,
+            "projectedMessages": 3,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 10,
+          "requestEventSeq": 274,
+          "before": {
+            "characters": 114677,
+            "estimatedTokens": 33928,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 9,
+            "projectedMessages": 19,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 92741,
+            "estimatedTokens": 28444,
+            "currentEvidenceCount": 7,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 2,
+            "projectedMessages": 5,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 11,
+          "requestEventSeq": 300,
+          "before": {
+            "characters": 117801,
+            "estimatedTokens": 34710,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 10,
+            "projectedMessages": 21,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 95762,
+            "estimatedTokens": 29199,
+            "currentEvidenceCount": 8,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 2,
+            "projectedMessages": 5,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 12,
+          "requestEventSeq": 328,
+          "before": {
+            "characters": 123851,
+            "estimatedTokens": 36233,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 11,
+            "projectedMessages": 23,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 99976,
+            "estimatedTokens": 30264,
+            "currentEvidenceCount": 9,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 2,
+            "projectedMessages": 5,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 13,
+          "requestEventSeq": 354,
+          "before": {
+            "characters": 146548,
+            "estimatedTokens": 42026,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 12,
+            "projectedMessages": 25,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 121786,
+            "estimatedTokens": 35835,
+            "currentEvidenceCount": 9,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 14,
+          "requestEventSeq": 384,
+          "before": {
+            "characters": 159332,
+            "estimatedTokens": 45230,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 13,
+            "projectedMessages": 27,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 130826,
+            "estimatedTokens": 38103,
+            "currentEvidenceCount": 10,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 15,
+          "requestEventSeq": 412,
+          "before": {
+            "characters": 169431,
+            "estimatedTokens": 47772,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 14,
+            "projectedMessages": 29,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 138447,
+            "estimatedTokens": 40025,
+            "currentEvidenceCount": 11,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 16,
+          "requestEventSeq": 439,
+          "before": {
+            "characters": 179383,
+            "estimatedTokens": 50285,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 15,
+            "projectedMessages": 31,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 145116,
+            "estimatedTokens": 41719,
+            "currentEvidenceCount": 12,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 17,
+          "requestEventSeq": 465,
+          "before": {
+            "characters": 194211,
+            "estimatedTokens": 55326,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 16,
+            "projectedMessages": 33,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 153581,
+            "estimatedTokens": 45168,
+            "currentEvidenceCount": 13,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 18,
+          "requestEventSeq": 495,
+          "before": {
+            "characters": 206310,
+            "estimatedTokens": 58373,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 17,
+            "projectedMessages": 35,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 162277,
+            "estimatedTokens": 47366,
+            "currentEvidenceCount": 14,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 19,
+          "requestEventSeq": 523,
+          "before": {
+            "characters": 214760,
+            "estimatedTokens": 60493,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 18,
+            "projectedMessages": 37,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 166607,
+            "estimatedTokens": 48454,
+            "currentEvidenceCount": 15,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 20,
+          "requestEventSeq": 548,
+          "before": {
+            "characters": 225386,
+            "estimatedTokens": 63239,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 19,
+            "projectedMessages": 39,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 176168,
+            "estimatedTokens": 50934,
+            "currentEvidenceCount": 16,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 21,
+          "requestEventSeq": 576,
+          "before": {
+            "characters": 236566,
+            "estimatedTokens": 66039,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 20,
+            "projectedMessages": 41,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 183718,
+            "estimatedTokens": 52826,
+            "currentEvidenceCount": 17,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 22,
+          "requestEventSeq": 603,
+          "before": {
+            "characters": 249139,
+            "estimatedTokens": 69344,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 21,
+            "projectedMessages": 43,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 192497,
+            "estimatedTokens": 55183,
+            "currentEvidenceCount": 18,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 23,
+          "requestEventSeq": 631,
+          "before": {
+            "characters": 262452,
+            "estimatedTokens": 73069,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 22,
+            "projectedMessages": 45,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 201860,
+            "estimatedTokens": 57921,
+            "currentEvidenceCount": 19,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 24,
+          "requestEventSeq": 672,
+          "before": {
+            "characters": 273295,
+            "estimatedTokens": 75792,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 23,
+            "projectedMessages": 47,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 207658,
+            "estimatedTokens": 59383,
+            "currentEvidenceCount": 20,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 25,
+          "requestEventSeq": 701,
+          "before": {
+            "characters": 280533,
+            "estimatedTokens": 77602,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 24,
+            "projectedMessages": 49,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 211804,
+            "estimatedTokens": 60419,
+            "currentEvidenceCount": 21,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 26,
+          "requestEventSeq": 730,
+          "before": {
+            "characters": 291584,
+            "estimatedTokens": 80370,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 25,
+            "projectedMessages": 51,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 217810,
+            "estimatedTokens": 61926,
+            "currentEvidenceCount": 22,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 27,
+          "requestEventSeq": 755,
+          "before": {
+            "characters": 296825,
+            "estimatedTokens": 81745,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 26,
+            "projectedMessages": 53,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 222935,
+            "estimatedTokens": 63272,
+            "currentEvidenceCount": 23,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        },
+        {
+          "step": 28,
+          "requestEventSeq": 784,
+          "before": {
+            "characters": 307331,
+            "estimatedTokens": 84373,
+            "currentEvidenceCount": 0,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 27,
+            "projectedMessages": 55,
+            "contextEpoch": 0
+          },
+          "after": {
+            "characters": 228422,
+            "estimatedTokens": 64645,
+            "currentEvidenceCount": 24,
+            "historicalObservationCount": 0,
+            "semanticItemCount": 0,
+            "pendingObservationCount": 3,
+            "projectedMessages": 7,
+            "contextEpoch": 0
+          }
+        }
+      ]
+    }
+  ]
+}

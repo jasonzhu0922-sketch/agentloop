@@ -1,0 +1,99 @@
+✔ the failure-report provider sees committed observations without assistant tool scaffolding (14.036ms)
+✔ budget exit reports current work against the goal in one extra tool-free turn (1.806333ms)
+✖ no_progress exit reports current work against the goal in one extra tool-free turn (2.852791ms)
+✔ recoverable leaf defers reporting until the Run owner actually chooses failure (1.069084ms)
+✔ exhausted assessment adds exactly one tool-free report without reassessment or completion (0.659875ms)
+✔ failure reporting handles empty without exposing rejected drafts or claiming success (0.904959ms)
+✔ failure reporting handles tool without exposing rejected drafts or claiming success (0.441583ms)
+✔ failure reporting handles dsml_text without exposing rejected drafts or claiming success (3.647834ms)
+✔ failure reporting handles length without exposing rejected drafts or claiming success (0.655375ms)
+✔ failure reporting handles provider_error without exposing rejected drafts or claiming success (0.499041ms)
+✔ failure reporting handles cancelled without exposing rejected drafts or claiming success (0.379458ms)
+✔ failed Run persists its report in both snapshot and Outcome, never a delivery receipt (43.096958ms)
+✔ budget failure persists a goal-oriented summary without changing the original failure code (12.750542ms)
+✔ planning failure waits and resumes the same Run after reopening the database (67.8945ms)
+✔ a safe model stream interrupted after emission enters recovery_required (8.9005ms)
+✔ safe model stream recovery resumes the interrupted Step from committed evidence (15.474125ms)
+✔ two delivery targets execute in separate Rounds and final Result aggregates both Round Results (31.148042ms)
+✔ next-Round planning failure waits and resumes the same Run (27.1605ms)
+✔ intent failure resumes the original Run without changing its frozen clock (12.516042ms)
+✔ an interrupted claimed planning recovery resumes after reconciliation (22.088166ms)
+✔ rejecting a planning retry cancels the original Run without granting more budget (12.250792ms)
+✔ a second planning failure terminates rather than asking or retrying indefinitely (14.944708ms)
+✔ cancellation during planning recovery cannot admit a late Plan (29.844958ms)
+✔ planning recovery refuses a changed Skill version before executing tools (17.635625ms)
+✔ failed conversation intent resolution preserves its own bounded model-call budget (6.019667ms)
+✔ initial planning failure retains its structured boundary in the durable Run events (4.386209ms)
+✔ canonical assessment gaps survive local exhaustion and drive one shared recovery path (humanPause=false) (28.487042ms)
+✔ canonical assessment gaps survive local exhaustion and drive one shared recovery path (humanPause=true) (33.745709ms)
+✔ a canonical synthesis gap allows a corrected answer from unchanged observations (8.68425ms)
+✔ criterion provenance rejects foreign intents, invented quotes and unowned targets without weakening the criterion (0.406041ms)
+✔ an unjustified extra proof obligation cannot reopen a canonical Gap for a matching reply (0.805083ms)
+✔ unchanged observations allow a corrected candidate while exact duplicates reuse rejection (duplicate=false) (0.451417ms)
+✔ unchanged observations allow a corrected candidate while exact duplicates reuse rejection (duplicate=true) (0.387458ms)
+✔ Recovery parsing preserves result criteria, original source identities and user provenance (0.187041ms)
+✔ Recovery parsing treats a null sourceConstraint as absent while rejecting malformed constraints (0.226125ms)
+✔ Recovery parsing rejects delivery criteria that Admission derives from target ownership (0.075333ms)
+✔ an invalid Recovery response commits a stopped Outcome and retains the open Gap (11.3915ms)
+✔ assessment profile schema upgrade preserves complete historical observations and indexes (9.326291ms)
+✔ postgres profile migration replaces only the profile constraint and is idempotent (0.19575ms)
+✖ tidb profile migration replaces only the profile constraint and is idempotent (0.774417ms)
+✔ an accepted file receipt cannot route a requested content property through rule-only assessment (36.017625ms)
+✔ Recovery projects editable criteria separately and Admission alone restores delivery obligations (0.874041ms)
+ℹ tests 42
+ℹ suites 0
+ℹ pass 40
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 756.5105
+
+✖ failing tests:
+
+test at ../../../../private/tmp/agentloop-native-state-audit/baseline/packages/agentloop/tests/failure-report.test.ts:58:3
+✖ no_progress exit reports current work against the goal in one extra tool-free turn (2.852791ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'STEP_NOT_COMPLETED'
+  - 'RUN_LIMIT_EXCEEDED'
+  
+      at Object.<anonymous> (file:///private/tmp/agentloop-native-state-audit/baseline/packages/agentloop/tests/failure-report.test.ts:87:14)
+      at expectedException (node:assert:547:17)
+      at expectsError (node:assert:672:21)
+      at strict.rejects (node:assert:738:3)
+      at async TestContext.<anonymous> (file:///private/tmp/agentloop-native-state-audit/baseline/packages/agentloop/tests/failure-report.test.ts:64:5)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'STEP_NOT_COMPLETED',
+    expected: 'RUN_LIMIT_EXCEEDED',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../../../../private/tmp/agentloop-native-state-audit/baseline/packages/agentloop/tests/goal-loop-contract.test.ts:969:3
+✖ tidb profile migration replaces only the profile constraint and is idempotent (0.774417ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /information_schema.CHECK_CONSTRAINTS/. Input:
+  
+  'SHOW CREATE TABLE skill_compliance_assessments'
+  
+      at Object.prepare (file:///private/tmp/agentloop-native-state-audit/baseline/packages/agentloop/tests/goal-loop-contract.test.ts:981:16)
+      at tidbTableChecks (file:///private/tmp/agentloop-native-state-audit/baseline/packages/agentloop/src/storage/assessment-profile-schema.ts:45:30)
+      at installAssessmentProfileSchema (file:///private/tmp/agentloop-native-state-audit/baseline/packages/agentloop/src/storage/assessment-profile-schema.ts:30:13)
+      at TestContext.<anonymous> (file:///private/tmp/agentloop-native-state-audit/baseline/packages/agentloop/tests/goal-loop-contract.test.ts:988:11)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1201:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:831:18)
+      at Test.postRun (node:internal/test_runner/test:1330:19)
+      at Test.run (node:internal/test_runner/test:1258:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'SHOW CREATE TABLE skill_compliance_assessments',
+    expected: /information_schema.CHECK_CONSTRAINTS/,
+    operator: 'match',
+    diff: 'simple'
+  }

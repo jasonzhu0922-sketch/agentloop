@@ -1,0 +1,5 @@
+npm warn Unknown builtin config "electron_mirror". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+
+> @zhujun/agentloop@0.1.0 build
+> node -e "require('node:fs').rmSync('dist', { recursive: true, force: true })" && tsc -p tsconfig.json && node -e "require('node:fs').cpSync('src/assets', 'dist/assets', { recursive: true })"
+

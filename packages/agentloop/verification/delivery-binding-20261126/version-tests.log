@@ -1,0 +1,25 @@
+✔ real Report Run: first semantic loss is v2; latest v3 remains selected and every historical file is retained (4.962792ms)
+✔ acceptance of original cannot complete v2 or v3; failed calls, reads and old acceptance never select a version (3.202625ms)
+✔ same-path rewrite requires fresh version acceptance (same bytes=false) (0.378833ms)
+✔ same-path rewrite requires fresh version acceptance (same bytes=true) (0.32475ms)
+✔ invalidated newest file cannot resurrect old cross-path selection (deleted) (5.393375ms)
+✔ invalidated newest file cannot resurrect old cross-path selection (modified) (0.289666ms)
+✔ logical target owns an atomic multi-file set; every member must pass, replacement and deletion affect the whole set (0.738125ms)
+✔ partially observed explicit set is invalidated as a set, never silently shrunk (0.071458ms)
+✔ multiple logical slots and targets do not cover one another or lower explicit cardinality/format (0.635416ms)
+✔ commit acknowledgement and recovery replay use the identical current binding and version identities (0.584291ms)
+✔ unbound observed files can be verified and selected as a bundle without changing Plan targets (17.198875ms)
+✔ download projection commits every bundle member and revokes the bundle when one current file changes (6.7545ms)
+✔ automatic verifier does not reuse same-path same-hash acceptance from an older incarnation (2.8185ms)
+✔ acceptance identity follows committed observations even when evidence is projected in a different order (0.126625ms)
+✔ replacement command may retain unchanged attachments through Runtime output identities (0.6175ms)
+✔ verification of unknown-target observations creates neither target ownership nor completion claims (0.098875ms)
+✔ failed rewrites revoke acceptance but never select a failed output or fall back to a historical file (0.192625ms)
+ℹ tests 17
+ℹ suites 0
+ℹ pass 17
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 201.704167

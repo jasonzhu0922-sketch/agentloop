@@ -5,6 +5,7 @@ import type { WorkProductDeliveryBinding, WorkProductDeliveryTarget } from "./wo
 import { canonicalArtifactAcceptanceVerdict } from "./tool-result-evidence.ts";
 import type { StepSemanticFrame } from "./step-semantic-frame.ts";
 import { artifactMatchesExpectedTarget } from "./tool-progress-policy.ts";
+import type { WorkProductObservationState } from "./work-product-observations.ts";
 
 export function normalizeDeliveryCandidate(input: {
   readonly output: string;
@@ -75,6 +76,7 @@ export function buildRuntimeDeliveryCandidate(input: {
   readonly deliveryTargets?: readonly Pick<CanonicalDeliveryTarget, "targetId" | "surface">[];
   readonly artifactBindings?: readonly WorkProductDeliveryBinding[];
   readonly artifactTargets?: readonly WorkProductDeliveryTarget[];
+  readonly artifactObservations?: WorkProductObservationState;
 }): RuntimeDeliveryCandidate {
   const evidenceKinds = collectEvidenceKinds(
     input.toolEvidence,
@@ -101,7 +103,7 @@ export function buildRuntimeDeliveryCandidate(input: {
         targetId: target.targetId,
         evidenceRefs: uniqueStrings(input.sourceToolCallIds ?? input.toolEvidence.map((item) => item.resultRef?.resultId ?? item.toolCallId)),
       }];
-      return deliveryClaimsForCurrentTargetBindings(input.artifactBindings ?? [], input.toolEvidence, input.artifactTargets ?? [])
+      return deliveryClaimsForCurrentTargetBindings(input.artifactBindings ?? [], input.toolEvidence, input.artifactTargets ?? [], input.artifactObservations)
         .filter((claim) => claim.targetId === target.targetId);
     }),
     ...(deliveryReceipt === undefined ? {} : { deliveryReceipt }),
@@ -271,8 +273,9 @@ export function deliveryClaimsForCurrentTargetBindings(
   }[],
   evidence: readonly AgentLoopToolEvidence[],
   targets: readonly { readonly targetId: string; readonly deliveryTargetId?: string }[],
+  observations?: WorkProductObservationState,
 ): NonNullable<RuntimeDeliveryCandidate["deliveryClaims"]> {
-  const acceptances = acceptedArtifactVersions(evidence);
+  const acceptances = acceptedArtifactVersions(evidence, bindings, observations);
   const accepted = bindings.flatMap((binding) => {
     const acceptanceToolCallId = acceptances.get(`${binding.path}\u0000${binding.sha256.toLowerCase()}`);
     if (acceptanceToolCallId === undefined) return [];
@@ -294,7 +297,9 @@ export function deliveryClaimsForCurrentTargetBindings(
   for (const claim of accepted) byTarget.set(claim.targetId, [...(byTarget.get(claim.targetId) ?? []), claim]);
   return [...byTarget.entries()].filter(([targetId, claims]) => {
     const expected = targets.filter((target) => (target.deliveryTargetId ?? target.targetId) === targetId);
-    return expected.length > 0 && expected.every((target) => claims.some((claim) => claim.instanceId === target.targetId));
+    const selected = bindings.filter((binding) => binding.deliveryTargetId === targetId);
+    return selected.length === claims.length && expected.length > 0
+      && expected.every((target) => claims.some((claim) => claim.instanceId === target.targetId));
   }).map(([targetId, claims]) => ({
     targetId,
     evidenceRefs: claims.flatMap((claim) => claim.evidenceRefs),
@@ -302,9 +307,13 @@ export function deliveryClaimsForCurrentTargetBindings(
   }));
 }
 /** Exact committed verifier identities shared by execution and delivery claims. */
-export function acceptedArtifactVersions(evidence: readonly AgentLoopToolEvidence[]): ReadonlyMap<string, string> {
+export function acceptedArtifactVersions(
+  evidence: readonly AgentLoopToolEvidence[],
+  bindings?: readonly { readonly path: string; readonly versionId: string; readonly sha256: string; readonly observedByToolCallId?: string }[],
+  observations?: WorkProductObservationState,
+): ReadonlyMap<string, string> {
   const acceptances = new Map<string, string>();
-  for (const item of evidence) {
+  for (const [index, item] of evidence.entries()) {
     if (item.isError || item.toolName !== "verify_artifact_acceptance") continue;
     for (const result of runtimeEvidenceRecordsFromToolResult(item.result)) {
       if (result.schema !== "agentloop.artifactAcceptance/v1") continue;
@@ -312,6 +321,22 @@ export function acceptedArtifactVersions(evidence: readonly AgentLoopToolEvidenc
       const path = typeof artifact?.path === "string" ? artifact.path : undefined;
       const sha256 = typeof artifact?.sha256 === "string" ? artifact.sha256.toLowerCase() : undefined;
       if (path === undefined || sha256 === undefined || !["accepted", "caveated"].includes(canonicalArtifactAcceptanceVerdict(result) ?? "")) continue;
+      if (bindings !== undefined && !bindings.some((binding) => {
+        if (binding.path !== path || binding.sha256.toLowerCase() !== sha256) return false;
+        if (observations !== undefined) {
+          const object = observations.objects.find(object => object.path === binding.path);
+          const version = object?.versions.find(version => version.id === binding.versionId);
+          return observations.observations.some(observation => observation.source.toolCallId === item.toolCallId
+            && observation.source.toolName === "verify_artifact_acceptance"
+            && observation.kind === "observed" && observation.sha256 === binding.sha256
+            && version?.observationIds.includes(observation.id));
+        }
+        if (artifact?.versionId !== undefined) return artifact.versionId === binding.versionId;
+        // Legacy receipts carry path/hash. Bind them only after the committed
+        // producer of this incarnation, never to an identical-byte later write.
+        const producerIndex = evidence.findIndex((entry) => entry.toolCallId === binding.observedByToolCallId);
+        return producerIndex >= 0 && producerIndex < index;
+      })) continue;
       acceptances.set(`${path}\u0000${sha256}`, item.toolCallId);
     }
   }

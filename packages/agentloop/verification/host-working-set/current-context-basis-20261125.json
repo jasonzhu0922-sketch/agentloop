@@ -1,0 +1,221 @@
+{
+  "schema": "agentloop.currentContextValidation/v1",
+  "scope": "isolated synthetic task using each host model configuration; not host business acceptance",
+  "accounting": "Actual successful-response provider usage is separate from characters and estimates. No billing inferred. Single stochastic sample per version and host; cross-host runs concurrent; no latency significance claim. All intermediate regressions retained.",
+  "package": {
+    "filename": "zhujun-agentloop-0.1.0-basis-02982d06ecab.tgz",
+    "sha256": "02982d06ecabe5831109075124d59386bf067121ecd41840dfcdcb63e30f7527"
+  },
+  "runs": [
+    {
+      "hostConfiguration": "data",
+      "stage": "baseline",
+      "task": "synthetic-sequential-v1",
+      "kernelCodeSha256": "9a493d408d6ec6a4ebb3b96b3f5b139808345b59e9eb677e8edec49103285af2",
+      "configSha256": "82c9c26dea4a6f617071217dfefddf2b2cf22cd33896089861dff9174ad6dc09",
+      "correct": true,
+      "modelCalls": 9,
+      "historyReads": 0,
+      "candidateRejections": 0,
+      "wallMs": 16775,
+      "compositionCharacters": 211612,
+      "estimatedInputTokens": 52930,
+      "providerUsage": {
+        "inputTokens": 56292,
+        "outputTokens": 2902,
+        "cacheReadInputTokens": null,
+        "cacheWriteInputTokens": null,
+        "inputTokensNoCache": null
+      }
+    },
+    {
+      "hostConfiguration": "report",
+      "stage": "baseline",
+      "task": "synthetic-sequential-v1",
+      "kernelCodeSha256": "9a493d408d6ec6a4ebb3b96b3f5b139808345b59e9eb677e8edec49103285af2",
+      "configSha256": "9e5a03c0d435cc2853421826348ce40a4c072670a8799986668cb1e14a95e8b7",
+      "correct": true,
+      "modelCalls": 9,
+      "historyReads": 0,
+      "candidateRejections": 0,
+      "wallMs": 15938,
+      "compositionCharacters": 211531,
+      "estimatedInputTokens": 52909,
+      "providerUsage": {
+        "inputTokens": 55859,
+        "outputTokens": 2596,
+        "cacheReadInputTokens": 8448,
+        "cacheWriteInputTokens": 0,
+        "inputTokensNoCache": 41370
+      }
+    },
+    {
+      "hostConfiguration": "data",
+      "stage": "current",
+      "task": "synthetic-sequential-v1",
+      "kernelCodeSha256": "938234efa6ab2abe028f02d0cc6efe13f7c3628d022afed81ef4e01cdd133a0a",
+      "configSha256": "82c9c26dea4a6f617071217dfefddf2b2cf22cd33896089861dff9174ad6dc09",
+      "correct": true,
+      "modelCalls": 10,
+      "historyReads": 0,
+      "candidateRejections": 1,
+      "wallMs": 22142,
+      "compositionCharacters": 371682,
+      "estimatedInputTokens": 94728,
+      "providerUsage": {
+        "inputTokens": 96385,
+        "outputTokens": 3242,
+        "cacheReadInputTokens": 1280,
+        "cacheWriteInputTokens": 0,
+        "inputTokensNoCache": 2473
+      }
+    },
+    {
+      "hostConfiguration": "report",
+      "stage": "current",
+      "task": "synthetic-sequential-v1",
+      "kernelCodeSha256": "938234efa6ab2abe028f02d0cc6efe13f7c3628d022afed81ef4e01cdd133a0a",
+      "configSha256": "9e5a03c0d435cc2853421826348ce40a4c072670a8799986668cb1e14a95e8b7",
+      "correct": true,
+      "modelCalls": 10,
+      "historyReads": 1,
+      "candidateRejections": 0,
+      "wallMs": 16499,
+      "compositionCharacters": 231357,
+      "estimatedInputTokens": 57869,
+      "providerUsage": {
+        "inputTokens": 61139,
+        "outputTokens": 2530,
+        "cacheReadInputTokens": 8448,
+        "cacheWriteInputTokens": 0,
+        "inputTokensNoCache": 40360
+      }
+    },
+    {
+      "hostConfiguration": "data",
+      "stage": "final",
+      "task": "synthetic-sequential-v1",
+      "kernelCodeSha256": "749635ba344d11ad75d8de58ad4bdd7c08af20e2088a1c5ab8110f150290896c",
+      "configSha256": "82c9c26dea4a6f617071217dfefddf2b2cf22cd33896089861dff9174ad6dc09",
+      "correct": true,
+      "modelCalls": 9,
+      "historyReads": 0,
+      "candidateRejections": 0,
+      "wallMs": 14827,
+      "compositionCharacters": 209097,
+      "estimatedInputTokens": 52304,
+      "providerUsage": {
+        "inputTokens": 55125,
+        "outputTokens": 2364,
+        "cacheReadInputTokens": 8448,
+        "cacheWriteInputTokens": 0,
+        "inputTokensNoCache": 40637
+      }
+    },
+    {
+      "hostConfiguration": "report",
+      "stage": "final",
+      "task": "synthetic-sequential-v1",
+      "kernelCodeSha256": "749635ba344d11ad75d8de58ad4bdd7c08af20e2088a1c5ab8110f150290896c",
+      "configSha256": "9e5a03c0d435cc2853421826348ce40a4c072670a8799986668cb1e14a95e8b7",
+      "correct": true,
+      "modelCalls": 11,
+      "historyReads": 2,
+      "candidateRejections": 0,
+      "wallMs": 20131,
+      "compositionCharacters": 258885,
+      "estimatedInputTokens": 64756,
+      "providerUsage": {
+        "inputTokens": 68696,
+        "outputTokens": 3302,
+        "cacheReadInputTokens": 9472,
+        "cacheWriteInputTokens": 0,
+        "inputTokensNoCache": 46184
+      }
+    },
+    {
+      "hostConfiguration": "data",
+      "stage": "release",
+      "task": "synthetic-sequential-v1",
+      "kernelCodeSha256": "b12e7586ee59d6a58ce5187c002462b85603c39ceb9f4f8a6c7323930bd98d8f",
+      "configSha256": "82c9c26dea4a6f617071217dfefddf2b2cf22cd33896089861dff9174ad6dc09",
+      "correct": true,
+      "modelCalls": 9,
+      "historyReads": 0,
+      "candidateRejections": 0,
+      "wallMs": 15527,
+      "compositionCharacters": 211174,
+      "estimatedInputTokens": 53286,
+      "providerUsage": {
+        "inputTokens": 55944,
+        "outputTokens": 2493,
+        "cacheReadInputTokens": 3840,
+        "cacheWriteInputTokens": 0,
+        "inputTokensNoCache": 45976
+      }
+    },
+    {
+      "hostConfiguration": "report",
+      "stage": "release",
+      "task": "synthetic-sequential-v1",
+      "kernelCodeSha256": "b12e7586ee59d6a58ce5187c002462b85603c39ceb9f4f8a6c7323930bd98d8f",
+      "configSha256": "9e5a03c0d435cc2853421826348ce40a4c072670a8799986668cb1e14a95e8b7",
+      "correct": true,
+      "modelCalls": 10,
+      "historyReads": 1,
+      "candidateRejections": 0,
+      "wallMs": 21925,
+      "compositionCharacters": 238399,
+      "estimatedInputTokens": 59785,
+      "providerUsage": {
+        "inputTokens": 62562,
+        "outputTokens": 3108,
+        "cacheReadInputTokens": 8576,
+        "cacheWriteInputTokens": 0,
+        "inputTokensNoCache": 41318
+      }
+    },
+    {
+      "hostConfiguration": "data",
+      "stage": "package",
+      "task": "synthetic-sequential-v1",
+      "kernelCodeSha256": "8ee9b487c392cb457f731fc232138df736e393654826cc9f952bfb900f3ca713",
+      "configSha256": "82c9c26dea4a6f617071217dfefddf2b2cf22cd33896089861dff9174ad6dc09",
+      "correct": true,
+      "modelCalls": 9,
+      "historyReads": 0,
+      "candidateRejections": 0,
+      "wallMs": 14360,
+      "compositionCharacters": 207588,
+      "estimatedInputTokens": 51924,
+      "providerUsage": {
+        "inputTokens": 54586,
+        "outputTokens": 2255,
+        "cacheReadInputTokens": 4864,
+        "cacheWriteInputTokens": 0,
+        "inputTokensNoCache": 43703
+      }
+    },
+    {
+      "hostConfiguration": "report",
+      "stage": "package",
+      "task": "synthetic-sequential-v1",
+      "kernelCodeSha256": "8ee9b487c392cb457f731fc232138df736e393654826cc9f952bfb900f3ca713",
+      "configSha256": "9e5a03c0d435cc2853421826348ce40a4c072670a8799986668cb1e14a95e8b7",
+      "correct": true,
+      "modelCalls": 9,
+      "historyReads": 0,
+      "candidateRejections": 0,
+      "wallMs": 14993,
+      "compositionCharacters": 224071,
+      "estimatedInputTokens": 56046,
+      "providerUsage": {
+        "inputTokens": 59866,
+        "outputTokens": 2544,
+        "cacheReadInputTokens": 6528,
+        "cacheWriteInputTokens": 0,
+        "inputTokensNoCache": 40070
+      }
+    }
+  ]
+}

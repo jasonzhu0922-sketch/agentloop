@@ -629,7 +629,7 @@ export function createComputerTools(
         "Original stdout/stderr belongs to the committed Runtime Result. The model-visible view may contain previews; read exact output through the same resultRef using read_result with pointer /stdout or /stderr and bounded character windows. Do not reopen a file or rerun the command solely to recover omitted output.",
         "The result includes bounded fileChanges for workspace files created, modified, or deleted by the command; use that structured receipt instead of inferring artifacts from stdout text.",
         "Generating code/specs/deliverables and modifying files in place are file operations, not immutable-input computations. Omit computationInputs for those operations and emit an operation-specific receipt rather than agentloop.commandComputation/v1. A computationEvidenceFailure rejects only the computation declaration; inspect exitCode and fileChanges before repeating any operation.",
-        "For a command that may create final user deliverables, declare outputBindings for each exact path when the target is known; pass [] for a support-only command. Runtime records omitted, partial, and unknown-target bindings as unbound observations, preserves fileChanges, and never creates targets or trusts stdout declarations.",
+        "For a command that may create final user deliverables, declare outputBindings for each exact path when the target is known. Multiple paths for one target form its atomic current file set, replacing its previous set; include every member; pass [] for a support-only command. Runtime records omitted, partial, and unknown-target bindings as unbound observations, preserves fileChanges, and never creates targets or trusts stdout declarations.",
         "computationInputs identifies immutable data files consumed by the command; never include the interpreter entrypoint, executable source file, or package-owned Skill script itself.",
         "A package action that acquires facts directly from an external source and emits its own evidenceReceipt must omit computationInputs unless it also consumes an immutable workspace data file declared by the action as an evidence input.",
         "For every command that derives facts from workspace data, pass each exact source path in computationInputs (for example, computationInputs:[{path:'series.json'}]). Its sole stdout JSON document must use agentloop.commandComputation/v1 with inputRefs:[{path:'series.json'}] in the same order and a non-empty facts object; inputs is not a valid stdout field. Runtime captures source hashes from computationInputs and will not infer source identity from stdout.",
@@ -748,15 +748,13 @@ function commandComputationInputs(value: unknown): Array<{ path: string }> {
 
 function commandOutputBindings(value: unknown): Array<{ targetId: string; path: string }> {
   if (!Array.isArray(value) || value.length > 64) throw badRequest("outputBindings must contain at most 64 target/path bindings");
-  const seenTargets = new Set<string>();
   const seenPaths = new Set<string>();
   return value.map((entry, index) => {
     const record = requireRecord(entry, `outputBindings[${index}]`);
     const targetId = requireString(record.targetId, `outputBindings[${index}].targetId`, { max: 128 });
     const path = requireString(record.path, `outputBindings[${index}].path`, { max: 4_000 });
-    if (seenTargets.has(targetId)) throw badRequest(`outputBindings must not repeat targetId: ${targetId}`);
     if (seenPaths.has(path)) throw badRequest(`outputBindings must not repeat path: ${path}`);
-    seenTargets.add(targetId); seenPaths.add(path);
+    seenPaths.add(path);
     return { targetId, path };
   });
 }
@@ -775,7 +773,11 @@ function annotateCommandOutputBindings(
     .filter((item): item is { path: string; changeType?: string } => item !== null && typeof item === "object"
       && typeof (item as Record<string, unknown>).path === "string") : [];
   const declaredPaths = new Set((declared ?? []).map((item) => item.path));
-  const observedPaths = changes.filter((item) => item.changeType !== "deleted").map((item) => item.path);
+  const outputPaths = Array.isArray(result.outputArtifacts) ? result.outputArtifacts.flatMap(value => {
+    const item = value as Record<string, unknown>;
+    return typeof item?.path === "string" ? [item.path] : [];
+  }) : [];
+  const observedPaths = [...new Set([...changes.filter((item) => item.changeType !== "deleted").map((item) => item.path), ...outputPaths])];
   const unknownTargetIds = (declared ?? []).map((item) => item.targetId).filter((id) => !targetIds.includes(id));
   const unboundObservedPaths = observedPaths.filter((path) => !declaredPaths.has(path));
   const unobservedDeclaredPaths = (declared ?? []).map((item) => item.path).filter((path) => !observedPaths.includes(path));
@@ -799,7 +801,7 @@ function annotateCommandOutputBindings(
       ...(unknownTargetIds.length === 0 ? {} : { unknownTargetIds: [...new Set(unknownTargetIds)] }),
       ...(unboundObservedPaths.length === 0 ? {} : { unboundObservedPaths: [...new Set(unboundObservedPaths)] }),
       ...(unobservedDeclaredPaths.length === 0 ? {} : { unobservedDeclaredPaths: [...new Set(unobservedDeclaredPaths)] }),
-      guidance: "Unknown or omitted bindings remain observed workspace files, not final delivery targets. Keep them as support artifacts or revise the admitted Plan before verification.",
+      guidance: "Unknown or omitted bindings remain observed workspace files, not final delivery targets. They may be verified without changing the Plan. Explicitly select their complete file set for an existing target before delivery; verification alone does not establish purpose or completion.",
     },
   };
 }

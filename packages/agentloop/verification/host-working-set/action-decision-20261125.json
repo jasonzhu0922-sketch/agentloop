@@ -1,0 +1,482 @@
+{
+  "schema": "agentloop.actionDecisionVerification/v1",
+  "date": "2026-11-25",
+  "method": "offline_contract_simulation_and_unchanged_verified_archive_replay",
+  "sourceTypeScriptSha256": "188630615a05710eda877e434c7b2f7aa7fe9c80ff679414e6454984e5640bb4",
+  "baselineJavaScriptSha256": "6b3ed296a143f2e7a7c4f45ef149aec47fdb52de40d5f0dd9b7efd0297ffe583",
+  "simulation": {
+    "method": "fixed_effective_working_set_with_explicit_carry_and_an_unresolved_conflict; native_transcript_baseline_is_not_a_prior_kernel_build",
+    "measurements": [
+      {
+        "steps": 100,
+        "baselineCharacters": 124746,
+        "currentCharacters": 12281
+      },
+      {
+        "steps": 160,
+        "baselineCharacters": 197886,
+        "currentCharacters": 12288
+      }
+    ],
+    "historyGrowthPercent": 60,
+    "currentInputGrowthPercent": 0.05699861574790521
+  },
+  "toolSchema": {
+    "tools": 16,
+    "cases": [
+      {
+        "hasObservations": false,
+        "beforeCharacters": 1543,
+        "afterCharacters": 9815,
+        "baseCharacters": 1543
+      },
+      {
+        "hasObservations": true,
+        "beforeCharacters": 19911,
+        "afterCharacters": 22647,
+        "baseCharacters": 1543
+      }
+    ],
+    "accounting": "characters, not actual provider tokens or billing"
+  },
+  "tests": {
+    "focused": {
+      "tests": 349,
+      "pass": 349,
+      "fail": 0,
+      "skipped": 0
+    },
+    "kernel": {
+      "tests": 792,
+      "pass": 789,
+      "fail": 1,
+      "skipped": 2
+    },
+    "unit": {
+      "tests": 347,
+      "pass": 346,
+      "fail": 1,
+      "skipped": 0
+    },
+    "isolatedInfrastructure": {
+      "tests": 69,
+      "pass": 67,
+      "fail": 0,
+      "skipped": 2
+    },
+    "preexistingFailuresReproducedAgainstBaseline": [
+      {
+        "test": "no_progress failure-report error code",
+        "actual": "STEP_NOT_COMPLETED",
+        "expected": "RUN_LIMIT_EXCEEDED"
+      },
+      {
+        "test": "TiDB profile schema migration mock query",
+        "actual": "SHOW CREATE TABLE",
+        "expected": "information_schema.CHECK_CONSTRAINTS"
+      }
+    ],
+    "skipped": [
+      "configured DNS probe",
+      "HTTPS CA network probe"
+    ],
+    "build": "passed"
+  },
+  "frozenActualRunReplay": {
+    "schema": "agentloop.exactCurrentEvidenceReplay/v1",
+    "method": "same_frozen_events_component_projection_not_task_reexecution",
+    "builds": {
+      "baselineJavaScriptSha256": "6b3ed296a143f2e7a7c4f45ef149aec47fdb52de40d5f0dd9b7efd0297ffe583",
+      "currentTypeScriptSha256": "188630615a05710eda877e434c7b2f7aa7fe9c80ff679414e6454984e5640bb4"
+    },
+    "configuration": {
+      "contextWindowTokens": 2000000,
+      "maxOutputTokens": 4096,
+      "completedExchangePolicy": "releasable",
+      "toolDefinitionSha256": "df84f55f1029a0e402a2e3b258195224827e22880218c9ee7d0b3237c8137081"
+    },
+    "accounting": "Characters and estimates are not actual provider tokens or billing. Both builds use the same frozen events, goal, current view, reader definition and model limits. A large fixed context window excludes capacity summaries from this component measurement. Full host prompts/tool catalogs and changed model decisions are not replayed.",
+    "runs": [
+      {
+        "runPrefix": "1f28c99d",
+        "archiveExportSha256": "bd1b84cdad0613dbe18f3161083a51b0c0a81657dd22633d1f768dbd62287853",
+        "executionDecisions": 15,
+        "beforeCharacters": 1108260,
+        "afterCharacters": 1108260,
+        "measurements": [
+          {
+            "step": 1,
+            "requestEventSeq": 48,
+            "before": {
+              "characters": 8536,
+              "estimatedTokens": 2147,
+              "currentEvidenceCount": 0,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 0,
+              "projectedMessages": 1,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 8536,
+              "estimatedTokens": 2147,
+              "currentEvidenceCount": 0,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 0,
+              "projectedMessages": 1,
+              "contextEpoch": 0
+            }
+          },
+          {
+            "step": 2,
+            "requestEventSeq": 74,
+            "before": {
+              "characters": 34061,
+              "estimatedTokens": 12286,
+              "currentEvidenceCount": 0,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 1,
+              "projectedMessages": 3,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 34061,
+              "estimatedTokens": 12286,
+              "currentEvidenceCount": 0,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 1,
+              "projectedMessages": 3,
+              "contextEpoch": 0
+            }
+          },
+          {
+            "step": 3,
+            "requestEventSeq": 101,
+            "before": {
+              "characters": 40817,
+              "estimatedTokens": 13981,
+              "currentEvidenceCount": 1,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 1,
+              "projectedMessages": 3,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 40817,
+              "estimatedTokens": 13981,
+              "currentEvidenceCount": 1,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 1,
+              "projectedMessages": 3,
+              "contextEpoch": 0
+            }
+          },
+          {
+            "step": 4,
+            "requestEventSeq": 126,
+            "before": {
+              "characters": 61631,
+              "estimatedTokens": 19609,
+              "currentEvidenceCount": 1,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 2,
+              "projectedMessages": 5,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 61631,
+              "estimatedTokens": 19609,
+              "currentEvidenceCount": 1,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 2,
+              "projectedMessages": 5,
+              "contextEpoch": 0
+            }
+          },
+          {
+            "step": 5,
+            "requestEventSeq": 153,
+            "before": {
+              "characters": 65727,
+              "estimatedTokens": 20649,
+              "currentEvidenceCount": 1,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 3,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 65727,
+              "estimatedTokens": 20649,
+              "currentEvidenceCount": 1,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 3,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            }
+          },
+          {
+            "step": 6,
+            "requestEventSeq": 178,
+            "before": {
+              "characters": 74127,
+              "estimatedTokens": 22889,
+              "currentEvidenceCount": 2,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 3,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 74127,
+              "estimatedTokens": 22889,
+              "currentEvidenceCount": 2,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 3,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            }
+          },
+          {
+            "step": 7,
+            "requestEventSeq": 196,
+            "before": {
+              "characters": 74347,
+              "estimatedTokens": 22944,
+              "currentEvidenceCount": 2,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 74347,
+              "estimatedTokens": 22944,
+              "currentEvidenceCount": 2,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            }
+          },
+          {
+            "step": 8,
+            "requestEventSeq": 224,
+            "before": {
+              "characters": 81006,
+              "estimatedTokens": 24615,
+              "currentEvidenceCount": 3,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 81006,
+              "estimatedTokens": 24615,
+              "currentEvidenceCount": 3,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            }
+          },
+          {
+            "step": 9,
+            "requestEventSeq": 252,
+            "before": {
+              "characters": 83585,
+              "estimatedTokens": 25266,
+              "currentEvidenceCount": 4,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 83585,
+              "estimatedTokens": 25266,
+              "currentEvidenceCount": 4,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            }
+          },
+          {
+            "step": 10,
+            "requestEventSeq": 277,
+            "before": {
+              "characters": 85578,
+              "estimatedTokens": 25772,
+              "currentEvidenceCount": 5,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 85578,
+              "estimatedTokens": 25772,
+              "currentEvidenceCount": 5,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            }
+          },
+          {
+            "step": 11,
+            "requestEventSeq": 305,
+            "before": {
+              "characters": 86925,
+              "estimatedTokens": 26114,
+              "currentEvidenceCount": 6,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 86925,
+              "estimatedTokens": 26114,
+              "currentEvidenceCount": 6,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            }
+          },
+          {
+            "step": 12,
+            "requestEventSeq": 333,
+            "before": {
+              "characters": 88270,
+              "estimatedTokens": 26457,
+              "currentEvidenceCount": 7,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 88270,
+              "estimatedTokens": 26457,
+              "currentEvidenceCount": 7,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            }
+          },
+          {
+            "step": 13,
+            "requestEventSeq": 358,
+            "before": {
+              "characters": 100778,
+              "estimatedTokens": 29666,
+              "currentEvidenceCount": 8,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 100778,
+              "estimatedTokens": 29666,
+              "currentEvidenceCount": 8,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            }
+          },
+          {
+            "step": 14,
+            "requestEventSeq": 383,
+            "before": {
+              "characters": 107000,
+              "estimatedTokens": 31222,
+              "currentEvidenceCount": 9,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 107000,
+              "estimatedTokens": 31222,
+              "currentEvidenceCount": 9,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            }
+          },
+          {
+            "step": 15,
+            "requestEventSeq": 411,
+            "before": {
+              "characters": 115872,
+              "estimatedTokens": 33457,
+              "currentEvidenceCount": 10,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            },
+            "after": {
+              "characters": 115872,
+              "estimatedTokens": 33457,
+              "currentEvidenceCount": 10,
+              "historicalObservationCount": 0,
+              "semanticItemCount": 0,
+              "pendingObservationCount": 4,
+              "projectedMessages": 7,
+              "contextEpoch": 0
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "actualProviderReplay": {
+    "performed": false,
+    "reason": "No new business execution or Provider/model request was performed; no actual new usage, latency, billing or decision-round improvement measured."
+  },
+  "boundaries": [
+    "No state-maintenance model call introduced. Mocked model regressions do not prove real-model convergence.",
+    "Schema adds fixed input cost; additional model output length and latency require real-model acceptance.",
+    "Carry remains a model semantic declaration. Runtime validates identity, request visibility, scope and lifecycle, not completeness of a natural-language interpretation.",
+    "User authority, canonical gaps, artifact acceptance and unknown effects remain independent of model progress claims.",
+    "No consumer dependency update, shared service restart, commit or push."
+  ]
+}

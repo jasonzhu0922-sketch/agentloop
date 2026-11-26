@@ -241,7 +241,7 @@ export class RuntimeHostService implements RuntimeControlPort {
           ...(envelope.connectorConnectionIds === undefined ? {} : { connectorConnectionIds: envelope.connectorConnectionIds }),
           allowDangerousTools: envelope.allowDangerousTools,
           ...(envelope.requestedModelKey === undefined ? {} : { modelKey: envelope.requestedModelKey }),
-        });
+        }, { persist: async record => { await this.dispatchStore?.accept(envelope.dispatchKey, record.id); } });
     });
     await this.dispatchStore?.accept(envelope.dispatchKey, run.id);
     this.ownersByRunId.set(run.id, envelope.subject.userId);

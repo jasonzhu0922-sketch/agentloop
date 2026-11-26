@@ -1,0 +1,170 @@
+✔ code artifacts are classified by source extension while generic files stay distinct (1.043875ms)
+✔ computer paths cannot escape the workspace lexically or through a symbolic link (6.012084ms)
+✔ computer_read_file reports a missing path as actionable NOT_FOUND (0.646292ms)
+✔ computer_read_file resolves a missing bare filename from a nested evidence file (1.509125ms)
+✔ computer_read_json returns structured pointer windows for durable artifacts (5.896791ms)
+✔ computer_read_json reports continuation in the source array and stops at its last page (3.826625ms)
+✔ computer_read_json distinguishes root values from profiles and preserves bounded root windows (9.943459ms)
+✔ computer_read_file prefers ranked evidence paths over lower-priority duplicate basenames (1.339ms)
+✔ computer_read_file reports same-priority duplicate basenames as an explicit conflict (6.611584ms)
+✔ computer discovery tools normalize empty root paths to workspace root (2.06625ms)
+✔ dangerous computer tools remain unavailable until the Run grant explicitly includes them (3.662125ms)
+✔ computer_write_file rejects read-only artifact evidence projections as executable arguments (0.449208ms)
+✔ convert_artifact converts an existing workspace artifact and returns a standard artifact receipt (1037.644625ms)
+✔ convert_artifact converts a Markdown artifact to every supported non-PDF target (1087.227041ms)
+✔ convert_artifact converts PPTX to PDF without routing through LibreOffice (475.567583ms)
+✔ convert_artifact rejects unsupported PPTX target formats before spawning a converter (1.074625ms)
+✔ convert_artifact falls back to lightweight ReportLab PDF generation when WeasyPrint fails (1413.011042ms)
+✔ convert_artifact validates source and target paths before spawning converters (1.44025ms)
+✔ computer_write_file remains the general HTML delivery path (2.21675ms)
+✔ verify_artifact_acceptance records aggregate HTML-PPT evidence and renderer caveats (3.622709ms)
+✔ HTML acceptance rejects CSS appended after a closed document without confusing embedded end-tag text (1.981292ms)
+✔ verify_artifact_acceptance rejects HTML with invalid inline script syntax (1.4245ms)
+✔ verify_artifact_acceptance accepts bounded human-readable check descriptions (1.327791ms)
+✔ verify_artifact_acceptance does not mistake next-week content for a navigation requirement (1.298542ms)
+✔ verify_artifact_acceptance accepts ordinary in-page anchor navigation for HTML (1.795417ms)
+✔ verify_artifact_acceptance verifies self-contained HTML when requested (3.02425ms)
+✔ verify_artifact_acceptance rejects external HTML resources when self-contained output is requested (1.263209ms)
+✔ verify_artifact_acceptance merges injected provider checks into the aggregate evidence (1.131458ms)
+✔ verify_artifact_acceptance accepts Playwright provider evidence when injected (1.923792ms)
+✔ verify_artifact_acceptance keeps Playwright runtime absence as an explicit caveat (1.307042ms)
+✔ verify_artifact_acceptance decodes image dimensions through the local image profile (1.193167ms)
+✔ verify_artifact_acceptance validates WAV headers and audio metadata (1.491334ms)
+✔ verify_artifact_acceptance accepts a valid large WAV from a truncated profile inspection (20.804875ms)
+✔ verify_artifact_acceptance recognizes MP3 as audio rather than a generic file (3.040459ms)
+✔ verify_artifact_acceptance keeps every previewable audio container in the audio family (3.3745ms)
+✔ verify_artifact_acceptance classifies source files as code (1.516208ms)
+✔ verify_artifact_acceptance validates OpenXML package structure through the same tool (1.342667ms)
+✔ verify_artifact_acceptance classifies DOC and DOCX as one Word format family (1.916834ms)
+✔ verify_artifact_acceptance records PPTX slide sequence as basic navigation evidence (1.0575ms)
+✔ verify_artifact_acceptance rejects PDF text-layer markup leaks (25.158417ms)
+✔ verify_artifact_acceptance does not mistake a PDF Subtype dictionary for a sub tag (11.317375ms)
+✔ verify_artifact_acceptance keeps structurally valid PDF evidence caveated without text leaks (12.1545ms)
+✔ verify_artifact_acceptance preserves workspace escape rejection (1.468042ms)
+✔ computer command execution uses an enforced timeout instead of an unbounded child process (104.919166ms)
+✔ computer_write_file reports an existing target as an actionable conflict (1.802875ms)
+✔ computer_write_file appends chunks and receipts the final file state (4.463208ms)
+✔ computer_patch_file transactionally applies exact revision-bound hunks and receipts the patched artifact (3.438083ms)
+✔ computer_patch_file resolves a unique expected-lines anchor without model-computed line numbers (2.509084ms)
+✔ computer_patch_file rejects a non-unique anchor without changing the file (2.397958ms)
+✔ computer_patch_file preserves indentation, trailing spaces, and blank lines across multiple hunks (2.204542ms)
+✔ computer_patch_file fails closed for stale revisions, cross-file handles, mismatched lines, and invalid hunks (5.520583ms)
+✖ computer_write_file append fails closed when the target is missing (0.886958ms)
+✔ computer_write_file rejects ambiguous mode and legacy overwrite arguments (0.858583ms)
+✔ server-owned executable aliases expose a safe name instead of an arbitrary binary path (45.098333ms)
+✔ computer_run_command binds a standard computation artifact to immutable inputs (207.244542ms)
+✔ computer command arguments preserve long workspace paths while rejecting outside absolute paths (90.486917ms)
+✔ file-producing command records omitted and unknown output bindings without blocking writes (154.94075ms)
+✔ computer_write_file returns bounded write-after-inspection evidence (1.860292ms)
+✔ computer_run_command treats empty cwd as the workspace root (41.991542ms)
+✔ computer_run_command stores large stdout as reusable content-addressed evidence (42.523084ms)
+✔ computer_run_command binds a zero-input external-source Skill action without treating its script as source data (44.262791ms)
+✔ computer_run_command preserves validated HIL signals from a registered Skill command root (42.933667ms)
+✔ computer_run_command does not promote workspace stdout to a control signal (41.581041ms)
+✔ computer_run_command preserves complete structured stdout before Runtime Result commit (42.236625ms)
+✔ computer_run_command preserves oversized delivery candidates and their original rows (41.694083ms)
+✔ computer_run_command promotes structured stdout evidence receipts to the tool result (44.727458ms)
+✔ computer_run_command reports bounded workspace file changes as structured evidence (40.746333ms)
+✔ computer_run_command accepts the provider-sized timeout and exposes its bounds (0.352ms)
+✔ computer command names remain bare executable names (0.40525ms)
+✔ computer_run_command rejects structured data files as interpreter entry points (46.153958ms)
+✔ computer_run_command can use only Runtime-authorized Skill execution roots as cwd (147.673375ms)
+✔ computer read tools share authorized Skill root path semantics with command cwd (3.079625ms)
+✔ computer_run_command can use an authorized visible directory as read-only cwd (45.307291ms)
+✔ computer_search_text walks recursively and skips .git/node_modules (1.732875ms)
+✔ computer_read_file supports small line windows (2.628292ms)
+✔ read_file schemas reject mixed single-window and range-window arguments (0.646ms)
+✔ computer_read_file reads line windows beyond the default byte prefix (28.555333ms)
+✔ computer_read_file preserves trailing spaces and blank lines in patchable line windows (0.948583ms)
+✔ computer_read_file supports multiple evidence ranges in one call (1.938208ms)
+✔ computer_find_files finds files by glob without dumping directory trees (1.165417ms)
+✔ computer_find_files treats an empty path as the workspace root (1.015125ms)
+✖ visible directory tools read only from explicitly granted local directories (2.474167ms)
+✔ visible directory indexing creates source summary evidence for large directory analysis (3.141334ms)
+✔ visible directory indexing does not claim complete record counts after a bounded scan (1.169708ms)
+✔ visible directory indexing profiles spreadsheet structure generically (5.225083ms)
+✔ profileSpreadsheets reads multiple workbooks with bounded concurrency (3.936083ms)
+✔ visible_extract_tables writes durable generic spreadsheet extraction evidence (3.421417ms)
+✔ computer_summarize_table_artifact covers all extracted tables with compact generic statistics (2.313083ms)
+✖ computer_aggregate_table_artifact derives complete group counts from structured records (4.881042ms)
+✔ visible_find_files reports total matches when returned paths are truncated (1.15425ms)
+✔ visible_search_text normalizes empty path and caps broad maxMatches (1.366375ms)
+✔ visible_search_text auto-compacts broad results unless full matches are requested (16.922958ms)
+✔ visible_read_files reads bounded windows from multiple discovered files (1.558833ms)
+✔ ComputerExecutor.readFiles uses bounded file-level concurrency while preserving result order (31.208625ms)
+✔ computer_search_text searches a single file path (0.644417ms)
+✔ computer_search_text returns bounded context windows and read ranges (1.2535ms)
+✔ computer_search_text rejects invalid line and match bounds with structured diagnostics (0.6095ms)
+✔ computer_search_text description routes structured results and distinguishes line windows from character windows (0.180167ms)
+✔ computer search executor rejects out-of-range windows instead of truncating them (0.410125ms)
+✔ computer_search_text delegates to a trusted grep and matches the JS walk (4.3355ms)
+✔ parseRgJsonLine extracts fields without colon ambiguity (0.08775ms)
+✔ parseGrepLine strips a search root containing ':' before splitting fields (0.0285ms)
+✔ buildCommandEnvironment is platform-aware and lets server env override (0.041333ms)
+ℹ tests 103
+ℹ suites 0
+ℹ pass 100
+ℹ fail 3
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5739.766667
+
+✖ failing tests:
+
+test at packages/agentloop/tests/computer-tools.test.ts:2195:1
+✖ computer_write_file append fails closed when the target is missing (0.886958ms)
+  AssertionError [ERR_ASSERTION]: The validation function is expected to return "true". Received false
+  
+  Caught error:
+  
+  AppError: Path not found: reports/missing.md
+      at async TestContext.<anonymous> (file:///Users/zhujun/coding/agentloop/packages/agentloop/tests/computer-tools.test.ts:2205:5)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: AppError: Path not found: reports/missing.md
+        at file:///Users/zhujun/coding/agentloop/packages/agentloop/src/computer/computer-executor.ts:2232:15
+        at async ComputerExecutor.resolveExisting (file:///Users/zhujun/coding/agentloop/packages/agentloop/src/computer/computer-executor.ts:2230:23)
+        at async ComputerExecutor.resolveReadablePath (file:///Users/zhujun/coding/agentloop/packages/agentloop/src/computer/computer-executor.ts:2155:26)
+        at async ComputerExecutor.resolveReadableFile (file:///Users/zhujun/coding/agentloop/packages/agentloop/src/computer/computer-executor.ts:2128:14)
+        at async ComputerExecutor.inspectFile (file:///Users/zhujun/coding/agentloop/packages/agentloop/src/computer/computer-executor.ts:530:26)
+        at async Object.preflight (file:///Users/zhujun/coding/agentloop/packages/agentloop/src/tools/computer-tools.ts:493:38)
+        at async Object.execute (file:///Users/zhujun/coding/agentloop/packages/agentloop/src/tools/tool-registry.ts:236:13)
+        at async waitForActual (node:assert:615:5)
+        at async strict.rejects (node:assert:738:25)
+        at async TestContext.<anonymous> (file:///Users/zhujun/coding/agentloop/packages/agentloop/tests/computer-tools.test.ts:2205:5),
+    operator: 'rejects',
+    diff: 'simple'
+  }
+
+test at packages/agentloop/tests/computer-tools.test.ts:3711:1
+✖ visible directory tools read only from explicitly granted local directories (2.474167ms)
+  AssertionError [ERR_ASSERTION]: Missing expected rejection.
+      at async TestContext.<anonymous> (file:///Users/zhujun/coding/agentloop/packages/agentloop/tests/computer-tools.test.ts:3797:5)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    operator: 'rejects',
+    diff: 'simple'
+  }
+
+test at packages/agentloop/tests/computer-tools.test.ts:4234:1
+✖ computer_aggregate_table_artifact derives complete group counts from structured records (4.881042ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  true !== false
+  
+      at TestContext.<anonymous> (file:///Users/zhujun/coding/agentloop/packages/agentloop/tests/computer-tools.test.ts:4344:12)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

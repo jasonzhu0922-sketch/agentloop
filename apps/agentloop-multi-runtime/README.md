@@ -445,3 +445,6 @@ npm run package:local-agent:win
 ```
 
 默认生成开发环境 MSI。测试、生产环境沿用同一组构建期固定地址变量：`AGENTLOOP_RELEASE_ENV`、`AGENTLOOP_ROUTER_URL_TEST`/`AGENTLOOP_ROUTER_URL_PRODUCTION`、`AGENTLOOP_WEB_ORIGIN_TEST`/`AGENTLOOP_WEB_ORIGIN_PRODUCTION`；模板见 `distribution/windows/environments.example.env`。产物为 `release/local-agent/windows-x64/AgentLoop-Local-Runtime-<version>-windows-x64.msi`。正式分发还应在 Windows 发布流水线中使用组织的代码签名证书分别签名 tray/Agent 可执行文件和 MSI，并运行 Windows 签名验证。
+
+
+Runtime 状态后端更新：设备 Desktop/Local Runtime/Local Agent 默认磁盘 SQLite；服务端 Runtime Host 默认内核原生 Redis（`AGENTLOOP_RUNTIME_STATE_BACKEND=sqlite|redis`）。Router/身份/业务 SQL 配置保持独立。旧文中 Runtime SQL 部署参数只适用于历史数据迁移。共享工作目录和归档卷必须持久化，Redis 需要 AOF、appendfsync always、noeviction；无故障降级、无启动自动迁移、无自动清理历史。完整接入、迁移与验证见仓库 `docs/RUNTIME-NATIVE-RECORDS-STATUS.md`。

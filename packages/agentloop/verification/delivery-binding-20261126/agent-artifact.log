@@ -1,0 +1,90 @@
+✔ plural delivery claim requires every bound instance to have matching acceptance (1.820417ms)
+✔ accepted artifact receipts allow a final semantic completion candidate (15.603792ms)
+✔ automatic artifact acceptance derives a Word profile from the final path instead of forwarding document semantics (2.584583ms)
+✔ post-commit explicit delivery selection registers the receipt before candidate acceptance (4.961083ms)
+✔ automatic artifact acceptance skips command stdout when the admitted target is PDF (2.109416ms)
+✔ automatic artifact acceptance visits every distinct path required by a target family (4.086959ms)
+✔ delivery candidates publish only the latest receipt matching the admitted artifact target (0.085125ms)
+✔ Runtime returns control for a concrete acceptance diagnostic so the model can repair (3.386125ms)
+✔ conversation delivery does not turn a helper script into an artifact-acceptance loop (1.487958ms)
+✔ structured source candidates wait for required artifact acceptance evidence (2.157625ms)
+✔ a declared Skill workflow fact must precede the accepted artifact that consumes it (4.479625ms)
+✔ an empty candidate during artifact execution keeps the delivery tools available (1.844416ms)
+✔ modify-artifact writes overwrite a same-Run read target without another model turn (1.08575ms)
+✔ artifact grace records excessive read-only exploration as advice without vetoing tools (11.018917ms)
+✖ artifact progress policy advises after excessive read-only exploration before grace (3.858708ms)
+✔ artifact progress policy advises verification after artifact evidence without vetoing a read (1.094542ms)
+✔ artifact execution keeps multi-tool provider choice auto while Runtime evidence is missing (0.989167ms)
+✔ artifact progress policy treats generated build scripts as source until a deliverable exists (4.218375ms)
+✔ artifact progress policy treats mismatched typed intermediates as source until the requested artifact kind exists (4.7455ms)
+✔ artifact progress policy treats DOC and DOCX receipts as the same Word deliverable family (0.162583ms)
+✔ artifact progress policy keeps a converted mismatched format out of automatic acceptance (0.102333ms)
+✔ artifact progress policy treats requested source code as the deliverable instead of an intermediate (0.073209ms)
+✔ artifact progress policy never accepts a generator script for a requested audio deliverable (0.061375ms)
+✔ artifact progress policy does not bind a mismatched acceptance receipt to requested code (0.076125ms)
+✔ failed setup does not divert requested code from automatic acceptance (1.957167ms)
+✔ artifact progress policy treats a successful PPTX acceptance receipt as the presentation deliverable (0.108375ms)
+✖ a later hashless artifact write invalidates an earlier acceptance receipt (0.1895ms)
+✔ agent loop rejects an HTML acceptance profile before it can self-validate a presentation target (1.035958ms)
+✔ artifact progress policy allows diagnostic-driven intermediate source repair before rerender (3.941625ms)
+✔ artifact progress policy does not require a semantic source receipt after process artifacts exist (3.436417ms)
+✔ artifact progress policy allows a targeted rebase read after patch precondition failure (5.714ms)
+✔ artifact diagnostics advise source repair without vetoing a targeted reread (3.186375ms)
+✔ artifact diagnostics retain a read-only grace turn as advice after a concrete diagnostic (1.832458ms)
+✔ progress policy advises after an intermediate artifact read without vetoing the authorized call (2.71875ms)
+ℹ tests 34
+ℹ suites 0
+ℹ pass 32
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 278.283875
+
+✖ failing tests:
+
+test at packages/agentloop/tests/agent-loop.test.ts:4028:1
+✖ artifact progress policy advises after excessive read-only exploration before grace (3.858708ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'deliverable_available'
+  - 'accepted'
+  
+      at Object.complete (file:///Users/zhujun/coding/agentloop/packages/agentloop/tests/agent-loop.test.ts:4101:16)
+      at completeWithStreaming (file:///Users/zhujun/coding/agentloop/packages/agentloop/src/runtime/model-streaming.ts:173:36)
+      at async completeWithStreamingAndDispatch (file:///Users/zhujun/coding/agentloop/packages/agentloop/src/runtime/agent-loop.ts:3307:16)
+      at async runAgentLoop (file:///Users/zhujun/coding/agentloop/packages/agentloop/src/runtime/agent-loop.ts:1463:18)
+      at async TestContext.<anonymous> (file:///Users/zhujun/coding/agentloop/packages/agentloop/tests/agent-loop.test.ts:4111:18)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'deliverable_available',
+    expected: 'accepted',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at packages/agentloop/tests/agent-loop.test.ts:5016:1
+✖ a later hashless artifact write invalidates an earlier acceptance receipt (0.1895ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'process_artifact_available'
+  - 'deliverable_available'
+  
+      at TestContext.<anonymous> (file:///Users/zhujun/coding/agentloop/packages/agentloop/tests/agent-loop.test.ts:5060:10)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1201:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:831:18)
+      at Test.postRun (node:internal/test_runner/test:1330:19)
+      at Test.run (node:internal/test_runner/test:1258:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'process_artifact_available',
+    expected: 'deliverable_available',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

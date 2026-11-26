@@ -1,0 +1,173 @@
+{
+  "recordedAt": "2026-11-25T01:33:14.869Z",
+  "node": "v26.0.0",
+  "platform": "darwin-arm64",
+  "scope": "Full RunService, deterministic mocked model, single-step Plan, Action, Result/Outcome, durable event commits. Two service instances in one process; no HTTP, external model/tools, archive or TiDB projection. A concurrency sweep, not a sustained production capacity claim.",
+  "redis": {
+    "appendonly": true,
+    "appendfsync": "always",
+    "maxmemoryPolicy": "noeviction",
+    "topology": "one temporary local Redis server"
+  },
+  "metrics": [
+    {
+      "backend": "sqlite-disk",
+      "concurrency": 1,
+      "serviceInstances": 2,
+      "completedRuns": 32,
+      "elapsedMs": 294.025667,
+      "runsPerSecond": 108.83403590748422,
+      "runLatencyMs": {
+        "p50": 6.1273330000000215,
+        "p95": 22.425749999999994,
+        "max": 66.879209
+      },
+      "redisCommands": 0,
+      "redisCommandsPerRun": 0
+    },
+    {
+      "backend": "sqlite-disk",
+      "concurrency": 8,
+      "serviceInstances": 2,
+      "completedRuns": 32,
+      "elapsedMs": 199.5899579999999,
+      "runsPerSecond": 160.3287075194435,
+      "runLatencyMs": {
+        "p50": 45.54716600000006,
+        "p95": 62.545124999999985,
+        "max": 64.27949999999998
+      },
+      "redisCommands": 0,
+      "redisCommandsPerRun": 0
+    },
+    {
+      "backend": "sqlite-disk",
+      "concurrency": 16,
+      "serviceInstances": 2,
+      "completedRuns": 32,
+      "elapsedMs": 201.017875,
+      "runsPerSecond": 159.18982329307778,
+      "runLatencyMs": {
+        "p50": 83.39179100000001,
+        "p95": 113.84958300000005,
+        "max": 126.798584
+      },
+      "redisCommands": 0,
+      "redisCommandsPerRun": 0
+    },
+    {
+      "backend": "redis-native-records",
+      "concurrency": 1,
+      "serviceInstances": 2,
+      "completedRuns": 32,
+      "elapsedMs": 7854.324458,
+      "runsPerSecond": 4.074188705994503,
+      "runLatencyMs": {
+        "p50": 248.9117500000002,
+        "p95": 266.576333,
+        "max": 272.699333
+      },
+      "redisCommands": 14496,
+      "redisCommandsPerRun": 453,
+      "redisCommandLatencyMs": {
+        "p50": 0.08104199999979755,
+        "p95": 4.20508400000017
+      }
+    },
+    {
+      "backend": "redis-native-records",
+      "concurrency": 8,
+      "serviceInstances": 2,
+      "completedRuns": 32,
+      "elapsedMs": 5725.676958,
+      "runsPerSecond": 5.5888587908001215,
+      "runLatencyMs": {
+        "p50": 1423.195040999999,
+        "p95": 1479.5987920000007,
+        "max": 1483.5676669999993
+      },
+      "redisCommands": 14496,
+      "redisCommandsPerRun": 453,
+      "redisCommandLatencyMs": {
+        "p50": 0.725416999999652,
+        "p95": 8.960583000000042
+      }
+    },
+    {
+      "backend": "redis-native-records",
+      "concurrency": 16,
+      "serviceInstances": 2,
+      "completedRuns": 32,
+      "elapsedMs": 3726.9303750000017,
+      "runsPerSecond": 8.586154497184559,
+      "runLatencyMs": {
+        "p50": 1866.322541999998,
+        "p95": 1912.588416999999,
+        "max": 1921.9553329999999
+      },
+      "redisCommands": 14496,
+      "redisCommandsPerRun": 453,
+      "redisCommandLatencyMs": {
+        "p50": 3.7229579999984708,
+        "p95": 9.585124999999607
+      }
+    },
+    {
+      "backend": "redis-legacy-changeset",
+      "concurrency": 1,
+      "serviceInstances": 2,
+      "completedRuns": 32,
+      "elapsedMs": 7368.899125,
+      "runsPerSecond": 4.342575391137546,
+      "runLatencyMs": {
+        "p50": 225.8060000000005,
+        "p95": 270.33037500000137,
+        "max": 280.64520800000173
+      },
+      "redisCommands": 1504,
+      "redisCommandsPerRun": 47,
+      "redisCommandLatencyMs": {
+        "p50": 3.913958000001003,
+        "p95": 4.731542000001355
+      }
+    },
+    {
+      "backend": "redis-legacy-changeset",
+      "concurrency": 8,
+      "serviceInstances": 2,
+      "completedRuns": 32,
+      "elapsedMs": 7589.889333000003,
+      "runsPerSecond": 4.216135255209522,
+      "runLatencyMs": {
+        "p50": 1895.677208000001,
+        "p95": 1938.6104999999989,
+        "max": 1947.443292
+      },
+      "redisCommands": 1504,
+      "redisCommandsPerRun": 47,
+      "redisCommandLatencyMs": {
+        "p50": 4.042499999999563,
+        "p95": 4.667042000000947
+      }
+    },
+    {
+      "backend": "redis-legacy-changeset",
+      "concurrency": 16,
+      "serviceInstances": 2,
+      "completedRuns": 32,
+      "elapsedMs": 7508.775915999999,
+      "runsPerSecond": 4.261679980596188,
+      "runLatencyMs": {
+        "p50": 3767.1890420000054,
+        "p95": 3804.920459000001,
+        "max": 3805.9559999999983
+      },
+      "redisCommands": 1504,
+      "redisCommandsPerRun": 47,
+      "redisCommandLatencyMs": {
+        "p50": 4.042750000000524,
+        "p95": 4.708041000005323
+      }
+    }
+  ]
+}

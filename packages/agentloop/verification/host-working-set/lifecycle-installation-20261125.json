@@ -1,0 +1,49 @@
+{
+  "package": {
+    "filename": "zhujun-agentloop-0.1.0-lifecycle-2a6a31a1224c.tgz",
+    "sha256": "2a6a31a1224c2a65f7ba29fe1dfdadab44cd01d423fd2cd337152599fca52434",
+    "integrity": "sha512-cNLzRuLleE9ZBON7F3Yb3gSnfa8BSL2CKaVll3LS/5R5u1lYbeYEvbugWObix0odi989thfAuVQS9Qovz542aQ=="
+  },
+  "hosts": [
+    {
+      "host": "data-agent",
+      "dependency": "file:vendor/zhujun-agentloop-0.1.0-lifecycle-2a6a31a1224c.tgz",
+      "distFileCount": 394,
+      "distExactMatch": true,
+      "changedJsonPointers": {
+        "package.json": [
+          "/dependencies/@zhujun/agentloop"
+        ],
+        "package-lock.json": [
+          "/packages//dependencies/@zhujun/agentloop",
+          "/packages/node_modules/@zhujun/agentloop/integrity",
+          "/packages/node_modules/@zhujun/agentloop/resolved"
+        ]
+      }
+    },
+    {
+      "host": "report-agent",
+      "dependency": "file:vendor/zhujun-agentloop-0.1.0-lifecycle-2a6a31a1224c.tgz",
+      "distFileCount": 394,
+      "distExactMatch": true,
+      "changedJsonPointers": {
+        "package.json": [
+          "/dependencies/@zhujun/agentloop"
+        ],
+        "package-lock.json": [
+          "/packages//dependencies/@zhujun/agentloop",
+          "/packages/node_modules/@zhujun/agentloop/integrity",
+          "/packages/node_modules/@zhujun/agentloop/resolved"
+        ]
+      }
+    }
+  ],
+  "servicesRestarted": false,
+  "kernelSourceSha256": "5e68b1625be10efc550d9a61edd333b6a849c5adca53b72aeee680c2689b67fc",
+  "hostTypechecksPassed": true,
+  "performanceAcceptancePassed": false,
+  "contentAndLifecycleFocusedTests": {
+    "passed": 159,
+    "failed": 0
+  }
+}

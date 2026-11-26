@@ -1571,6 +1571,7 @@ export class ComputerExecutor {
     stderrRef?: CommandOutputReference;
     fileChanges: CommandFileChange[];
     outputBindings?: readonly { readonly targetId: string; readonly path: string }[];
+    outputArtifacts?: readonly { readonly targetId: string; readonly path: string; readonly bytes: number; readonly sha256: string }[];
     fileChangesTruncated: boolean;
     truncated: boolean;
     timedOut: boolean;
@@ -1679,6 +1680,16 @@ export class ComputerExecutor {
     const complete = async ({ stdout, stderr, exitCode, signal, timedOut = false }: HostCommandResult & { timedOut?: boolean }) => {
       const afterFiles = await this.snapshotWorkspaceFiles();
       const fileChangeSummary = await summarizeFileChanges(this.workspaceRoot, beforeFiles, afterFiles);
+      // Observe every explicitly selected member, including unchanged attachments.
+      // These are Runtime file identities, never paths or hashes parsed from stdout.
+      const outputArtifacts = await Promise.all((input.outputBindings ?? []).map(async (binding) => {
+        try {
+          const file = await this.inspectFile(binding.path);
+          if (file.path !== binding.path || file.path.startsWith("@")
+            || !isInsideRoot(resolve(this.workspaceRoot, file.path), this.workspaceRoot)) return undefined;
+          return { targetId: binding.targetId, path: binding.path, bytes: file.bytes, sha256: file.sha256 };
+        } catch { return undefined; } // Selection completeness is checked by the reducer.
+      }));
       // Only an immutable, Runtime-registered Skill package may publish
       // a control signal through command stdout. Workspace commands and
       // later file reads remain ordinary content, never control-plane
@@ -1718,7 +1729,8 @@ export class ComputerExecutor {
         ...(stderrReference === undefined ? {} : { stderrRef: stderrReference }),
         ...(controlSignals === undefined ? {} : { controlSignals }),
         fileChanges: fileChangeSummary.changes,
-        ...(input.outputBindings === undefined ? {} : { outputBindings: input.outputBindings }),
+        ...(input.outputBindings === undefined ? {} : { outputBindings: input.outputBindings,
+          outputArtifacts: outputArtifacts.filter((artifact) => artifact !== undefined) }),
         fileChangesTruncated: fileChangeSummary.truncated,
         executionReceipt: {
           schema: "agentloop.commandExecutionReceipt/v1",

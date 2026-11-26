@@ -1,0 +1,20 @@
+{
+  "database": "agentloop_history_http_1795581333406",
+  "namespace": "http:{dc7f53e9-fa10-494a-8b0e-512e4ad013c1}",
+  "runId": "80d041a7-1f68-4c54-87b9-8e9a3216e33c",
+  "events": 97,
+  "historyStatus": {
+    "pendingCount": 0,
+    "oldestAgeMs": 0,
+    "lastError": "Connection lost: The server closed the connection.",
+    "lastFailureAt": "1795581581314",
+    "retries": "176",
+    "lastSuccessAt": "1795581581847",
+    "lastLatencyMs": "132030",
+    "acknowledged": "9"
+  },
+  "historySource": "tidb",
+  "conversations": 1,
+  "tool": "load_skill",
+  "verificationScope": "Real model/tool Run and HTTP history recovery; no claim of full browser lag interaction"
+}

@@ -240,3 +240,7 @@ AgentLoop 的 Runtime 设计参考并源码级核验了：
 Desktop App 是独立本机宿主，使用账号隔离的本机数据和工作区；开发态使用本机 Account Service，正式账号服务与安装包有各自的部署验收边界。Multi Runtime 提供 Router、独立 Runtime Host 和设备侧 Local Runtime Agent；生产多副本需要共享状态库和工作区、fenced lease、独立 Worker 以及受部署环境管理的鉴权与密钥。本机 Local Runtime 数据不与云端状态库混用。SQLite 不适合放在 NFS/RWX 卷上供多节点共享。
 
 详细架构见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+## 本机内核发布
+
+独立的 report-agent 和 data-agent 可一次性绑定本机发布通道。之后在本仓执行 `npm run release:kernel`，再正常重启消费服务，即可使用已发布快照；无需再次复制 tgz 或修改消费端依赖。构建不等于发布。绑定、依赖隔离、回滚与验证见 [本机内核发布通道](docs/KERNEL-LOCAL-RELEASE-CHANNEL.md)。

@@ -1,0 +1,42 @@
+{
+  "schema": "agentloop.kernelLocalInstall/v1",
+  "package": {
+    "filename": "zhujun-agentloop-0.1.0-context-622632a0d730.tgz",
+    "sha256": "622632a0d7301859c00f8752a8c4079b9afcc794fde2b39d210574f1f475818a",
+    "bytes": 12153150
+  },
+  "hosts": [
+    {
+      "host": "data-agent",
+      "kernelSpec": "file:vendor/zhujun-agentloop-0.1.0-context-622632a0d730.tgz",
+      "distFilesMatched": 390,
+      "packageAndLockChangedPaths": [
+        "package.json/dependencies/@zhujun/agentloop",
+        "package-lock.json/packages//dependencies/@zhujun/agentloop",
+        "package-lock.json/packages/node_modules/@zhujun/agentloop/integrity",
+        "package-lock.json/packages/node_modules/@zhujun/agentloop/resolved"
+      ]
+    },
+    {
+      "host": "report-agent",
+      "kernelSpec": "file:vendor/zhujun-agentloop-0.1.0-context-622632a0d730.tgz",
+      "distFilesMatched": 390,
+      "packageAndLockChangedPaths": [
+        "package.json/dependencies/@zhujun/agentloop",
+        "package-lock.json/packages//dependencies/@zhujun/agentloop",
+        "package-lock.json/packages/node_modules/@zhujun/agentloop/integrity",
+        "package-lock.json/packages/node_modules/@zhujun/agentloop/resolved"
+      ]
+    }
+  ],
+  "kernelBuild": "passed",
+  "focusedTests": {
+    "passed": 121,
+    "failed": 0
+  },
+  "hostTypecheck": "both_passed",
+  "servicesRestarted": false,
+  "committed": false,
+  "pushed": false,
+  "liveProviderReplay": false
+}

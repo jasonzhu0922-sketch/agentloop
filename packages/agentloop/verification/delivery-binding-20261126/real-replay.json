@@ -1,0 +1,56 @@
+[
+  {
+    "seq": 105,
+    "installed": [
+      "reports/banned-supplier-5651-202610.docx"
+    ],
+    "fixed": [
+      "reports/banned-supplier-5651-202610.docx"
+    ],
+    "observedFiles": 18
+  },
+  {
+    "seq": 135,
+    "installed": [
+      "reports/banned-supplier-5651-202610.docx"
+    ],
+    "fixed": [
+      "reports/banned-supplier-5651-202610.docx"
+    ],
+    "observedFiles": 18
+  },
+  {
+    "seq": 164,
+    "installed": [
+      "reports/banned-supplier-5651-202610.docx"
+    ],
+    "fixed": [
+      "reports/banned-supplier-5651-202610.docx"
+    ],
+    "observedFiles": 18
+  },
+  {
+    "seq": 190,
+    "installed": [],
+    "fixed": [
+      "reports/banned-supplier-5651-202610-v2.docx"
+    ],
+    "observedFiles": 36
+  },
+  {
+    "seq": 219,
+    "installed": [],
+    "fixed": [
+      "reports/banned-supplier-5651-202610-v3.docx"
+    ],
+    "observedFiles": 54
+  },
+  {
+    "seq": 239,
+    "installed": [],
+    "fixed": [
+      "reports/banned-supplier-5651-202610-v3.docx"
+    ],
+    "observedFiles": 54
+  }
+]

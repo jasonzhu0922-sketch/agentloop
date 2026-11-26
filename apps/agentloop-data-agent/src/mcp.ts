@@ -147,10 +147,16 @@ export function createMcpService(options: McpServiceOptions): McpService {
 
   async function waitForRun(runId: string, call: DataAgentMcpCall & { events: Record<string, unknown>[] }, session: SseSession | undefined, progressToken: string): Promise<Record<string, unknown>> {
     let cursor = 0;
-    for (;;) {
-      const events = await options.agent.runs.eventsAfter(OWNER, runId, cursor);
+    const pending: Awaited<ReturnType<typeof options.agent.runs.eventsAfter>> = [];
+    const unsubscribe = options.agent.runs.subscribeRunEvents(runId, event => {
+      if (pending.length >= 2000) return;
+      pending.push(event);
+    });
+    try { for (;;) {
+      const events = [...await options.agent.runs.eventsAfter(OWNER, runId, cursor), ...pending.splice(0)].sort((a, b) => a.seq - b.seq);
       for (const event of events) {
-        cursor = Math.max(cursor, event.seq);
+        if (event.seq <= cursor) continue;
+        cursor = event.seq;
         const projected = publicEvent(event);
         call.events.push(projected);
         if (call.events.length > MAX_EVENTS) call.events.splice(0, call.events.length - MAX_EVENTS);
@@ -162,7 +168,7 @@ export function createMcpService(options: McpServiceOptions): McpService {
       const result = await publicRun(runId);
       if (result.status !== "running") return result;
       await delay(250);
-    }
+    } } finally { unsubscribe(); }
   }
 
   async function callQuery(args: Record<string, unknown>, call: DataAgentMcpCall & { events: Record<string, unknown>[] }, session: SseSession | undefined, progressToken: string): Promise<Record<string, unknown>> {

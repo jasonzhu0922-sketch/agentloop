@@ -286,7 +286,16 @@ export class DesktopApi {
       // Never reflect provider exceptions, paths, URLs, prompts or credentials.
       if (error instanceof HttpError) json(response, error.status, { error: error.code });
       else if (error instanceof LocalManagementError || error instanceof LocalRuntimeConfigurationStoreError || error instanceof LocalRuntimeSupervisorError) {
-        json(response, error.status, { error: /^[a-z][a-z0-9_]{1,100}$/.test(error.message) ? error.message : "settings_operation_failed" });
+        // Supervisor lifecycle failures may carry a bounded diagnostic suffix
+        // (for example `mcp_startup_failed:<source-key>`).  Never reflect the
+        // suffix, which can contain endpoint or credential material, but keep
+        // the stable public error family so the UI can explain how to recover.
+        const errorCode = error.message.startsWith("mcp_startup_failed:")
+          ? "mcp_startup_failed"
+          : error.message.startsWith("runtime_resource_cleanup_failed:")
+            ? "runtime_resource_cleanup_failed"
+            : /^[a-z][a-z0-9_]{1,100}$/.test(error.message) ? error.message : "settings_operation_failed";
+        json(response, error.status, { error: errorCode });
       }
       else if (error instanceof AppError) {
         const safe = new Set(["account_storage_outside_scope", "account_data_migration_failed", "request_id_payload_conflict", "admission_outcome_unknown", "admission_run_deleted", "runtime_capacity_exhausted", "local_model_unavailable", "model_configuration_stale", "model_configuration_read_only", "model_configuration_invalid", "runtime_active_runs_prevent_reconfiguration", "runtime_operation_in_progress"]);

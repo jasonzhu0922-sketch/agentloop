@@ -1,0 +1,425 @@
+{
+  "accounting": "Successful response usage only; failed requests listed separately; no billing estimate.",
+  "runs": [
+    {
+      "file": "data-canonical-v2.json",
+      "runIndex": 0,
+      "status": "completed",
+      "calls": 9,
+      "failedModelRequests": 0,
+      "durationMs": 22526,
+      "usage": {
+        "inputTokens": 289146,
+        "outputTokens": 2819,
+        "cacheReadInputTokens": 19328,
+        "inputTokensNoCache": 269818
+      },
+      "usageWithCacheFields": 9,
+      "componentCharacters": {
+        "systemPrompt": 102083,
+        "toolSchemas": 212251,
+        "runtimeContext": 352101,
+        "otherToolResults": 155464
+      }
+    },
+    {
+      "file": "data-canonical-v2.json",
+      "runIndex": 1,
+      "status": "completed",
+      "calls": 8,
+      "failedModelRequests": 0,
+      "durationMs": 18019,
+      "usage": {
+        "inputTokens": 229922,
+        "outputTokens": 2819,
+        "cacheReadInputTokens": 17792,
+        "inputTokensNoCache": 212130
+      },
+      "usageWithCacheFields": 8,
+      "componentCharacters": {
+        "systemPrompt": 91562,
+        "toolSchemas": 184851,
+        "runtimeContext": 315907,
+        "otherToolResults": 54447
+      }
+    },
+    {
+      "file": "data-canonical.json",
+      "runIndex": 0,
+      "status": "completed",
+      "calls": 23,
+      "failedModelRequests": 0,
+      "durationMs": 64119,
+      "usage": {
+        "inputTokens": 1155747,
+        "outputTokens": 10158,
+        "cacheReadInputTokens": 49536,
+        "inputTokensNoCache": 1106211
+      },
+      "usageWithCacheFields": 23,
+      "componentCharacters": {
+        "systemPrompt": 255140,
+        "toolSchemas": 542147,
+        "runtimeContext": 1274483,
+        "otherToolResults": 1011801
+      }
+    },
+    {
+      "file": "data-canonical.json",
+      "runIndex": 1,
+      "status": "failed",
+      "calls": 21,
+      "failedModelRequests": 0,
+      "durationMs": 66832,
+      "usage": {
+        "inputTokens": 1002225,
+        "outputTokens": 10423,
+        "cacheReadInputTokens": 71424,
+        "inputTokensNoCache": 831237
+      },
+      "usageWithCacheFields": 20,
+      "componentCharacters": {
+        "systemPrompt": 233365,
+        "toolSchemas": 449800,
+        "runtimeContext": 1547101,
+        "otherToolResults": 374558
+      }
+    },
+    {
+      "file": "data-current-v2.json",
+      "runIndex": 0,
+      "status": "completed",
+      "calls": 10,
+      "failedModelRequests": 0,
+      "durationMs": 20861,
+      "usage": {
+        "inputTokens": 344009,
+        "outputTokens": 3079,
+        "cacheReadInputTokens": 21760,
+        "inputTokensNoCache": 322249
+      },
+      "usageWithCacheFields": 10,
+      "componentCharacters": {
+        "systemPrompt": 112604,
+        "toolSchemas": 369586,
+        "runtimeContext": 401080,
+        "otherToolResults": 104740
+      }
+    },
+    {
+      "file": "data-current-v2.json",
+      "runIndex": 1,
+      "status": "completed",
+      "calls": 9,
+      "failedModelRequests": 0,
+      "durationMs": 20869,
+      "usage": {
+        "inputTokens": 318989,
+        "outputTokens": 2893,
+        "cacheReadInputTokens": 19712,
+        "inputTokensNoCache": 299277
+      },
+      "usageWithCacheFields": 9,
+      "componentCharacters": {
+        "systemPrompt": 102083,
+        "toolSchemas": 324145,
+        "runtimeContext": 400598,
+        "otherToolResults": 89736
+      }
+    },
+    {
+      "file": "data-current.json",
+      "runIndex": 0,
+      "status": "completed",
+      "calls": 10,
+      "failedModelRequests": 0,
+      "durationMs": 21709,
+      "usage": {
+        "inputTokens": 424416,
+        "outputTokens": 3410,
+        "cacheReadInputTokens": 19584,
+        "inputTokensNoCache": 379703
+      },
+      "usageWithCacheFields": 9,
+      "componentCharacters": {
+        "systemPrompt": 112604,
+        "toolSchemas": 446450,
+        "runtimeContext": 442939,
+        "otherToolResults": 235904
+      }
+    },
+    {
+      "file": "data-current.json",
+      "runIndex": 1,
+      "status": "completed",
+      "calls": 21,
+      "failedModelRequests": 0,
+      "durationMs": 57803,
+      "usage": {
+        "inputTokens": 1116608,
+        "outputTokens": 11067,
+        "cacheReadInputTokens": 45312,
+        "inputTokensNoCache": 1071296
+      },
+      "usageWithCacheFields": 21,
+      "componentCharacters": {
+        "systemPrompt": 228335,
+        "toolSchemas": 1038202,
+        "runtimeContext": 1036700,
+        "otherToolResults": 656418
+      }
+    },
+    {
+      "file": "report-canonical-v2.json",
+      "runIndex": 0,
+      "status": "completed",
+      "calls": 7,
+      "failedModelRequests": 0,
+      "durationMs": 19170,
+      "usage": {
+        "inputTokens": 152874,
+        "outputTokens": 2650,
+        "cacheReadInputTokens": 15616,
+        "inputTokensNoCache": 137258
+      },
+      "usageWithCacheFields": 7,
+      "componentCharacters": {
+        "systemPrompt": 89379,
+        "toolSchemas": 132626,
+        "runtimeContext": 280069,
+        "otherToolResults": 18037
+      }
+    },
+    {
+      "file": "report-canonical-v2.json",
+      "runIndex": 1,
+      "status": "completed",
+      "calls": 7,
+      "failedModelRequests": 0,
+      "durationMs": 21509,
+      "usage": {
+        "inputTokens": 180531,
+        "outputTokens": 3127,
+        "cacheReadInputTokens": 16384,
+        "inputTokensNoCache": 164147
+      },
+      "usageWithCacheFields": 7,
+      "componentCharacters": {
+        "systemPrompt": 89379,
+        "toolSchemas": 134097,
+        "runtimeContext": 348759,
+        "otherToolResults": 18053
+      }
+    },
+    {
+      "file": "report-canonical.json",
+      "runIndex": 0,
+      "status": "completed",
+      "calls": 8,
+      "failedModelRequests": 0,
+      "durationMs": 20472,
+      "usage": {
+        "inputTokens": 169723,
+        "outputTokens": 3562,
+        "cacheReadInputTokens": 19712,
+        "inputTokensNoCache": 150011
+      },
+      "usageWithCacheFields": 8,
+      "componentCharacters": {
+        "systemPrompt": 111653,
+        "toolSchemas": 142503,
+        "runtimeContext": 311905,
+        "otherToolResults": 18432
+      }
+    },
+    {
+      "file": "report-canonical.json",
+      "runIndex": 1,
+      "status": "completed",
+      "calls": 7,
+      "failedModelRequests": 0,
+      "durationMs": 19550,
+      "usage": {
+        "inputTokens": 178538,
+        "outputTokens": 3074,
+        "cacheReadInputTokens": 16384,
+        "inputTokensNoCache": 162154
+      },
+      "usageWithCacheFields": 7,
+      "componentCharacters": {
+        "systemPrompt": 89379,
+        "toolSchemas": 134047,
+        "runtimeContext": 342890,
+        "otherToolResults": 18029
+      }
+    },
+    {
+      "file": "report-current-v2.json",
+      "runIndex": 0,
+      "status": "completed",
+      "calls": 7,
+      "failedModelRequests": 0,
+      "durationMs": 18106,
+      "usage": {
+        "inputTokens": 174098,
+        "outputTokens": 3506,
+        "cacheReadInputTokens": 16512,
+        "inputTokensNoCache": 157586
+      },
+      "usageWithCacheFields": 7,
+      "componentCharacters": {
+        "systemPrompt": 89379,
+        "toolSchemas": 189605,
+        "runtimeContext": 303783,
+        "otherToolResults": 10170
+      }
+    },
+    {
+      "file": "report-current-v2.json",
+      "runIndex": 1,
+      "status": "completed",
+      "calls": 7,
+      "failedModelRequests": 0,
+      "durationMs": 16034,
+      "usage": {
+        "inputTokens": 192338,
+        "outputTokens": 3136,
+        "cacheReadInputTokens": 16256,
+        "inputTokensNoCache": 176082
+      },
+      "usageWithCacheFields": 7,
+      "componentCharacters": {
+        "systemPrompt": 88719,
+        "toolSchemas": 190882,
+        "runtimeContext": 348823,
+        "otherToolResults": 10178
+      }
+    },
+    {
+      "file": "report-current.json",
+      "runIndex": 0,
+      "status": "completed",
+      "calls": 7,
+      "failedModelRequests": 0,
+      "durationMs": 24567,
+      "usage": {
+        "inputTokens": 183053,
+        "outputTokens": 3059,
+        "cacheReadInputTokens": 11648,
+        "inputTokensNoCache": 125594
+      },
+      "usageWithCacheFields": 5,
+      "componentCharacters": {
+        "systemPrompt": 88719,
+        "toolSchemas": 236782,
+        "runtimeContext": 289940,
+        "otherToolResults": 10118
+      }
+    },
+    {
+      "file": "report-current.json",
+      "runIndex": 1,
+      "status": "completed",
+      "calls": 7,
+      "failedModelRequests": 0,
+      "durationMs": 17258,
+      "usage": {
+        "inputTokens": 211533,
+        "outputTokens": 3224,
+        "cacheReadInputTokens": 15616,
+        "inputTokensNoCache": 195917
+      },
+      "usageWithCacheFields": 7,
+      "componentCharacters": {
+        "systemPrompt": 88719,
+        "toolSchemas": 238162,
+        "runtimeContext": 352250,
+        "otherToolResults": 17953
+      }
+    },
+    {
+      "file": "report-hr-canonical-v2-repeat.json",
+      "runIndex": 0,
+      "status": "completed",
+      "calls": 18,
+      "failedModelRequests": 0,
+      "durationMs": 43232,
+      "usage": {
+        "inputTokens": 658816,
+        "outputTokens": 5179,
+        "cacheReadInputTokens": 41984,
+        "inputTokensNoCache": 616832
+      },
+      "usageWithCacheFields": 18,
+      "componentCharacters": {
+        "systemPrompt": 208146,
+        "toolSchemas": 443773,
+        "runtimeContext": 920331,
+        "otherToolResults": 397969
+      }
+    },
+    {
+      "file": "report-hr-canonical-v2.json",
+      "runIndex": 0,
+      "status": "failed",
+      "calls": 26,
+      "failedModelRequests": 1,
+      "durationMs": 98008,
+      "usage": {
+        "inputTokens": 1238646,
+        "outputTokens": 9276,
+        "cacheReadInputTokens": 60032,
+        "inputTokensNoCache": 1178614
+      },
+      "usageWithCacheFields": 26,
+      "componentCharacters": {
+        "systemPrompt": 292259,
+        "toolSchemas": 618294,
+        "runtimeContext": 1571842,
+        "otherToolResults": 1102530
+      }
+    },
+    {
+      "file": "report-hr-current-v2.json",
+      "runIndex": 0,
+      "status": "completed",
+      "calls": 29,
+      "failedModelRequests": 0,
+      "durationMs": 66175,
+      "usage": {
+        "inputTokens": 1280936,
+        "outputTokens": 7399,
+        "cacheReadInputTokens": 68736,
+        "inputTokensNoCache": 1212200
+      },
+      "usageWithCacheFields": 29,
+      "componentCharacters": {
+        "systemPrompt": 326803,
+        "toolSchemas": 1208695,
+        "runtimeContext": 1662164,
+        "otherToolResults": 580809
+      }
+    },
+    {
+      "file": "report-hr-current.json",
+      "runIndex": 0,
+      "status": "completed",
+      "calls": 19,
+      "failedModelRequests": 0,
+      "durationMs": 48649,
+      "usage": {
+        "inputTokens": 840265,
+        "outputTokens": 6171,
+        "cacheReadInputTokens": 44160,
+        "inputTokensNoCache": 796105
+      },
+      "usageWithCacheFields": 19,
+      "componentCharacters": {
+        "systemPrompt": 218561,
+        "toolSchemas": 881559,
+        "runtimeContext": 1066657,
+        "otherToolResults": 375616
+      }
+    }
+  ]
+}

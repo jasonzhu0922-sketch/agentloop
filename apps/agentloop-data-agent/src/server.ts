@@ -1,3 +1,4 @@
+import { streamRuntimeRun } from "@zhujun/agentloop";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -89,6 +90,7 @@ export function createChatServer(agent: DataAgent, options: {
     "/": ["index.html", "text/html; charset=utf-8"],
     "/app.js": ["app.js", "text/javascript; charset=utf-8"],
     "/markdown.js": ["markdown.js", "text/javascript; charset=utf-8"],
+    "/history-state.js": ["history-state.js", "text/javascript; charset=utf-8"],
     "/style.css": ["style.css", "text/css; charset=utf-8"],
     "/settings": ["settings.html", "text/html; charset=utf-8"],
     "/settings.js": ["settings.js", "text/javascript; charset=utf-8"],
@@ -175,7 +177,7 @@ export function createChatServer(agent: DataAgent, options: {
           json(response, 200, await settings.catalog("connection-test", await body(request))); return;
         }
         if (request.method === "GET" && route === "status") {
-          json(response, 200, { service: "AgentLoop Data Agent", storage: "TiDB", skill: agent.skill, url: origin,
+          json(response, 200, { service: "AgentLoop Data Agent", storage: agent.runtimeStateStatus?.().backend ?? "sqlite", skill: agent.skill, url: origin,
             mcp: mcp.describe(origin),
             workflow: [
               { name: "固定能力计划", description: "由应用绑定 data-analysis 主 Skill，领域问题交给当前模型理解。" },
@@ -186,12 +188,15 @@ export function createChatServer(agent: DataAgent, options: {
             ] }); return;
         }
       }
+      if (request.method === "GET" && url.pathname === "/api/history/status") { json(response, 200, await agent.historyStatus()); return; }
       if (request.method === "GET" && url.pathname === "/api/conversations") {
-        json(response, 200, { conversations: await agent.runs.listConversations(OWNER) }); return;
+        if (agent.history) {
+          json(response, 200, { ...await agent.history.listConversations(OWNER, { limit: Number(url.searchParams.get("limit") ?? 50), cursor: url.searchParams.get("cursor") ?? undefined }), source: "tidb" });
+        } else json(response, 200, { conversations: await agent.runs.listConversations(OWNER) }); return;
       }
       const conversation = url.pathname.match(/^\/api\/conversations\/([^/]+)$/);
       if (request.method === "GET" && conversation) {
-        json(response, 200, await agent.runs.getConversation(OWNER, decodeURIComponent(conversation[1]))); return;
+        json(response, 200, await (agent.history ?? agent.runs).getConversation(OWNER, decodeURIComponent(conversation[1]))); return;
       }
       if (request.method === "POST" && url.pathname === "/api/messages") {
         const value = await body(request);
@@ -201,12 +206,22 @@ export function createChatServer(agent: DataAgent, options: {
         };
         json(response, 202, { run: await agent.start(message) }); return;
       }
-      const route = url.pathname.match(/^\/api\/runs\/([^/]+)(?:\/(cancel|human-loop))?$/);
+      const route = url.pathname.match(/^\/api\/runs\/([^/]+)(?:\/(cancel|human-loop|events))?$/);
       if (route) {
         const id = decodeURIComponent(route[1]);
+        if (request.method === "GET" && route[2] === "events") {
+          const after = Number(request.headers["last-event-id"] ?? url.searchParams.get("after") ?? "0");
+          if (!Number.isSafeInteger(after) || after < 0) throw new AppError("BAD_REQUEST", "事件游标无效", 400);
+          await streamRuntimeRun({ runs: agent.runs, actorUserId: OWNER, runId: id, after, request, response, project: publicEvent }); return;
+        }
         if (request.method === "GET" && !route[2]) {
           const after = Number(url.searchParams.get("after") ?? "0");
           if (!Number.isSafeInteger(after) || after < 0) throw new AppError("BAD_REQUEST", "事件游标无效", 400);
+          if (agent.history) {
+            const snapshot = await agent.history.getRun(OWNER, id);
+            const events = await agent.history.eventsAfter(OWNER, id, after);
+            json(response, 200, { ...snapshot, events: events.map(publicEvent) }); return;
+          }
           const [run, events, humanLoop] = await Promise.all([
             agent.runs.get(OWNER, id), agent.runs.eventsAfter(OWNER, id, after), agent.runs.currentHumanLoop(OWNER, id),
           ]);
@@ -230,7 +245,8 @@ export function createChatServer(agent: DataAgent, options: {
       console.error("Data Agent HTTP failure:", error instanceof Error ? error.message.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"']+/giu, "<url>") : "Unknown error");
       const status = error instanceof AppError ? error.status : 500;
       // Provider/filesystem errors can contain deployment details; keep those off the HTTP boundary.
-      json(response, status, { error: status < 500 && error instanceof AppError ? error.message : "服务处理失败，请检查服务端运行记录", code: error instanceof AppError ? error.code : "INTERNAL_ERROR" });
+      json(response, status, { error: status < 500 && error instanceof AppError ? error.message : "服务处理失败，请检查服务端运行记录", code: error instanceof AppError ? error.code : "INTERNAL_ERROR",
+        ...(error instanceof AppError && error.details?.reason === "runtime_execution_owner_mismatch" ? { reason: error.details.reason, executionRuntimeId: error.details.runtimeId } : {}) });
     }
   });
 }

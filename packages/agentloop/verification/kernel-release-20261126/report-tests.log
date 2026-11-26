@@ -1,0 +1,17 @@
+✔ report planning context exposes domain workflow without granting execution (1.121458ms)
+✔ report planning context follows the authorized Skill catalog (0.052834ms)
+✔ directory Skill is a reusable source provider, not a report producer (0.042042ms)
+✔ mixed report Skills are not promoted to separate source prerequisites (0.050083ms)
+✔ planning contracts are bounded and Skill-owned (0.043791ms)
+✔ report plan seed preserves canonical facts and minimal workflow (0.107375ms)
+✔ resolver model receives report-specific planning contract (0.144125ms)
+✔ report Skill catalog discovers future packages without a host code change (8.478ms)
+✔ installed Report Agent starts HTTP and completes/reopens a new SQLite Run without Runtime Redis or TiDB (283.5415ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 605.687125

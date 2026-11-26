@@ -101,6 +101,21 @@ test("Desktop MCP catalog applies to every account Runtime and survives restart"
   assert.deepEqual((await jsonCall(after, `/api/runtimes/${later.id}/configuration`)).configuration.mcpServerIds, []);
 });
 
+test("Runtime startup survives an MCP failure and reports its sanitized diagnostic", async t => {
+  const { app } = await fixture(t);
+  const call = client(app.origin, await session(app.origin));
+  await jsonCall(call, `/api/runtimes/${DEFAULT_RUNTIME_ID}/stop`, {});
+  await jsonCall(call, "/api/mcp", { server: {
+    displayName: "Unavailable MCP", key: "unavailable-mcp", transport: "http", url: "http://127.0.0.1:1/mcp",
+    auth: { kind: "none" },
+  } });
+  const response = await call(`/api/runtimes/${DEFAULT_RUNTIME_ID}/start`, {});
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.runtime.status, "ready");
+  assert.deepEqual(body.runtime.mcpDiagnostics, [{ key: "unavailable-mcp", displayName: "Unavailable MCP", message: "fetch failed" }]);
+});
+
 test("legacy Runtime-scoped Connector accounts migrate to the device-wide catalog", async t => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-desktop-connector-migration-")); const skills = join(root, "skills"); await mkdir(skills);
   const database = new DatabaseSync(join(root, "supervisor.db"));

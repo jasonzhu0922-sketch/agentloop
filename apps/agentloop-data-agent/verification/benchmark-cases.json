@@ -1,0 +1,5 @@
+[
+  {"question":"员工人数按月趋势","source_ids":["v_fawhzhss0401"]},
+  {"question":"管理合并营业收入逐月","source_ids":["t_dwd_fact_cwgl_merge_report"]},
+  {"question":"行情指标日期观测值","source_ids":["mb_index_main_data","mb_index_main_info"]}
+]

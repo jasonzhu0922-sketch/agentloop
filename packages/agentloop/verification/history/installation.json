@@ -1,0 +1,25 @@
+{
+  "verifiedAt": "2026-11-25T04:23:59.330298+00:00",
+  "packageSha256": "78b17ae1320304ad9e585fe04c2014a9f219900a9e238c1e353f47ec9d737922",
+  "distFiles": 388,
+  "packedDistMatchesBuild": true,
+  "distTreeSha256": "e83ba47bced20aa18f472ee534014d01ad263fdb9efdb1ed1eb2d8383feda0f0",
+  "applications": [
+    {
+      "application": "data-agent",
+      "dependency": "file:vendor/zhujun-agentloop-0.1.0-history-78b17ae13203.tgz",
+      "tarballSha256": "78b17ae1320304ad9e585fe04c2014a9f219900a9e238c1e353f47ec9d737922",
+      "resolvedEntry": "file:///Users/zhujun/coding/data-agent/node_modules/@zhujun/agentloop/dist/index.js",
+      "installedDistMatchesBuild": true,
+      "version": "0.1.0"
+    },
+    {
+      "application": "report-agent",
+      "dependency": "file:vendor/zhujun-agentloop-0.1.0-history-78b17ae13203.tgz",
+      "tarballSha256": "78b17ae1320304ad9e585fe04c2014a9f219900a9e238c1e353f47ec9d737922",
+      "resolvedEntry": "file:///Users/zhujun/coding/report-agent/node_modules/@zhujun/agentloop/dist/index.js",
+      "installedDistMatchesBuild": true,
+      "version": "0.1.0"
+    }
+  ]
+}

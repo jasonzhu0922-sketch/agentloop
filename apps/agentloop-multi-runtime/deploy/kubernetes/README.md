@@ -42,3 +42,6 @@ This deployment makes the three roles independently publishable and runnable
 on distinct nodes. It does **not** claim automatic takeover of an in-flight
 Run after a Host failure: that still requires the separately designed Run
 lease, fencing, and receipt-aware recovery protocol.
+
+
+Runtime 状态后端更新：设备 Desktop/Local Runtime/Local Agent 默认磁盘 SQLite；服务端 Runtime Host 默认内核原生 Redis（`AGENTLOOP_RUNTIME_STATE_BACKEND=sqlite|redis`）。Router/身份/业务 SQL 配置保持独立。旧文中 Runtime SQL 部署参数只适用于历史数据迁移。共享工作目录和归档卷必须持久化，Redis 需要 AOF、appendfsync always、noeviction；无故障降级、无启动自动迁移、无自动清理历史。完整接入、迁移与验证见仓库 `docs/RUNTIME-NATIVE-RECORDS-STATUS.md`。

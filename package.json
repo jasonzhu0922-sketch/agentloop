@@ -68,7 +68,12 @@
     "package:desktop:mac": "npm run package:mac --workspace agentloop-desktop --",
     "package:desktop:win": "npm run package:win --workspace agentloop-desktop --",
     "package:desktop:mac:local": "npm run package:desktop:mac -- --channel local",
-    "package:desktop:win:local": "npm run package:desktop:win -- --channel local"
+    "package:desktop:win:local": "npm run package:desktop:win -- --channel local",
+    "release:kernel": "node scripts/kernel-release.mjs publish",
+    "release:kernel:status": "node scripts/kernel-release.mjs status",
+    "release:kernel:bind": "node scripts/kernel-release.mjs bind",
+    "release:kernel:activate": "node scripts/kernel-release.mjs activate",
+    "test:kernel-release": "node --test scripts/kernel-release.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",

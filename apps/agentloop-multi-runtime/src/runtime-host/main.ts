@@ -1,7 +1,7 @@
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { colorizeTerminalLogLabel, colorizeTerminalLogLine, createStepExecutionStrategyProfile, createWebTools, DEFAULT_MAX_PLANNING_TURNS, DEFAULT_MAX_STEPS, LlmProviderRegistry, loadOptionalMcpToolsFromConfigFile, MAX_SUPPORTED_PLANNING_TURNS, MAX_SUPPORTED_STEP_TURNS, RunService, SkillService } from "@zhujun/agentloop";
+import { colorizeTerminalLogLabel, colorizeTerminalLogLine, createStepExecutionStrategyProfile, createWebTools, DEFAULT_MAX_PLANNING_TURNS, DEFAULT_MAX_STEPS, LlmProviderRegistry, loadOptionalMcpToolsFromConfigFile, MAX_SUPPORTED_PLANNING_TURNS, MAX_SUPPORTED_STEP_TURNS, RunService, SkillService, AppDatabase, openRuntimeState, RuntimeRecordMaintenance, FileRuntimeArchiveStore, createRuntimeHistory, type RuntimeStateConfig } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { loadPracticeProfileConfig, loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../shared/config.ts";
 import { HttpResourceImporter } from "./infrastructure/http-resource-importer.ts";
@@ -17,14 +17,14 @@ import {
   requiredRuntimeNodeModules,
   requiredRuntimePythonModules,
 } from "./service/runtime-command-preflight.ts";
-import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../shared/persistence/state-database.ts";
-import { migrateRuntimeState } from "./persistence/state-migrations.ts";
 import { loadOptionalPlanTemplateObserver } from "./plan-template-observer.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const host = process.env.HOST ?? "127.0.0.1";
 const port = integer(process.env.PORT, 8791);
 const runtimeId = requiredEnv("RUNTIME_ID");
+if (process.env.AGENTLOOP_RUNTIME_STATE_BACKEND === undefined && (process.env.AGENTLOOP_RUNTIME_STATE_DRIVER || process.env.AGENTLOOP_RUNTIME_STATE_DATABASE_URL))
+  throw new Error("Legacy Runtime SQL history requires offline migration and an explicit AGENTLOOP_RUNTIME_STATE_BACKEND selection");
 const databasePath = resolve(appRoot, process.env.DATABASE_PATH ?? `./data/${runtimeId}/agentloop.db`);
 // The task workspace is a cluster-wide volume. RunService keeps each conversation
 // below conversations/<conversationId>, while runtime-local state stays under data/.
@@ -74,14 +74,16 @@ const stepExecutionStrategy = createStepExecutionStrategyProfile(
 // through their declared workflow, rather than an incidental shell command or
 // a Router-specific integration.
 const integrationTools = process.env.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptionsFromEnvironment(process.env));
-const database = await openStateDatabase(stateDatabaseConfigFromEnvironment({
-  environment: process.env,
-  appRoot,
-  sqliteFallbackPath: databasePath,
-  environmentPrefix: "AGENTLOOP_RUNTIME_STATE",
-}), { schema: "runtime", autoMigrateKernel: false });
-await migrateRuntimeState(database);
-const dispatchStore = new HostDispatchStore(database, runtimeId);
+const backend = process.env.AGENTLOOP_RUNTIME_STATE_BACKEND ?? "redis";
+if (backend !== "sqlite" && backend !== "redis") throw new TypeError("AGENTLOOP_RUNTIME_STATE_BACKEND must be sqlite or redis");
+const stateConfig: RuntimeStateConfig = backend === "sqlite" ? { backend, filename: databasePath } : {
+  backend, url: process.env.AGENTLOOP_RUNTIME_REDIS_URL ?? "redis://127.0.0.1:6379",
+  namespace: process.env.AGENTLOOP_RUNTIME_REDIS_NAMESPACE ?? "agentloop-runtime-state",
+};
+// Host catalogue is local/control data. Router and business database settings remain independent.
+const database = new AppDatabase(resolve(appRoot, process.env.RUNTIME_CATALOGUE_FILE ?? `./data/${runtimeId}/catalogue.db`));
+const runtimeState = await openRuntimeState(stateConfig);
+const dispatchStore = new HostDispatchStore(runtimeState, runtimeId);
 await dispatchStore.ready();
 let providers = await LlmProviderRegistry.fromConfigFile(providerConfigPath);
 let providerConfigMtimeMs = (await stat(providerConfigPath)).mtimeMs;
@@ -102,8 +104,9 @@ const planTemplateObserver = await loadOptionalPlanTemplateObserver({
     : { configPath: process.env.PLAN_TEMPLATE_CONFIG_PATH }),
 });
 const runs = new RunService({
+    executionRuntimeId: runtimeId,
   requireExplicitModel: true,
-  database,
+  database: runtimeState,
   skills,
   modelFactory: (onRetry, modelKey) => {
     if (modelKey === undefined || modelKey.length === 0) throw new Error("model_required");
@@ -119,6 +122,25 @@ const runs = new RunService({
   ...(planTemplateObserver === undefined ? {} : { planningExtensions: [planTemplateObserver.extension()] }),
   runEventLogSink: (line) => process.stdout.write(`${runtimeLogLabel} ${colorizeTerminalLogLine(line, logColorOptions)}\n`),
 });
+const archiveStore = new FileRuntimeArchiveStore(resolve(appRoot, process.env.RUNTIME_ARCHIVE_ROOT ?? "./data/runtime-archives"));
+const historyUrl = process.env.RUNTIME_HISTORY_TIDB_URL ?? process.env.RUNTIME_SUMMARY_TIDB_URL;
+const history = createRuntimeHistory({ state: runtimeState, namespace: stateConfig.backend === "redis" ? stateConfig.namespace : stateConfig.filename,
+  ...(stateConfig.backend === "redis" && historyUrl ? { config: { url: historyUrl,
+    timeoutMs: positiveInteger(process.env.RUNTIME_HISTORY_TIMEOUT_MS, 3000), connectionLimit: positiveInteger(process.env.RUNTIME_HISTORY_CONNECTION_LIMIT, 2),
+    batchSize: positiveInteger(process.env.RUNTIME_HISTORY_BATCH_SIZE, 100), intervalMs: positiveInteger(process.env.RUNTIME_HISTORY_INTERVAL_MS, 1000),
+    retryBaseMs: positiveInteger(process.env.RUNTIME_HISTORY_RETRY_BASE_MS, 1000), retryMaxMs: positiveInteger(process.env.RUNTIME_HISTORY_RETRY_MAX_MS, 60000) } } : {}),
+  content: archiveStore, onError: error => process.stderr.write(`Runtime history projection: ${error.message}\n`) });
+history.worker?.start();
+const maintenance = new RuntimeRecordMaintenance({ state: runtimeState, namespace: stateConfig.backend === "redis" ? stateConfig.namespace : stateConfig.filename,
+  archive: archiveStore, artifacts: async runId => {
+    const run = (await runtimeState.records.find("runs", { id: runId }))[0];
+    return run ? await runs.processArtifacts(run.owner_user_id, runId) : [];
+  }, artifactContent: async artifact => {
+    const run = (await runtimeState.records.find("runs", { id: artifact.runId }))[0];
+    if (!run) throw new Error("Artifact Run is unavailable");
+    return (await runs.readProcessArtifact(run.owner_user_id,artifact.runId,artifact.id)).content;
+  } });
+maintenance.start();
 async function refreshProviderConfiguration(): Promise<LlmProviderRegistry> {
   const currentMtimeMs = (await stat(providerConfigPath)).mtimeMs;
   if (currentMtimeMs === providerConfigMtimeMs) return providers;
@@ -139,7 +161,7 @@ const runtimeHost = new RuntimeHostService(new AgentLoopRuntimeRunPort(runs), ne
 }, dispatchStore);
 const server = createRuntimeHostHttpServer(runtimeHost, {
   dispatchToken: runtimeDispatchToken,
-  refresh: refreshProviderConfiguration,
+  refresh: async () => { await refreshProviderConfiguration(); },
   providers: refreshProviderConfiguration,
   models: async () => (await refreshProviderConfiguration()).modelCatalog().map(({ key, displayName }) => ({ key, displayName })),
 });
@@ -171,14 +193,14 @@ function shutdown(): void {
   clearInterval(reconciliationTimer);
   server.close(() => {
     if (planTemplateObserver === undefined) {
-      database.close();
+      void runs.closeRunEvents().then(() => maintenance.close()).then(() => history.close()).then(() => runtimeState.close()).then(() => database.close());
       process.exitCode = 0;
       return;
     }
     void planTemplateObserver.close()
       .catch((error) => process.stderr.write(`PlanTemplate observer shutdown failed: ${String(error)}\n`))
       .finally(() => {
-        database.close();
+        void runs.closeRunEvents().then(() => maintenance.close()).then(() => history.close()).then(() => runtimeState.close()).then(() => database.close());
         process.exitCode = 0;
       });
   });

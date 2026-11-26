@@ -194,7 +194,7 @@ export function deriveCurrentDecisionView(input: {
     ...(input.stepSemanticFrame?.evidenceMode === undefined ? {} : { evidenceMode: input.stepSemanticFrame.evidenceMode }),
     completionBoundary: input.stepSemanticFrame?.completionBoundary ?? [],
   };
-  const deliveryTargets = deliveryTargetView(input.workProducts);
+  const deliveryTargets = deliveryTargetView(input.workProducts, input.context?.canonicalState, input.context?.stepId);
   const unboundDeliveryTargetIds = (input.workProducts?.admittedDeliveryTargets ?? [])
     .filter((target) => !deliveryTargets.some((binding) => binding.targetId === target.targetId && binding.versionId.length > 0))
     .map((target) => target.targetId).sort();
@@ -351,23 +351,33 @@ function currentObjects(facts: CurrentDecisionWorkProductFacts): CurrentDecision
   }).sort((left, right) => left.path.localeCompare(right.path, "en"));
 }
 
-function deliveryTargetView(facts: CurrentDecisionWorkProductFacts | undefined): CurrentDecisionView["workProducts"]["deliveryTargets"] {
+function deliveryTargetView(
+  facts: CurrentDecisionWorkProductFacts | undefined,
+  canonicalState?: CanonicalRunState,
+  stepId?: string,
+): CurrentDecisionView["workProducts"]["deliveryTargets"] {
   if (facts === undefined) return [];
-  const bindings = new Map((facts.semantics.deliveryTargets ?? []).map((binding) => [binding.targetId, binding]));
-  return (facts.admittedDeliveryTargets ?? []).map((target) => {
-    const binding = bindings.get(target.targetId);
-    return {
-      targetId: target.targetId,
-      deliveryTargetId: target.deliveryTargetId ?? target.targetId,
-      purpose: target.purpose,
-      kind: target.kind,
+  const bindings = facts.semantics.deliveryTargets ?? [];
+  const admitted = facts.admittedDeliveryTargets ?? (stepId === undefined ? [] : (canonicalState?.steps[stepId]?.targetIds ?? [])
+    .flatMap((targetId) => {
+      const target = canonicalState?.targets[targetId];
+      return target === undefined ? [] : [{
+        targetId: target.targetId,
+        deliveryTargetId: target.targetId,
+        purpose: target.purpose,
+        kind: target.kind,
+        ...(target.format === undefined ? {} : { format: target.format }),
+      }];
+    }));
+  return admitted.flatMap((target) => {
+    const members = bindings.filter((binding) => binding.targetId === target.targetId);
+    return (members.length > 0 ? members : [undefined]).map((binding) => ({
+      targetId: target.targetId, deliveryTargetId: target.deliveryTargetId ?? target.targetId,
+      purpose: target.purpose, kind: target.kind,
       ...(target.format === undefined ? {} : { format: target.format }),
-      path: binding?.path ?? "",
-      versionId: binding?.versionId ?? "",
-      bytes: binding?.bytes ?? 0,
-      sha256: binding?.sha256 ?? "",
-      observedByToolCallId: binding?.observedByToolCallId ?? "",
-    };
+      path: binding?.path ?? "", versionId: binding?.versionId ?? "", bytes: binding?.bytes ?? 0,
+      sha256: binding?.sha256 ?? "", observedByToolCallId: binding?.observedByToolCallId ?? "",
+    }));
   });
 }
 

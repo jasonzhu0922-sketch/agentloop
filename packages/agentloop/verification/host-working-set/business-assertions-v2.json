@@ -1,0 +1,87 @@
+{
+  "schema": "agentloop.hostReplayBusinessAssertions/v1",
+  "results": [
+    {
+      "id": "data-latest-canonical-1",
+      "queries": 2,
+      "assertions": [
+        "latest_month_matches_formal_result",
+        "followup_months_match_formal_result_without_personnel_details"
+      ]
+    },
+    {
+      "id": "data-latest-current-1",
+      "queries": 2,
+      "assertions": [
+        "latest_month_matches_formal_result",
+        "followup_months_match_formal_result_without_personnel_details"
+      ]
+    },
+    {
+      "id": "report-finance-canonical-1",
+      "documents": [
+        {
+          "company": "DEMO002",
+          "sourceRows": 2,
+          "sourceSha256": "b41700ef2f9bd340ec0e6ef96ea3a6ca1a715c7e4792edb386a0b3cdab94a295",
+          "documentXmlSha256": "cf07bc2fb1068a9dcdedec22bdc2337fc01a3f7d5d6d36273552912a8fe183d3",
+          "sourceAmountsAndSupplierNamesMatch": true
+        },
+        {
+          "company": "DEMO001",
+          "sourceRows": 2,
+          "sourceSha256": "58a9a5336a3916f2e894937837a64cd15fdec4a08d6daa08da94e44f9fe18ddb",
+          "documentXmlSha256": "1038ca95a25d73139af535045de11ed90e7d5806ed76952f152b4878d046431b",
+          "sourceAmountsAndSupplierNamesMatch": true
+        }
+      ],
+      "firstReportPreservedAfterFollowup": true
+    },
+    {
+      "id": "report-finance-current-1",
+      "documents": [
+        {
+          "company": "DEMO002",
+          "sourceRows": 2,
+          "sourceSha256": "b41700ef2f9bd340ec0e6ef96ea3a6ca1a715c7e4792edb386a0b3cdab94a295",
+          "documentXmlSha256": "cf07bc2fb1068a9dcdedec22bdc2337fc01a3f7d5d6d36273552912a8fe183d3",
+          "sourceAmountsAndSupplierNamesMatch": true
+        },
+        {
+          "company": "DEMO001",
+          "sourceRows": 2,
+          "sourceSha256": "58a9a5336a3916f2e894937837a64cd15fdec4a08d6daa08da94e44f9fe18ddb",
+          "documentXmlSha256": "1038ca95a25d73139af535045de11ed90e7d5806ed76952f152b4878d046431b",
+          "sourceAmountsAndSupplierNamesMatch": true
+        }
+      ],
+      "firstReportPreservedAfterFollowup": true
+    },
+    {
+      "id": "report-hr-canonical-2",
+      "sourceMode": "live",
+      "sourceRows": 2095,
+      "independentlyRecomputedObservations": 2000,
+      "independentlyRecomputedRatios": 1393,
+      "duplicateHandlingMatches": true,
+      "totalMetricSeries": 2092,
+      "metricSeriesTruncated": true,
+      "coverageLimitationVisibleInHtml": false,
+      "businessAcceptance": "incomplete",
+      "artifactSha256": "699ba84dff39b1726b0963fa71430c48a5729707957f059f7d24920dbe86cb8d"
+    },
+    {
+      "id": "report-hr-current-1",
+      "sourceMode": "live",
+      "sourceRows": 2095,
+      "independentlyRecomputedObservations": 2000,
+      "independentlyRecomputedRatios": 1393,
+      "duplicateHandlingMatches": true,
+      "totalMetricSeries": 2092,
+      "metricSeriesTruncated": true,
+      "coverageLimitationVisibleInHtml": false,
+      "businessAcceptance": "incomplete",
+      "artifactSha256": "699ba84dff39b1726b0963fa71430c48a5729707957f059f7d24920dbe86cb8d"
+    }
+  ]
+}

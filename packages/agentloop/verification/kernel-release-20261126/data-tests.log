@@ -1,0 +1,15 @@
+✔ actions and catalog administration share one interpreter, with isolated Run environment (211.760833ms)
+✔ a crash fails the current action without replay; a later action starts a fresh worker (112.752167ms)
+✔ cancellation terminates active Python and preserves queued Run isolation (223.170709ms)
+✔ cancelling a queued action leaves the active worker alive; refresh retires it (133.278375ms)
+✔ the host transport preserves executor preflight, file changes and evidence receipts (72.363958ms)
+✔ an active deadline fails without replay and ordinary commands retain native spawn (168.488ms)
+✔ real result-computation entrypoint works across repeated actions (58.635583ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1406.6635

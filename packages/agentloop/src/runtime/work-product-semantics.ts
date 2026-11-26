@@ -18,6 +18,8 @@ export interface WorkProductDeclaration {
   readonly path: string;
   readonly versionId: string;
   readonly replaces?: string;
+  /** Atomic execution-selected file set for one logical instance. */
+  readonly artifacts?: readonly { readonly path: string; readonly versionId: string }[];
   readonly source: Omit<WorkProductDeclarationEvent, "payload"> & { readonly authority: "model"; readonly index: number };
   readonly role?: WorkProductRole;
   /** An admitted, immutable Runtime target. The model may select it, never define it. */
@@ -45,6 +47,15 @@ export interface WorkProductSemantics {
   })[];
   /** Current bindings only. A superseded file revision automatically ceases to fulfill its target. */
   readonly deliveryTargets?: readonly WorkProductDeliveryBinding[];
+  /** Includes invalidated latest selections: never fall back to an older set. */
+  readonly deliverySelections?: readonly (WorkProductDeliverySelection & { readonly current: boolean })[];
+}
+
+interface WorkProductDeliverySelection {
+  readonly targetId: string;
+  readonly throughSeq: number;
+  readonly bindings: WorkProductDeliveryBinding[];
+  readonly selectedPaths?: readonly string[];
 }
 
 export interface WorkProductDeliveryTarget {
@@ -131,6 +142,19 @@ export function deriveWorkProductSemantics(input: {
         || firstObservation.source.seq > event.throughSeq) { reject(index, "unobserved_object_version"); continue; }
       if (value.kind === "role" && !ROLES.includes(value.role as WorkProductRole)) { reject(index, "invalid_role"); continue; }
       if (value.kind === "delivery_target") {
+        if (value.artifacts !== undefined && (!Array.isArray(value.artifacts) || value.artifacts.length === 0 || value.artifacts.length > 64)) {
+          reject(index, "invalid_artifact_set"); continue;
+        }
+        const members = value.artifacts === undefined ? [value] : value.artifacts.map(record);
+        if (members.some((member) => member === undefined || !text(member.path, 1000) || !text(member.versionId, 128))
+          || new Set(members.map((member) => member!.path)).size !== members.length
+          || !members.some((member) => member!.path === value.path && member!.versionId === value.versionId)
+          || members.some((member) => {
+            const object = facts.objects.find((object) => object.path === member!.path);
+            const version = object?.versions.find((version) => version.id === member!.versionId && version.presence === "present");
+            const observed = facts.observations.find((observation) => observation.id === version?.observationIds[0]);
+            return version?.sha256 === undefined || (version.bytes ?? 0) <= 0 || observed === undefined || observed.source.seq > event.throughSeq!;
+          })) { reject(index, "unobserved_artifact_set"); continue; }
         if (!text(value.targetId, 128) || !admittedTargets.has(value.targetId)) { reject(index, "unknown_delivery_target"); continue; }
         // Binding a delivery target without an immutable artifact identity would
         // merely recreate the old path/extension ambiguity.
@@ -163,7 +187,8 @@ export function deriveWorkProductSemantics(input: {
       const { payload: _, ...source } = event;
       const declaration: WorkProductDeclaration = {
         id, kind: value.kind as "role" | "issue" | "delivery_target", path: value.path as string, versionId: value.versionId as string,
-        ...(previous === undefined ? {} : { replaces: previous.id }), source: { ...source, authority: "model", index },
+        ...(previous === undefined ? {} : { replaces: previous.id }),
+        ...(value.kind !== "delivery_target" || value.artifacts === undefined ? {} : { artifacts: value.artifacts as { path: string; versionId: string }[] }), source: { ...source, authority: "model", index },
         ...(value.kind === "role" ? { role: value.role as WorkProductRole }
           : value.kind === "delivery_target" ? { targetId: value.targetId as string }
           : {
@@ -180,34 +205,44 @@ export function deriveWorkProductSemantics(input: {
       active.set(key, declaration);
     }
   }
-  const modelBindings = [...active.values()].filter((item) => item.kind === "delivery_target").flatMap((item): WorkProductDeliveryBinding[] => {
-    const object = facts.objects.find((candidate) => candidate.path === item.path);
-    const version = object?.versions.find((candidate) => candidate.id === item.versionId);
-    const observation = facts.observations.find((candidate) => candidate.id === version?.observationIds[0]);
-    if (
-      object?.presence !== "present"
-      || object.currentVersionId !== item.versionId
-      || version?.bytes === undefined || version.bytes <= 0 || version.sha256 === undefined
-      || observation === undefined
-    ) return [];
-    // A physical artifact instance can fulfill exactly one user-visible
-    // target, while one leaf may still own any number of such instances.
-    const duplicate = [...active.values()].some((other) => other.id !== item.id
-      && other.kind === "delivery_target" && other.path === item.path && other.versionId === item.versionId
-      && facts.objects.find((candidate) => candidate.path === other.path)?.currentVersionId === other.versionId);
-    if (duplicate) return [];
-    return [{
-      targetId: item.targetId!, deliveryTargetId: admittedTargets.get(item.targetId!)?.deliveryTargetId ?? item.targetId!, path: item.path, versionId: item.versionId,
-      bytes: version.bytes, sha256: version.sha256, declarationId: item.id,
-      observedByToolCallId: observation.source.toolCallId, bindingAuthority: "model",
-    }];
+  const selections = deriveReceiptSelections({ facts, goalId, targets: input.deliveryTargets ?? [] });
+  for (const item of active.values()) {
+    if (item.kind !== "delivery_target") continue;
+    const target = admittedTargets.get(item.targetId!)!;
+    const members = item.artifacts ?? [{ path: item.path, versionId: item.versionId }];
+    const bindings = members.flatMap((member): WorkProductDeliveryBinding[] => {
+      const object = facts.objects.find((candidate) => candidate.path === member.path);
+      const version = object?.versions.find((candidate) => candidate.id === member.versionId);
+      const observation = facts.observations.find((candidate) => candidate.id === version?.observationIds[0]);
+      if (version?.bytes === undefined || version.sha256 === undefined || observation === undefined) return [];
+      return [{ targetId: target.targetId, deliveryTargetId: target.deliveryTargetId ?? target.targetId,
+        path: member.path, versionId: member.versionId, bytes: version.bytes, sha256: version.sha256,
+        declarationId: item.id, observedByToolCallId: observation.source.toolCallId, bindingAuthority: "model" }];
+    });
+    const seq = item.source.throughSeq!;
+    const previous = selections.get(target.targetId);
+    // A declaration after a committed receipt at throughSeq is a newer explicit selection.
+    if (previous === undefined || previous.throughSeq <= seq) selections.set(target.targetId, { targetId: target.targetId, throughSeq: seq, bindings });
+  }
+  const selected = [...selections.values()];
+  const owners = new Map<string, Set<string>>();
+  for (const selection of selected) for (const binding of selection.bindings) {
+    const key = `${binding.path}\u0000${binding.versionId}`;
+    owners.set(key, new Set([...(owners.get(key) ?? []), selection.targetId]));
+  }
+  const deliverySelections = selected.map((selection) => {
+    const target = admittedTargets.get(selection.targetId)!;
+    const current = selection.bindings.length > 0
+      && (selection.selectedPaths === undefined || selection.selectedPaths.length === selection.bindings.length)
+      && selection.bindings.every((binding) => {
+        const object = facts.objects.find((object) => object.path === binding.path);
+        return object?.presence === "present" && object.currentVersionId === binding.versionId
+          && artifactMatchesExpectedTarget({ path: binding.path }, target.kind, target.format)
+          && owners.get(`${binding.path}\u0000${binding.versionId}`)?.size === 1;
+      });
+    return { ...selection, current };
   });
-  const receiptBindings = deriveReceiptSelectedDeliveryBindings({
-    facts,
-    goalId,
-    targets: input.deliveryTargets ?? [],
-  });
-  const explicitBindings = [...modelBindings, ...receiptBindings];
+  const explicitBindings = deliverySelections.filter((selection) => selection.current).flatMap((selection) => selection.bindings);
   return {
     schema: "agentloop.workProductSemantics/v1", goalId, declarations, rejected,
     roles: facts.objects.map((object) => {
@@ -231,6 +266,7 @@ export function deriveWorkProductSemantics(input: {
           : checks.length > 0 && checks.every((check) => check.status === "passed") ? "version_scoped_check" : "successful_operation" };
     }),
     deliveryTargets: explicitBindings,
+    deliverySelections,
   };
 }
 
@@ -241,58 +277,47 @@ export function deriveWorkProductSemantics(input: {
  * rejected by omission when the selected target is unknown, incompatible, or
  * shares the same artifact version with another selected target.
  */
-function deriveReceiptSelectedDeliveryBindings(input: {
+function deriveReceiptSelections(input: {
   readonly facts: WorkProductObservationState;
   readonly goalId: string;
   readonly targets: readonly WorkProductDeliveryTarget[];
-}): WorkProductDeliveryBinding[] {
-  const candidates = input.facts.objects.flatMap((object) => {
-    const version = object.versions.find((candidate) => candidate.id === object.currentVersionId);
-    if (object.presence !== "present" || version?.bytes === undefined || version.bytes <= 0 || version.sha256 === undefined) return [];
-    return version.observationIds
-      .map((id) => input.facts.observations.find((observation) => observation.id === id))
-      .filter((observation): observation is NonNullable<typeof observation> =>
-        observation !== undefined
-        && observation.operationStatus === "succeeded"
-        && ((observation.basis === "receipt" && DELIVERY_RECEIPT_TOOLS.has(observation.source.toolName))
-          || (observation.basis === "file_change" && observation.source.toolName === "computer_run_command"))
-        && observation.deliveryTargetId !== undefined,
-      )
-      .map((observation) => ({
-        path: object.path,
-        versionId: version.id,
-        bytes: version.bytes!,
-        sha256: version.sha256!,
-        targetId: observation.deliveryTargetId!,
-        observedByToolCallId: observation.source.toolCallId,
-      }));
-  });
-  const candidateCounts = new Map<string, number>();
-  for (const candidate of candidates) {
-    const key = `${candidate.path}\u0000${candidate.versionId}`;
-    candidateCounts.set(key, (candidateCounts.get(key) ?? 0) + 1);
+}): Map<string, WorkProductDeliverySelection> {
+  const selected = new Map<string, WorkProductDeliverySelection>();
+  for (const operation of input.facts.operations) {
+    if (operation.status !== "succeeded" || operation.outputBindings === undefined) continue;
+    for (const target of input.targets) {
+      const paths = operation.outputBindings.filter((binding) => binding.targetId === target.targetId).map((binding) => binding.path);
+      if (paths.length > 0) selected.set(target.targetId, {
+        targetId: target.targetId, throughSeq: operation.source.seq, bindings: [], selectedPaths: paths,
+      });
+    }
   }
-  return input.targets.flatMap((target) => {
-    const matches = candidates.filter((candidate) => candidate.targetId === target.targetId
-      && artifactMatchesExpectedTarget({ path: candidate.path }, target.kind, target.format));
-    if (matches.length !== 1) return [];
-    const candidate = matches[0]!;
-    if (candidateCounts.get(`${candidate.path}\u0000${candidate.versionId}`) !== 1) return [];
-    return [{
-      targetId: target.targetId,
-      deliveryTargetId: target.deliveryTargetId ?? target.targetId,
-      path: candidate.path,
-      versionId: candidate.versionId,
-      bytes: candidate.bytes,
-      sha256: candidate.sha256,
-      declarationId: `runtime:receipt-target:${digest(JSON.stringify([input.goalId, target.targetId, candidate.path, candidate.versionId])).slice(0, 20)}`,
-      observedByToolCallId: candidate.observedByToolCallId,
-      bindingAuthority: input.facts.observations.some((observation) =>
-        observation.source.toolCallId === candidate.observedByToolCallId
-        && observation.source.toolName === "computer_run_command"
-        && observation.basis === "file_change") ? "runtime" as const : "model" as const,
-    }];
-  });
+  // Select from ALL committed incarnations first, then validate currentness.
+  // Filtering to present files first would resurrect an old version after deletion.
+  for (const observation of input.facts.observations) {
+    if (observation.operationStatus !== "succeeded" || observation.deliveryTargetId === undefined
+      || !((observation.basis === "receipt" && (DELIVERY_RECEIPT_TOOLS.has(observation.source.toolName) || observation.source.toolName === "computer_run_command"))
+        || (observation.basis === "file_change" && observation.source.toolName === "computer_run_command"))) continue;
+    const target = input.targets.find((target) => target.targetId === observation.deliveryTargetId);
+    if (target === undefined) continue;
+    const object = input.facts.objects.find((object) => object.path === observation.path);
+    const version = object?.versions.find((version) => version.observationIds.includes(observation.id));
+    const previous = selected.get(target.targetId);
+    if (previous !== undefined && previous.throughSeq > observation.source.seq) continue;
+    const selection = previous?.throughSeq === observation.source.seq ? previous
+      : { targetId: target.targetId, throughSeq: observation.source.seq, bindings: [] as WorkProductDeliveryBinding[] };
+    selected.set(target.targetId, selection);
+    if (version?.sha256 === undefined || (version.bytes ?? 0) <= 0 || observation.kind === "deleted") continue;
+    if (selection.bindings.some((binding) => binding.path === object!.path && binding.versionId === version.id)) continue;
+    const firstObservation = input.facts.observations.find(item => item.id === version.observationIds[0])!;
+    selection.bindings.push({
+      targetId: target.targetId, deliveryTargetId: target.deliveryTargetId ?? target.targetId,
+      path: object!.path, versionId: version.id, bytes: version.bytes!, sha256: version.sha256,
+      declarationId: `runtime:receipt-target:${digest(JSON.stringify([input.goalId, target.targetId, observation.source.seq, object!.path, version.id])).slice(0, 20)}`,
+      observedByToolCallId: firstObservation.source.toolCallId, bindingAuthority: observation.source.toolName === "computer_run_command" ? "runtime" : "model",
+    });
+  }
+  return selected;
 }
 
 const ROLES: WorkProductRole[] = ["input", "generator", "experiment", "candidate", "unknown"];

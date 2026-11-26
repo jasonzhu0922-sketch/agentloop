@@ -66,9 +66,18 @@ export interface LocalRuntimeDefinition {
   readonly isDefault: boolean;
 }
 
+/** A configured MCP source that could not be loaded for this Runtime. The
+ * source remains configured, while its tools are omitted until it recovers. */
+export interface LocalRuntimeMcpDiagnostic {
+  readonly key: string;
+  readonly displayName?: string;
+  readonly message: string;
+}
+
 /** Transitional trusted-host API for the existing Supervisor, not a UI API. */
 export interface LocalRuntimeControl extends LocalRuntimeDefinition {
   readonly skillDiagnostics?: readonly SkillLoadDiagnostic[];
+  readonly mcpDiagnostics?: readonly LocalRuntimeMcpDiagnostic[];
   readonly database: AppDatabase;
   readonly runtimeState?: RuntimePersistence;
   readonly executionRuntimeId?: string;

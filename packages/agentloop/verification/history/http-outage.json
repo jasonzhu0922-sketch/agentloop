@@ -1,0 +1,32 @@
+{
+  "database": "agentloop_history_http_1795580291256",
+  "namespace": "http:{5cb3769f-2003-40d4-af7e-aef5c3cf1cbb}",
+  "checks": [
+    "history returns explicit failure; startup succeeds with SQL socket stalled",
+    "real model Run and tool complete; verified file archive reference queues while SQL unavailable",
+    "process restart and network recovery replay pending history without repeating model/tool effects",
+    "HTTP list includes a TiDB-only conversation absent from Redis"
+  ],
+  "startupWhileSQLUnreachableMs": 639.367917,
+  "admissionWhileSQLStalledMs": 31.052416999999878,
+  "backlog": {
+    "pendingCount": 9,
+    "oldestAgeMs": 9297,
+    "lastError": "connect ETIMEDOUT",
+    "lastFailureAt": "1795580301783",
+    "retries": "12"
+  },
+  "runId": "a64c2f2c-09de-46f3-a936-4d0f57483984",
+  "events": 98,
+  "sqlOnlyConversationId": "14b766bb-c388-402a-a109-7a86312b2e68",
+  "recovered": {
+    "pendingCount": 0,
+    "oldestAgeMs": 0,
+    "lastError": "connect ETIMEDOUT",
+    "lastFailureAt": "1795580302540",
+    "retries": "13",
+    "lastSuccessAt": "1795580303389",
+    "lastLatencyMs": "10661",
+    "acknowledged": "9"
+  }
+}

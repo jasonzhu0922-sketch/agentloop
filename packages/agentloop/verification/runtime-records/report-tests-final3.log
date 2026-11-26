@@ -1,0 +1,61 @@
+npm warn Unknown builtin config "electron_mirror". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+
+> agentloop-report-agent@0.1.0 test
+> node --test tests/*.test.ts
+
+✔ connector settings expose redacted transport configuration and reject remote HTTP (5.76675ms)
+✔ runtime capabilities persist skill and tool policy (6.266833ms)
+✔ agent database connection defaults to SQLite and selects native Redis as a restart-time option (26.459833ms)
+✔ banned supplier report Skill declares its independent final DOCX inventory (11.735083ms)
+✔ an empty business result completes the Run without claiming a formal report (938.079333ms)
+✔ real Kernel delivery, HIL, idempotency and restart: prepay-overdue-report (1006.110333ms)
+✔ real Kernel delivery, HIL, idempotency and restart: banned-supplier-report (670.923833ms)
+✔ real Kernel delivery, HIL, idempotency and restart: prepay-overdue-report catalog and Chinese report filename (671.687541ms)
+✔ legacy attribute charts use the canonical safe renderer (22.089333ms)
+✔ chart-like examples inside fenced code remain literal (0.505334ms)
+✔ legacy charts may wrap attributes across lines outside code fences (0.383583ms)
+✔ invalid legacy chart attributes are preserved as escaped source (8.988125ms)
+✔ legacy chart text stays escaped by the shared renderer (0.180125ms)
+✔ editing and reloading a hosted model preserves its native provider and SDK options (32.538ms)
+✔ the settings boundary rejects legacy fields and SDK-incompatible protocol without writing (6.327875ms)
+✔ changing service identity requires new credentials and retains the requested SDK kind (6.64625ms)
+✔ external configuration edits cannot be overwritten by a stale settings snapshot (5.314625ms)
+✔ local SQLite host lock excludes another instance and releases cleanly (21.058125ms)
+✔ application policy no longer narrows Kernel workspace authoring (0.311292ms)
+✔ runtime capabilities always allow the Kernel Skill loader (8.523417ms)
+✔ report filenames support Unicode while preserving the reports directory and exact binding (0.228791ms)
+✔ report planning context exposes domain workflow without granting execution (3.293417ms)
+✔ report planning context follows the authorized Skill catalog (0.293959ms)
+✔ directory Skill is a reusable source provider, not a report producer (0.129292ms)
+✔ mixed report Skills are not promoted to separate source prerequisites (0.153625ms)
+✔ planning contracts are bounded and Skill-owned (0.271375ms)
+✔ report plan seed preserves canonical facts and minimal workflow (0.259542ms)
+✔ resolver model receives report-specific planning contract (0.290333ms)
+✔ report Skill catalog discovers future packages without a host code change (23.3075ms)
+✔ installed Report Agent starts HTTP and completes/reopens a new SQLite Run without Runtime Redis or TiDB (372.305917ms)
+✔ chat server module loads with the settings handlers (0.499542ms)
+✔ prepay report declares one independently bound DOCX per company (20.084209ms)
+✔ shared directory Skill owns directory actions and report Skills do not duplicate them (39.535375ms)
+✔ report descriptions stay within domain ownership (3.953792ms)
+✔ hr-report defaults analytical delivery to a bound HTML artifact (5.20775ms)
+✔ enterprise query exposes source operations instead of connector implementation names (3.835667ms)
+✔ formats report event logs like the Data Agent when color is enabled (0.702208ms)
+✔ keeps report event logs plain when color is disabled (0.058875ms)
+✔ auto mode only colors an interactive terminal (0.086958ms)
+✔ failed heartbeats preserve the database error and recover without losing the lease (2.484583ms)
+✔ confirmed expiry or ownership change fences admission and emits loss once (0.635375ms)
+✔ assertion detects ownership loss independently of the heartbeat (0.119ms)
+✔ an outage past expiry becomes lease loss only after TiDB confirms it (0.912542ms)
+✔ slow heartbeats do not overlap and release waits before clearing ownership (0.535292ms)
+✔ database transport failures are typed on every SQL path; SQL defects remain unchanged (0.2385ms)
+✔ turn budgets are optional when the environment is unset (0.619042ms)
+✔ turn budgets accept configured values within the Runtime ceiling (0.093375ms)
+✔ turn budgets reject malformed and out-of-range values (0.190042ms)
+ℹ tests 48
+ℹ suites 0
+ℹ pass 48
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2953.366625

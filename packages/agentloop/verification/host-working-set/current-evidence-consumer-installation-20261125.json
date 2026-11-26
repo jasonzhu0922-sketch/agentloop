@@ -1,0 +1,56 @@
+{
+  "schema": "agentloop.consumerKernelInstallation/v1",
+  "createdAt": "2026-11-25T09:48:06.693Z",
+  "release": {
+    "filename": "zhujun-agentloop-0.1.0-evidence-4a4a3bf0df1c.tgz",
+    "sha256": "4a4a3bf0df1c34bace2757edc5dd3a97be93e46e0bde3a425f4504be3ba61a97",
+    "integrity": "sha512-smIDyuZxYVAnViNIQtsPjWXWP4ahKzpNxT7924c2hsDt5HWuuGawyvXxegML42EMpUuDV89KUha6mt7SA4Zi0g==",
+    "sourceSha256": "0da147b51ad7ac125831356440f0ac6c426da0d255c8e7d1a7236aac41f93972"
+  },
+  "applications": [
+    {
+      "application": "data-agent",
+      "root": "/Users/zhujun/coding/data-agent",
+      "dependency": "file:vendor/zhujun-agentloop-0.1.0-evidence-4a4a3bf0df1c.tgz",
+      "installed": "file:vendor/zhujun-agentloop-0.1.0-evidence-4a4a3bf0df1c.tgz",
+      "integrity": "sha512-smIDyuZxYVAnViNIQtsPjWXWP4ahKzpNxT7924c2hsDt5HWuuGawyvXxegML42EMpUuDV89KUha6mt7SA4Zi0g==",
+      "distFilesMatched": 398,
+      "typecheck": "passed",
+      "regression": {
+        "tests": 8,
+        "passed": 8,
+        "failed": 0
+      },
+      "installedSmoke": {
+        "emptyUpdatesExactEvidence": true,
+        "committedFrontier": true,
+        "modelCalls": 0
+      },
+      "unrelatedFilesAndStagingPreserved": true
+    },
+    {
+      "application": "report-agent",
+      "root": "/Users/zhujun/coding/report-agent",
+      "dependency": "file:vendor/zhujun-agentloop-0.1.0-evidence-4a4a3bf0df1c.tgz",
+      "installed": "file:vendor/zhujun-agentloop-0.1.0-evidence-4a4a3bf0df1c.tgz",
+      "integrity": "sha512-smIDyuZxYVAnViNIQtsPjWXWP4ahKzpNxT7924c2hsDt5HWuuGawyvXxegML42EMpUuDV89KUha6mt7SA4Zi0g==",
+      "distFilesMatched": 398,
+      "typecheck": "passed",
+      "regression": {
+        "tests": 13,
+        "passed": 13,
+        "failed": 0
+      },
+      "installedSmoke": {
+        "emptyUpdatesExactEvidence": true,
+        "committedFrontier": true,
+        "modelCalls": 0
+      },
+      "unrelatedFilesAndStagingPreserved": true
+    }
+  ],
+  "servicesRestarted": false,
+  "committed": false,
+  "pushed": false,
+  "scope": "Local package installation and host checks; running processes must be started again to load the update. No new business task replay."
+}

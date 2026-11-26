@@ -1,0 +1,91 @@
+{
+  "schema": "agentloop.offlineWorkingSetReplay/v1",
+  "kernelSourceSha256": "6317c117094070b36c1db848d1029ba5930816ae7170a11331124dadb9720de9",
+  "mode": "offline_no_provider_usage_or_latency_claim",
+  "runs": [
+    {
+      "runPrefix": "e154278b",
+      "evidenceSha256": "e85d44d6e15f15a53c468d9360ff94d8a6054a8892b9ff4a3b6f89a1f06a9e5a",
+      "history": [],
+      "originalDeclarations": {
+        "accepted": 25,
+        "rejected": 17,
+        "absorbed": 32
+      },
+      "reinterpretedNativeSyntax": {
+        "accepted": 25,
+        "rejected": 17,
+        "absorbed": 32
+      },
+      "sameSelectedEvidenceEncoding": {
+        "accounting": "characters_are_not_provider_tokens_or_billing",
+        "sourceCharacters": 812824,
+        "projectedCharacters": 575276,
+        "parsedResults": 61,
+        "sharedReferences": 123,
+        "exactRoundTrip": true
+      }
+    },
+    {
+      "runPrefix": "bef6367b",
+      "evidenceSha256": "f3209993e37548d4ef104fbb39e4af0f78c4dcdde75925047eafe13aff21dc65",
+      "history": [
+        {
+          "baselineOutcome": false,
+          "currentOutcome": true,
+          "exactResultMatched": true,
+          "originalResultEventSeq": 85,
+          "assistantEventSeq": 86
+        },
+        {
+          "baselineOutcome": false,
+          "currentOutcome": true,
+          "exactResultMatched": true,
+          "originalResultEventSeq": 112,
+          "assistantEventSeq": 113
+        }
+      ],
+      "originalDeclarations": {
+        "accepted": 1,
+        "rejected": 9,
+        "absorbed": 4
+      },
+      "reinterpretedNativeSyntax": {
+        "accepted": 7,
+        "rejected": 3,
+        "absorbed": 12
+      },
+      "sameSelectedEvidenceEncoding": {
+        "accounting": "characters_are_not_provider_tokens_or_billing",
+        "sourceCharacters": 365796,
+        "projectedCharacters": 270843,
+        "parsedResults": 26,
+        "sharedReferences": 33,
+        "exactRoundTrip": true
+      }
+    },
+    {
+      "runPrefix": "ff2bfa74",
+      "evidenceSha256": "91606f7c817f61dac3dc1fecc98690bd5a2c12577fb35d7fa01f174940f42d98",
+      "history": [],
+      "originalDeclarations": {
+        "accepted": 3,
+        "rejected": 10,
+        "absorbed": 2
+      },
+      "reinterpretedNativeSyntax": {
+        "accepted": 5,
+        "rejected": 8,
+        "absorbed": 2
+      },
+      "sameSelectedEvidenceEncoding": {
+        "accounting": "characters_are_not_provider_tokens_or_billing",
+        "sourceCharacters": 241055,
+        "projectedCharacters": 177089,
+        "parsedResults": 13,
+        "sharedReferences": 24,
+        "exactRoundTrip": true
+      }
+    }
+  ]
+}

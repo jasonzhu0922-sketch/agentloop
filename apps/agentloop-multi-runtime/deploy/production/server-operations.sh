@@ -73,7 +73,12 @@ render_topology() {
 }
 
 idle() {
-  local driver count
+  local driver count backend
+  backend=$(docker exec "${runtime_names[0]}" sh -c 'printf "%s" "${AGENTLOOP_RUNTIME_STATE_BACKEND:-legacy}"')
+  if [ "$backend" != legacy ]; then
+    echo 'This legacy PostgreSQL release procedure cannot back up native Runtime state. Stop writers, export/verify Runtime state and shared files, then deploy the current templates using the native-state migration runbook.' >&2
+    return 1
+  fi
   driver=$(docker exec "${runtime_names[0]}" printenv AGENTLOOP_RUNTIME_STATE_DRIVER)
   test "$driver" = postgres || { echo 'This production procedure requires PostgreSQL.' >&2; return 1; }
   # Current production database; the pg_dump names below use the same contract.

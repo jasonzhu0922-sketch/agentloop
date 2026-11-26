@@ -1,0 +1,123 @@
+{
+  "schema": "agentloop.committedDecisionReplay/v1",
+  "mode": "offline_fixed_evidence_no_provider_usage_or_business_acceptance_claim",
+  "baselineReducerSha256": "2a7ce80ce517c0c507af6e3acb1290512cc51af896e81d7a0c630d948ef634c1",
+  "runs": [
+    {
+      "runPrefix": "b79ee9ca",
+      "evidenceSha256": "e4de46a9508b1bf393ccd5fb5cac1c1e408da6361950f836823b731d47239a1f",
+      "baseline": {
+        "liveItems": 8,
+        "recoveryItems": 10,
+        "semanticEqual": false
+      },
+      "current": {
+        "liveItems": 10,
+        "recoveryItems": 10,
+        "semanticEqual": true,
+        "rejections": 3,
+        "pendingObservations": 19,
+        "unfinishedEffects": 0,
+        "prepareRejectionsExcludedFromNative": 2,
+        "projectionMs": 2.1804169999999914
+      },
+      "evidenceComponentOnly": {
+        "scope": "semantic carry + unreconciled observations + effect safety; product roles/canonical gaps/criteria unavailable",
+        "legacyRemainingCount": 22,
+        "legacyRemainingCharacters": 152702,
+        "currentSelectedCount": 21,
+        "currentSelectedCharacters": 134455,
+        "exactSelectedBodies": true
+      },
+      "modelCallsExecuted": 0,
+      "toolCallsExecuted": 0
+    },
+    {
+      "runPrefix": "023fd241",
+      "evidenceSha256": "31545cc6f0992b381e87f19e8cf9422c2ea11ac769af446343469adfb3b4d9ca",
+      "baseline": {
+        "liveItems": 7,
+        "recoveryItems": 7,
+        "semanticEqual": true
+      },
+      "current": {
+        "liveItems": 7,
+        "recoveryItems": 7,
+        "semanticEqual": true,
+        "rejections": 6,
+        "pendingObservations": 17,
+        "unfinishedEffects": 0,
+        "prepareRejectionsExcludedFromNative": 0,
+        "projectionMs": 0.7671670000000006
+      },
+      "evidenceComponentOnly": {
+        "scope": "semantic carry + unreconciled observations + effect safety; product roles/canonical gaps/criteria unavailable",
+        "legacyRemainingCount": 19,
+        "legacyRemainingCharacters": 148252,
+        "currentSelectedCount": 19,
+        "currentSelectedCharacters": 148252,
+        "exactSelectedBodies": true
+      },
+      "modelCallsExecuted": 0,
+      "toolCallsExecuted": 0
+    },
+    {
+      "runPrefix": "bef6367b",
+      "evidenceSha256": "f3209993e37548d4ef104fbb39e4af0f78c4dcdde75925047eafe13aff21dc65",
+      "baseline": {
+        "liveItems": 6,
+        "recoveryItems": 6,
+        "semanticEqual": true
+      },
+      "current": {
+        "liveItems": 6,
+        "recoveryItems": 6,
+        "semanticEqual": true,
+        "rejections": 3,
+        "pendingObservations": 14,
+        "unfinishedEffects": 0,
+        "prepareRejectionsExcludedFromNative": 0,
+        "projectionMs": 0.7235000000000014
+      },
+      "evidenceComponentOnly": {
+        "scope": "semantic carry + unreconciled observations + effect safety; product roles/canonical gaps/criteria unavailable",
+        "legacyRemainingCount": 17,
+        "legacyRemainingCharacters": 131148,
+        "currentSelectedCount": 17,
+        "currentSelectedCharacters": 131148,
+        "exactSelectedBodies": true
+      },
+      "modelCallsExecuted": 0,
+      "toolCallsExecuted": 0
+    },
+    {
+      "runPrefix": "ff2bfa74",
+      "evidenceSha256": "91606f7c817f61dac3dc1fecc98690bd5a2c12577fb35d7fa01f174940f42d98",
+      "baseline": {
+        "liveItems": 5,
+        "recoveryItems": 5,
+        "semanticEqual": true
+      },
+      "current": {
+        "liveItems": 5,
+        "recoveryItems": 5,
+        "semanticEqual": true,
+        "rejections": 8,
+        "pendingObservations": 11,
+        "unfinishedEffects": 0,
+        "prepareRejectionsExcludedFromNative": 0,
+        "projectionMs": 0.32858300000000895
+      },
+      "evidenceComponentOnly": {
+        "scope": "semantic carry + unreconciled observations + effect safety; product roles/canonical gaps/criteria unavailable",
+        "legacyRemainingCount": 12,
+        "legacyRemainingCharacters": 157607,
+        "currentSelectedCount": 12,
+        "currentSelectedCharacters": 157607,
+        "exactSelectedBodies": true
+      },
+      "modelCallsExecuted": 0,
+      "toolCallsExecuted": 0
+    }
+  ]
+}

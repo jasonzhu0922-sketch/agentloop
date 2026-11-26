@@ -1,0 +1,33 @@
+npm warn Unknown builtin config "electron_mirror". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+
+> agentloop-data-agent@0.1.0 test
+> node --test tests/fixed-planner.test.ts tests/server.test.ts tests/mcp.test.ts tests/skill-policy.test.ts tests/model-configuration.test.ts tests/model-settings.test.ts tests/settings.test.ts tests/startup-diagnostics.test.ts tests/turn-budgets.test.ts
+
+✔ fixed application workflow binds its main Skill even outside lexical recommendations (13.145375ms)
+✔ fixed planner uses the kernel response-only plan contract for conversational follow-ups (4.528416ms)
+✔ fixed planner refuses an unavailable or wrong application capability (0.187666ms)
+✔ application rejects legacy SQL execution state without an explicit backend (0.275042ms)
+✔ MCP SSE exposes tools, progress, structured query results and durable call state (42.450791ms)
+✔ the shipped configuration uses native Alibaba SDK reasoning for hosted DeepSeek too (13.335208ms)
+✔ native configuration rejects legacy thinking controls at both configuration levels (0.389875ms)
+✔ editing and reloading a hosted model preserves its native provider and SDK options (52.959ms)
+✔ the settings boundary rejects legacy fields and SDK-incompatible protocol without writing (2.836666ms)
+✔ changing service identity requires new credentials and retains the requested SDK kind (3.119667ms)
+✔ external configuration edits cannot be overwritten by a stale settings snapshot (1.599625ms)
+✔ chat opens without login and protects mutations from other origins (33.572458ms)
+✔ settings mutations use host admission, refresh the connection package and preserve request identity (32.968958ms)
+✔ fixed package policy admits declared entrypoints and keeps credentials private (3.470625ms)
+✔ startup diagnostics identifies a network permission boundary without exposing credentials (0.683792ms)
+✔ startup diagnostics distinguishes a refused TiDB listener (0.088584ms)
+✔ startup diagnostics explains an active TiDB Runtime host lease (0.261667ms)
+✔ turn budgets are optional when the environment is unset (0.528083ms)
+✔ turn budgets accept configured values within the Runtime ceiling (0.069916ms)
+✔ turn budgets reject malformed and out-of-range values (3.009167ms)
+ℹ tests 20
+ℹ suites 0
+ℹ pass 20
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 508.869292

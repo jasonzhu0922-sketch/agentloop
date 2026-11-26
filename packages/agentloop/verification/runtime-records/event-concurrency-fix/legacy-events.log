@@ -1,0 +1,22 @@
+✔ all event writers and evidence reads use Redis before SQL projection (5.561042ms)
+✔ failed state transactions discard their events without reusing sequences (2.623166ms)
+✔ SQL projection failure retains the same batch for retry and never poisons Redis admission (2.346959ms)
+✔ a complete Run advances through model, Action result and terminal events while the SQL sink is blocked (40.956166ms)
+✔ restart merges pending Redis records and resolves committed or rolled back state transactions (2.5015ms)
+✔ an uncertain SQL sink commit retries its stable manifest without duplicate event publication or rows (2.2985ms)
+✔ later accepted events cannot jump past an unresolved state transaction in live replay (2.094458ms)
+✔ a newly created Run seeds its empty ledger before the first Redis event (2.069416ms)
+✔ count threshold and flush use one ordered batch and freeze caller data (1.480084ms)
+✔ timer persists sparse observations without an execution checkpoint (11.327291ms)
+✔ flush waits for an in-flight batch and background failures remain visible (0.656209ms)
+✔ outbox records are recovered before new execution starts (0.19225ms)
+✔ Runtime separates transient progress from commit and deduplicates an uncertain batch on restart (6.408833ms)
+✔ a complete Run drains observations before publishing its terminal result (35.371958ms)
+ℹ tests 14
+ℹ suites 0
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 399.87225

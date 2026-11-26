@@ -1,0 +1,140 @@
+{
+  "recordedAt": "2026-11-25T00:31:31.129Z",
+  "node": "v26.0.0",
+  "platform": "darwin-arm64",
+  "scope": "Storage-only budget consumption plus one ordered event per transaction. No model, tools, RunService, HTTP, archive or TiDB projection.",
+  "redis": {
+    "appendonly": true,
+    "appendfsync": "always",
+    "maxmemoryPolicy": "noeviction",
+    "topology": "one temporary local Redis server"
+  },
+  "metrics": [
+    {
+      "backend": "sqlite-disk",
+      "concurrency": 1,
+      "transactions": 8,
+      "elapsedMs": 1.0997080000000068,
+      "transactionsPerSecond": 7274.658363856543,
+      "transactionLatencyMs": {
+        "p50": 0.1183329999999927,
+        "p95": 0.18829099999999244,
+        "max": 0.18829099999999244
+      },
+      "redisCommands": 0,
+      "redisCommandsPerTransaction": 0
+    },
+    {
+      "backend": "sqlite-disk",
+      "concurrency": 8,
+      "transactions": 64,
+      "elapsedMs": 7.005291999999997,
+      "transactionsPerSecond": 9135.950364381673,
+      "transactionLatencyMs": {
+        "p50": 0.8302080000000274,
+        "p95": 1.1445420000000013,
+        "max": 1.1594169999999906
+      },
+      "redisCommands": 0,
+      "redisCommandsPerTransaction": 0
+    },
+    {
+      "backend": "sqlite-disk",
+      "concurrency": 32,
+      "transactions": 256,
+      "elapsedMs": 21.70637500000001,
+      "transactionsPerSecond": 11793.77026334429,
+      "transactionLatencyMs": {
+        "p50": 2.579499999999996,
+        "p95": 3.37662499999999,
+        "max": 3.8432499999999834
+      },
+      "redisCommands": 0,
+      "redisCommandsPerTransaction": 0
+    },
+    {
+      "backend": "redis-native-records",
+      "concurrency": 1,
+      "transactions": 8,
+      "elapsedMs": 39.883208999999965,
+      "transactionsPerSecond": 200.5856650100549,
+      "transactionLatencyMs": {
+        "p50": 5.012916999999987,
+        "p95": 5.167291000000006,
+        "max": 5.167291000000006
+      },
+      "redisCommands": 64,
+      "redisCommandsPerTransaction": 8
+    },
+    {
+      "backend": "redis-native-records",
+      "concurrency": 8,
+      "transactions": 64,
+      "elapsedMs": 157.11087500000002,
+      "transactionsPerSecond": 407.35563340220716,
+      "transactionLatencyMs": {
+        "p50": 18.975792000000013,
+        "p95": 25.178249999999935,
+        "max": 29.20387500000004
+      },
+      "redisCommands": 512,
+      "redisCommandsPerTransaction": 8
+    },
+    {
+      "backend": "redis-native-records",
+      "concurrency": 32,
+      "transactions": 256,
+      "elapsedMs": 293.0148750000001,
+      "transactionsPerSecond": 873.6757818182436,
+      "transactionLatencyMs": {
+        "p50": 34.07158400000003,
+        "p95": 43.915042000000085,
+        "max": 44.85958299999993
+      },
+      "redisCommands": 2048,
+      "redisCommandsPerTransaction": 8
+    },
+    {
+      "backend": "redis-legacy-changeset",
+      "concurrency": 1,
+      "transactions": 8,
+      "elapsedMs": 31.67854199999988,
+      "transactionsPerSecond": 252.53687496097612,
+      "transactionLatencyMs": {
+        "p50": 4.029125000000022,
+        "p95": 4.308083000000124,
+        "max": 4.308083000000124
+      },
+      "redisCommands": 8,
+      "redisCommandsPerTransaction": 1
+    },
+    {
+      "backend": "redis-legacy-changeset",
+      "concurrency": 8,
+      "transactions": 64,
+      "elapsedMs": 293.2180000000001,
+      "transactionsPerSecond": 218.267637048203,
+      "transactionLatencyMs": {
+        "p50": 36.75474999999983,
+        "p95": 39.76999999999998,
+        "max": 40.210000000000036
+      },
+      "redisCommands": 64,
+      "redisCommandsPerTransaction": 1
+    },
+    {
+      "backend": "redis-legacy-changeset",
+      "concurrency": 32,
+      "transactions": 256,
+      "elapsedMs": 1192.9343330000002,
+      "transactionsPerSecond": 214.5968918139939,
+      "transactionLatencyMs": {
+        "p50": 145.15966700000035,
+        "p95": 170.9942500000002,
+        "max": 173.09195899999986
+      },
+      "redisCommands": 256,
+      "redisCommandsPerTransaction": 1
+    }
+  ]
+}

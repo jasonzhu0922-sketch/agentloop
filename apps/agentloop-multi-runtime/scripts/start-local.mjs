@@ -99,6 +99,9 @@ const children = [];
 let closing = false;
 const common = localRuntimeHostEnvironment({
   ...process.env,
+  AGENTLOOP_RUNTIME_STATE_BACKEND: process.env.AGENTLOOP_RUNTIME_STATE_BACKEND ?? "redis",
+  AGENTLOOP_RUNTIME_REDIS_URL: process.env.AGENTLOOP_RUNTIME_REDIS_URL ?? "redis://127.0.0.1:6379",
+  AGENTLOOP_RUNTIME_REDIS_NAMESPACE: process.env.AGENTLOOP_RUNTIME_REDIS_NAMESPACE ?? "agentloop-runtime-state",
   RUNTIME_DISPATCH_TOKEN: dispatchToken,
   RUNTIME_ATTACHMENT_TOKEN: attachmentToken,
   // Child stdout is piped so this launcher can add a Runtime prefix.  The

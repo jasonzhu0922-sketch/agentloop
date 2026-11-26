@@ -1,0 +1,76 @@
+npm warn Unknown builtin config "electron_mirror". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+
+> agentloop-data-agent@0.1.0 test
+> node --test tests/tidb-state.test.ts tests/tidb-schema.test.ts tests/fixed-planner.test.ts tests/server.test.ts tests/run-stream.test.ts tests/mcp.test.ts tests/skill-policy.test.ts tests/runtime-capabilities.test.ts tests/model-configuration.test.ts tests/model-settings.test.ts tests/mcp-settings.test.ts tests/settings.test.ts tests/startup-diagnostics.test.ts tests/storage-paths.test.ts tests/turn-budgets.test.ts tests/run-concurrency.test.ts tests/skill-package.test.ts
+
+✔ fixed application workflow binds its main Skill even outside lexical recommendations (32.515917ms)
+✔ fixed planner uses the kernel response-only plan contract for conversational follow-ups (23.660125ms)
+✔ fixed planner refuses an unavailable or wrong application capability (0.212916ms)
+✔ application rejects unsupported state dialects and the old changeset API before initialization (0.299541ms)
+✔ MCP selection follows the live default, persists a fixed model, and rejects stale changes (15.267167ms)
+✔ invalid or externally changed MCP settings never silently switch to an application default (4.0635ms)
+✔ MCP resolves the current default for each new query, supports explicit selection and preserves HIL identity (16.081875ms)
+✔ MCP SSE exposes tools, progress, structured query results and durable call state (85.460541ms)
+✔ MCP waits on Run transitions without periodic database reads and releases subscriptions (601.463125ms)
+✔ the shipped configuration uses native Alibaba SDK reasoning for hosted DeepSeek too (23.938959ms)
+✔ native configuration rejects legacy thinking controls at both configuration levels (1.2525ms)
+✔ editing and reloading a hosted model preserves its native provider and SDK options (116.241083ms)
+✔ the settings boundary rejects legacy fields and SDK-incompatible protocol without writing (7.18775ms)
+✔ changing service identity requires new credentials and retains the requested SDK kind (4.019667ms)
+✔ external configuration edits cannot be overwritten by a stale settings snapshot (2.781ms)
+✔ Run concurrency defaults to 15 and accepts deployment and host options (1.296ms)
+✔ invalid Run limits fail before changing persistence (1.098625ms)
+✔ SSE closes the snapshot race, avoids database polling and keeps transient progress off replay cursor (1295.5105ms)
+Data Agent HTTP failure: 事件游标无效
+Data Agent HTTP failure: 事件游标无效
+Data Agent HTTP failure: 事件游标无效
+✔ Last-Event-ID resumes backfill after refresh and terminal snapshot closes the stream (5.582917ms)
+✔ application switches persist, reject stale/unknown values, and fail closed on corrupt configuration (33.779208ms)
+✔ kernel registry blocks disabled writes before effects, and re-enabling preserves fixed Skill protections (6.284375ms)
+✔ Skill exclusions come only from configuration and can be added, persisted, and removed (5.80625ms)
+✔ Skill selector is sourced from bundled packages and retains removed catalog selections (321.891584ms)
+✔ positive available-Skill settings preserve old restrictions and required application capability (4.762166ms)
+✔ settings HTML and its transitive module imports are served by the same static routes (115.224791ms)
+Data Agent HTTP failure: provider socket reset
+✔ database outages return explicit errors while the same HTTP server survives recovery (34.141583ms)
+Data Agent HTTP failure: 查询并发已满
+✔ chat opens without login and protects mutations from other origins (20.919459ms)
+Data Agent HTTP failure: 分页参数无效
+Data Agent HTTP failure: 分页参数无效
+Data Agent HTTP failure: 分页参数无效
+Data Agent HTTP failure: 分页参数无效
+Data Agent HTTP failure: 分页参数无效
+Data Agent HTTP failure: 分页参数无效
+Data Agent HTTP failure: 分页参数无效
+✔ conversation history defaults to 50 and passes bounded pagination to storage (7.597042ms)
+Data Agent HTTP failure: 该会话仍在执行，请先停止查询后再删除
+Data Agent HTTP failure: Conversation not found
+✔ conversation deletion is owner-scoped, origin-protected and preserves active-run conflicts (5.304334ms)
+Data Agent HTTP failure: Process artifact not found
+Data Agent HTTP failure: Process artifact not found
+✔ artifact endpoints use owner-scoped Kernel reads and isolate HTML previews (7.230208ms)
+✔ settings mutations use host admission, refresh the connection package and preserve request identity (42.976041ms)
+✔ data-analysis Skill package is discoverable (70.164791ms)
+✔ fixed package policy admits declared entrypoints and keeps credentials private (7.941ms)
+✔ optional Skill files and declared commands require a current step binding (1.224917ms)
+✔ typed database failures retain their original network diagnosis (0.665375ms)
+✔ startup diagnostics identifies a network permission boundary without exposing credentials (0.553875ms)
+✔ startup diagnostics distinguishes a refused TiDB listener (0.166667ms)
+✔ existing deployments retain the default workspace under their file directory (1.167875ms)
+✔ an independent workspace mount preserves the application file directory (0.081083ms)
+✔ relative paths resolve against the app, not the file directory or process cwd (0.565875ms)
+✔ explicitly empty or invalid paths cannot silently select a different directory (0.444291ms)
+✔ TiDB schema repair drops only the known unsupported composite foreign keys (1.140917ms)
+✔ persisted Agent connection overrides the bootstrap URL (5.960542ms)
+✔ state database transport failures remain typed without a host lease (1.206ms)
+✔ turn budgets are optional when the environment is unset (3.17975ms)
+✔ turn budgets accept configured values within the Runtime ceiling (0.144ms)
+✔ turn budgets reject malformed and out-of-range values (0.207042ms)
+ℹ tests 47
+ℹ suites 0
+ℹ pass 47
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2564.566042

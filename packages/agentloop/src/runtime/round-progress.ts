@@ -1,7 +1,7 @@
 import { AppError } from "../shared/errors.ts";
 import type { ExecutionPlan } from "../planning/contracts.ts";
 import { activeLeafSteps } from "../planning/plan-utils.ts";
-import type { CanonicalRunState } from "./canonical-run-state.ts";
+import { acceptedCanonicalDelivery, type CanonicalRunState } from "./canonical-run-state.ts";
 
 export type RoundProgress =
   | { readonly kind: "continue_round"; readonly incompleteStepIds: readonly string[] }
@@ -22,7 +22,7 @@ export function decideRoundProgress(plan: ExecutionPlan, state: CanonicalRunStat
     .map((step) => step.id);
   if (incompleteStepIds.length > 0) return { kind: "continue_round", incompleteStepIds };
   const openGapIds = state.gaps.filter((gap) => gap.status === "open").map((gap) => gap.id);
-  const openTargetIds = Object.values(state.targets).filter((target) => target.terminalRequired && target.status !== "accepted")
+  const openTargetIds = Object.values(state.targets).filter((target) => target.terminalRequired && acceptedCanonicalDelivery(target) === undefined)
     .map((target) => target.targetId);
   if (openGapIds.length > 0 || openTargetIds.length > 0) return { kind: "next_round", openGapIds, openTargetIds };
   return { kind: "complete_goal" };

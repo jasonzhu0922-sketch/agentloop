@@ -18,7 +18,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
   let metadataDrawer;
   const labels = { general: ['常规', '管理当前账号的本机存储与 Memory 配置。'], 'web-search': ['联网搜索', '配置 websearch 工具使用的端点和凭据；配置按当前账号加密保存在本机。'], skills: ['Skill 管理', '上传和维护本机 Skill 包；安装后可在各个 Runtime 配置中分别选择。'], mcp: ['MCP 配置', '配置当前账号的 MCP Server，供所有本机 Runtime 使用。'], runtimes: ['子 Runtime 管理', '新增、停止、重启、删除和查看各个本机 Runtime；每个 Runtime 独立选择扩展 Skill，共享当前账号的 MCP。'], connectors: ['Connector 配置', '个人 Connector 只保存在 Desktop；配置凭据不会上传到云端。'] };
   const errors = { account_storage_outside_scope: '此目录不适用于当前账号，请选择其他目录。', runtime_must_be_stopped_for_configuration: '请先在 Runtime 页停止对应实例，再编辑配置。', runtime_active_runs_prevent_reconfiguration: '仍有活动任务，请等待任务结束。', runtime_configuration_stale: '配置已被其他页面修改，请重新读取后再编辑。', mcp_json_invalid: 'JSON 格式无效，请检查引号、括号和逗号。', mcp_credential_required: '缺少凭据；更换地址或认证目标后，必须重新填写。', mcp_server_key_duplicate: '当前账号的 MCP key 不能重复。', mcp_server_referenced_by_runtime: '该 MCP 已被一个或多个 Runtime 选择，不能删除。请先在对应 Runtime 中解除勾选。', connector_connection_not_authorized: '不能使用其他账号的 Connector 连接。', skill_import_invalid: 'Skill 包无效：请检查 SKILL.md、归档路径、文件类型和大小限制。', skill_runtime_active: '请先停止使用同名 Skill 的 Runtime，再重新上传。', skill_package_referenced: '该 Skill 已被 Runtime 选择，请先在对应 Runtime 配置中取消选择。', skill_metadata_runtime_active: '请先停止使用此 Skill 的 Runtime。', runtime_default_cannot_be_removed: '不能删除默认 Runtime。', web_search_api_key_required: 'Bocha 搜索需要 API Key。', web_search_endpoint_required: 'Bocha 搜索需要搜索端点。', web_search_endpoint_invalid: '搜索端点必须为 HTTP 或 HTTPS，且不能包含凭据、查询参数或片段。', web_search_provider_invalid: '搜索服务类型无效。', web_search_credentials_missing: '搜索凭据缺失，请重新填写 API Key。' };
-  Object.assign(errors, connectorCredentialMessages, { mcp_form_invalid: '请检查 MCP 配置中标出的输入问题。', mcp_configuration_invalid: 'MCP 配置无效，请检查地址、认证和参数。', mcp_url_must_not_contain_credentials_or_query: '请将凭据填写在认证区域，服务地址不能包含查询参数。' });
+  Object.assign(errors, connectorCredentialMessages, { mcp_startup_failed: 'Runtime 启动失败：已配置的 MCP 服务当前不可用，请在“MCP 配置”中测试、修复或移除后重试。', runtime_resource_cleanup_failed: 'Runtime 资源清理失败，请重启 Desktop 后重试。', mcp_form_invalid: '请检查 MCP 配置中标出的输入问题。', mcp_configuration_invalid: 'MCP 配置无效，请检查地址、认证和参数。', mcp_url_must_not_contain_credentials_or_query: '请将凭据填写在认证区域，服务地址不能包含查询参数。' });
   const connectorBindings = {
     '126-mail': {
       title: '绑定 126 邮箱', displayName: '我的 126 邮箱', scopes: ['email:search', 'email:read'],
@@ -266,6 +266,7 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
       const activity = runtime.activeRunCount ? `当前 ${runtime.activeRunCount} 个活动任务` : '当前无活动任务';
       main.append(title, el('p', activity), el('small', `${runtime.extensionSkillCount} 个扩展 Skill · ${runtime.mcpServerCount} 个 MCP`));
       if (runtime.skillDiagnostics?.length) main.append(el('p', `${runtime.skillDiagnostics.length} 项 Skill 加载异常，已隔离；可查看详情。`, 'capability-status error'));
+      if (runtime.mcpDiagnostics?.length) main.append(el('p', `${runtime.mcpDiagnostics.length} 个 MCP 加载失败，Runtime 仍可运行；可查看详情。`, 'capability-status error'));
       const actions = runtimeActionMenu(runtime);
       actions.prepend(button('查看', () => openRuntimeDetail(runtime, 'view')));
       item.append(main, actions); list.append(item);
@@ -344,6 +345,10 @@ export function installCapabilitySettings({ api, element, refreshModels, status,
     if (runtime.skillDiagnostics?.length) {
       const diagnostics = cardInto(tabs.skills, 'Skill 加载异常', '以下 Skill 已隔离，其他可用 Skill 和 Runtime 继续运行。修复后可重启 Runtime 重新加载。');
       for (const issue of runtime.skillDiagnostics) diagnostics.append(el('p', `${issue.skillName || 'Skill 目录'}：${issue.message}`, 'capability-status error'));
+    }
+    if (runtime.mcpDiagnostics?.length) {
+      const diagnostics = cardInto(tabs.mcp, 'MCP 加载异常', '以下 MCP 暂不可用，其他工具和 Runtime 继续运行。修复服务后重启 Runtime 重新加载。');
+      for (const issue of runtime.mcpDiagnostics) diagnostics.append(el('p', `${issue.displayName || issue.key}：${issue.message}`, 'capability-status error'));
     }
     const iconCard = cardInto(tabs.skills, 'Runtime 形象', '会话历史、输入框入口和对话流都会使用这个标识。');
     const icon = RUNTIME_ICONS.find(item => item.key === (runtime.iconKey || snapshot.configuration.iconKey)) || RUNTIME_ICONS[0];

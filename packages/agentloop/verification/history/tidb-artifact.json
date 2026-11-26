@@ -1,0 +1,42 @@
+{
+  "database": "agentloop_history_artifact_1795580288502",
+  "scenarios": [],
+  "checks": [
+    "real tool wrote bytes",
+    "TiDB stores name/type/size/checksum/stable immutable reference",
+    "history download and preview survive workspace mutation",
+    "complete process archive confirmed"
+  ],
+  "runId": "b2579f2f-a254-45b4-bb72-fcdebfa15d3c",
+  "status": "completed",
+  "tool": "computer_write_file",
+  "artifact": {
+    "runId": "b2579f2f-a254-45b4-bb72-fcdebfa15d3c",
+    "id": "bdc1ed6a81e659790a888dbf39b0e96299b64762e6621c0863b4abf123a206e5",
+    "path": "evidence.csv",
+    "name": "evidence.csv",
+    "bytes": 22,
+    "sha256": "105fca698f203a35a0f3cdbac969b6f22c217a5bca07f6f8a8fa0731fede39a3",
+    "verification": {
+      "file": "unverified",
+      "result": "unverified",
+      "delivery": "uncommitted",
+      "targetIds": [],
+      "limitations": []
+    },
+    "mimeType": "text/csv; charset=utf-8",
+    "role": "process",
+    "sourceTool": "computer_write_file",
+    "previewable": true,
+    "type": "text/csv; charset=utf-8",
+    "storageRef": "artifacts/105fca698f203a35a0f3cdbac969b6f22c217a5bca07f6f8a8fa0731fede39a3.bin",
+    "storageKind": "archive"
+  },
+  "outbox": {
+    "pendingCount": 0,
+    "oldestAgeMs": 0,
+    "lastSuccessAt": "1795580289364",
+    "lastLatencyMs": "311",
+    "acknowledged": "10"
+  }
+}

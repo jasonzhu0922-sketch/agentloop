@@ -66,12 +66,15 @@ export interface CanonicalDeliveryTarget {
   readonly surface: "conversation" | "workspace_artifact";
   readonly kind: string;
   readonly format?: string;
+  /** Immutable number of requested logical instances; each may realize a file bundle. */
   readonly expectedCount: number;
   readonly terminalRequired: true;
   readonly status: "open" | "accepted";
   readonly ownerStepIds: readonly string[];
   /** Current user-delivery identity, derived from an admitted target binding. */
   readonly artifactBinding?: {
+    /** Logical instance, independent of the number of physical files in its bundle. */
+    readonly targetId?: string;
     readonly stepId: string;
     readonly declarationId: string;
     readonly path: string;
@@ -506,7 +509,9 @@ export function recordCanonicalAssessment(
 /**
  * Reconcile current target/version bindings from committed ActionResult facts.
  * This does not assign ownership or alter the Plan: a single leaf may bind
- * many targets. Rewriting a bound path clears acceptance for that target until
+ * many targets. The input is a partial observation of the Step's work, so an
+ * omitted target is left untouched unless its current physical identity was
+ * invalidated. Rewriting a bound path clears acceptance for that target until
  * the new current version is explicitly re-bound and accepted.
  */
 export function reconcileCanonicalDeliveryTargetBindings(
@@ -515,6 +520,8 @@ export function reconcileCanonicalDeliveryTargetBindings(
     readonly stepId: string;
     readonly bindings: NonNullable<WorkProductSemantics["deliveryTargets"]>;
     readonly observations?: WorkProductObservationState;
+    /** Complete selection namespace, including invalidated latest selections. */
+    readonly selectedTargetIds?: readonly string[];
     readonly now?: number;
   },
 ): CanonicalRunState {
@@ -536,7 +543,7 @@ export function reconcileCanonicalDeliveryTargetBindings(
       const version = object.versions.find((item) => item.id === object.currentVersionId);
       // A later write is a new incarnation even with identical bytes or no
       // digest. An ordinary read of the same bytes does not revoke acceptance.
-      const rewritten = input.observations!.observations.some((observation) => version?.observationIds.includes(observation.id)
+      const rewritten = version?.id !== binding.versionId && input.observations!.observations.some((observation) => version?.observationIds.includes(observation.id)
         && (observation.kind === "created" || observation.kind === "modified")
         && observation.source.toolCallId !== binding.observedByToolCallId);
       return object.presence !== "present" || rewritten
@@ -544,15 +551,24 @@ export function reconcileCanonicalDeliveryTargetBindings(
         || version?.bytes !== undefined && version.bytes !== binding.bytes;
     });
     const clearBinding = () => {
+      if (currentBindings.length === 0 && target.status === "open") return [targetId, target];
       changed = true;
       return [targetId, Object.freeze({ ...target, status: "open" as const, artifactBinding: undefined, artifactBindings: undefined })];
     };
     if (!target.ownerStepIds.includes(input.stepId)) return invalidated ? clearBinding() : [targetId, target];
     const bindings = byTarget.get(targetId) ?? [];
     if (bindings.length === 0) {
-      return invalidated || target.artifactBinding?.stepId === input.stepId ? clearBinding() : [targetId, target];
+      // A WorkProductSemantics snapshot is a projection of the observations
+      // available at this callback, not a replacement instruction for every
+      // target owned by the Step.  A command may produce several files while
+      // declaring only one output binding, and later verify/read operations do
+      // not repeat that binding.  Preserve the current identity unless the
+      // physical observation above proved that this target was invalidated.
+      return invalidated || input.selectedTargetIds?.some((id) => id === targetId || currentBindings.some((binding) => binding.targetId === id))
+        ? clearBinding() : [targetId, target];
     }
     const nextBindings = bindings.map((binding) => ({
+      targetId: binding.targetId,
       stepId: input.stepId,
       declarationId: binding.declarationId,
       path: binding.path,
@@ -563,7 +579,7 @@ export function reconcileCanonicalDeliveryTargetBindings(
       boundAt: now,
     }));
     const identity = (binding: NonNullable<CanonicalDeliveryTarget["artifactBinding"]>) =>
-      JSON.stringify([binding.stepId, binding.declarationId, binding.path, binding.versionId, binding.sha256, binding.bytes, binding.observedByToolCallId]);
+      JSON.stringify([binding.targetId, binding.stepId, binding.declarationId, binding.path, binding.versionId, binding.sha256, binding.bytes, binding.observedByToolCallId]);
     const current = target.artifactBindings ?? (target.artifactBinding === undefined ? [] : [target.artifactBinding]);
     if (!invalidated && current.length === nextBindings.length
       && current.map(identity).sort().every((value, index) => value === nextBindings.map(identity).sort()[index])) return [targetId, target];
@@ -608,7 +624,7 @@ export function markCanonicalReadyForTerminal(state: CanonicalRunState, now = Da
   if (state.gaps.some((gap) => gap.status === "open")) {
     throw conflict("Canonical state cannot become terminal-ready with open GoalGaps");
   }
-  if (Object.values(state.targets).some((target) => target.terminalRequired && target.status !== "accepted")) {
+  if (Object.values(state.targets).some((target) => target.terminalRequired && acceptedCanonicalDelivery(target) === undefined)) {
     throw conflict("Canonical state cannot become terminal-ready before every delivery target is accepted");
   }
   return next(state, { phase: "ready_for_terminal" }, now);
@@ -670,7 +686,8 @@ function deliveryClaimMatchesCurrentTargetBinding(
   const bindings = target.artifactBindings ?? (target.artifactBinding === undefined ? [] : [target.artifactBinding]);
   if (bindings.length === 0) return target.surface !== "workspace_artifact";
   const artifacts = claim.artifacts ?? (claim.artifact === undefined ? [] : [claim.artifact]);
-  if (bindings.length !== target.expectedCount || artifacts.length !== bindings.length) return false;
+  const instances = new Set(bindings.map((binding) => binding.targetId ?? binding.path));
+  if (instances.size !== target.expectedCount || artifacts.length !== bindings.length) return false;
   return bindings.every((binding) => artifacts.some((artifact) => artifact.path === binding.path
     && artifact.versionId === binding.versionId
     && artifact.sha256 === binding.sha256

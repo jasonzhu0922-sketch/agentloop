@@ -1,0 +1,33 @@
+✔ candidate claims enumerate the canonical surfaces without letting prose replace file identity (5.044834ms)
+✔ a partial multi-file command keeps its bound target through later read/verify observations (1.796125ms)
+✔ Run delivery persists every target and repairs only the unresolved surface (no repair) (63.472667ms)
+✔ Run delivery persists every target and repairs only the unresolved surface (figure) (48.13075ms)
+✔ Run delivery persists every target and repairs only the unresolved surface (findings) (35.156208ms)
+✔ Run delivery persists every target and repairs only the unresolved surface (separate sequential producers) (34.75ms)
+✔ Run delivery persists every target and repairs only the unresolved surface (findings, direct recovery) (33.818959ms)
+✔ Run delivery persists every target and repairs only the unresolved surface (figure, direct recovery) (45.220125ms)
+✔ a retired producer's acceptance follows the current physical identity (modified) (0.382208ms)
+✔ a retired producer's acceptance follows the current physical identity (deleted) (0.158542ms)
+✔ a retired producer's acceptance follows the current physical identity (hashless_write) (0.089833ms)
+✔ a retired producer's acceptance follows the current physical identity (same_content_write) (0.06925ms)
+✔ a retired producer's acceptance follows the current physical identity (same_content_read) (0.056959ms)
+✔ Plan with one logical report delivers its execution-selected main file and attachments through TerminalCommitter (47.198083ms)
+✔ process artifacts keep file validation separate from result acceptance and formal delivery (12.077083ms)
+✔ accepted artifacts from an earlier conversation turn remain accessible with version-specific file validation (2.272291ms)
+✔ process artifacts exclude stdout and stderr captures from the artifact catalog (1.314708ms)
+✔ candidate approval alone does not promote generated files to formal delivery (1.127792ms)
+✔ process artifacts include converted outputs from convert_artifact (1.228917ms)
+✔ DOCX preview preserves page geometry, run styles, numbering, and tables (3.462958ms)
+✔ process artifacts collect legacy DOC command outputs as Word artifacts (0.5715ms)
+✔ process artifacts retain browser-playable audio outputs as previewable artifacts (0.905542ms)
+✔ process artifacts include patched outputs from computer_patch_file (0.675667ms)
+✔ each member of an accepted plural target projects as a final artifact (5.488917ms)
+✔ file checks, semantic acceptance and TerminalCommitter delivery project separately for the same artifact version (4.477917ms)
+ℹ tests 25
+ℹ suites 0
+ℹ pass 25
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 696.523125

@@ -230,7 +230,7 @@ test("cloud Runtime Host enables PlanTemplate only through its deployment switch
   }
 });
 
-test("Docker Compose passes independent TiDB settings to Router and Runtime Hosts", async () => {
+test("Docker Compose separates Router SQL from native Redis Runtime state", async () => {
   const [compose, tidbExample, packageJson] = await Promise.all([
     readFile(new URL("../compose.yaml", import.meta.url), "utf8"),
     readFile(new URL("../.env.docker.tidb.example", import.meta.url), "utf8"),
@@ -238,14 +238,14 @@ test("Docker Compose passes independent TiDB settings to Router and Runtime Host
   ]);
   assert.match(compose, /AGENTLOOP_ROUTER_STATE_DRIVER: \$\{AGENTLOOP_ROUTER_STATE_DRIVER:-\$\{AGENTLOOP_STATE_DRIVER:-sqlite\}\}/);
   assert.match(compose, /AGENTLOOP_ROUTER_STATE_DATABASE_URL: \$\{AGENTLOOP_ROUTER_STATE_DATABASE_URL:-\$\{AGENTLOOP_STATE_DATABASE_URL:-\}\}/);
-  assert.equal((compose.match(/^\s+AGENTLOOP_RUNTIME_STATE_DRIVER:/gm) ?? []).length, 2);
-  assert.equal((compose.match(/^\s+AGENTLOOP_RUNTIME_STATE_DATABASE_URL:/gm) ?? []).length, 2);
+  assert.match(compose, /AGENTLOOP_RUNTIME_STATE_BACKEND:.*redis/);
+  assert.doesNotMatch(compose, /AGENTLOOP_RUNTIME_STATE_DATABASE_URL:/);
   assert.match(compose, /PLANNING_MAX_TURNS: \$\{PLANNING_MAX_TURNS:-4\}/);
   assert.match(compose, /STEP_MAX_TURNS: \$\{STEP_MAX_TURNS:-32\}/);
   assert.match(tidbExample, /AGENTLOOP_ROUTER_STATE_DRIVER=tidb/);
   assert.match(tidbExample, /\/agentloop_router/);
-  assert.match(tidbExample, /AGENTLOOP_RUNTIME_STATE_DRIVER=tidb/);
-  assert.match(tidbExample, /\/agentloop_runtime/);
+  assert.match(tidbExample, /AGENTLOOP_RUNTIME_STATE_BACKEND=redis/);
+  assert.match(tidbExample, /AGENTLOOP_RUNTIME_REDIS_URL=redis:/);
   assert.match(packageJson, /start:multi-runtime:docker:tidb[\s\S]*?\.env\.docker\.tidb/);
   assert.match(packageJson, /rebuild:multi-runtime:docker:tidb[\s\S]*?--build --force-recreate -d/);
 });
@@ -3126,6 +3126,7 @@ test("Host persists dispatch idempotency across a process restart", async () => 
     async ensureConversation() {},
     async startConversation() {
       starts += 1;
+      await database.prepare("INSERT INTO runs(id,owner_user_id,depth,allow_dangerous_tools,status,input,created_at) VALUES('durable-run','user',0,0,'running','task',1)").run();
       return { id: "durable-run" } as never;
     },
     async get() {
@@ -3193,6 +3194,7 @@ test("a Runtime Host reconciles only Runs durably accepted by its own executor l
   const hostB = new HostDispatchStore(database, "runtime-b");
   await hostA.ready();
   await hostB.ready();
+  for (const [id, owner] of [["run-a", "user-a"], ["run-b", "user-b"]]) await database.prepare("INSERT INTO runs(id,owner_user_id,depth,allow_dangerous_tools,status,input,created_at) VALUES(?,?,0,0,'running','task',1)").run(id, owner);
   await hostA.claim({ dispatchKey: "dispatch-a", assignmentId: "assignment-a", ownerUserId: "user-a", now: 100, leaseMs: 1_000 });
   await hostA.accept("dispatch-a", "run-a", 101);
   await hostB.claim({ dispatchKey: "dispatch-b", assignmentId: "assignment-b", ownerUserId: "user-b", now: 100, leaseMs: 1_000 });

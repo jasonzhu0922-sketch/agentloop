@@ -16,6 +16,7 @@ test("MCP SSE exposes tools, progress, structured query results and durable call
     },
     start: async () => { started = true; return { id: "run_mcp", input: "查询销售额", conversationId: "conv_mcp", modelKey: "flash", status: "running", createdAt: 1 }; },
     runs: {
+      subscribeRunEvents() { return () => {}; },
       async get(_owner: string, id: string) { return { id, input: "查询销售额", conversationId: "conv_mcp", modelKey: "flash", status: "completed", output: "销售额为 10", createdAt: 1, finishedAt: 2 }; },
       async eventsAfter() { return [{ seq: 1, type: "run.started", createdAt: 1, data: { phase: "planning" } }]; },
       async currentHumanLoop() { return undefined; },

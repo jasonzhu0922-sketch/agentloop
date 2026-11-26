@@ -294,6 +294,10 @@ function recoveryRuntimeContext(input: RecoveryPlannerInput): RuntimeContextSnap
   const step = input.plan?.steps.find(candidate => candidate.id === stepId);
   const products = input.workspaceId === undefined || step === undefined ? undefined : new WorkProductContext(input.runId, {
     workspaceId: input.workspaceId, goalId: `${input.plan!.id}:v${input.plan!.version}:${step.id}`, goal: step.objective,
+    deliveryTargets: (step.executionBinding.artifactTargets ?? []).map(target => ({
+      targetId: target.id, deliveryTargetId: target.deliveryTargetId ?? target.id,
+      purpose: target.purpose ?? target.id, kind: target.kind, ...(target.format === undefined ? {} : { format: target.format }),
+    })),
     storeSnapshot: async () => { throw new Error("Recovery projection does not write a snapshot"); },
   });
   for (const event of transcript?.workProductEvents ?? []) products?.capture(event);

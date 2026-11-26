@@ -59,6 +59,8 @@ import {
   firstHumanLoopControlSignal,
 } from "./runtime-control-signal.ts";
 import { WorkProductContext, type WorkProductContextOptions } from "./work-product-context.ts";
+import type { WorkProductDeliveryTarget } from "./work-product-semantics.ts";
+import type { CanonicalRunState } from "./canonical-run-state.ts";
 import {
   deriveCurrentDecisionView,
   projectCurrentDecisionView,
@@ -150,7 +152,7 @@ export interface AgentLoopOptions {
   /** Stage 3: current-leaf visibility only; no assessment/recovery policy change. */
   readonly workProductContext?: WorkProductContextOptions;
   /** Persist Runtime-validated current target/version bindings through the canonical writer. */
-  readonly onWorkProductDeliveryTargets?: (bindings: NonNullable<CurrentDecisionWorkProductFacts["semantics"]["deliveryTargets"]>, observations: CurrentDecisionWorkProductFacts["observations"]) => Promise<void> | void;
+  readonly onWorkProductDeliveryTargets?: (bindings: NonNullable<CurrentDecisionWorkProductFacts["semantics"]["deliveryTargets"]>, observations: CurrentDecisionWorkProductFacts["observations"], selectedTargetIds?: readonly string[]) => Promise<void> | void;
   /** Read the latest committed Run at every model and assessment boundary. */
   readonly currentDecisionContext?: () => CurrentDecisionContext;
   readonly signal?: AbortSignal;
@@ -283,18 +285,19 @@ function automaticArtifactAcceptanceCall(input: {
   readonly attemptedArtifactKeys: ReadonlySet<string>;
   readonly checkedPaths?: ReadonlySet<string>;
   readonly evidence: readonly AgentLoopToolEvidence[];
-  readonly currentTargetBindings?: readonly { readonly targetId: string; readonly path: string; readonly versionId: string; readonly sha256: string }[];
+  readonly observations?: CurrentDecisionWorkProductFacts["observations"];
+  readonly currentTargetBindings?: readonly { readonly targetId: string; readonly path: string; readonly versionId: string; readonly sha256: string; readonly observedByToolCallId?: string }[];
 }): AutomaticArtifactAcceptanceCall | undefined {
   const state = input.stepEvidenceState;
   if (!input.availableToolNames.includes("verify_artifact_acceptance")) return undefined;
   // A canonical file target is verified by its current realization, never by
   // progress inferred from an older same-kind receipt in recovery history.
-  const acceptances = acceptedArtifactVersions(input.evidence);
-  const artifact: { readonly path: string; readonly sha256?: string; readonly toolCallId?: string; readonly acceptanceProfile?: string } | undefined =
+  const acceptances = acceptedArtifactVersions(input.evidence, input.currentTargetBindings, input.observations);
+  const artifact: { readonly path: string; readonly sha256?: string; readonly toolCallId?: string; readonly acceptanceProfile?: string; readonly versionId?: string } | undefined =
     input.currentTargetBindings !== undefined
       ? input.currentTargetBindings.findLast((binding) => !acceptances.has(`${binding.path}\u0000${binding.sha256.toLowerCase()}`)
         && !input.checkedPaths?.has(binding.path)
-        && !input.attemptedArtifactKeys.has(`${binding.path}#${binding.sha256}`))
+        && !input.attemptedArtifactKeys.has([binding.path, binding.versionId, binding.sha256].join("#")))
       : input.convergenceOnly || state?.nextAction !== "verify_existing_artifact" || state.workProduct.status !== "deliverable_available"
         ? undefined
         : state.workProduct.deliverableArtifacts.findLast((candidate) => artifactMatchesExpectedTarget(candidate,
@@ -302,7 +305,7 @@ function automaticArtifactAcceptanceCall(input: {
           && !input.checkedPaths?.has(candidate.path)
           && !input.attemptedArtifactKeys.has([candidate.path, candidate.sha256 ?? candidate.toolCallId].join("#")));
   if (artifact === undefined) return undefined;
-  const artifactKey = [artifact.path, artifact.sha256 ?? artifact.toolCallId].join("#");
+  const artifactKey = [artifact.path, ...(artifact.versionId === undefined ? [] : [artifact.versionId]), artifact.sha256 ?? artifact.toolCallId].join("#");
   // `artifactKind` is a Runtime/Planner semantic label (for example
   // `document`), whereas verifier profiles are concrete inspection kinds
   // (`word`, `docx`, `pdf`, ...). Never pass that semantic label across the
@@ -329,15 +332,15 @@ function automaticArtifactAcceptanceCall(input: {
 
 /**
  * `verify_artifact_acceptance` is an observation tool, not an authority to
- * redefine the target. The admitted Plan target is Runtime-owned; a model may
- * choose a verifier profile only when that profile and its path can actually
- * satisfy that target. This stops an HTML-local receipt from being presented
- * as validation of a PPTX, PDF, or other incompatible deliverable.
+ * redefine the target. With committed file facts, eligibility requires an
+ * observed physical identity, independently of delivery membership. Target
+ * compatibility and completion remain binding/Assessment responsibilities.
+ * Legacy callers without file facts retain the existing shape check.
  */
-function assertArtifactAcceptanceCallMatchesTarget(
+function assertArtifactAcceptanceCallEligibility(
   call: ModelToolCall,
   policy: RuntimeToolProgressPolicy | undefined,
-  currentTargetBindings?: readonly { readonly targetId: string; readonly path: string; readonly versionId: string; readonly sha256: string }[],
+  observedProducts?: CurrentDecisionWorkProductFacts,
 ): void {
   if (call.name !== "verify_artifact_acceptance") return;
   const expectedArtifactKind = policy?.expectedArtifactKind;
@@ -353,23 +356,11 @@ function assertArtifactAcceptanceCallMatchesTarget(
       ? call.arguments.artifactKind
       : undefined;
   const artifact = { path: artifactPath, ...(profileId === undefined ? {} : { artifactKind: profileId }) };
-  // When the leaf has the semantic work-product reducer, an acceptance must
-  // name an already bound current version. Compatibility by extension is only
-  // a shape check; it cannot decide whether a report, QC note, or sample file
-  // is the user-requested delivery.
-  if (currentTargetBindings !== undefined && artifactTargets.length > 0) {
-    const bound = currentTargetBindings.filter((binding) => binding.path === artifactPath
-      && artifactTargets.some((target) => target.id === binding.targetId));
-    if (bound.length === 1) return;
-    const reason = bound.length === 0
-      ? "has no current admitted target/version binding"
-      : "is bound to more than one admitted delivery target";
-    throw new AppError(
-      "TOOL_POLICY_DENIED",
-      `verify_artifact_acceptance target mismatch: ${artifactPath} ${reason}`,
-      422,
-      { artifactPath, artifactTargets, currentTargetBindings },
-    );
+  if (observedProducts !== undefined) {
+    const object = observedProducts.observations.objects.find((object) => object.path === artifactPath);
+    const version = object?.versions.find((version) => version.id === object.currentVersionId);
+    if (object?.presence === "present" && version?.sha256 !== undefined && (version.bytes ?? 0) > 0) return;
+    throw new AppError("TOOL_POLICY_DENIED", `verify_artifact_acceptance requires a present observed file identity: ${artifactPath}`, 422, { artifactPath });
   }
   const matches = artifactTargets.length > 0
     ? artifactTargets.some((target) => artifactMatchesExpectedTarget(artifact, target.kind, target.format))
@@ -567,7 +558,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       if (isDecisionRecordEvent(observed)) committedDecisionEvents.push(observed);
       if (workProducts !== undefined && options.onWorkProductDeliveryTargets !== undefined) {
         const facts = workProducts.derive();
-        await options.onWorkProductDeliveryTargets(facts.semantics.deliveryTargets ?? [], facts.observations);
+        const selectedTargetIds = facts.semantics.deliverySelections?.map(selection =>
+          options.workProductContext?.deliveryTargets?.find(target => target.targetId === selection.targetId)?.deliveryTargetId
+            ?? selection.targetId);
+        await options.onWorkProductDeliveryTargets(facts.semantics.deliveryTargets ?? [], facts.observations, selectedTargetIds);
       }
     });
     // A failed sink cannot publish facts. Later failure evidence may still be
@@ -612,18 +606,28 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const artifactDeliveryTargetsEnabled = (options.workProductContext?.deliveryTargets?.length ?? 0) > 0;
   const buildDeliveryCandidate = (
     input: Omit<Parameters<typeof buildRuntimeDeliveryCandidate>[0], "expectedArtifactKind" | "expectedArtifactFormat" | "deliveryTargets" | "artifactBindings" | "artifactTargets">,
-  ): RuntimeDeliveryCandidate => buildRuntimeDeliveryCandidate({
-    ...input,
-    deliveryTargets: options.deliveryTargets ?? [],
-    artifactBindings: workProducts?.derive().semantics.deliveryTargets ?? [],
-    artifactTargets: options.workProductContext?.deliveryTargets ?? [],
-    ...(options.progressPolicy?.expectedArtifactKind === undefined
-      ? {}
-      : { expectedArtifactKind: options.progressPolicy.expectedArtifactKind }),
-    ...(options.progressPolicy?.expectedArtifactFormat === undefined
-      ? {}
-      : { expectedArtifactFormat: options.progressPolicy.expectedArtifactFormat }),
-  });
+  ): RuntimeDeliveryCandidate => {
+    const semanticBindings = workProducts?.derive().semantics.deliveryTargets ?? [];
+    const currentContext = options.currentDecisionContext?.();
+    const artifactTargets = canonicalArtifactTargetsForCandidate(
+      currentContext?.canonicalState,
+      currentContext?.stepId,
+      options.workProductContext?.deliveryTargets,
+    );
+    return buildRuntimeDeliveryCandidate({
+      ...input,
+      deliveryTargets: options.deliveryTargets ?? [],
+      artifactBindings: semanticBindings,
+      ...(workProducts === undefined ? {} : { artifactObservations: workProducts.derive().observations }),
+      artifactTargets,
+      ...(options.progressPolicy?.expectedArtifactKind === undefined
+        ? {}
+        : { expectedArtifactKind: options.progressPolicy.expectedArtifactKind }),
+      ...(options.progressPolicy?.expectedArtifactFormat === undefined
+        ? {}
+        : { expectedArtifactFormat: options.progressPolicy.expectedArtifactFormat }),
+    });
+  };
   const availableSkillList = options.availableSkills ?? [];
   const availableSkills = buildSkillReferenceMap(availableSkillList);
   const activatedSkillNames = new Set(
@@ -1175,10 +1179,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     // fresh authorized snapshot, and preparation remains tied to that snapshot.
     const prepareWithArtifactTarget = (call: ModelToolCall): PreparedToolCall => {
       call = toolCallWithoutDecisionContext(call, contextTransport.names);
-      assertArtifactAcceptanceCallMatchesTarget(
+      assertArtifactAcceptanceCallEligibility(
         call,
         options.progressPolicy,
-        artifactDeliveryTargetsEnabled ? workProducts!.derive().semantics.deliveryTargets : undefined,
+        workProducts?.derive(),
       );
       return grantedMaterialized.prepare(call);
     };
@@ -1299,6 +1303,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           attemptedArtifactKeys: automaticArtifactAcceptanceAttempts,
           checkedPaths,
           evidence: toolEvidence,
+          ...(facts === undefined ? {} : { observations: facts.observations }),
           ...(!artifactDeliveryTargetsEnabled ? {} : { currentTargetBindings: view.workProducts.deliveryTargets.filter(binding => binding.versionId.length > 0) }),
         });
         if (automaticAcceptance === undefined) break;
@@ -4059,6 +4064,24 @@ function publicErrorDetails(error: unknown): Readonly<Record<string, unknown>> {
   return error instanceof AppError && error.details?.code === "invalid_tool_argument"
     ? error.details
     : {};
+}
+
+function canonicalArtifactTargetsForCandidate(
+  state: CanonicalRunState | undefined,
+  stepId: string | undefined,
+  admittedTargets: readonly WorkProductDeliveryTarget[] | undefined,
+): readonly WorkProductDeliveryTarget[] {
+  if (admittedTargets !== undefined && admittedTargets.length > 0) return admittedTargets;
+  return (stepId === undefined ? [] : (state?.steps[stepId]?.targetIds ?? [])).flatMap((targetId) => {
+    const target = state?.targets[targetId];
+    return target === undefined ? [] : [{
+      targetId: target.targetId,
+      deliveryTargetId: target.targetId,
+      purpose: target.purpose,
+      kind: target.kind,
+      ...(target.format === undefined ? {} : { format: target.format }),
+    }];
+  });
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

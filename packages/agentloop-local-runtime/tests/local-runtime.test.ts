@@ -143,6 +143,23 @@ test("missing identity for enabled Memory fails before registering a usable Runt
   await database.close();
 });
 
+test("an unavailable MCP does not prevent Runtime creation and retains its sanitized diagnostic", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => { throw new Error("mcp_fetch_failed"); });
+  const root = await mkdtemp(join(tmpdir(), "agentloop-local-mcp-degraded-"));
+  const skills = join(root, "skills"); await mkdir(skills);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const factory = new LocalRuntimeFactory({ databasePath: join(root, "runtime.db"), skillPackageStoreRoot: join(root, "packages"),
+    environment: { AGENTLOOP_BUNDLED_SKILL_DIRECTORIES: skills }, models: modelPort() });
+  const runtime = await factory.create({ id: "degraded", displayName: "Degraded", storageKey: "default", isDefault: true }, {
+    customSkillDirectories: [], mcpServers: [{ key: "broken-mcp", displayName: "Broken MCP", transport: "http", url: "https://mcp.example.test/tools" }],
+    integrationEnvironment: { WEB_SEARCH_DISABLED: "1" },
+  }, join(root, "workspace"), join(root, "uploads"));
+  try {
+    assert.deepEqual(runtime.mcpDiagnostics, [{ key: "broken-mcp", displayName: "Broken MCP", message: "mcp_fetch_failed" }]);
+    assert.deepEqual(runtime.modelKeys, ["local:test"]);
+  } finally { await runtime.close?.(); await runtime.database.close(); }
+});
+
 test("policy bootstrap failure releases the Runtime registry and SQLite for a later restart", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-local-policy-bootstrap-"));
   t.after(() => rm(root, { recursive: true, force: true }));

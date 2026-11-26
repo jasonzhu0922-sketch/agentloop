@@ -1,0 +1,260 @@
+{
+  "schema": "nl2sql.retrieval-benchmark/v1",
+  "rounds": 3,
+  "scope": "metadata retrieval only; response bytes are not model token counts; small live samples are not P95 or SQL accuracy evidence",
+  "cases": [
+    {
+      "question": "员工人数按月趋势",
+      "expected_sources": [
+        "v_fawhzhss0401"
+      ],
+      "samples": {
+        "broad_catalog": [
+          {
+            "elapsed_ms": 240,
+            "metadata_calls": 2,
+            "physical_tables_returned": 14,
+            "physical_columns_returned": 564,
+            "response_bytes": 424117,
+            "target_tables_in_top5": [
+              "v_fawhzhss0401"
+            ],
+            "all_targets_in_top5": true
+          },
+          {
+            "elapsed_ms": 201,
+            "metadata_calls": 2,
+            "physical_tables_returned": 14,
+            "physical_columns_returned": 564,
+            "response_bytes": 424117,
+            "target_tables_in_top5": [
+              "v_fawhzhss0401"
+            ],
+            "all_targets_in_top5": true
+          },
+          {
+            "elapsed_ms": 192,
+            "metadata_calls": 2,
+            "physical_tables_returned": 14,
+            "physical_columns_returned": 564,
+            "response_bytes": 424117,
+            "target_tables_in_top5": [
+              "v_fawhzhss0401"
+            ],
+            "all_targets_in_top5": true
+          }
+        ],
+        "retrieval_context": [
+          {
+            "elapsed_ms": 150,
+            "metadata_calls": 1,
+            "physical_tables_returned": 1,
+            "physical_columns_returned": 6,
+            "response_bytes": 67332,
+            "target_tables_in_top5": [
+              "v_fawhzhss0401"
+            ],
+            "all_targets_in_top5": true
+          },
+          {
+            "elapsed_ms": 155,
+            "metadata_calls": 1,
+            "physical_tables_returned": 1,
+            "physical_columns_returned": 6,
+            "response_bytes": 67332,
+            "target_tables_in_top5": [
+              "v_fawhzhss0401"
+            ],
+            "all_targets_in_top5": true
+          },
+          {
+            "elapsed_ms": 152,
+            "metadata_calls": 1,
+            "physical_tables_returned": 1,
+            "physical_columns_returned": 6,
+            "response_bytes": 67332,
+            "target_tables_in_top5": [
+              "v_fawhzhss0401"
+            ],
+            "all_targets_in_top5": true
+          }
+        ]
+      },
+      "median_ms": {
+        "broad_catalog": 201,
+        "retrieval_context": 152
+      }
+    },
+    {
+      "question": "管理合并营业收入逐月",
+      "expected_sources": [
+        "t_dwd_fact_cwgl_merge_report"
+      ],
+      "samples": {
+        "broad_catalog": [
+          {
+            "elapsed_ms": 190,
+            "metadata_calls": 2,
+            "physical_tables_returned": 14,
+            "physical_columns_returned": 564,
+            "response_bytes": 462284,
+            "target_tables_in_top5": [
+              "t_dwd_fact_cwgl_merge_report"
+            ],
+            "all_targets_in_top5": true
+          },
+          {
+            "elapsed_ms": 182,
+            "metadata_calls": 2,
+            "physical_tables_returned": 14,
+            "physical_columns_returned": 564,
+            "response_bytes": 462284,
+            "target_tables_in_top5": [
+              "t_dwd_fact_cwgl_merge_report"
+            ],
+            "all_targets_in_top5": true
+          },
+          {
+            "elapsed_ms": 185,
+            "metadata_calls": 2,
+            "physical_tables_returned": 14,
+            "physical_columns_returned": 564,
+            "response_bytes": 462284,
+            "target_tables_in_top5": [
+              "t_dwd_fact_cwgl_merge_report"
+            ],
+            "all_targets_in_top5": true
+          }
+        ],
+        "retrieval_context": [
+          {
+            "elapsed_ms": 147,
+            "metadata_calls": 1,
+            "physical_tables_returned": 1,
+            "physical_columns_returned": 48,
+            "response_bytes": 52730,
+            "target_tables_in_top5": [
+              "t_dwd_fact_cwgl_merge_report"
+            ],
+            "all_targets_in_top5": true
+          },
+          {
+            "elapsed_ms": 155,
+            "metadata_calls": 1,
+            "physical_tables_returned": 1,
+            "physical_columns_returned": 48,
+            "response_bytes": 52730,
+            "target_tables_in_top5": [
+              "t_dwd_fact_cwgl_merge_report"
+            ],
+            "all_targets_in_top5": true
+          },
+          {
+            "elapsed_ms": 145,
+            "metadata_calls": 1,
+            "physical_tables_returned": 1,
+            "physical_columns_returned": 48,
+            "response_bytes": 52730,
+            "target_tables_in_top5": [
+              "t_dwd_fact_cwgl_merge_report"
+            ],
+            "all_targets_in_top5": true
+          }
+        ]
+      },
+      "median_ms": {
+        "broad_catalog": 185,
+        "retrieval_context": 147
+      }
+    },
+    {
+      "question": "行情指标日期观测值",
+      "expected_sources": [
+        "mb_index_main_data",
+        "mb_index_main_info"
+      ],
+      "samples": {
+        "broad_catalog": [
+          {
+            "elapsed_ms": 175,
+            "metadata_calls": 2,
+            "physical_tables_returned": 14,
+            "physical_columns_returned": 564,
+            "response_bytes": 599560,
+            "target_tables_in_top5": [
+              "mb_index_main_data",
+              "mb_index_main_info"
+            ],
+            "all_targets_in_top5": true
+          },
+          {
+            "elapsed_ms": 181,
+            "metadata_calls": 2,
+            "physical_tables_returned": 14,
+            "physical_columns_returned": 564,
+            "response_bytes": 599560,
+            "target_tables_in_top5": [
+              "mb_index_main_data",
+              "mb_index_main_info"
+            ],
+            "all_targets_in_top5": true
+          },
+          {
+            "elapsed_ms": 188,
+            "metadata_calls": 2,
+            "physical_tables_returned": 14,
+            "physical_columns_returned": 564,
+            "response_bytes": 599560,
+            "target_tables_in_top5": [
+              "mb_index_main_data",
+              "mb_index_main_info"
+            ],
+            "all_targets_in_top5": true
+          }
+        ],
+        "retrieval_context": [
+          {
+            "elapsed_ms": 150,
+            "metadata_calls": 1,
+            "physical_tables_returned": 2,
+            "physical_columns_returned": 137,
+            "response_bytes": 111855,
+            "target_tables_in_top5": [
+              "mb_index_main_data",
+              "mb_index_main_info"
+            ],
+            "all_targets_in_top5": true
+          },
+          {
+            "elapsed_ms": 155,
+            "metadata_calls": 1,
+            "physical_tables_returned": 2,
+            "physical_columns_returned": 137,
+            "response_bytes": 111855,
+            "target_tables_in_top5": [
+              "mb_index_main_data",
+              "mb_index_main_info"
+            ],
+            "all_targets_in_top5": true
+          },
+          {
+            "elapsed_ms": 155,
+            "metadata_calls": 1,
+            "physical_tables_returned": 2,
+            "physical_columns_returned": 137,
+            "response_bytes": 111855,
+            "target_tables_in_top5": [
+              "mb_index_main_data",
+              "mb_index_main_info"
+            ],
+            "all_targets_in_top5": true
+          }
+        ]
+      },
+      "median_ms": {
+        "broad_catalog": 181,
+        "retrieval_context": 155
+      }
+    }
+  ]
+}

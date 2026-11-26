@@ -1,0 +1,13 @@
+{
+  "database": "agentloop_history_faults_1795580614695",
+  "checks": [
+    "SQL committed but response lost: tasks retained",
+    "old running projection cannot overwrite terminal",
+    "old confirmation cannot delete newer pending task",
+    "duplicate workers complete idempotently",
+    "large partial Result stored as verified file and hydrated by reader",
+    "TiDB version tombstone defeats late delete race and resurrection",
+    "Redis reconnect continues durable unconfirmed deletes",
+    "unreachable SQL initialization retries successfully after recovery"
+  ]
+}

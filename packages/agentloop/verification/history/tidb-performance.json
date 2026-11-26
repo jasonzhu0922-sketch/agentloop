@@ -1,0 +1,164 @@
+{
+  "database": "agentloop_history_verify_1795580398019",
+  "scenarios": [
+    {
+      "mode": "normal",
+      "runs": 16,
+      "tools": 16,
+      "runThroughputPerSecond": 2.799537070299766,
+      "runP50Ms": 1439.338417,
+      "runP95Ms": 1649.6953749999998,
+      "elapsedMs": 5715.230625,
+      "backlogAtExecutionEnd": {
+        "pendingCount": 1,
+        "oldestAgeMs": 8,
+        "lastSuccessAt": "1795580403937",
+        "lastLatencyMs": "14",
+        "acknowledged": "231"
+      },
+      "archiveStatus": {
+        "archivedRuns": 16,
+        "projectedRuns": 0,
+        "archivePending": false,
+        "projectionPending": false
+      },
+      "drainMs": 445.51054099999965,
+      "final": {
+        "pendingCount": 0,
+        "oldestAgeMs": 0,
+        "lastSuccessAt": "1795580403972",
+        "lastLatencyMs": "12",
+        "acknowledged": "232"
+      },
+      "errors": 0,
+      "projectedObjects": 240,
+      "sqlActiveMs": 1862.2764229999982,
+      "projectionObjectsPerSecond": 128.8745306743328,
+      "projectionP50Ms": 44,
+      "projectionP95Ms": 1095
+    },
+    {
+      "mode": "slow",
+      "runs": 16,
+      "tools": 16,
+      "runThroughputPerSecond": 2.487623844765308,
+      "runP50Ms": 1389.753458000001,
+      "runP95Ms": 2231.1321669999998,
+      "elapsedMs": 6431.840582999999,
+      "backlogAtExecutionEnd": {
+        "pendingCount": 28,
+        "oldestAgeMs": 378,
+        "lastSuccessAt": "1795580410744",
+        "lastLatencyMs": "384",
+        "acknowledged": "164"
+      },
+      "archiveStatus": {
+        "archivedRuns": 16,
+        "projectedRuns": 0,
+        "archivePending": false,
+        "projectionPending": false
+      },
+      "drainMs": 666.0670420000006,
+      "final": {
+        "pendingCount": 0,
+        "oldestAgeMs": 0,
+        "lastSuccessAt": "1795580411554",
+        "lastLatencyMs": "485",
+        "acknowledged": "192"
+      },
+      "errors": 0,
+      "projectedObjects": 207,
+      "sqlActiveMs": 6102.46717,
+      "projectionObjectsPerSecond": 33.92070686059914,
+      "projectionP50Ms": 651,
+      "projectionP95Ms": 815
+    },
+    {
+      "mode": "unavailable",
+      "runs": 16,
+      "tools": 16,
+      "runThroughputPerSecond": 2.541268984125276,
+      "runP50Ms": 1648.056542000002,
+      "runP95Ms": 1978.2896250000013,
+      "elapsedMs": 6296.067083,
+      "backlogAtExecutionEnd": {
+        "pendingCount": 144,
+        "oldestAgeMs": 6494,
+        "lastError": "connect ECONNREFUSED 127.0.0.1:1",
+        "lastFailureAt": "1795580418299",
+        "retries": "169"
+      },
+      "archiveStatus": {
+        "archivedRuns": 16,
+        "projectedRuns": 0,
+        "archivePending": false,
+        "projectionPending": false
+      },
+      "drainMs": 251.7270000000026,
+      "final": {
+        "pendingCount": 0,
+        "oldestAgeMs": 0,
+        "lastError": "connect ECONNREFUSED 127.0.0.1:1",
+        "lastFailureAt": "1795580418299",
+        "retries": "169",
+        "lastSuccessAt": "1795580418402",
+        "lastLatencyMs": "2894",
+        "acknowledged": "144"
+      },
+      "errors": 169,
+      "projectedObjects": 144,
+      "sqlActiveMs": 54.421251000003394,
+      "projectionObjectsPerSecond": 2646.0251713065363,
+      "projectionP50Ms": 2893,
+      "projectionP95Ms": 6515
+    }
+  ],
+  "checks": [
+    {
+      "check": "real TiDB timeout",
+      "elapsedMs": 150.78137499999866
+    },
+    {
+      "check": "unreachable TiDB assembly/admission/terminal",
+      "elapsedMs": 12.024416999996902
+    }
+  ],
+  "kinds": [
+    {
+      "kind": "results",
+      "count": 48
+    },
+    {
+      "kind": "archives",
+      "count": 48
+    },
+    {
+      "kind": "run_outcomes",
+      "count": 48
+    },
+    {
+      "kind": "plan_revision_snapshots",
+      "count": 48
+    },
+    {
+      "kind": "plan_steps",
+      "count": 48
+    },
+    {
+      "kind": "runs",
+      "count": 48
+    },
+    {
+      "kind": "conversations",
+      "count": 48
+    },
+    {
+      "kind": "run_round_results",
+      "count": 48
+    },
+    {
+      "kind": "plans",
+      "count": 48
+    }
+  ]
+}

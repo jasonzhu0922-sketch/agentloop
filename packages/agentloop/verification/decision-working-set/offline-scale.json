@@ -1,0 +1,23 @@
+{
+  "schema": "agentloop.decisionWorkingSetScale/v1",
+  "kernelSourceSha256": "8dda33b5739be70dd13f96e9a379dcd2bcab83deb929c0acc8f5cde4a1d7937f",
+  "measurement": "totalCharacters from modelInvocationComposition; fixed tool definitions; not provider usage or billing",
+  "fixture": "decision-working-set.test.ts: fixed-task A/B replay",
+  "cases": [
+    {
+      "steps": 10,
+      "baseline": 19773,
+      "current": 10326
+    },
+    {
+      "steps": 100,
+      "baseline": 157835,
+      "current": 10337
+    },
+    {
+      "steps": 1000,
+      "baseline": 1542037,
+      "current": 10348
+    }
+  ]
+}

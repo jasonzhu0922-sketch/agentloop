@@ -5,7 +5,7 @@ import { AppDatabase, AppError, LlmProviderRegistry, RunService, SkillService, c
 import { createLocalMemoryPlugin, MemorySettlementWorker, type MemorySettlementModel } from "@zhujun/agentloop-memory";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { ConnectorRegistry, ConnectorRuntimeService, environmentConnectorRuntime, loadConnectorModules } from "../connectors/index.ts";
-import type { LocalRuntimeHostOptions, LocalModelConfigurationPort, LocalConnectorConfigurationPort, LocalModelProviderPort, ResolvedLocalRuntimeConfiguration, LocalRuntimeControl, LocalRuntimeDefinition } from "../contracts/host.ts";
+import type { LocalRuntimeHostOptions, LocalModelConfigurationPort, LocalConnectorConfigurationPort, LocalModelProviderPort, ResolvedLocalRuntimeConfiguration, LocalRuntimeControl, LocalRuntimeDefinition, LocalRuntimeMcpDiagnostic } from "../contracts/host.ts";
 import { LocalRuntimeSupervisorError } from "../contracts/host.ts";
 import { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.ts";
 import { LocalModelStreamCaptureStore } from "../persistence/model-stream-capture-store.ts";
@@ -77,7 +77,7 @@ export function localRuntimeMcpStartupLogLines(integration: McpStartupIntegratio
   ];
 }
 
-export function redactMcpDiagnostic(message: string, secretValues: readonly string[]): string {
+export function redactMcpDiagnostic(message: string, secretValues: readonly string[], urls: readonly string[] = []): string {
   const variants = new Set<string>();
   for (const value of secretValues) {
     if (value.length === 0) continue;
@@ -85,9 +85,12 @@ export function redactMcpDiagnostic(message: string, secretValues: readonly stri
     variants.add(encodeURIComponent(value));
     variants.add(new URLSearchParams({ value }).toString().slice("value=".length));
   }
+  for (const url of urls) if (url.length > 0) variants.add(url);
   return [...variants]
     .sort((left, right) => right.length - left.length)
-    .reduce((result, value) => result.replaceAll(value, "[redacted]"), message);
+    .reduce((result, value) => result.replaceAll(value, "[redacted]"), message)
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .slice(0, 500);
 }
 
 function localSettlementModel(
@@ -349,28 +352,25 @@ export class LocalRuntimeFactory {
         ...(this.input.runEventLogSink === undefined ? {} : { runEventLogSink: (line) => this.input.runEventLogSink!(definition, line) }),
       });
       const secretValues = Object.values(configuration.integrationEnvironment).filter((value): value is string => typeof value === "string" && value.length > 0);
+      const mcpUrls = new Map(configuration.mcpServers.map(server => [server.key, server.url]));
       const sanitizedMcpIntegration = {
         ...mcpIntegration,
         failedServers: mcpIntegration.failedServers.map((server) => ({
           ...server,
-          message: redactMcpDiagnostic(server.message, secretValues),
+          message: redactMcpDiagnostic(server.message, secretValues, [mcpUrls.get(server.key) ?? ""]),
         })),
       };
       for (const line of localRuntimeMcpStartupLogLines(sanitizedMcpIntegration)) {
         (line.stream === "stdout" ? process.stdout : process.stderr).write(`${line.text}\n`);
       }
-      // A configured MCP source is part of this Runtime's execution contract.
-      // Do not construct a superficially-ready Runtime with a partial tool
-      // catalog: Router admission would succeed and the first Run would only
-      // fail later with CAPABILITY_UNAVAILABLE.  Keep the diagnostic limited to
-      // source keys; the loader's messages may contain endpoint or credential
-      // details even after redaction.
-      if (mcpIntegration.failedServers.length > 0) {
-        throw new LocalRuntimeSupervisorError(
-          503,
-          `mcp_startup_failed:${mcpIntegration.failedServers.map((server) => server.key).join(",")}`,
-        );
-      }
+      // MCP is an optional capability boundary. A failed source must not take
+      // down the Runtime or hide unrelated tools; retain its sanitized loader
+      // diagnostic so management surfaces can report the real failure and the
+      // source can recover on a later Runtime restart.
+      const mcpDiagnostics: readonly LocalRuntimeMcpDiagnostic[] = sanitizedMcpIntegration.failedServers.map(server => {
+        const configured = configuration.mcpServers.find(candidate => candidate.key === server.key);
+        return { key: server.key, ...(configured?.displayName === undefined ? {} : { displayName: configured.displayName }), message: server.message };
+      });
       if (settlementWorker !== undefined) {
         let settling = false;
         settlementTimer = setInterval(() => {
@@ -411,6 +411,7 @@ export class LocalRuntimeFactory {
       planningRecoveryTimer.unref();
       return { ...definition, database, runtimeState, executionRuntimeId, scopes, runs,
         get skillDiagnostics() { return [...(configuration.skillDiagnostics ?? []), ...skills.loadDiagnostics()]; },
+        ...(mcpDiagnostics.length === 0 ? {} : { mcpDiagnostics }),
         ...(memory === undefined || memoryTenantId === undefined ? {} : { memory: { store: memory.store, tenantId: memoryTenantId } }),
         close: async () => {
           if (settlementTimer !== undefined) clearInterval(settlementTimer);

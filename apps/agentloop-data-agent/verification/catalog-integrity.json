@@ -1,0 +1,138 @@
+{
+  "schema": "nl2sql.catalog-integrity/v2",
+  "generated_at": "2026-11-21T03:55:20.260680+00:00",
+  "scenario": "group",
+  "catalog_revision": "e4fdd039639429405237ea82aeae7737fa79193a7d156451d3af4ebd60344fa4",
+  "database": "127.0.0.1:4000/nl2sql_skill",
+  "counts": {
+    "tables": 7,
+    "metrics": 22,
+    "terms": 39,
+    "entities": 6,
+    "relationships": 2,
+    "period_formats": 5,
+    "semantic_objects": 361,
+    "source_bindings": 329,
+    "coverage": 0,
+    "semantic_gaps": 3,
+    "observed_probes": 2
+  },
+  "semantic_layers": {
+    "source": 7,
+    "measure": 22,
+    "object": 6,
+    "time": 5,
+    "attribute": 282,
+    "term": 39
+  },
+  "hierarchy": {
+    "missing_parent_refs": [],
+    "entity_object_ids_match_execution_ids": true,
+    "wrong_entity_object_ids": [],
+    "all_parents_resolve": true
+  },
+  "forbidden_runtime_ids_present": [],
+  "entity_ids": [
+    "entity:t_ads_fact_bwg_ind_all_02_real:account",
+    "entity:t_ads_fact_bwg_ind_all_03_real:account",
+    "entity:t_dwd_fact_cwgl_merge_report:company_code",
+    "entity:v_fawhzhss0401:org_code",
+    "entity:t_dwd_fact_cgcz_pcontract_info:company_code",
+    "entity:t_ads_fact_bwg_ind_all_03_real:account:scope:index_name"
+  ],
+  "period_variants": [
+    {
+      "source_id": "t_dwd_fact_cwgl_merge_report",
+      "field": "acct_period_no",
+      "variant_id": "period:t_dwd_fact_cwgl_merge_report:acct_period_no:%Y%m:month",
+      "format": "%Y%m",
+      "granularity": "month",
+      "status": "confirmed"
+    },
+    {
+      "source_id": "v_fawhzhss0401",
+      "field": "ny",
+      "variant_id": "period:v_fawhzhss0401:ny:%Y%m:month",
+      "format": "%Y%m",
+      "granularity": "month",
+      "status": "confirmed"
+    },
+    {
+      "source_id": "t_dwd_fact_cgcz_pcontract_info",
+      "field": "contract_sign_date",
+      "variant_id": "period:t_dwd_fact_cgcz_pcontract_info:contract_sign_date:%Y%m%d:day",
+      "format": "%Y%m%d",
+      "granularity": "day",
+      "status": "confirmed"
+    },
+    {
+      "source_id": "mb_index_main_data",
+      "field": "data_date",
+      "variant_id": "period:mb_index_main_data:data_date:%Y-%m-%d:day",
+      "format": "%Y-%m-%d",
+      "granularity": "day",
+      "status": "confirmed"
+    },
+    {
+      "source_id": "mb_index_main_info",
+      "field": "data_date",
+      "variant_id": "period:mb_index_main_info:data_date:%Y-%m-%d:day",
+      "format": "%Y-%m-%d",
+      "granularity": "day",
+      "status": "confirmed"
+    }
+  ],
+  "blocking_gaps": [
+    "definition_gap:time:t_ads_fact_bwg_ind_all_02_real:date_time",
+    "definition_gap:time:t_ads_fact_bwg_ind_all_03_real:date_time",
+    "no_company_price_binding"
+  ],
+  "observed_probes": [
+    {
+      "source_id": "t_ads_fact_bwg_ind_all_02_real",
+      "field": "date_time",
+      "status": "observed_only",
+      "scope": {
+        "completeness": "observed_only",
+        "field": "date_time",
+        "kind": "source",
+        "scenario_id": "group",
+        "source_id": "t_ads_fact_bwg_ind_all_02_real"
+      },
+      "evidence": {
+        "observed_at": "2026-11-21T01:48:59.087210+00:00",
+        "params": [],
+        "query_id": "query_5701ce07694d4c6897076ba1c14a854c",
+        "sql": "SELECT `date_time` AS value, COUNT(*) AS frequency FROM `nl2sql_group`.`t_ads_fact_bwg_ind_all_02_real` GROUP BY `date_time` ORDER BY frequency DESC, value LIMIT 200"
+      }
+    },
+    {
+      "source_id": "t_ads_fact_bwg_ind_all_03_real",
+      "field": "date_time",
+      "status": "observed_only",
+      "scope": {
+        "completeness": "observed_only",
+        "field": "date_time",
+        "kind": "source",
+        "scenario_id": "group",
+        "source_id": "t_ads_fact_bwg_ind_all_03_real"
+      },
+      "evidence": {
+        "observed_at": "2026-11-21T01:48:59.250239+00:00",
+        "params": [],
+        "query_id": "query_706cacf729d947eda77717cec905a633",
+        "sql": "SELECT `date_time` AS value, COUNT(*) AS frequency FROM `nl2sql_group`.`t_ads_fact_bwg_ind_all_03_real` GROUP BY `date_time` ORDER BY frequency DESC, value LIMIT 200"
+      }
+    }
+  ],
+  "term_projections": {
+    "source_of_truth": "terms",
+    "all_have_projection_of": true,
+    "term_objects": 39,
+    "source_bound_terms": 7,
+    "domain_terms": 32,
+    "term_source_bindings": 7,
+    "domain_term_source_bindings": 0,
+    "stale_gap_term_refs": []
+  }
+}

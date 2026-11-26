@@ -1,0 +1,314 @@
+✔ authoring a helper does not declare a computation or discharge missing source facts (2.05575ms)
+✔ source-only step still needs source evidence after writing a helper (16.076083ms)
+✔ repeated helper rewrites do not invent a computation execution obligation (0.121708ms)
+✔ a failed computation is executed after its repair instead of converging on the write receipt (4.065875ms)
+✔ chunked repair authoring retains the pending computation without spending the rewrite budget (5.145333ms)
+✔ repeated computation rewrites stop without consuming the entire execution budget (2.796958ms)
+✔ plural delivery claim requires every bound instance to have matching acceptance (0.287958ms)
+✔ parallel tools settle into model source order while completion events stay truthful (22.006291ms)
+✖ ModelPlanner emits a strict Responses schema with every leaf property required (10.458041ms)
+✔ execution turns use the model-declared output budget (0.450708ms)
+✔ single leaf execution carries loop step handoff across model steps (1.013292ms)
+✔ model-authored task intent remains authoritative over lexical task classification (1.567792ms)
+✔ a resolved conversational document remains conversational despite report wording (1.943833ms)
+✔ evidence demand does not imply web research when the source channel is domain-bound (0.835375ms)
+✔ standard context enrichment activates tabular guidance from committed visible-file facts before the next model request (1.45025ms)
+✔ initial Runtime prompt augmentations reach the first model request (1.4945ms)
+✔ custom step execution strategy keeps deprioritized Run-authorized tools callable (1.185167ms)
+✔ batch source reads are observed as one tool action with many source receipts (1.825583ms)
+✔ tool calls from a length-truncated model response are never dispatched (1.199875ms)
+✔ the runtime, not model prose, enforces the step budget (1.193959ms)
+✔ the final budgeted turn retains tools and submits existing evidence for assessment (0.77575ms)
+✔ receipt readiness leaves complementary acquisition to the Agent before candidate submission (1.425ms)
+✔ completion preparation retains the Run catalog and assesses after the exact observation (1.422709ms)
+✔ completion preparation executes an exposed Run-authorized call without reopening (1.511292ms)
+✔ completion-preparation metadata cannot authorize an effectful or result-publishing Tool (0.081ms)
+✔ Assessment rejection retains the full Run-authorized catalog for repair (2.436375ms)
+✔ the final budgeted turn can execute missing required evidence before convergence (1.039167ms)
+✔ accepted artifact receipts allow a final semantic completion candidate (1.521375ms)
+✔ automatic artifact acceptance derives a Word profile from the final path instead of forwarding document semantics (1.414666ms)
+✔ post-commit explicit delivery selection registers the receipt before candidate acceptance (3.557333ms)
+✔ automatic artifact acceptance skips command stdout when the admitted target is PDF (1.485416ms)
+✔ automatic artifact acceptance visits every distinct path required by a target family (3.065209ms)
+✔ delivery candidates publish only the latest receipt matching the admitted artifact target (0.075125ms)
+✔ Runtime returns control for a concrete acceptance diagnostic so the model can repair (3.176ms)
+✔ source-only evidence receipts do not replace a produce step delivery candidate (1.169959ms)
+✔ a caveat completion requirement does not fabricate limitations or evidence (0.343333ms)
+✔ conversation delivery does not turn a helper script into an artifact-acceptance loop (1.466833ms)
+✖ structured tool candidates go directly to assessment without a final model rewrite (1.399417ms)
+✔ source-backed conversation delivery synthesizes a structured source candidate (0.728667ms)
+✔ rejected source rendering returns to model synthesis after a source read (recovered=false) (1.056125ms)
+✔ rejected source rendering returns to model synthesis after a source read (recovered=true) (0.713333ms)
+✔ structured source candidates wait for required artifact acceptance evidence (1.909792ms)
+✔ a declared Skill workflow fact must precede the accepted artifact that consumes it (4.098667ms)
+✔ structured stdout candidates from command-style tools go directly to assessment (0.405125ms)
+✔ conflicting structured tool observations require one synthesis turn instead of last-result delivery (0.79575ms)
+✔ declared appendable structured candidate partitions merge without a synthesis turn (0.466417ms)
+✖ oversized structured stdout candidates from command projections go directly to assessment (1.071416ms)
+✔ an empty completion candidate is repaired within the same budgeted step (0.796041ms)
+✔ two empty completion candidates compact context before one bounded delivery retry (2.652458ms)
+✔ empty completion fails explicitly when only protected user input remains (1.481333ms)
+✔ an empty candidate during artifact execution keeps the delivery tools available (1.739917ms)
+✔ a length-truncated completion candidate receives bounded repair grace (5.264625ms)
+✔ a length-truncated execution turn with tools receives a forward-action repair directive (1.352042ms)
+✔ a truncated unexecuted Tool call receives the same bounded-action repair instead of generic failure feedback (0.90025ms)
+✔ repeated output-truncated Tool calls stop instead of consuming the whole Run budget (0.963ms)
+✔ modify-artifact writes overwrite a same-Run read target without another model turn (1.342417ms)
+✔ computer_search_text prepare rejection preserves structured argument diagnostics in tool.rejected (1.51675ms)
+✔ prepare-stage argument rejection receives a schema repair directive (1.138084ms)
+✔ missing command is rejected before execution and the corrected structured call runs once (1.005541ms)
+✔ repeated prepare-stage argument rejection produces a recoverable Step boundary (7.750208ms)
+✔ a rejected assessed candidate grants bounded tool repair grace (1.199834ms)
+✔ paraphrasing an evidence-dependent gap reaches Recovery without another assessment (1.690792ms)
+✔ rejected completion candidates are not projected as prior assistant answers during repair (0.635375ms)
+✔ rejected prose candidate cannot complete through deferredValidation (0.512958ms)
+✔ rejected tool candidate cannot complete through deferredValidation (0.940042ms)
+✔ rejected prose candidate cannot complete through evidenceBoundary (0.837ms)
+✔ rejected tool candidate cannot complete through evidenceBoundary (0.870042ms)
+✔ rejected prose candidate cannot complete through allowRepairLimitCompletion (0.827791ms)
+✔ rejected tool candidate cannot complete through allowRepairLimitCompletion (0.973167ms)
+✔ candidate repair assessment limit does not turn a rejected completion into a caveated success by default (1.3385ms)
+✔ candidate repair assessment limit can be blocked for unmet prerequisite criteria (0.965959ms)
+✔ a mid-work model is granted convergence grace steps to reach real completion (0.929125ms)
+✔ distinct tool calls keep extending grace while the model makes progress (2.262375ms)
+✔ artifact grace records excessive read-only exploration as advice without vetoing tools (11.447708ms)
+✖ artifact progress policy advises after excessive read-only exploration before grace (3.817291ms)
+✔ artifact progress policy advises verification after artifact evidence without vetoing a read (1.470333ms)
+✔ artifact execution keeps multi-tool provider choice auto while Runtime evidence is missing (2.721041ms)
+✔ artifact progress policy treats generated build scripts as source until a deliverable exists (4.732875ms)
+✔ artifact progress policy treats mismatched typed intermediates as source until the requested artifact kind exists (5.221083ms)
+✔ artifact progress policy treats DOC and DOCX receipts as the same Word deliverable family (0.213584ms)
+✔ artifact progress policy keeps a converted mismatched format out of automatic acceptance (0.104417ms)
+✔ artifact progress policy treats requested source code as the deliverable instead of an intermediate (0.076542ms)
+✔ artifact progress policy never accepts a generator script for a requested audio deliverable (0.063208ms)
+✔ artifact progress policy does not bind a mismatched acceptance receipt to requested code (0.094292ms)
+✔ failed setup does not divert requested code from automatic acceptance (2.5215ms)
+✔ artifact progress policy treats a successful PPTX acceptance receipt as the presentation deliverable (0.153833ms)
+✖ a later hashless artifact write invalidates an earlier acceptance receipt (0.2235ms)
+✔ agent loop rejects an HTML acceptance profile before it can self-validate a presentation target (1.068583ms)
+✔ agent loop permits Markdown verification for a structured Markdown target despite a legacy XLSX projection (0.943583ms)
+✔ artifact progress policy allows diagnostic-driven intermediate source repair before rerender (4.091167ms)
+✔ artifact progress policy does not require a semantic source receipt after process artifacts exist (4.671583ms)
+✔ artifact progress policy allows a targeted rebase read after patch precondition failure (6.511834ms)
+✔ artifact diagnostics advise source repair without vetoing a targeted reread (3.72575ms)
+✔ artifact diagnostics retain a read-only grace turn as advice after a concrete diagnostic (2.080708ms)
+✔ tool evidence can queue an early convergence turn before the hard limit (0.630458ms)
+✔ next model turn receives explicit execution feedback for failures and file changes (1.084084ms)
+✔ repeated execution failures surface failure phases and a strategy switch directive (1.114166ms)
+✔ a looping model reaches the real hard limit when it repeats authorized tool calls (3.821334ms)
+✔ a converged turn that emits an unexecuted tool invocation gets one candidate repair before assessment (1.043916ms)
+✔ a converged Kimi-style text tool invocation gets one candidate repair before assessment (0.975958ms)
+✔ a no-tool candidate with embedded provider tool protocol is rejected before assessment (0.630791ms)
+✔ a no-tool candidate with embedded provider tool protocol is rejected before assessment (0.5375ms)
+✔ a no-tool candidate with internal Runtime evidence markup is repaired before assessment (0.503708ms)
+✔ a no-tool candidate that echoes server evidence is rejected before assessment (0.542041ms)
+✔ a no-tool candidate with provider reasoning or presentation markup is rejected before assessment (0.962042ms)
+✔ an invalid final convergence candidate receives bounded repair grace before the Run limit (1.063083ms)
+✔ convergence keeps tools available until every receipt-backed evidence obligation is satisfied (2.47075ms)
+✔ repeated internal evidence markup stops at the candidate repair boundary instead of consuming the Run (1.519ms)
+✔ a reused rejected assessment stops instead of resubmitting the same candidate (0.916458ms)
+✔ per-tool search quota rejects excess searches and converges from the bounded evidence (0.855375ms)
+✔ streaming turns emit live deltas before the durable assistant checkpoint (0.91975ms)
+✔ assistant checkpoints persist provider reasoning continuation (0.26225ms)
+✔ tool_call_ready dispatches the tool before the full assistant checkpoint (0.769875ms)
+✔ a ready tool call survives an idle stream timeout under a per-Tool ceiling (0.593458ms)
+✔ model request failures are emitted before the run fails (0.489333ms)
+✔ progress policy advises after an intermediate artifact read without vetoing the authorized call (2.823333ms)
+✔ capability grants are immutable at runtime, not only in TypeScript (0.101166ms)
+✔ a bounded probe permits reassessment only when observations change: recovered=false (1.445709ms)
+✔ a bounded probe permits reassessment only when observations change: recovered=true (1.066958ms)
+✔ a changed-condition prerequisite hands off to the existing Recovery boundary immediately (0.462083ms)
+✔ an evidence-independent interpretation can be corrected without another source action (0.4015ms)
+✔ planning failure waits and resumes the same Run after reopening the database (77.484709ms)
+✔ a safe model stream interrupted after emission enters recovery_required (11.034833ms)
+✔ safe model stream recovery resumes the interrupted Step from committed evidence (20.673833ms)
+✔ two delivery targets execute in separate Rounds and final Result aggregates both Round Results (42.748ms)
+✔ next-Round planning failure waits and resumes the same Run (27.591625ms)
+✔ intent failure resumes the original Run without changing its frozen clock (16.9245ms)
+✔ an interrupted claimed planning recovery resumes after reconciliation (41.561625ms)
+✔ rejecting a planning retry cancels the original Run without granting more budget (8.134084ms)
+✔ a second planning failure terminates rather than asking or retrying indefinitely (11.599917ms)
+✔ cancellation during planning recovery cannot admit a late Plan (26.542084ms)
+✔ planning recovery refuses a changed Skill version before executing tools (11.55825ms)
+✔ failed conversation intent resolution preserves its own bounded model-call budget (6.594666ms)
+✔ initial planning failure retains its structured boundary in the durable Run events (5.362917ms)
+✔ canonical assessment gaps survive local exhaustion and drive one shared recovery path (humanPause=false) (43.856667ms)
+✔ canonical assessment gaps survive local exhaustion and drive one shared recovery path (humanPause=true) (41.401959ms)
+✔ a canonical synthesis gap allows a corrected answer from unchanged observations (10.9585ms)
+✔ criterion provenance rejects foreign intents, invented quotes and unowned targets without weakening the criterion (0.409042ms)
+✔ an unjustified extra proof obligation cannot reopen a canonical Gap for a matching reply (1.017583ms)
+✔ unchanged observations allow a corrected candidate while exact duplicates reuse rejection (duplicate=false) (0.602584ms)
+✔ unchanged observations allow a corrected candidate while exact duplicates reuse rejection (duplicate=true) (0.530875ms)
+✔ Recovery parsing preserves result criteria, original source identities and user provenance (0.209791ms)
+✔ Recovery parsing treats a null sourceConstraint as absent while rejecting malformed constraints (0.208167ms)
+✔ Recovery parsing rejects delivery criteria that Admission derives from target ownership (0.077875ms)
+✔ an invalid Recovery response commits a stopped Outcome and retains the open Gap (14.938208ms)
+✔ assessment profile schema upgrade preserves complete historical observations and indexes (11.035375ms)
+✔ postgres profile migration replaces only the profile constraint and is idempotent (0.172209ms)
+✖ tidb profile migration replaces only the profile constraint and is idempotent (0.749541ms)
+✔ an accepted file receipt cannot route a requested content property through rule-only assessment (41.683ms)
+✔ Recovery projects editable criteria separately and Admission alone restores delivery obligations (1.104417ms)
+✔ prior time provenance repairs binding (continue_prior, prior=completed, invalidQuote=false) (44.385292ms)
+✔ prior time provenance repairs binding (correct_prior, prior=completed, invalidQuote=false) (11.765334ms)
+✔ prior time provenance repairs binding (refine_prior, prior=completed, invalidQuote=false) (10.14175ms)
+✔ prior time provenance repairs binding (challenge_prior, prior=completed, invalidQuote=false) (12.1135ms)
+✔ prior time provenance repairs binding (continue_prior, prior=failed, invalidQuote=false) (11.712875ms)
+✔ prior time provenance repairs binding (refine_prior, prior=completed, invalidQuote=true) (10.399208ms)
+✔ relative calendar bounds use the Run's local date, not UTC or the model's guessed year (4.520834ms)
+✔ calendar-month scopes preserve exact month buckets across year, leap day and DST boundaries (3.716334ms)
+✔ calendar days preserve DST boundaries and historical references do not mutate the clock (1.69825ms)
+✔ calendar windows through now include the current partial day without guessed exclusive-midnight offsets (1.026167ms)
+✔ coverage is interval-based for arbitrary ranges and unions; text-only and truncated receipts cannot prove zero (1.669875ms)
+✔ all model phases use one persisted clock across midnight; derived bounds remain separate from user constraints (37.881666ms)
+✔ the frozen clock is also projected into compaction invocations (0.16075ms)
+✔ recurring time condition must be grounded in the user's exact words (0.083791ms)
+✔ recurring condition survives resolver repair, persistence and model phases (date range=false) (17.005833ms)
+✔ recurring condition survives resolver repair, persistence and model phases (date range=true) (19.275666ms)
+✔ bounded resolver repair preserves validation context (simultaneous=false) (16.4135ms)
+✔ bounded resolver repair preserves validation context (simultaneous=true) (14.201167ms)
+ℹ tests 168
+ℹ suites 0
+ℹ pass 162
+ℹ fail 6
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 868.307583
+
+✖ failing tests:
+
+test at ../../../../private/tmp/agentloop-delivery-baseline/tests/agent-loop.test.ts:255:1
+✖ ModelPlanner emits a strict Responses schema with every leaf property required (10.458041ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+  +   description: 'requestedTargets is Runtime-owned and immutable. With roundScope=null, bind every target in the current allowed scope exactly once across leaves. An explicit delivery roundScope owns only its targetIds. An explicit prerequisite roundScope supports its targetIds without owning any delivery: use fact_acquisition leaves with targetIds: [], source evidence and a concrete completion boundary. Preserve all other global targets as open. Do not invent IDs or rewrite target contracts.',
+      items: {
+        type: 'string'
+      },
+      maxItems: 0,
+      type: 'array'
+  
+      at TestContext.<anonymous> (file:///private/tmp/agentloop-delivery-baseline/tests/agent-loop.test.ts:307:10)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { type: 'array', description: 'requestedTargets is Runtime-owned and immutable. With roundScope=null, bind every target in the current allowed scope exactly once across leaves. An explicit delivery roundScope owns only its targetIds. An explicit prerequisite roundScope supports its targetIds without owning any delivery: use fact_acquisition leaves with targetIds: [], source evidence and a concrete completion boundary. Preserve all other global targets as open. Do not invent IDs or rewrite target contracts.', maxItems: 0, items: { type: 'string' } },
+    expected: { type: 'array', maxItems: 0, items: { type: 'string' } },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at ../../../../private/tmp/agentloop-delivery-baseline/tests/agent-loop.test.ts:2145:1
+✖ structured tool candidates go directly to assessment without a final model rewrite (1.399417ms)
+  AssertionError [ERR_ASSERTION]: The input was expected to not match the regular expression /xxxxxxxxxxxxxxxxxxxxxxxx/. Input:
+  
+  '{"schema":"api_catalog_result/v1","deliveryCandidate":{"output":"合同备案记录查询 API has sysId input and verified output fields.\\n\\n## 限制说明\\n\\n- 目录结果需要以精确 API_ID 再确认。"},"assessmentProjection":{"match_count":1,"primary_api_id":"M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001","output_field_counts":{"M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001":32}},"evidenceReceipt":{"schema":"agentloop.toolEvidenceReceipt/v1","sourceType":"api_catalog","receiptId":"api-receipt-with-visible-caveat","facts":[{"kind":"source_summary","primary_api_id":"M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001"}],"caveats":["目录结果需要以精确 API_ID 再确认。"],"evidenceKinds":{"satisfied":["source_summary"],"caveated":["explicit_caveats"],"failed":[]}},"rawRows":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'... 10744 more characters
+  
+      at Object.evaluateCandidate (file:///private/tmp/agentloop-delivery-baseline/tests/agent-loop.test.ts:2206:14)
+      at evaluateCandidate (file:///private/tmp/agentloop-delivery-baseline/src/runtime/agent-loop.ts:807:36)
+      at async evaluateToolBackedCandidate (file:///private/tmp/agentloop-delivery-baseline/src/runtime/agent-loop.ts:967:24)
+      at async runAgentLoop (file:///private/tmp/agentloop-delivery-baseline/src/runtime/agent-loop.ts:2395:26)
+      at async TestContext.<anonymous> (file:///private/tmp/agentloop-delivery-baseline/tests/agent-loop.test.ts:2190:18)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: '{"schema":"api_catalog_result/v1","deliveryCandidate":{"output":"合同备案记录查询 API has sysId input and verified output fields.\\n\\n## 限制说明\\n\\n- 目录结果需要以精确 API_ID 再确认。"},"assessmentProjection":{"match_count":1,"primary_api_id":"M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001","output_field_counts":{"M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001":32}},"evidenceReceipt":{"schema":"agentloop.toolEvidenceReceipt/v1","sourceType":"api_catalog","receiptId":"api-receipt-with-visible-caveat","facts":[{"kind":"source_summary","primary_api_id":"M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001"}],"caveats":["目录结果需要以精确 API_ID 再确认。"],"evidenceKinds":{"satisfied":["source_summary"],"caveated":["explicit_caveats"],"failed":[]}},"rawRows":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'... 10744 more characters,
+    expected: /xxxxxxxxxxxxxxxxxxxxxxxx/,
+    operator: 'doesNotMatch',
+    diff: 'simple'
+  }
+
+test at ../../../../private/tmp/agentloop-delivery-baseline/tests/agent-loop.test.ts:2773:1
+✖ oversized structured stdout candidates from command projections go directly to assessment (1.071416ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /"deliveryCandidate"/. Input:
+  
+  '{"exitCode":0,"signal":null,"stdout":"{\\"schema\\":\\"agentloop.commandOutputProjection/v1\\",\\"stream\\":\\"stdout\\",\\"sourceSchema\\":\\"api_catalog_result/v1\\",\\"deliveryCandidate\\":{\\"output\\":\\"合同备案记录查询 API has sysId input.\\\\n出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 \\",\\"format\\":\\"markdown\\"},\\"assessmentProjection\\":{\\"match_count\\":1,\\"primary_api_id\\":\\"M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001\\"},\\"evidenceReceipt\\":{\\"schema\\":\\"agentloop.toolEvidenceReceipt/v1\\",\\"sourceType\\":\\"api_catalog\\",\\"receiptId\\":\\"api-receipt-large-candidate\\",\\"sourceRefs\\":[{\\"url\\":\\"https://eplat.baocloud.cn/service/D_A_BSTABD00_SHUTU_AGENT\\"}],\\"facts\\":[{\\"kind\\":\\"source_summary\\",\\"primary_api_id\\":\\"M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001\\"}],\\"caveats\\":[\\"Candidate ranking requires exact API_ID confirmation.\\"],\\"evidenceKinds\\":{\\"satisfied\\":[\\"source_summary\\",\\"source_urls\\"],\\"caveated\\":[\\"explicit_caveats\\"],\\"failed\\":[]}},\\"contentLocation\\":{\\"kind\\":\\"content_addressed\\",\\"stream\\":\\"stdout\\",\\"path\\":\\".agentloop/tool-results/aa/example.stdout.txt\\",\\"sha256\\":\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\",\\"characters\\":30000,\\"bytes\\":30000,\\"previewCharacters\\":2000}}","stderr":""}'
+  
+      at Object.evaluateCandidate (file:///private/tmp/agentloop-delivery-baseline/tests/agent-loop.test.ts:2842:14)
+      at evaluateCandidate (file:///private/tmp/agentloop-delivery-baseline/src/runtime/agent-loop.ts:807:36)
+      at async evaluateToolBackedCandidate (file:///private/tmp/agentloop-delivery-baseline/src/runtime/agent-loop.ts:967:24)
+      at async runAgentLoop (file:///private/tmp/agentloop-delivery-baseline/src/runtime/agent-loop.ts:2395:26)
+      at async TestContext.<anonymous> (file:///private/tmp/agentloop-delivery-baseline/tests/agent-loop.test.ts:2825:18)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: '{"exitCode":0,"signal":null,"stdout":"{\\"schema\\":\\"agentloop.commandOutputProjection/v1\\",\\"stream\\":\\"stdout\\",\\"sourceSchema\\":\\"api_catalog_result/v1\\",\\"deliveryCandidate\\":{\\"output\\":\\"合同备案记录查询 API has sysId input.\\\\n出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 出参字段 \\",\\"format\\":\\"markdown\\"},\\"assessmentProjection\\":{\\"match_count\\":1,\\"primary_api_id\\":\\"M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001\\"},\\"evidenceReceipt\\":{\\"schema\\":\\"agentloop.toolEvidenceReceipt/v1\\",\\"sourceType\\":\\"api_catalog\\",\\"receiptId\\":\\"api-receipt-large-candidate\\",\\"sourceRefs\\":[{\\"url\\":\\"https://eplat.baocloud.cn/service/D_A_BSTABD00_SHUTU_AGENT\\"}],\\"facts\\":[{\\"kind\\":\\"source_summary\\",\\"primary_api_id\\":\\"M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001\\"}],\\"caveats\\":[\\"Candidate ranking requires exact API_ID confirmation.\\"],\\"evidenceKinds\\":{\\"satisfied\\":[\\"source_summary\\",\\"source_urls\\"],\\"caveated\\":[\\"explicit_caveats\\"],\\"failed\\":[]}},\\"contentLocation\\":{\\"kind\\":\\"content_addressed\\",\\"stream\\":\\"stdout\\",\\"path\\":\\".agentloop/tool-results/aa/example.stdout.txt\\",\\"sha256\\":\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\",\\"characters\\":30000,\\"bytes\\":30000,\\"previewCharacters\\":2000}}","stderr":""}',
+    expected: /"deliveryCandidate"/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at ../../../../private/tmp/agentloop-delivery-baseline/tests/agent-loop.test.ts:4028:1
+✖ artifact progress policy advises after excessive read-only exploration before grace (3.817291ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'deliverable_available'
+  - 'accepted'
+  
+      at Object.complete (file:///private/tmp/agentloop-delivery-baseline/tests/agent-loop.test.ts:4101:16)
+      at completeWithStreaming (file:///private/tmp/agentloop-delivery-baseline/src/runtime/model-streaming.ts:173:36)
+      at async completeWithStreamingAndDispatch (file:///private/tmp/agentloop-delivery-baseline/src/runtime/agent-loop.ts:3305:16)
+      at async runAgentLoop (file:///private/tmp/agentloop-delivery-baseline/src/runtime/agent-loop.ts:1461:18)
+      at async TestContext.<anonymous> (file:///private/tmp/agentloop-delivery-baseline/tests/agent-loop.test.ts:4111:18)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'deliverable_available',
+    expected: 'accepted',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../../../../private/tmp/agentloop-delivery-baseline/tests/agent-loop.test.ts:5016:1
+✖ a later hashless artifact write invalidates an earlier acceptance receipt (0.2235ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'process_artifact_available'
+  - 'deliverable_available'
+  
+      at TestContext.<anonymous> (file:///private/tmp/agentloop-delivery-baseline/tests/agent-loop.test.ts:5060:10)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1201:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:831:18)
+      at Test.postRun (node:internal/test_runner/test:1330:19)
+      at Test.run (node:internal/test_runner/test:1258:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'process_artifact_available',
+    expected: 'deliverable_available',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../../../../private/tmp/agentloop-delivery-baseline/tests/goal-loop-contract.test.ts:969:3
+✖ tidb profile migration replaces only the profile constraint and is idempotent (0.749541ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /information_schema.CHECK_CONSTRAINTS/. Input:
+  
+  'SHOW CREATE TABLE skill_compliance_assessments'
+  
+      at Object.prepare (file:///private/tmp/agentloop-delivery-baseline/tests/goal-loop-contract.test.ts:981:16)
+      at tidbTableChecks (file:///private/tmp/agentloop-delivery-baseline/src/storage/assessment-profile-schema.ts:45:30)
+      at installAssessmentProfileSchema (file:///private/tmp/agentloop-delivery-baseline/src/storage/assessment-profile-schema.ts:30:13)
+      at TestContext.<anonymous> (file:///private/tmp/agentloop-delivery-baseline/tests/goal-loop-contract.test.ts:988:11)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1201:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:831:18)
+      at Test.postRun (node:internal/test_runner/test:1330:19)
+      at Test.run (node:internal/test_runner/test:1258:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'SHOW CREATE TABLE skill_compliance_assessments',
+    expected: /information_schema.CHECK_CONSTRAINTS/,
+    operator: 'match',
+    diff: 'simple'
+  }

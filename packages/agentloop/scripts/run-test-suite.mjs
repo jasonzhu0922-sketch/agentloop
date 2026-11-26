@@ -30,6 +30,7 @@ const suites = Object.freeze({
     "tests/work-product-context.test.ts",
     "tests/work-product-observations.test.ts",
     "tests/work-product-semantics.test.ts",
+    "tests/artifact-version-binding.test.ts",
     "tests/runtime-action-query-service.test.ts",
     "tests/runtime-conversation-working-set-query-service.test.ts",
     "tests/runtime-event-query-service.test.ts",

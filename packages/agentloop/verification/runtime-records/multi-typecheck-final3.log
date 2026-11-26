@@ -1,0 +1,13 @@
+npm warn Unknown builtin config "electron_mirror". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+tests/assignment-stream.test.ts(157,39): error TS2339: Property 'location' does not exist on type 'never'.
+tests/assignment-stream.test.ts(158,39): error TS2339: Property 'id' does not exist on type 'never'.
+tests/assignment-stream.test.ts(180,26): error TS2551: Property 'artifactState' does not exist on type '{ executionLocation: string; localRuntimeId: string; remoteRunId: string; artifacts: never[]; }'. Did you mean 'artifacts'?
+tests/assignment-stream.test.ts(181,26): error TS2339: Property 'artifactError' does not exist on type '{ executionLocation: string; localRuntimeId: string; remoteRunId: string; artifacts: never[]; }'.
+tests/assignment-stream.test.ts(212,99): error TS2353: Object literal may only specify known properties, and 'remoteRunId' does not exist in type '{ readonly id: string; readonly runtimeId?: string | undefined; readonly hasRun: boolean; readonly executionLocation?: string | undefined; readonly errorMessage?: string | undefined; }'.
+tests/assignment-stream.test.ts(213,39): error TS2353: Object literal may only specify known properties, and 'assistantOutput' does not exist in type '{ readonly status?: string | undefined; readonly modelKey?: string | undefined; readonly modelDisplayName?: string | undefined; readonly completedAt?: number | undefined; }'.
+tests/assignment-stream.test.ts(216,26): error TS2339: Property 'localRuntimeId' does not exist on type 'PersistedConversationMessage'.
+tests/assignment-stream.test.ts(217,26): error TS2339: Property 'remoteRunId' does not exist on type 'PersistedConversationMessage'.
+tests/cloud-model-config.test.ts(40,10): error TS2790: The operand of a 'delete' operator must be optional.
+tests/local-agent-downloads.test.ts(118,36): error TS2353: Object literal may only specify known properties, and 'desktopUpdateDirectory' does not exist in type '{ installerDirectory?: string | undefined; runtimeControlSocket?: string | undefined; runtimeControlDevMode?: boolean | undefined; runtimeControlDevRoot?: string | undefined; ... 4 more ...; runtimeControlDevMcpConfiguration?: string | undefined; }'.
+tests/local-connector-run-admission.test.ts(197,13): error TS7022: 'callback' implicitly has type 'any' because it does not have a type annotation and is referenced directly or indirectly in its own initializer.
+tests/multi-runtime.test.ts(1774,95): error TS2353: Object literal may only specify known properties, and 'phase' does not exist in type '{ result: string; }'.

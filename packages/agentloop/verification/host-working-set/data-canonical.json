@@ -1,0 +1,4753 @@
+{
+  "schema": "agentloop.hostWorkingSetReplay/v1",
+  "id": "data-latest-canonical-1",
+  "host": "data",
+  "suite": "latest",
+  "policy": "canonical",
+  "modelKey": "deepseek-v4-flash",
+  "source": {
+    "schema": "agentloop.hostReplaySnapshot/v1",
+    "createdAt": "2026-11-25T04:23:10.805Z",
+    "kernelSourceSha256": "8cf30b98a3e6f43a27601212e82d88df3be949062176a168e3de087953f1e8f7",
+    "hosts": {
+      "data": {
+        "sourceSha256": "e2472641f45467a6410393f02b591a4020a204948014ea0bdcb363d1f60861cc",
+        "skillPackageSha256": "7dfc7247a105ee31200841bffb64f16a9a1afb685dc26760b07fb3059df443cd",
+        "modelConfigSha256": "6bff84983bf1b0a740f095430967808decd86f7ea64a2a25903a80cb3361c630"
+      },
+      "report": {
+        "sourceSha256": "fb43e48ae8324db33c01ed7214fb71fdd22fe131f684eda70d6a4afd1b9dd237",
+        "skillPackageSha256": "36a40c42aa4bbad16fb17ec589f15ee0d00f4d916f8461108617849286f9408b",
+        "modelConfigSha256": "9e5a03c0d435cc2853421826348ce40a4c072670a8799986668cb1e14a95e8b7"
+      }
+    }
+  },
+  "comparison": "same frozen source; private canonical copy overrides only executionHistoryProjection comparison switch",
+  "sourceDataMode": "configured_remote_service; verify receipt before claiming live",
+  "durationMs": 131040,
+  "runs": [
+    {
+      "index": 0,
+      "runId": "111324e5-16f9-46cc-a60a-c8eeef9261f5",
+      "status": "completed",
+      "durationMs": 64119,
+      "hil": null,
+      "outputSha256": "30347e4f69b298237a7a6eada16993903f0551daec66ca7dd3d843d7c04af04e",
+      "artifacts": [],
+      "calls": [
+        {
+          "phase": "planning",
+          "durationMs": 5605,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "planning",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 19832,
+              "toolSchemas": 9781,
+              "runtimeContext": 20473,
+              "userMessages": 15,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 4958,
+              "toolSchemas": 2446,
+              "runtimeContext": 5206,
+              "userMessages": 15,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 1,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "totalCharacters": 50101,
+            "totalEstimatedTokens": 12625,
+            "totalReferences": 4,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 0,
+                "characters": 2,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 11240,
+            "outputTokens": 373,
+            "inputTokensNoCache": 7784,
+            "cacheReadInputTokens": 3456,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "resolve_conversation_turn"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "ea4e4f0e76adb37b50f8f7232dfcf515519e697e9d60615ebb6a1d4913ccdf8b"
+        },
+        {
+          "phase": "planning",
+          "durationMs": 2215,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "planning",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 20118,
+              "toolSchemas": 9781,
+              "runtimeContext": 20473,
+              "userMessages": 15,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 631,
+              "skillResults": 0,
+              "otherToolResults": 222
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 5030,
+              "toolSchemas": 2446,
+              "runtimeContext": 5206,
+              "userMessages": 15,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 202,
+              "skillResults": 0,
+              "otherToolResults": 56
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 1,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 1,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 1,
+              "skillResults": 0,
+              "otherToolResults": 1
+            },
+            "totalCharacters": 51240,
+            "totalEstimatedTokens": 12955,
+            "totalReferences": 7,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 2,
+                "characters": 1123,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 11722,
+            "outputTokens": 341,
+            "inputTokensNoCache": 8266,
+            "cacheReadInputTokens": 3456,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "resolve_conversation_turn"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "17c498c26682dfcb7d6a3bd5e5b13f9ef652a664a9f950cec92481b3b978e29f"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 876,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 25903,
+              "userMessages": 15,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 7568,
+              "userMessages": 15,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "totalCharacters": 64711,
+            "totalEstimatedTokens": 17666,
+            "totalReferences": 19,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 7543,
+                "estimatedTokens": 1886
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 0,
+                "characters": 2,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 16747,
+            "outputTokens": 52,
+            "inputTokensNoCache": 14699,
+            "cacheReadInputTokens": 2048,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "load_skill"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "0ffb8e8e18e4525d26e29c4b374296344a1c0951180b12928b6267ab3ada0802"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1163,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 28478,
+              "userMessages": 15,
+              "assistantText": 37,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 24,
+              "skillResults": 24092,
+              "otherToolResults": 0
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 8212,
+              "userMessages": 15,
+              "assistantText": 22,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 6,
+              "skillResults": 9620,
+              "otherToolResults": 0
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 1,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 1,
+              "skillResults": 1,
+              "otherToolResults": 0
+            },
+            "totalCharacters": 91439,
+            "totalEstimatedTokens": 27958,
+            "totalReferences": 22,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 7576,
+                "estimatedTokens": 1894
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 2,
+                "characters": 25507,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 25386,
+            "outputTokens": 136,
+            "inputTokensNoCache": 23210,
+            "cacheReadInputTokens": 2176,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_run_command"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "499b8b08f10b64143d677bd63827bb354b83010120b2f61a21c13e24f0e37544"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1540,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 30284,
+              "userMessages": 15,
+              "assistantText": 68,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 246,
+              "skillResults": 24092,
+              "otherToolResults": 5145
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 8663,
+              "userMessages": 15,
+              "assistantText": 38,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 72,
+              "skillResults": 9620,
+              "otherToolResults": 1287
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 2,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 2,
+              "skillResults": 1,
+              "otherToolResults": 1
+            },
+            "totalCharacters": 98643,
+            "totalEstimatedTokens": 29778,
+            "totalReferences": 25,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 8825,
+                "estimatedTokens": 2207
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 4,
+                "characters": 32468,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 27737,
+            "outputTokens": 99,
+            "inputTokensNoCache": 25561,
+            "cacheReadInputTokens": 2176,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_read_json"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "4c5666fd4628c70b9cfcf3f1b85d235c98c5588f7d37dd4e00169af58175bd99"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1231,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 30577,
+              "userMessages": 15,
+              "assistantText": 68,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 417,
+              "skillResults": 24092,
+              "otherToolResults": 26067
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 8737,
+              "userMessages": 15,
+              "assistantText": 38,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 115,
+              "skillResults": 9620,
+              "otherToolResults": 6714
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 3,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 3,
+              "skillResults": 1,
+              "otherToolResults": 2
+            },
+            "totalCharacters": 120029,
+            "totalEstimatedTokens": 35322,
+            "totalReferences": 28,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 8864,
+                "estimatedTokens": 2216
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 6,
+                "characters": 57285,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 34514,
+            "outputTokens": 121,
+            "inputTokensNoCache": 32338,
+            "cacheReadInputTokens": 2176,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "read_result"
+          ],
+          "historyReads": 0,
+          "resultReads": 1,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "f032888ab2df180793bcf7d48a7248610524693cbf973bbdf35bdef55d187e37"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1704,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 30755,
+              "userMessages": 15,
+              "assistantText": 68,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 527,
+              "skillResults": 24092,
+              "otherToolResults": 35778
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 8781,
+              "userMessages": 15,
+              "assistantText": 38,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 143,
+              "skillResults": 9620,
+              "otherToolResults": 10746
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 4,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 4,
+              "skillResults": 1,
+              "otherToolResults": 3
+            },
+            "totalCharacters": 130028,
+            "totalEstimatedTokens": 39426,
+            "totalReferences": 31,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 8879,
+                "estimatedTokens": 2220
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 10895,
+                "estimatedTokens": 4329
+              },
+              "nativeProtocol": {
+                "messages": 8,
+                "characters": 69641,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 1
+            }
+          },
+          "usage": {
+            "inputTokens": 38359,
+            "outputTokens": 265,
+            "inputTokensNoCache": 36183,
+            "cacheReadInputTokens": 2176,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_run_command"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "d1356d641d40780493ab4c374a2f34a9a4c7fdc4cd0d70b1f48d9a97fe8dba70"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1239,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 31530,
+              "userMessages": 15,
+              "assistantText": 126,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 993,
+              "skillResults": 24092,
+              "otherToolResults": 41714
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 8975,
+              "userMessages": 15,
+              "assistantText": 79,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 270,
+              "skillResults": 9620,
+              "otherToolResults": 12230
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 5,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 5,
+              "skillResults": 1,
+              "otherToolResults": 4
+            },
+            "totalCharacters": 137263,
+            "totalEstimatedTokens": 41272,
+            "totalReferences": 34,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 9180,
+                "estimatedTokens": 2295
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 10895,
+                "estimatedTokens": 4329
+              },
+              "nativeProtocol": {
+                "messages": 10,
+                "characters": 78194,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 1
+            }
+          },
+          "usage": {
+            "inputTokens": 40736,
+            "outputTokens": 94,
+            "inputTokensNoCache": 38688,
+            "cacheReadInputTokens": 2048,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_read_json"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "c7a9c48f81f66d9ce7d017d96bc654f89e8e699867cc4f388708215416de16ae"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 3149,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 31777,
+              "userMessages": 15,
+              "assistantText": 126,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 1150,
+              "skillResults": 24092,
+              "otherToolResults": 58428
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 9037,
+              "userMessages": 15,
+              "assistantText": 79,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 309,
+              "skillResults": 9620,
+              "otherToolResults": 16705
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 6,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 6,
+              "skillResults": 1,
+              "otherToolResults": 5
+            },
+            "totalCharacters": 154381,
+            "totalEstimatedTokens": 45848,
+            "totalReferences": 37,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 9181,
+                "estimatedTokens": 2296
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 10895,
+                "estimatedTokens": 4329
+              },
+              "nativeProtocol": {
+                "messages": 12,
+                "characters": 99024,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 1
+            }
+          },
+          "usage": {
+            "inputTokens": 45942,
+            "outputTokens": 854,
+            "inputTokensNoCache": 43766,
+            "cacheReadInputTokens": 2176,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_write_file"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "8b8d9d5db34f0313cc588af8ed00a229b4cd699078b72ec487819384fa5b2cbd"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1215,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 34010,
+              "userMessages": 15,
+              "assistantText": 199,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 3584,
+              "skillResults": 24092,
+              "otherToolResults": 60448
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 9595,
+              "userMessages": 15,
+              "assistantText": 140,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 917,
+              "skillResults": 9620,
+              "otherToolResults": 17210
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 7,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 7,
+              "skillResults": 1,
+              "otherToolResults": 6
+            },
+            "totalCharacters": 161141,
+            "totalEstimatedTokens": 47580,
+            "totalReferences": 40,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 9572,
+                "estimatedTokens": 2393
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 10895,
+                "estimatedTokens": 4329
+              },
+              "nativeProtocol": {
+                "messages": 14,
+                "characters": 105244,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 1
+            }
+          },
+          "usage": {
+            "inputTokens": 48394,
+            "outputTokens": 117,
+            "inputTokensNoCache": 46346,
+            "cacheReadInputTokens": 2048,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_run_command"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "705908faf2a7f3cc8a0d495d6f6761014ed69920648f39b85e844153ec9a1edd"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 3503,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 34586,
+              "userMessages": 15,
+              "assistantText": 199,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 3803,
+              "skillResults": 24092,
+              "otherToolResults": 65230
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 9739,
+              "userMessages": 15,
+              "assistantText": 140,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 972,
+              "skillResults": 9620,
+              "otherToolResults": 18406
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 8,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 8,
+              "skillResults": 1,
+              "otherToolResults": 7
+            },
+            "totalCharacters": 166718,
+            "totalEstimatedTokens": 48975,
+            "totalReferences": 43,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 9572,
+                "estimatedTokens": 2393
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 10895,
+                "estimatedTokens": 4329
+              },
+              "nativeProtocol": {
+                "messages": 16,
+                "characters": 112869,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 1
+            }
+          },
+          "usage": {
+            "inputTokens": 50526,
+            "outputTokens": 879,
+            "inputTokensNoCache": 48350,
+            "cacheReadInputTokens": 2176,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_write_file"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "b8ec0a1ee779dbfd2f7f6cf9378bc130e22e8bfb40f586e24e674ad8990fe6cf"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1229,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 34969,
+              "userMessages": 15,
+              "assistantText": 256,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 6333,
+              "skillResults": 24092,
+              "otherToolResults": 67250
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 9835,
+              "userMessages": 15,
+              "assistantText": 189,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 1605,
+              "skillResults": 9620,
+              "otherToolResults": 18911
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 9,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 9,
+              "skillResults": 1,
+              "otherToolResults": 8
+            },
+            "totalCharacters": 171708,
+            "totalEstimatedTokens": 50258,
+            "totalReferences": 46,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 10028,
+                "estimatedTokens": 2507
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 10895,
+                "estimatedTokens": 4329
+              },
+              "nativeProtocol": {
+                "messages": 18,
+                "characters": 119539,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 1
+            }
+          },
+          "usage": {
+            "inputTokens": 52188,
+            "outputTokens": 118,
+            "inputTokensNoCache": 50140,
+            "cacheReadInputTokens": 2048,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_run_command"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "351e90e34e2e62f28515479adef93bb274a998f3a1f639886abfd297e9d21d3e"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 3317,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 35229,
+              "userMessages": 15,
+              "assistantText": 256,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 6552,
+              "skillResults": 24092,
+              "otherToolResults": 72092
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 9900,
+              "userMessages": 15,
+              "assistantText": 189,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 1659,
+              "skillResults": 9620,
+              "otherToolResults": 20121
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 10,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 10,
+              "skillResults": 1,
+              "otherToolResults": 9
+            },
+            "totalCharacters": 177029,
+            "totalEstimatedTokens": 51587,
+            "totalReferences": 49,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 9711,
+                "estimatedTokens": 2428
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 10895,
+                "estimatedTokens": 4329
+              },
+              "nativeProtocol": {
+                "messages": 20,
+                "characters": 127419,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 1
+            }
+          },
+          "usage": {
+            "inputTokens": 54191,
+            "outputTokens": 905,
+            "inputTokensNoCache": 52015,
+            "cacheReadInputTokens": 2176,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_write_file"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "317db6c2ea8d30c374ea5744b0bad1ff33d20a3f16f7a4bd34d939581a340ae9"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1428,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 35607,
+              "userMessages": 15,
+              "assistantText": 337,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 9090,
+              "skillResults": 24092,
+              "otherToolResults": 74112
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 9994,
+              "userMessages": 15,
+              "assistantText": 244,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 2294,
+              "skillResults": 9620,
+              "otherToolResults": 20626
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 11,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 11,
+              "skillResults": 1,
+              "otherToolResults": 10
+            },
+            "totalCharacters": 182046,
+            "totalEstimatedTokens": 52876,
+            "totalReferences": 52,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 10166,
+                "estimatedTokens": 2542
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 10895,
+                "estimatedTokens": 4329
+              },
+              "nativeProtocol": {
+                "messages": 22,
+                "characters": 134122,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 1
+            }
+          },
+          "usage": {
+            "inputTokens": 55829,
+            "outputTokens": 117,
+            "inputTokensNoCache": 53653,
+            "cacheReadInputTokens": 2176,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_run_command"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "5b560a683e78efa45acadfbddb5b7e46cc4259caa170b57919022977b7d16a25"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 2513,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 35858,
+              "userMessages": 15,
+              "assistantText": 337,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 9309,
+              "skillResults": 24092,
+              "otherToolResults": 78969
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 10057,
+              "userMessages": 15,
+              "assistantText": 244,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 2349,
+              "skillResults": 9620,
+              "otherToolResults": 21840
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 12,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 12,
+              "skillResults": 1,
+              "otherToolResults": 11
+            },
+            "totalCharacters": 187373,
+            "totalEstimatedTokens": 54208,
+            "totalReferences": 55,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 9840,
+                "estimatedTokens": 2460
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 10895,
+                "estimatedTokens": 4329
+              },
+              "nativeProtocol": {
+                "messages": 24,
+                "characters": 142018,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 1
+            }
+          },
+          "usage": {
+            "inputTokens": 57813,
+            "outputTokens": 238,
+            "inputTokensNoCache": 55637,
+            "cacheReadInputTokens": 2176,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "stop",
+          "toolNames": [],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "a0cd26b8c37d6d0fb502d81d9e0c1577a91e1985706dcfdd25c46bb2d4d68bca"
+        },
+        {
+          "phase": "assessment",
+          "durationMs": 8191,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "assessment",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 8604,
+              "toolSchemas": 4563,
+              "runtimeContext": 177274,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 2151,
+              "toolSchemas": 1141,
+              "runtimeContext": 51604,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 1,
+              "runtimeContext": 1,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "totalCharacters": 190441,
+            "totalEstimatedTokens": 54896,
+            "totalReferences": 3,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 0,
+                "characters": 2,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 78210,
+            "outputTokens": 1595,
+            "inputTokensNoCache": 77186,
+            "cacheReadInputTokens": 1024,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "submit_assessment"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "34d336a8dd63236099d5a99b4aaeba1cd8ef0c3a0106392986a0c6bdc146b509"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1830,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 42176,
+              "userMessages": 15,
+              "assistantText": 337,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 9309,
+              "skillResults": 24092,
+              "otherToolResults": 78969
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 11999,
+              "userMessages": 15,
+              "assistantText": 244,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 2349,
+              "skillResults": 9620,
+              "otherToolResults": 21840
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 12,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 12,
+              "skillResults": 1,
+              "otherToolResults": 11
+            },
+            "totalCharacters": 193691,
+            "totalEstimatedTokens": 56150,
+            "totalReferences": 55,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 12312,
+                "estimatedTokens": 3266
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 10895,
+                "estimatedTokens": 4329
+              },
+              "nativeProtocol": {
+                "messages": 24,
+                "characters": 142018,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 1
+            }
+          },
+          "usage": {
+            "inputTokens": 60062,
+            "outputTokens": 143,
+            "inputTokensNoCache": 57886,
+            "cacheReadInputTokens": 2176,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_search_text"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "9224501af3797fe98f00c8eec60b44f5bc54f153c0da5479898bfc5320605e2b"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1140,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 38173,
+              "userMessages": 15,
+              "assistantText": 396,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 9416,
+              "skillResults": 24092,
+              "otherToolResults": 79015
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 10882,
+              "userMessages": 15,
+              "assistantText": 298,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 2375,
+              "skillResults": 9620,
+              "otherToolResults": 21871
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 13,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 13,
+              "skillResults": 1,
+              "otherToolResults": 12
+            },
+            "totalCharacters": 189900,
+            "totalEstimatedTokens": 55144,
+            "totalReferences": 58,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 12531,
+                "estimatedTokens": 3340
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 10895,
+                "estimatedTokens": 4329
+              },
+              "nativeProtocol": {
+                "messages": 26,
+                "characters": 144199,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 1
+            }
+          },
+          "usage": {
+            "inputTokens": 59218,
+            "outputTokens": 51,
+            "inputTokensNoCache": 57042,
+            "cacheReadInputTokens": 2176,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_read_file"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "a8095d113a6f539af0f5935d599013bec2ec86f1769cd44c326a71725364a160"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 3374,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 38446,
+              "userMessages": 15,
+              "assistantText": 396,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 9481,
+              "skillResults": 24092,
+              "otherToolResults": 84922
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 10999,
+              "userMessages": 15,
+              "assistantText": 298,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 2392,
+              "skillResults": 9620,
+              "otherToolResults": 24817
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 14,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 14,
+              "skillResults": 1,
+              "otherToolResults": 13
+            },
+            "totalCharacters": 196145,
+            "totalEstimatedTokens": 58224,
+            "totalReferences": 61,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 12554,
+                "estimatedTokens": 3346
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 10895,
+                "estimatedTokens": 4329
+              },
+              "nativeProtocol": {
+                "messages": 28,
+                "characters": 152558,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 1
+            }
+          },
+          "usage": {
+            "inputTokens": 62055,
+            "outputTokens": 901,
+            "inputTokensNoCache": 59879,
+            "cacheReadInputTokens": 2176,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_write_file"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "29c9ed3fcdda12a4ca9b39a700fdea3e239d23722260551cc7319a8515971726"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1261,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 39227,
+              "userMessages": 15,
+              "assistantText": 464,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 12019,
+              "skillResults": 24092,
+              "otherToolResults": 86942
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 11106,
+              "userMessages": 15,
+              "assistantText": 344,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 3026,
+              "skillResults": 9620,
+              "otherToolResults": 25322
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 15,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 15,
+              "skillResults": 1,
+              "otherToolResults": 14
+            },
+            "totalCharacters": 201552,
+            "totalEstimatedTokens": 59516,
+            "totalReferences": 64,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 12999,
+                "estimatedTokens": 3457
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 10895,
+                "estimatedTokens": 4329
+              },
+              "nativeProtocol": {
+                "messages": 30,
+                "characters": 159248,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 1
+            }
+          },
+          "usage": {
+            "inputTokens": 63752,
+            "outputTokens": 117,
+            "inputTokensNoCache": 61576,
+            "cacheReadInputTokens": 2176,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_run_command"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "0d1bfb0488594b362f48e68da68eedb79c145c897fb3ac387b22f8585b60857d"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1423,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10521,
+              "toolSchemas": 28272,
+              "runtimeContext": 39880,
+              "userMessages": 15,
+              "assistantText": 464,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 12238,
+              "skillResults": 24092,
+              "otherToolResults": 96498
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3015,
+              "toolSchemas": 7068,
+              "runtimeContext": 11269,
+              "userMessages": 15,
+              "assistantText": 344,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 3081,
+              "skillResults": 9620,
+              "otherToolResults": 27724
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 16,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 16,
+              "skillResults": 1,
+              "otherToolResults": 15
+            },
+            "totalCharacters": 211980,
+            "totalEstimatedTokens": 62136,
+            "totalReferences": 67,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 13015,
+                "estimatedTokens": 3461
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 10895,
+                "estimatedTokens": 4329
+              },
+              "nativeProtocol": {
+                "messages": 32,
+                "characters": 172546,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 1
+            }
+          },
+          "usage": {
+            "inputTokens": 67165,
+            "outputTokens": 60,
+            "inputTokensNoCache": 64989,
+            "cacheReadInputTokens": 2176,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "stop",
+          "toolNames": [],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "86a8d3399ccf6d75439296cd6a9f6861a31c30c7c38af446a3b331deb62c1f91"
+        },
+        {
+          "phase": "assessment",
+          "durationMs": 5983,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "assessment",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 8604,
+              "toolSchemas": 4563,
+              "runtimeContext": 218908,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 2151,
+              "toolSchemas": 1141,
+              "runtimeContext": 64063,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 1,
+              "runtimeContext": 1,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "totalCharacters": 232075,
+            "totalEstimatedTokens": 67355,
+            "totalReferences": 3,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 0,
+                "characters": 2,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 96832,
+            "outputTokens": 1257,
+            "inputTokensNoCache": 95424,
+            "cacheReadInputTokens": 1408,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "submit_assessment"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "af0f33585a4a63a1604839b5adf06cda04beb7e7c82f23cc928c119d9cbd45b2"
+        },
+        {
+          "phase": "assessment",
+          "durationMs": 6315,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "assessment",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 8604,
+              "toolSchemas": 4563,
+              "runtimeContext": 219890,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 2151,
+              "toolSchemas": 1141,
+              "runtimeContext": 64309,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 1,
+              "runtimeContext": 1,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "totalCharacters": 233057,
+            "totalEstimatedTokens": 67601,
+            "totalReferences": 3,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 0,
+                "characters": 2,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 97129,
+            "outputTokens": 1325,
+            "inputTokensNoCache": 95593,
+            "cacheReadInputTokens": 1536,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "submit_assessment"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "8853d2fa34a5d1d13d2ff189f1a4f826feab29276627824a3d49a05fad9d1c4f"
+        }
+      ],
+      "contexts": [
+        {
+          "contextEpoch": 0,
+          "contextRevision": 3,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 1,
+          "projectedMessageCount": 1,
+          "estimatedInputTokens": 18777,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 0,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 6,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 3,
+          "projectedMessageCount": 3,
+          "estimatedInputTokens": 29344,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 0,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 11,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 5,
+          "projectedMessageCount": 5,
+          "estimatedInputTokens": 31465,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 1,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 15,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 7,
+          "projectedMessageCount": 7,
+          "estimatedInputTokens": 37727,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 2,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 18,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 9,
+          "projectedMessageCount": 9,
+          "estimatedInputTokens": 42216,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 2,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 22,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 11,
+          "projectedMessageCount": 11,
+          "estimatedInputTokens": 44363,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 3,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 26,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 13,
+          "projectedMessageCount": 13,
+          "estimatedInputTokens": 49659,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 4,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 31,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 15,
+          "projectedMessageCount": 15,
+          "estimatedInputTokens": 51840,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 5,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 35,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 17,
+          "projectedMessageCount": 17,
+          "estimatedInputTokens": 53551,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 5,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 41,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 19,
+          "projectedMessageCount": 19,
+          "estimatedInputTokens": 55084,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 6,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 45,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 21,
+          "projectedMessageCount": 21,
+          "estimatedInputTokens": 56714,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 6,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 51,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 23,
+          "projectedMessageCount": 23,
+          "estimatedInputTokens": 58255,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 7,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 55,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 25,
+          "projectedMessageCount": 25,
+          "estimatedInputTokens": 59887,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 7,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 58,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 25,
+          "projectedMessageCount": 25,
+          "estimatedInputTokens": 61984,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 7,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 61,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 27,
+          "projectedMessageCount": 27,
+          "estimatedInputTokens": 61008,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 7,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 65,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 29,
+          "projectedMessageCount": 29,
+          "estimatedInputTokens": 64294,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 7,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 71,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 31,
+          "projectedMessageCount": 31,
+          "estimatedInputTokens": 65857,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 8,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 75,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 33,
+          "projectedMessageCount": 33,
+          "estimatedInputTokens": 68980,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 9,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        }
+      ],
+      "failures": [
+        {
+          "type": "tool.failed"
+        }
+      ],
+      "eventTypes": {
+        "run.started": 1,
+        "runtime.capability_snapshot.created": 1,
+        "conversation.turn.resolution_started": 1,
+        "conversation.turn.attempt_started": 2,
+        "action.created": 39,
+        "action.leased": 39,
+        "action.dispatched": 39,
+        "model.request.started": 23,
+        "model.request.completed": 23,
+        "action.result_committed": 35,
+        "conversation.turn.resolution_rejected": 1,
+        "conversation.turn.resolved": 1,
+        "conversation.intent.classified": 1,
+        "skill.directory.resolved": 1,
+        "skill.package.verified": 1,
+        "canonical_run_state.initialized": 1,
+        "planning.task.understood": 1,
+        "planning.skills.selected": 1,
+        "planning.skills.role_selected": 1,
+        "planning.started": 1,
+        "planning.turn.started": 1,
+        "planning.turn.completed": 1,
+        "plan.proposed": 1,
+        "plan.admitted": 1,
+        "plan.step.started": 1,
+        "loop.started": 1,
+        "skill.activation.available": 1,
+        "step.started": 18,
+        "step_execution.policy_applied": 18,
+        "context.assembled": 18,
+        "model.stream.first_event": 21,
+        "assistant.streaming": 57,
+        "assistant.tool_call.committed": 16,
+        "model.stream.awaiting_completion": 16,
+        "tool.planned": 16,
+        "tool.effect_pending": 16,
+        "tool.dispatched": 16,
+        "tool.result_committed": 15,
+        "tool.completed": 15,
+        "assistant.committed": 18,
+        "skill.activated": 1,
+        "step.completed": 16,
+        "runtime.evidence_facts_committed": 7,
+        "context.tool_outputs_projected": 9,
+        "context.history.read": 1,
+        "loop.provisional_output_observed": 5,
+        "action.failed": 4,
+        "assessment.turn.completed": 3,
+        "skill.compliance.assessed": 2,
+        "assessment.failed_boundary": 1,
+        "candidate.rejected": 1,
+        "loop.candidate_repair_grace_granted": 1,
+        "tool.failed": 1,
+        "assessment.validation.rejected": 1,
+        "candidate.approved": 1,
+        "loop.completed": 1,
+        "plan.step.completed": 1,
+        "terminal.delivery_committed": 1,
+        "run.completed": 1
+      },
+      "reopen": {
+        "statusEqual": true,
+        "outputEqual": true,
+        "eventCountEqual": true,
+        "artifactIdentitiesEqual": true
+      }
+    },
+    {
+      "index": 1,
+      "runId": "4eb458c7-2f32-47fd-8b1f-6213a03ed408",
+      "status": "failed",
+      "durationMs": 66832,
+      "hil": null,
+      "outputSha256": "5e2db5a651a8747993ec0204b5b477bcbaddfe212caa485045b88e7ac83fcf97",
+      "errorCode": "PLANNING_ERROR",
+      "artifacts": [],
+      "calls": [
+        {
+          "phase": "planning",
+          "durationMs": 2489,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "planning",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 19832,
+              "toolSchemas": 10676,
+              "runtimeContext": 22686,
+              "userMessages": 53,
+              "assistantText": 100,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 4958,
+              "toolSchemas": 2669,
+              "runtimeContext": 5953,
+              "userMessages": 53,
+              "assistantText": 76,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 1,
+              "runtimeContext": 1,
+              "userMessages": 2,
+              "assistantText": 1,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "totalCharacters": 53347,
+            "totalEstimatedTokens": 13709,
+            "totalReferences": 6,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 0,
+                "characters": 2,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 12376,
+            "outputTokens": 457,
+            "inputTokensNoCache": 9048,
+            "cacheReadInputTokens": 3328,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "resolve_conversation_turn"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "c4ee77c175c4b1d6a56354855e37a5a23d5e3db6933a512924810f1421a6ecb4"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 916,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 28272,
+              "runtimeContext": 31010,
+              "userMessages": 53,
+              "assistantText": 100,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 7068,
+              "runtimeContext": 9270,
+              "userMessages": 53,
+              "assistantText": 76,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 2,
+              "assistantText": 1,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "totalCharacters": 70354,
+            "totalEstimatedTokens": 19586,
+            "totalReferences": 21,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 7722,
+                "estimatedTokens": 1931
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 0,
+                "characters": 2,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 18927,
+            "outputTokens": 58,
+            "inputTokensNoCache": 16879,
+            "cacheReadInputTokens": 2048,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "load_skill"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "bf26e6ee1e6942f262d5c89e9672e6fb64951f80e1a21ca5cc1906da4949c18c"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1388,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 28272,
+              "runtimeContext": 33585,
+              "userMessages": 53,
+              "assistantText": 141,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 24,
+              "skillResults": 24092,
+              "otherToolResults": 0
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 7068,
+              "runtimeContext": 9914,
+              "userMessages": 53,
+              "assistantText": 112,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 6,
+              "skillResults": 9620,
+              "otherToolResults": 0
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 2,
+              "assistantText": 2,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 1,
+              "skillResults": 1,
+              "otherToolResults": 0
+            },
+            "totalCharacters": 97086,
+            "totalEstimatedTokens": 29892,
+            "totalReferences": 24,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 7755,
+                "estimatedTokens": 1939
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 2,
+                "characters": 25511,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 27570,
+            "outputTokens": 196,
+            "inputTokensNoCache": 25522,
+            "cacheReadInputTokens": 2048,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_read_json",
+            "computer_read_json"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "b2f889624488dd7dfdb4fa1dab95aac19caf0ad299f10a72b6db4f1abdf63a03"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 3361,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 28272,
+              "runtimeContext": 35295,
+              "userMessages": 53,
+              "assistantText": 214,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 276,
+              "skillResults": 24092,
+              "otherToolResults": 12989
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 7068,
+              "runtimeContext": 10341,
+              "userMessages": 53,
+              "assistantText": 166,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 69,
+              "skillResults": 9620,
+              "otherToolResults": 3248
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 2,
+              "assistantText": 3,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 3,
+              "skillResults": 1,
+              "otherToolResults": 2
+            },
+            "totalCharacters": 112110,
+            "totalEstimatedTokens": 33684,
+            "totalReferences": 29,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 8657,
+                "estimatedTokens": 2165
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 5,
+                "characters": 42059,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 32460,
+            "outputTokens": 847,
+            "inputTokensNoCache": 30156,
+            "cacheReadInputTokens": 2304,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_write_file"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "559ecc2f1f6bed8c46eb78d4b4a576bb0d402e4a602a66a4ccd01126687f1202"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1432,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 28272,
+              "runtimeContext": 37457,
+              "userMessages": 53,
+              "assistantText": 265,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 2733,
+              "skillResults": 24092,
+              "otherToolResults": 15021
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 7068,
+              "runtimeContext": 10882,
+              "userMessages": 53,
+              "assistantText": 207,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 684,
+              "skillResults": 9620,
+              "otherToolResults": 3756
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 2,
+              "assistantText": 4,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 4,
+              "skillResults": 1,
+              "otherToolResults": 3
+            },
+            "totalCharacters": 118812,
+            "totalEstimatedTokens": 35389,
+            "totalReferences": 32,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 9066,
+                "estimatedTokens": 2267
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 7,
+                "characters": 48036,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 34930,
+            "outputTokens": 141,
+            "inputTokensNoCache": 32626,
+            "cacheReadInputTokens": 2304,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_run_command"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "8b7ba7e5b5673d3109f1a62e81a72469379e0a6953ffd86a4898c4658739d083"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1748,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 28272,
+              "runtimeContext": 38866,
+              "userMessages": 53,
+              "assistantText": 265,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 2978,
+              "skillResults": 24092,
+              "otherToolResults": 19822
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 7068,
+              "runtimeContext": 11234,
+              "userMessages": 53,
+              "assistantText": 207,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 745,
+              "skillResults": 9620,
+              "otherToolResults": 4956
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 2,
+              "assistantText": 5,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 5,
+              "skillResults": 1,
+              "otherToolResults": 4
+            },
+            "totalCharacters": 125267,
+            "totalEstimatedTokens": 37002,
+            "totalReferences": 35,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 9817,
+                "estimatedTokens": 2455
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 9,
+                "characters": 55456,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 37337,
+            "outputTokens": 211,
+            "inputTokensNoCache": 35289,
+            "cacheReadInputTokens": 2048,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_patch_file"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "bf20c7df66388164c83f37a1d4d095b3c155f78752c9c3eee47d1c727dec45fb"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1394,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 28272,
+              "runtimeContext": 38264,
+              "userMessages": 444,
+              "assistantText": 310,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 2978,
+              "skillResults": 24092,
+              "otherToolResults": 19822
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 7068,
+              "runtimeContext": 11084,
+              "userMessages": 151,
+              "assistantText": 243,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 745,
+              "skillResults": 9620,
+              "otherToolResults": 4956
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 3,
+              "assistantText": 6,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 5,
+              "skillResults": 1,
+              "otherToolResults": 4
+            },
+            "totalCharacters": 125101,
+            "totalEstimatedTokens": 36986,
+            "totalReferences": 37,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 10162,
+                "estimatedTokens": 2541
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 9,
+                "characters": 55456,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 37320,
+            "outputTokens": 194,
+            "inputTokensNoCache": 35016,
+            "cacheReadInputTokens": 2304,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_patch_file"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "a3adf5df74423bcbd92efb06c3ebea197e99ec5bdc0e8d9fb235b13ffe979bc7"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1282,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 28272,
+              "runtimeContext": 38875,
+              "userMessages": 444,
+              "assistantText": 310,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 3343,
+              "skillResults": 24092,
+              "otherToolResults": 21362
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 7068,
+              "runtimeContext": 11236,
+              "userMessages": 151,
+              "assistantText": 243,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 836,
+              "skillResults": 9620,
+              "otherToolResults": 5341
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 3,
+              "assistantText": 7,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 6,
+              "skillResults": 1,
+              "otherToolResults": 5
+            },
+            "totalCharacters": 127617,
+            "totalEstimatedTokens": 37614,
+            "totalReferences": 40,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 10149,
+                "estimatedTokens": 2538
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 11,
+                "characters": 59355,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 38226,
+            "outputTokens": 141,
+            "inputTokensNoCache": 35922,
+            "cacheReadInputTokens": 2304,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_run_command"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "665b4ae53865adafa561a89a9f7b68600159e9c4423d7e3009a220cffeead758"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 2842,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 28272,
+              "runtimeContext": 39618,
+              "userMessages": 444,
+              "assistantText": 310,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 3588,
+              "skillResults": 24092,
+              "otherToolResults": 26205
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 7068,
+              "runtimeContext": 11422,
+              "userMessages": 151,
+              "assistantText": 243,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 897,
+              "skillResults": 9620,
+              "otherToolResults": 6552
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 3,
+              "assistantText": 8,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 7,
+              "skillResults": 1,
+              "otherToolResults": 6
+            },
+            "totalCharacters": 133448,
+            "totalEstimatedTokens": 39072,
+            "totalReferences": 43,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 10233,
+                "estimatedTokens": 2559
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 13,
+                "characters": 67207,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 40350,
+            "outputTokens": 325,
+            "inputTokensNoCache": 38046,
+            "cacheReadInputTokens": 2304,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "stop",
+          "toolNames": [],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "0b65fe6db3a99a1d564907e7210b0c910c57e6e9e39633851668ffae4bf8c399"
+        },
+        {
+          "phase": "assessment",
+          "durationMs": 8031,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "assessment",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 9004,
+              "toolSchemas": 4563,
+              "runtimeContext": 99260,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 2256,
+              "toolSchemas": 1141,
+              "runtimeContext": 30633,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 1,
+              "runtimeContext": 1,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "totalCharacters": 112827,
+            "totalEstimatedTokens": 34030,
+            "totalReferences": 3,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 0,
+                "characters": 2,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 44375,
+            "outputTokens": 1765,
+            "inputTokensNoCache": 43095,
+            "cacheReadInputTokens": 1280,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "submit_assessment"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "5906f86a206669af386a9653d9e9ecea895a87261a510b982aa44210e41682e3"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1629,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 28272,
+              "runtimeContext": 48207,
+              "userMessages": 444,
+              "assistantText": 310,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 3588,
+              "skillResults": 24092,
+              "otherToolResults": 26205
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 7068,
+              "runtimeContext": 13688,
+              "userMessages": 151,
+              "assistantText": 243,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 897,
+              "skillResults": 9620,
+              "otherToolResults": 6552
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 3,
+              "assistantText": 8,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 7,
+              "skillResults": 1,
+              "otherToolResults": 6
+            },
+            "totalCharacters": 142037,
+            "totalEstimatedTokens": 41338,
+            "totalReferences": 43,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 14330,
+                "estimatedTokens": 3583
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 13,
+                "characters": 67207,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 43125,
+            "outputTokens": 264,
+            "inputTokensNoCache": 40821,
+            "cacheReadInputTokens": 2304,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_patch_file"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "65908f3ce57972e3ebf262497cdaf5202aaeb0e31506a3b9fdc5a31f20fcbc07"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1529,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 28272,
+              "runtimeContext": 43767,
+              "userMessages": 444,
+              "assistantText": 372,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 4102,
+              "skillResults": 24092,
+              "otherToolResults": 27289
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 7068,
+              "runtimeContext": 12459,
+              "userMessages": 151,
+              "assistantText": 283,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 1026,
+              "skillResults": 9620,
+              "otherToolResults": 6823
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 3,
+              "assistantText": 9,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 8,
+              "skillResults": 1,
+              "otherToolResults": 7
+            },
+            "totalCharacters": 139257,
+            "totalEstimatedTokens": 40549,
+            "totalReferences": 46,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 14787,
+                "estimatedTokens": 3697
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 15,
+                "characters": 70881,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 42546,
+            "outputTokens": 231,
+            "inputTokensNoCache": 40242,
+            "cacheReadInputTokens": 2304,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_patch_file"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "df65a872b0cf9a827a0b707709704c4c3634049f5141a0162e051633bf537e7a"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1333,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 28272,
+              "runtimeContext": 43655,
+              "userMessages": 444,
+              "assistantText": 372,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 4616,
+              "skillResults": 24092,
+              "otherToolResults": 28829
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 7068,
+              "runtimeContext": 12431,
+              "userMessages": 151,
+              "assistantText": 283,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 1154,
+              "skillResults": 9620,
+              "otherToolResults": 7208
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 3,
+              "assistantText": 10,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 9,
+              "skillResults": 1,
+              "otherToolResults": 8
+            },
+            "totalCharacters": 141199,
+            "totalEstimatedTokens": 41034,
+            "totalReferences": 49,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 14597,
+                "estimatedTokens": 3650
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 17,
+                "characters": 74929,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 43341,
+            "outputTokens": 141,
+            "inputTokensNoCache": 41037,
+            "cacheReadInputTokens": 2304,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_run_command"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "e778d71c368c0f2c31a7113e5e806f6304bccd00f3672ce3429f191cca0b98c1"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1130,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 28272,
+              "runtimeContext": 44400,
+              "userMessages": 444,
+              "assistantText": 372,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 4861,
+              "skillResults": 24092,
+              "otherToolResults": 33719
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 7068,
+              "runtimeContext": 12618,
+              "userMessages": 151,
+              "assistantText": 283,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 1216,
+              "skillResults": 9620,
+              "otherToolResults": 8430
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 3,
+              "assistantText": 11,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 10,
+              "skillResults": 1,
+              "otherToolResults": 9
+            },
+            "totalCharacters": 147079,
+            "totalEstimatedTokens": 42505,
+            "totalReferences": 52,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 14682,
+                "estimatedTokens": 3671
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 19,
+                "characters": 82837,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 45494,
+            "outputTokens": 83,
+            "inputTokensNoCache": 43446,
+            "cacheReadInputTokens": 2048,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "computer_read_json"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "ace8b49aac38e8a38c34597b5d72bf549c48837e1e12c9fc729436aaca7d39d5"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 2621,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 28272,
+              "runtimeContext": 44289,
+              "userMessages": 444,
+              "assistantText": 372,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 4975,
+              "skillResults": 24092,
+              "otherToolResults": 47730
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 7068,
+              "runtimeContext": 12590,
+              "userMessages": 151,
+              "assistantText": 283,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 1244,
+              "skillResults": 9620,
+              "otherToolResults": 12229
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 3,
+              "assistantText": 12,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 11,
+              "skillResults": 1,
+              "otherToolResults": 10
+            },
+            "totalCharacters": 161093,
+            "totalEstimatedTokens": 46304,
+            "totalReferences": 55,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 14703,
+                "estimatedTokens": 3676
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 21,
+                "characters": 100901,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 49649,
+            "outputTokens": 295,
+            "inputTokensNoCache": 47345,
+            "cacheReadInputTokens": 2304,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "stop",
+          "toolNames": [],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "dc9c9c17ba5e5d300fddd8c1c21ece673b178f16c68435be99d8da7d2007a769"
+        },
+        {
+          "phase": "assessment",
+          "durationMs": 11710,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "assessment",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 9004,
+              "toolSchemas": 4563,
+              "runtimeContext": 148581,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 2256,
+              "toolSchemas": 1141,
+              "runtimeContext": 43209,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 1,
+              "runtimeContext": 1,
+              "userMessages": 0,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "totalCharacters": 162148,
+            "totalEstimatedTokens": 46606,
+            "totalReferences": 3,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 0,
+                "characters": 2,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 65323,
+            "outputTokens": 2318,
+            "inputTokensNoCache": 62507,
+            "cacheReadInputTokens": 2816,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "submit_assessment"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "dc7cd9e080441ba427f6518f600d4d2cf5d7166e998f68bf32c544b2987112f9"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1317,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 28272,
+              "runtimeContext": 48631,
+              "userMessages": 444,
+              "assistantText": 372,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 4975,
+              "skillResults": 24092,
+              "otherToolResults": 47730
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 7068,
+              "runtimeContext": 14226,
+              "userMessages": 151,
+              "assistantText": 283,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 1244,
+              "skillResults": 9620,
+              "otherToolResults": 12229
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 16,
+              "runtimeContext": 1,
+              "userMessages": 3,
+              "assistantText": 12,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 11,
+              "skillResults": 1,
+              "otherToolResults": 10
+            },
+            "totalCharacters": 165435,
+            "totalEstimatedTokens": 47940,
+            "totalReferences": 55,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 14750,
+                "estimatedTokens": 4021
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 21,
+                "characters": 100901,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 51272,
+            "outputTokens": 87,
+            "inputTokensNoCache": 48968,
+            "cacheReadInputTokens": 2304,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "stop",
+          "toolNames": [],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "5f444dc38dc43d150c296af446069520f51618093ab3540bec3f5a9813e282f8"
+        },
+        {
+          "phase": "planning",
+          "durationMs": 7766,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "planning",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10438,
+              "toolSchemas": 11396,
+              "runtimeContext": 227550,
+              "userMessages": 38,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 2614,
+              "toolSchemas": 2849,
+              "runtimeContext": 64082,
+              "userMessages": 38,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 1,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "totalCharacters": 249422,
+            "totalEstimatedTokens": 69583,
+            "totalReferences": 4,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 0,
+                "characters": 2,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            },
+            "runtimeContextDiagnostics": {
+              "evidenceTimeline": {
+                "characters": 19814,
+                "references": 1
+              }
+            }
+          },
+          "usage": {
+            "inputTokens": 99564,
+            "outputTokens": 922
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "submit_recovery_decision"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "2475ce5d9626b7ba35c02b8f631a18731bb63e0e8efc7ac6358c67c0737c5ed5"
+        },
+        {
+          "phase": "planning",
+          "durationMs": 4873,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "planning",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10651,
+              "toolSchemas": 11396,
+              "runtimeContext": 231242,
+              "userMessages": 38,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 2668,
+              "toolSchemas": 2849,
+              "runtimeContext": 65057,
+              "userMessages": 38,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 1,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "totalCharacters": 253327,
+            "totalEstimatedTokens": 70612,
+            "totalReferences": 4,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 0,
+                "characters": 2,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            },
+            "runtimeContextDiagnostics": {
+              "evidenceTimeline": {
+                "characters": 19814,
+                "references": 1
+              }
+            }
+          },
+          "usage": {
+            "inputTokens": 100701,
+            "outputTokens": 824,
+            "inputTokensNoCache": 99165,
+            "cacheReadInputTokens": 1536,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "submit_recovery_decision"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "dc8a049b1b100c8295a66f40165ad49c4fc098fd190ffce520ce693281007175"
+        },
+        {
+          "phase": "planning",
+          "durationMs": 5219,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "planning",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10651,
+              "toolSchemas": 11396,
+              "runtimeContext": 234480,
+              "userMessages": 38,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 2668,
+              "toolSchemas": 2849,
+              "runtimeContext": 65920,
+              "userMessages": 38,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 1,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 0,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 0,
+              "skillResults": 0,
+              "otherToolResults": 0
+            },
+            "totalCharacters": 256565,
+            "totalEstimatedTokens": 71475,
+            "totalReferences": 4,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 0,
+                "characters": 2,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            },
+            "runtimeContextDiagnostics": {
+              "evidenceTimeline": {
+                "characters": 19814,
+                "references": 1
+              }
+            }
+          },
+          "usage": {
+            "inputTokens": 101697,
+            "outputTokens": 852,
+            "inputTokensNoCache": 72769,
+            "cacheReadInputTokens": 28928,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "tool_calls",
+          "toolNames": [
+            "submit_recovery_decision"
+          ],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "e9ddf132716ab2ad9a0f827eccd5f5196c8a3a3944d30f818f44e76593035a4b"
+        },
+        {
+          "phase": "execution",
+          "durationMs": 1290,
+          "composition": {
+            "schema": "agentloop.modelContextComposition/v1",
+            "phase": "execution",
+            "accounting": "top_level_components_are_mutually_exclusive; diagnostics_are_subcomponents_and_must_not_be_added_to_totals",
+            "componentCharacters": {
+              "systemPrompt": 10919,
+              "toolSchemas": 2,
+              "runtimeContext": 17383,
+              "userMessages": 38,
+              "assistantText": 272,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 5323,
+              "skillResults": 24092,
+              "otherToolResults": 47835
+            },
+            "componentEstimatedTokens": {
+              "systemPrompt": 3119,
+              "toolSchemas": 1,
+              "runtimeContext": 5814,
+              "userMessages": 38,
+              "assistantText": 208,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 1331,
+              "skillResults": 9620,
+              "otherToolResults": 12255
+            },
+            "componentReferences": {
+              "systemPrompt": 1,
+              "toolSchemas": 0,
+              "runtimeContext": 1,
+              "userMessages": 1,
+              "assistantText": 11,
+              "assistantReasoning": 0,
+              "assistantToolArguments": 12,
+              "skillResults": 1,
+              "otherToolResults": 11
+            },
+            "totalCharacters": 105864,
+            "totalEstimatedTokens": 32386,
+            "totalReferences": 38,
+            "decisionContextDiagnostics": {
+              "accounting": "diagnostic_subcomponents_not_additive_to_totals; character_estimates_are_not_provider_usage_or_billing",
+              "currentStateAndProducts": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentWorkingSetAndHistoryIndex": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "historicalHints": {
+                "characters": 0,
+                "estimatedTokens": 0
+              },
+              "currentSemanticState": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "semanticHistoricalHints": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "historyDetails": {
+                "characters": 2,
+                "estimatedTokens": 1
+              },
+              "nativeProtocol": {
+                "messages": 23,
+                "characters": 103322,
+                "reasoningCharacters": 0
+              },
+              "residentHistoryReadCount": 0
+            }
+          },
+          "usage": {
+            "inputTokens": 35642,
+            "outputTokens": 71,
+            "inputTokensNoCache": 33338,
+            "cacheReadInputTokens": 2304,
+            "cacheWriteInputTokens": 0
+          },
+          "finishReason": "stop",
+          "toolNames": [],
+          "historyReads": 0,
+          "resultReads": 0,
+          "updateCount": 0,
+          "updateCharacters": 2,
+          "responseSha256": "dec4ffbcbbc07465071cddf3a35e941d9cc80a5ecea3ec549d24b72fe2bdf8c0"
+        }
+      ],
+      "contexts": [
+        {
+          "contextEpoch": 0,
+          "contextRevision": 3,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 3,
+          "projectedMessageCount": 3,
+          "estimatedInputTokens": 21022,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 0,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 6,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 5,
+          "projectedMessageCount": 5,
+          "estimatedInputTokens": 31603,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 0,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 10,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 8,
+          "projectedMessageCount": 8,
+          "estimatedInputTokens": 36140,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 0,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 15,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 10,
+          "projectedMessageCount": 10,
+          "estimatedInputTokens": 38293,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 1,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 19,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 12,
+          "projectedMessageCount": 12,
+          "estimatedInputTokens": 40252,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 1,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 23,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 14,
+          "projectedMessageCount": 14,
+          "estimatedInputTokens": 40277,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 1,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 27,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 16,
+          "projectedMessageCount": 16,
+          "estimatedInputTokens": 41037,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 2,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 31,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 18,
+          "projectedMessageCount": 18,
+          "estimatedInputTokens": 42801,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 2,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 34,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 18,
+          "projectedMessageCount": 18,
+          "estimatedInputTokens": 45260,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 2,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 38,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 20,
+          "projectedMessageCount": 20,
+          "estimatedInputTokens": 44527,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 2,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 42,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 22,
+          "projectedMessageCount": 22,
+          "estimatedInputTokens": 45153,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 3,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 46,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 24,
+          "projectedMessageCount": 24,
+          "estimatedInputTokens": 46931,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 3,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 50,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 26,
+          "projectedMessageCount": 26,
+          "estimatedInputTokens": 51330,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 4,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 52,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 26,
+          "projectedMessageCount": 26,
+          "estimatedInputTokens": 53035,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 4,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        },
+        {
+          "contextEpoch": 0,
+          "contextRevision": 2,
+          "runtimePromptAugmentationIds": [],
+          "canonicalMessageCount": 24,
+          "projectedMessageCount": 24,
+          "estimatedInputTokens": 37086,
+          "usableInputTokens": 107520,
+          "prunedToolResultCount": 4,
+          "hasSummary": false,
+          "executionHistoryPolicy": "canonical"
+        }
+      ],
+      "failures": [
+        {
+          "type": "tool.failed"
+        },
+        {
+          "type": "run.failed",
+          "code": "PLANNING_ERROR"
+        }
+      ],
+      "eventTypes": {
+        "run.started": 1,
+        "runtime.capability_snapshot.created": 1,
+        "conversation.turn.resolution_started": 1,
+        "conversation.turn.attempt_started": 1,
+        "action.created": 33,
+        "action.leased": 32,
+        "action.dispatched": 32,
+        "model.request.started": 21,
+        "model.request.completed": 21,
+        "action.result_committed": 28,
+        "conversation.turn.resolved": 1,
+        "conversation.intent.classified": 1,
+        "skill.directory.resolved": 1,
+        "skill.package.verified": 1,
+        "canonical_run_state.initialized": 1,
+        "planning.task.understood": 1,
+        "planning.skills.selected": 1,
+        "planning.skills.role_selected": 1,
+        "planning.started": 1,
+        "planning.turn.started": 1,
+        "planning.turn.completed": 1,
+        "plan.proposed": 1,
+        "plan.admitted": 1,
+        "plan.step.started": 1,
+        "loop.started": 1,
+        "skill.activation.available": 1,
+        "step.started": 14,
+        "step_execution.policy_applied": 14,
+        "context.assembled": 15,
+        "model.stream.first_event": 17,
+        "assistant.streaming": 44,
+        "assistant.tool_call.committed": 12,
+        "model.stream.awaiting_completion": 12,
+        "tool.planned": 11,
+        "tool.effect_pending": 11,
+        "tool.dispatched": 11,
+        "tool.result_committed": 10,
+        "tool.completed": 10,
+        "assistant.committed": 14,
+        "skill.activated": 1,
+        "step.completed": 11,
+        "runtime.evidence_facts_committed": 3,
+        "loop.provisional_output_observed": 3,
+        "context.tool_outputs_projected": 5,
+        "action.failed": 4,
+        "tool.rejected": 1,
+        "assessment.turn.completed": 2,
+        "skill.compliance.assessed": 2,
+        "assessment.failed_boundary": 2,
+        "candidate.rejected": 3,
+        "loop.candidate_repair_grace_granted": 1,
+        "tool.failed": 1,
+        "candidate.repair_limit_blocked": 1,
+        "action.recovery_required": 1,
+        "run.repairing": 1,
+        "recovery.proposal_attempt_started": 3,
+        "recovery.proposal_rejected": 3,
+        "recovery.continuation_failed": 1,
+        "failure_report.started": 1,
+        "failure_report.streaming": 2,
+        "failure_report.generated": 1,
+        "run.failed": 1
+      },
+      "reopen": {
+        "statusEqual": true,
+        "outputEqual": true,
+        "eventCountEqual": true,
+        "artifactIdentitiesEqual": true
+      }
+    }
+  ],
+  "totals": {
+    "calls": 44,
+    "inputTokens": 2157972,
+    "outputTokens": 20581,
+    "historyReads": 0,
+    "resultReads": 1,
+    "updateCharacters": 88
+  },
+  "accounting": "Provider usage is actual reported tokens from successful responses. Failed attempts without usage are not included; see persisted model.request.failed counts. Composition characters/estimates are separate. No price or billing estimate."
+}

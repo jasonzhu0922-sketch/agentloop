@@ -3932,14 +3932,16 @@ export class RunService {
             }),
             storeSnapshot: (content: string) => new ComputerExecutor(input.rootGrant.workspaceRoot ?? this.workspaceRoot).storeContentReference(content),
           },
-          onWorkProductDeliveryTargets: async (bindings, observations) => {
+          onWorkProductDeliveryTargets: async (bindings, observations, selectedTargetIds) => {
             const admittedTargetIds = new Set((activeStep.executionBinding.artifactTargets ?? []).map((target) => target.id));
             const unbound = observations.observations.filter((observation) => observation.operationStatus === "succeeded"
               && (observation.kind === "created" || observation.kind === "modified")
               && ((observation.deliveryTargetId !== undefined && !admittedTargetIds.has(observation.deliveryTargetId))
                 || observation.deliveryBindingStatus !== undefined
                   && observation.deliveryBindingStatus !== "explicit"
-                  && observation.deliveryBindingStatus !== "support_only")
+                  && observation.deliveryBindingStatus !== "support_only"
+                  && !bindings.some((binding) => binding.targetId === observation.deliveryTargetId
+                    && binding.path === observation.path && binding.sha256 === observation.sha256))
               && !persistedUnboundDeliveryKeys.has(`${observation.source.toolCallId}\u0000${observation.path}\u0000${observation.sha256 ?? ""}`));
             if (unbound.length > 0) {
               unbound.forEach((observation) => persistedUnboundDeliveryKeys.add(`${observation.source.toolCallId}\u0000${observation.path}\u0000${observation.sha256 ?? ""}`));
@@ -3950,15 +3952,17 @@ export class RunService {
                   planId: plan.id,
                   planVersion: plan.version,
                   stepId: activeStep.id,
-                  resolution: "target_not_admitted",
+                  resolution: "observed_files_without_delivery_selection",
                   diagnostics: unbound.map((observation) => ({
+                    reason: observation.deliveryTargetId !== undefined && !admittedTargetIds.has(observation.deliveryTargetId)
+                      ? "target_not_admitted" : observation.deliveryTargetId === undefined ? "output_not_selected" : "binding_incomplete",
                     requestedTargetId: observation.deliveryTargetId,
                     bindingStatus: observation.deliveryBindingStatus,
                     path: observation.path,
                     bytes: observation.bytes,
                     sha256: observation.sha256,
                     observedByToolCallId: observation.source.toolCallId,
-                    message: "The file was produced and observed, but its requested target is not in the current admitted Plan.",
+                    message: "File observation is preserved. Verification is independent of target selection; delivery requires an explicit current file set and Assessment.",
                   })),
                 },
               });
@@ -3993,6 +3997,7 @@ export class RunService {
               stepId: activeStep.id,
               bindings,
               observations,
+              ...(selectedTargetIds === undefined ? {} : { selectedTargetIds }),
             });
             if (reconciled === canonicalState) return;
             canonicalState = await this.canonicalStates.commit({

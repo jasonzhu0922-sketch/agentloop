@@ -1,0 +1,25 @@
+{
+  "schema": "agentloop.hostArtifactVisualReview/v1",
+  "docx": {
+    "count": 2,
+    "pagesPerDocument": 3,
+    "renderer": "bundled LibreOffice; temporary FONTCONFIG_FILE includes macOS system CJK fonts",
+    "allPagesInspected": true,
+    "businessSourceMode": "mock",
+    "sourceFilesUnmodified": true,
+    "limitations": [
+      "Narrow appendix columns split dates and monetary amounts across lines",
+      "Large blank area on signature page"
+    ],
+    "visualAcceptance": "limited"
+  },
+  "hr": {
+    "opened": true,
+    "layoutAcceptance": "incomplete",
+    "limitations": [
+      "Large organization list dominates first viewport",
+      "178524px document height",
+      "Metric-series truncation is not disclosed in the rendered HTML"
+    ]
+  }
+}

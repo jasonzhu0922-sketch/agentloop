@@ -1,0 +1,194 @@
+{
+  "schema": "agentloop.readDeliveryReplay/v1",
+  "mode": "offline_component_replay",
+  "accounting": "Exact selected JSON values and projected Tool-body characters only. No provider token, cost, full working-set or business latency claim.",
+  "baselineAssemblerSha256": "7703395e919bd0c1ac2c9d185eb0f7b3f771c141a2609a9fdf78c6940d0daa8a",
+  "currentAssemblerSha256": "0d2c5705a64233eb6380b26a85dc9cc2e8e15859509d5efc81be5157d11a8b6a",
+  "modelCallsExecuted": 0,
+  "toolCallsExecuted": 0,
+  "runs": [
+    {
+      "runPrefix": "496dbd17",
+      "archiveExportSha256": "f3063e7503d69c90c4bbe8cdd50637f867e80b3eb33d0f4a93101c395c049dc4",
+      "requests": [
+        {
+          "step": 4,
+          "requestEventSeq": 127,
+          "requiredValues": 1,
+          "beforeExactValues": 1,
+          "afterExactValues": 1,
+          "beforeToolCharacters": 37117,
+          "afterToolCharacters": 37117
+        },
+        {
+          "step": 5,
+          "requestEventSeq": 152,
+          "requiredValues": 4,
+          "beforeExactValues": 4,
+          "afterExactValues": 4,
+          "beforeToolCharacters": 47833,
+          "afterToolCharacters": 47833
+        },
+        {
+          "step": 6,
+          "requestEventSeq": 178,
+          "requiredValues": 1,
+          "beforeExactValues": 1,
+          "afterExactValues": 1,
+          "beforeToolCharacters": 62482,
+          "afterToolCharacters": 61596
+        },
+        {
+          "step": 7,
+          "requestEventSeq": 203,
+          "requiredValues": 1,
+          "beforeExactValues": 1,
+          "afterExactValues": 1,
+          "beforeToolCharacters": 74256,
+          "afterToolCharacters": 74256
+        },
+        {
+          "step": 10,
+          "requestEventSeq": 284,
+          "requiredValues": 1,
+          "beforeExactValues": 1,
+          "afterExactValues": 1,
+          "beforeToolCharacters": 98674,
+          "afterToolCharacters": 98674
+        },
+        {
+          "step": 11,
+          "requestEventSeq": 310,
+          "requiredValues": 5,
+          "beforeExactValues": 5,
+          "afterExactValues": 5,
+          "beforeToolCharacters": 113879,
+          "afterToolCharacters": 112907
+        },
+        {
+          "step": 12,
+          "requestEventSeq": 336,
+          "requiredValues": 1,
+          "beforeExactValues": 1,
+          "afterExactValues": 1,
+          "beforeToolCharacters": 121806,
+          "afterToolCharacters": 121806
+        },
+        {
+          "step": 13,
+          "requestEventSeq": 362,
+          "requiredValues": 1,
+          "beforeExactValues": 1,
+          "afterExactValues": 1,
+          "beforeToolCharacters": 135632,
+          "afterToolCharacters": 134744
+        },
+        {
+          "step": 20,
+          "requestEventSeq": 547,
+          "requiredValues": 1,
+          "beforeExactValues": 1,
+          "afterExactValues": 1,
+          "beforeToolCharacters": 172764,
+          "afterToolCharacters": 172764
+        },
+        {
+          "step": 23,
+          "requestEventSeq": 632,
+          "requiredValues": 1,
+          "beforeExactValues": 0,
+          "afterExactValues": 1,
+          "beforeToolCharacters": 199539,
+          "afterToolCharacters": 229894
+        }
+      ]
+    },
+    {
+      "runPrefix": "80fbadfc",
+      "archiveExportSha256": "f9a5ca89bf7f1b2c3b9689eba02787d02fe20482e95d0f381b1d4dc6cb1158e3",
+      "requests": [
+        {
+          "step": 4,
+          "requestEventSeq": 120,
+          "requiredValues": 1,
+          "beforeExactValues": 1,
+          "afterExactValues": 1,
+          "beforeToolCharacters": 37288,
+          "afterToolCharacters": 37288
+        },
+        {
+          "step": 5,
+          "requestEventSeq": 146,
+          "requiredValues": 4,
+          "beforeExactValues": 4,
+          "afterExactValues": 4,
+          "beforeToolCharacters": 57082,
+          "afterToolCharacters": 56133
+        },
+        {
+          "step": 7,
+          "requestEventSeq": 201,
+          "requiredValues": 3,
+          "beforeExactValues": 3,
+          "afterExactValues": 3,
+          "beforeToolCharacters": 76065,
+          "afterToolCharacters": 76065
+        },
+        {
+          "step": 8,
+          "requestEventSeq": 227,
+          "requiredValues": 5,
+          "beforeExactValues": 4,
+          "afterExactValues": 5,
+          "beforeToolCharacters": 92789,
+          "afterToolCharacters": 100852
+        },
+        {
+          "step": 9,
+          "requestEventSeq": 255,
+          "requiredValues": 1,
+          "beforeExactValues": 1,
+          "afterExactValues": 1,
+          "beforeToolCharacters": 111493,
+          "afterToolCharacters": 110605
+        },
+        {
+          "step": 11,
+          "requestEventSeq": 310,
+          "requiredValues": 2,
+          "beforeExactValues": 2,
+          "afterExactValues": 2,
+          "beforeToolCharacters": 123191,
+          "afterToolCharacters": 123191
+        },
+        {
+          "step": 17,
+          "requestEventSeq": 481,
+          "requiredValues": 3,
+          "beforeExactValues": 3,
+          "afterExactValues": 3,
+          "beforeToolCharacters": 159921,
+          "afterToolCharacters": 159921
+        },
+        {
+          "step": 18,
+          "requestEventSeq": 507,
+          "requiredValues": 1,
+          "beforeExactValues": 1,
+          "afterExactValues": 1,
+          "beforeToolCharacters": 168194,
+          "afterToolCharacters": 168194
+        },
+        {
+          "step": 20,
+          "requestEventSeq": 561,
+          "requiredValues": 2,
+          "beforeExactValues": 2,
+          "afterExactValues": 2,
+          "beforeToolCharacters": 181387,
+          "afterToolCharacters": 181387
+        }
+      ]
+    }
+  ]
+}

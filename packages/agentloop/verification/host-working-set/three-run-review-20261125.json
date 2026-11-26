@@ -1,0 +1,375 @@
+{
+  "schema": "agentloop.threeRunWorkingSetReview/v1",
+  "runs": [
+    {
+      "runId": "e154278b-00e2-4a55-9020-8efe2fa60f2d",
+      "status": "failed",
+      "verifiedEventCount": 1872,
+      "elapsedMs": 229480,
+      "modelCalls": 71,
+      "inputTokens": 4571591,
+      "outputTokens": 30597,
+      "actionCalls": 65,
+      "phases": [
+        {
+          "phase": "compaction",
+          "calls": 4,
+          "inputTokens": 208532,
+          "outputTokens": 11147,
+          "requestDurationMs": 42858
+        },
+        {
+          "phase": "execution",
+          "calls": 66,
+          "inputTokens": 4350799,
+          "outputTokens": 19012,
+          "requestDurationMs": 146427
+        },
+        {
+          "phase": "planning",
+          "calls": 1,
+          "inputTokens": 12260,
+          "outputTokens": 438,
+          "requestDurationMs": 3951
+        }
+      ],
+      "declarations": 42,
+      "rejections": {
+        "explicit_revision_required": 10,
+        "invalid_context_item": 5,
+        "uncommitted_or_out_of_scope_evidence": 2
+      },
+      "historyReadViews": {
+        "result": 4
+      },
+      "lastDecisionWorkingSet": {
+        "itemCount": 20,
+        "historicalItemCount": 5,
+        "absorbedExchangeCount": 0,
+        "retainedExchangeCount": 65,
+        "rejectionCount": 17,
+        "gapCount": 2
+      },
+      "selectedRounds": [
+        {
+          "round": 1,
+          "contextEventSeq": 39,
+          "canonicalMessages": 1,
+          "projectedMessages": 1,
+          "providerInputTokens": 17882,
+          "workingSet": {
+            "itemCount": 0,
+            "historicalItemCount": 0,
+            "absorbedExchangeCount": 0,
+            "retainedExchangeCount": 0,
+            "rejectionCount": 0,
+            "gapCount": 0
+          }
+        },
+        {
+          "round": 5,
+          "contextEventSeq": 143,
+          "canonicalMessages": 9,
+          "projectedMessages": 9,
+          "providerInputTokens": 40109,
+          "workingSet": {
+            "itemCount": 0,
+            "historicalItemCount": 0,
+            "absorbedExchangeCount": 0,
+            "retainedExchangeCount": 4,
+            "rejectionCount": 0,
+            "gapCount": 0
+          }
+        },
+        {
+          "round": 10,
+          "contextEventSeq": 277,
+          "canonicalMessages": 19,
+          "projectedMessages": 5,
+          "providerInputTokens": 35070,
+          "workingSet": {
+            "itemCount": 2,
+            "historicalItemCount": 1,
+            "absorbedExchangeCount": 7,
+            "retainedExchangeCount": 2,
+            "rejectionCount": 0,
+            "gapCount": 0
+          }
+        },
+        {
+          "round": 65,
+          "contextEventSeq": 1817,
+          "canonicalMessages": 129,
+          "projectedMessages": 25,
+          "providerInputTokens": 66373,
+          "workingSet": {
+            "itemCount": 20,
+            "historicalItemCount": 5,
+            "absorbedExchangeCount": 32,
+            "retainedExchangeCount": 32,
+            "rejectionCount": 17,
+            "gapCount": 1
+          }
+        }
+      ]
+    },
+    {
+      "runId": "bef6367b-2edf-43d1-a3be-7c9dd389ebdf",
+      "status": "completed",
+      "verifiedEventCount": 844,
+      "elapsedMs": 79028,
+      "modelCalls": 32,
+      "inputTokens": 1732153,
+      "outputTokens": 8398,
+      "actionCalls": 29,
+      "phases": [
+        {
+          "phase": "assessment",
+          "calls": 1,
+          "inputTokens": 129361,
+          "outputTokens": 912,
+          "requestDurationMs": 5537
+        },
+        {
+          "phase": "execution",
+          "calls": 30,
+          "inputTokens": 1590539,
+          "outputTokens": 7048,
+          "requestDurationMs": 56500
+        },
+        {
+          "phase": "planning",
+          "calls": 1,
+          "inputTokens": 12253,
+          "outputTokens": 438,
+          "requestDurationMs": 5515
+        }
+      ],
+      "declarations": 10,
+      "rejections": {
+        "invalid_context_item": 9
+      },
+      "historyReadViews": {
+        "step_history": 1,
+        "producer_exchange": 2,
+        "result": 3
+      },
+      "lastDecisionWorkingSet": {
+        "itemCount": 1,
+        "historicalItemCount": 0,
+        "absorbedExchangeCount": 4,
+        "retainedExchangeCount": 25,
+        "rejectionCount": 9,
+        "gapCount": 1
+      },
+      "selectedRounds": [
+        {
+          "round": 1,
+          "contextEventSeq": 39,
+          "canonicalMessages": 1,
+          "projectedMessages": 1,
+          "providerInputTokens": 17888,
+          "workingSet": {
+            "itemCount": 0,
+            "historicalItemCount": 0,
+            "absorbedExchangeCount": 0,
+            "retainedExchangeCount": 0,
+            "rejectionCount": 0,
+            "gapCount": 0
+          }
+        },
+        {
+          "round": 5,
+          "contextEventSeq": 143,
+          "canonicalMessages": 9,
+          "projectedMessages": 9,
+          "providerInputTokens": 42969,
+          "workingSet": {
+            "itemCount": 0,
+            "historicalItemCount": 0,
+            "absorbedExchangeCount": 0,
+            "retainedExchangeCount": 4,
+            "rejectionCount": 0,
+            "gapCount": 0
+          }
+        },
+        {
+          "round": 10,
+          "contextEventSeq": 277,
+          "canonicalMessages": 19,
+          "projectedMessages": 11,
+          "providerInputTokens": 37185,
+          "workingSet": {
+            "itemCount": 1,
+            "historicalItemCount": 0,
+            "absorbedExchangeCount": 4,
+            "retainedExchangeCount": 5,
+            "rejectionCount": 0,
+            "gapCount": 0
+          }
+        },
+        {
+          "round": 30,
+          "contextEventSeq": 819,
+          "canonicalMessages": 59,
+          "projectedMessages": 51,
+          "providerInputTokens": 88124,
+          "workingSet": {
+            "itemCount": 1,
+            "historicalItemCount": 0,
+            "absorbedExchangeCount": 4,
+            "retainedExchangeCount": 25,
+            "rejectionCount": 9,
+            "gapCount": 1
+          }
+        }
+      ],
+      "resultCheck": {
+        "sha256": "20055ec4747f4738782cd055c8c20289e186038b2dd84b0ea09198748a6c628a",
+        "hashMatchesCommittedEvents": true,
+        "rows": 6,
+        "liveBusinessQueryRerun": false,
+        "rawSum": "49.437092",
+        "answerRoundedSum": "49.44",
+        "sixMonthsPresent": true,
+        "occurrenceVsCumulativeSemanticsIndependentlyVerified": false
+      }
+    },
+    {
+      "runId": "ff2bfa74-44b3-4eb3-8617-797919022a30",
+      "status": "completed",
+      "verifiedEventCount": 466,
+      "elapsedMs": 53159,
+      "modelCalls": 18,
+      "inputTokens": 947304,
+      "outputTokens": 7379,
+      "actionCalls": 14,
+      "phases": [
+        {
+          "phase": "assessment",
+          "calls": 1,
+          "inputTokens": 107232,
+          "outputTokens": 856,
+          "requestDurationMs": 4223
+        },
+        {
+          "phase": "execution",
+          "calls": 15,
+          "inputTokens": 812851,
+          "outputTokens": 5515,
+          "requestDurationMs": 35867
+        },
+        {
+          "phase": "planning",
+          "calls": 2,
+          "inputTokens": 27221,
+          "outputTokens": 1008,
+          "requestDurationMs": 5175
+        }
+      ],
+      "declarations": 13,
+      "rejections": {
+        "explicit_revision_required": 2,
+        "invalid_context_item": 8
+      },
+      "historyReadViews": {
+        "result": 1
+      },
+      "lastDecisionWorkingSet": {
+        "itemCount": 3,
+        "historicalItemCount": 0,
+        "absorbedExchangeCount": 2,
+        "retainedExchangeCount": 12,
+        "rejectionCount": 10,
+        "gapCount": 1
+      },
+      "selectedRounds": [
+        {
+          "round": 1,
+          "contextEventSeq": 47,
+          "canonicalMessages": 3,
+          "projectedMessages": 3,
+          "providerInputTokens": 19292,
+          "workingSet": {
+            "itemCount": 0,
+            "historicalItemCount": 0,
+            "absorbedExchangeCount": 0,
+            "retainedExchangeCount": 0,
+            "rejectionCount": 0,
+            "gapCount": 0
+          }
+        },
+        {
+          "round": 5,
+          "contextEventSeq": 155,
+          "canonicalMessages": 11,
+          "projectedMessages": 11,
+          "providerInputTokens": 43710,
+          "workingSet": {
+            "itemCount": 1,
+            "historicalItemCount": 0,
+            "absorbedExchangeCount": 0,
+            "retainedExchangeCount": 4,
+            "rejectionCount": 2,
+            "gapCount": 1
+          }
+        },
+        {
+          "round": 10,
+          "contextEventSeq": 295,
+          "canonicalMessages": 21,
+          "projectedMessages": 19,
+          "providerInputTokens": 61901,
+          "workingSet": {
+            "itemCount": 2,
+            "historicalItemCount": 0,
+            "absorbedExchangeCount": 1,
+            "retainedExchangeCount": 8,
+            "rejectionCount": 6,
+            "gapCount": 1
+          }
+        },
+        {
+          "round": 15,
+          "contextEventSeq": 440,
+          "canonicalMessages": 31,
+          "projectedMessages": 27,
+          "providerInputTokens": 79341,
+          "workingSet": {
+            "itemCount": 3,
+            "historicalItemCount": 0,
+            "absorbedExchangeCount": 2,
+            "retainedExchangeCount": 12,
+            "rejectionCount": 10,
+            "gapCount": 1
+          }
+        }
+      ],
+      "resultCheck": {
+        "sha256": "018840751eb4fd90f0b611b9f12ff757cec556b038b260cd8acb60ab722d5668",
+        "hashMatchesCommittedEvents": true,
+        "rows": 17,
+        "liveBusinessQueryRerun": false,
+        "all17DisplayedValuesMatch": true,
+        "underlyingObservationCount": 218,
+        "rawObservationsRecomputed": false,
+        "meanConfirmationPresentInInspectedConversation": false
+      }
+    }
+  ],
+  "historyReaderDefect": {
+    "runPrefix": "bef6367b",
+    "resultEventSeq": 85,
+    "assistantEventSeq": 86,
+    "originalOperationStatus": "succeeded",
+    "returnedOutcome": false,
+    "offlineCurrentMethodReproduced": true,
+    "authorizationTestedInReproduction": false
+  },
+  "comparisonLimits": [
+    "Different goals and source metadata; not a controlled before/after comparison.",
+    "Same configured model key and same provider model string do not prove frozen provider weights.",
+    "No live SQL/model replay, service restart or Run mutation.",
+    "No billing inference from token estimates or incomplete cache telemetry."
+  ]
+}

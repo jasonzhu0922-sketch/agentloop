@@ -46,10 +46,14 @@
     "zod": "4.6.7"
   },
   "peerDependencies": {
-    "pg": "^8.16.0"
+    "pg": "^8.16.0",
+    "mysql2": "^3.24.4"
   },
   "peerDependenciesMeta": {
     "pg": {
+      "optional": true
+    },
+    "mysql2": {
       "optional": true
     }
   },

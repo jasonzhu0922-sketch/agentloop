@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { inflateRawSync } from "node:zlib";
-import type { CanonicalRunState } from "./canonical-run-state.ts";
+import { acceptedCanonicalDelivery, type CanonicalRunState } from "./canonical-run-state.ts";
 import type { StoredRunEvent } from "./run-service.ts";
 
 const MAX_PROCESS_ARTIFACT_BYTES = 50 * 1024 * 1024;
@@ -180,6 +180,22 @@ export async function collectProcessArtifacts(input: {
   }
   const candidates = collectCandidatePaths(input.events);
   const acceptedArtifacts = collectAcceptedArtifactReceipts(input.events);
+  const deliverableTargets = new Map<string, NonNullable<ReturnType<typeof acceptedCanonicalDelivery>>>();
+  for (const target of Object.values(input.canonicalState?.targets ?? {})) {
+    const claim = acceptedCanonicalDelivery(target);
+    if (claim === undefined || target.surface !== "workspace_artifact") continue;
+    const producerStatus = input.canonicalState?.steps[claim.stepId]?.status;
+    // A completed Run may retain an independently assessed delivery after its
+    // producer is retired by recovery. Retirement cannot erase that identity.
+    if (producerStatus !== "satisfied"
+      && !(producerStatus === "retired" && input.canonicalState?.terminal?.status === "completed")) continue;
+    const bindings = target.artifactBindings ?? (target.artifactBinding ? [target.artifactBinding] : []);
+    const current = await Promise.all(bindings.map(async (binding) => {
+      const file = await inspectCandidate(input.workspaceRoot, input.runCreatedAt, binding.path, { allowExistingBeforeRun: true });
+      return file?.sha256 === binding.sha256 && file?.bytes === binding.bytes;
+    }));
+    if (current.length > 0 && current.every(Boolean)) deliverableTargets.set(target.targetId, claim);
+  }
   const artifacts = new Map<string, ProcessArtifact>();
   for (const candidate of candidates) {
     const acceptance = acceptedArtifacts.find((artifact) => artifact.path === candidate.path);
@@ -192,13 +208,9 @@ export async function collectProcessArtifacts(input: {
       && (acceptance.bytes === undefined || acceptance.bytes === file.bytes);
     const targets = Object.values(input.canonicalState?.targets ?? {}).filter((target) =>
       (target.artifactBindings ?? (target.artifactBinding ? [target.artifactBinding] : [])).some((binding) => binding.path === path));
-    const acceptedTargets = targets.filter((target) => target.status === "accepted" && target.claims.some((claim) =>
-      input.canonicalState?.steps[claim.stepId]?.status === "satisfied" &&
-      (claim.artifacts ?? (claim.artifact ? [claim.artifact] : [])).some((artifact) =>
-        artifact.path === path && artifact.sha256 === file.sha256 && artifact.bytes === file.bytes
-        && (target.artifactBindings ?? (target.artifactBinding ? [target.artifactBinding] : [])).some((binding) =>
-          binding.path === path && binding.versionId === artifact.versionId
-          && binding.sha256 === file.sha256 && binding.bytes === file.bytes))));
+    const acceptedTargets = targets.filter((target) => deliverableTargets.has(target.targetId)
+      && (deliverableTargets.get(target.targetId)!.artifacts ?? [deliverableTargets.get(target.targetId)!.artifact!])
+        .some((artifact) => artifact.path === path && artifact.sha256 === file.sha256 && artifact.bytes === file.bytes));
     const committed = input.canonicalState?.terminal?.status === "completed" && acceptedTargets.length > 0;
     const targetIds = targets.map((target) => target.targetId);
     const ownerIds = new Set(targets.flatMap((target) => target.ownerStepIds));
@@ -339,11 +351,11 @@ function collectCandidatePaths(events: readonly StoredRunEvent[]): Array<{
       }
       continue;
     }
-    if (toolName !== "computer_run_command" || result?.exitCode !== 0 || typeof result.stdout !== "string") continue;
+    if (toolName !== "computer_run_command" || result?.exitCode !== 0) continue;
     for (const path of artifactPathsFromCommandFileChanges(result)) {
       if (!candidates.has(path)) candidates.set(path, toolName);
     }
-    for (const path of artifactPathsMentionedInCommandOutput(result.stdout)) {
+    for (const path of artifactPathsMentionedInCommandOutput(typeof result.stdout === "string" ? result.stdout : "")) {
       if (!candidates.has(path)) candidates.set(path, toolName);
     }
   }
@@ -362,6 +374,19 @@ interface AcceptedArtifactReceipt {
 function collectAcceptedArtifactReceipts(events: readonly StoredRunEvent[]): AcceptedArtifactReceipt[] {
   const receipts = new Map<string, AcceptedArtifactReceipt>();
   for (const event of events) {
+    const observed = parseResult(event.data.result);
+    // A later incarnation revokes file verification even with identical bytes.
+    if (["tool.completed", "tool.failed"].includes(event.type)) {
+      if (event.data.toolName === "computer_run_command" && Array.isArray(observed?.fileChanges)) {
+        for (const change of observed.fileChanges) {
+          const item = recordValue(change);
+          if (typeof item?.path === "string" && ["created", "modified", "deleted"].includes(String(item.changeType))) receipts.delete(item.path);
+        }
+      } else if (["computer_write_file", "computer_patch_file", "convert_artifact"].includes(String(event.data.toolName)) && event.data.isError !== true) {
+        const path = stringValue(observed?.path) ?? stringValue(recordValue(observed?.output)?.path);
+        if (path !== undefined) receipts.delete(path);
+      }
+    }
     if (event.type !== "tool.completed") continue;
     if (event.data.toolName !== "verify_artifact_acceptance" || event.data.isError === true) continue;
     const result = parseResult(event.data.result);

@@ -52,11 +52,15 @@ spec:
               value: /etc/agentloop/step-execution-strategy.json
             - name: LLM_PROVIDER_CONFIG_PATH
               value: /etc/agentloop-provider/llm-providers.json
-            - name: AGENTLOOP_STATE_DRIVER
-              value: postgres
-            - name: AGENTLOOP_STATE_DATABASE_URL
+            - name: AGENTLOOP_RUNTIME_STATE_BACKEND
+              value: redis
+            - name: AGENTLOOP_RUNTIME_REDIS_URL
               valueFrom:
-                secretKeyRef: { name: agentloop-state, key: database-url }
+                secretKeyRef: { name: agentloop-runtime-state, key: redis-url }
+            - name: AGENTLOOP_RUNTIME_REDIS_NAMESPACE
+              value: agentloop-runtime-state
+            - name: RUNTIME_ARCHIVE_ROOT
+              value: /var/lib/agentloop/workspace/runtime-archives
             - name: RUNTIME_DISPATCH_TOKEN
               valueFrom:
                 secretKeyRef: { name: agentloop-runtime-auth, key: dispatch-token }

@@ -1,0 +1,175 @@
+{
+  "recordedAt": "2026-11-25",
+  "scope": "Selectable complete Runtime execution state via shared domain repositories: disk SQLite and native Redis. Functional integration delivered; production capacity/HA and operations limitations remain.",
+  "schemaTables": 44,
+  "kernelBuild": "passed",
+  "recordSchemaCheck": "passed",
+  "sourceVerification": {
+    "nativeContractsAndDiagnostics": {
+      "tests": 50,
+      "pass": 50,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "log": "native-final3.log"
+    },
+    "localRuntime": {
+      "tests": 124,
+      "pass": 124,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "log": "local-final2.log"
+    },
+    "desktop": {
+      "tests": 221,
+      "pass": 221,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "log": "desktop-tests-final2.log"
+    },
+    "kernelUnit": {
+      "tests": 333,
+      "pass": 332,
+      "fail": 1,
+      "cancelled": 0,
+      "skipped": 0,
+      "log": "kernel-unit-final2.log"
+    },
+    "kernelRegression": {
+      "tests": 637,
+      "pass": 634,
+      "fail": 1,
+      "cancelled": 0,
+      "skipped": 2,
+      "log": "kernel-regression-final3.log"
+    },
+    "dataMonorepo": {
+      "tests": 20,
+      "pass": 20,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "log": "monorepo-data-final4.log"
+    },
+    "dataIndependent": {
+      "tests": 47,
+      "pass": 47,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "log": "data-tests-final4.log"
+    },
+    "dataNativeApplication": {
+      "tests": 6,
+      "pass": 6,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "log": "data-native-final5.log"
+    },
+    "reportIndependent": {
+      "tests": 48,
+      "pass": 48,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "log": "report-tests-final3.log"
+    },
+    "reportHttpApplication": {
+      "tests": 1,
+      "pass": 1,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "log": "report-native-final2.log"
+    },
+    "runtimeHostScope": {
+      "tests": 6,
+      "pass": 6,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "log": "host-final4.log"
+    }
+  },
+  "baselineFailures": [
+    "tidb profile migration replaces only the profile constraint and is idempotent",
+    "no_progress exit reports current work against the goal in one extra tool-free turn"
+  ],
+  "baselineReproduction": "Task-start source copy previously reproduced both failures (40/42 pass); no baseline files edited.",
+  "sourceTypechecks": {
+    "kernel": "passed",
+    "localRuntime": "passed",
+    "desktop": "passed",
+    "dataIndependent": "passed",
+    "reportIndependent": "passed",
+    "runtimeHostSrc": "passed",
+    "multiRuntimeFull": "existing test typing failures",
+    "localAgentMain": "existing localRuntimeToolsEnvironment export mismatch and optional length error"
+  },
+  "packaging": {
+    "sourceDistSha256": "d24ad6decdf8fd27da1eb10506d248d0683fb26e934506c06958017fc2ed1072",
+    "apps": {
+      "data-agent": {
+        "dependency": "file:vendor/zhujun-agentloop-0.1.0-native-002667e6e3c3.tgz",
+        "resolvedPath": "/Users/zhujun/coding/data-agent/node_modules/@zhujun/agentloop",
+        "installedDistSha256": "d24ad6decdf8fd27da1eb10506d248d0683fb26e934506c06958017fc2ed1072",
+        "matchesSource": true,
+        "tarballSha256": "002667e6e3c378810620bc4a4ac985775c0bef6718088c3505b5573644b0e4f8",
+        "cliInstalled": true
+      },
+      "report-agent": {
+        "dependency": "file:vendor/zhujun-agentloop-0.1.0-native-002667e6e3c3.tgz",
+        "resolvedPath": "/Users/zhujun/coding/report-agent/node_modules/@zhujun/agentloop",
+        "installedDistSha256": "d24ad6decdf8fd27da1eb10506d248d0683fb26e934506c06958017fc2ed1072",
+        "matchesSource": true,
+        "tarballSha256": "002667e6e3c378810620bc4a4ac985775c0bef6718088c3505b5573644b0e4f8",
+        "cliInstalled": true
+      }
+    }
+  },
+  "acceptance": {
+    "dataIndependent": "Temporary HTTP listener/new native Redis Run; HIL, SQL-offline, file tool evidence >2MB, concurrency, idempotence, host/Redis restart",
+    "reportIndependent": "Temporary HTTP listener, new completed SQLite Run, SSE Last-Event-ID and reopen",
+    "localRuntime": "Actual factory/native Redis new Run + Memory evidence, reopen, SQLite→Redis→SQLite history isolation and deletion retry tombstone",
+    "desktop": "Application/account startup/new deterministic SQLite Runs in regression tests; explicit backend settings. No Electron GUI or fresh OS installer acceptance.",
+    "model": "Deterministic test models; no real provider or real business query replay",
+    "existingServices": "not restarted or modified"
+  },
+  "performanceFiles": [
+    "full-run-benchmark.json",
+    "full-run-benchmark-256.json"
+  ],
+  "limitations": [
+    "453 native Redis request/response commands per full deterministic Run; measured throughput remains low and does not establish production high-concurrency capacity",
+    "Single Redis primary per namespace; no Cluster redirects/replica quorum/automatic executor takeover",
+    "Control commands require executor affinity; wrong host returns 409 with target runtime id; reads/events work across instances",
+    "No automatic Redis expiry/pruning; archive success never authorizes implicit deletion",
+    "Offline export currently materializes all records in process memory; unresolved/cyclic historical dependencies fail explicitly",
+    "Real safe temporary TiDB migration/projection integration was unavailable; SQL-offline and sink retry/monotonic projection contracts verified",
+    "Legacy PostgreSQL production auto-release backup/rollback script does not support native Redis; offline migration/backups plus current Compose/Kubernetes template deployment required",
+    "No production deployment, existing service restart or new Desktop installer generated"
+  ],
+  "sourceSha256": {
+    "packages/agentloop/src/storage/runtime-records.ts": "827ffa8475c3fbd8b3b44c9fe9a774309bfb31061b2d699beff717666308d955",
+    "packages/agentloop/src/storage/redis-runtime-records.ts": "e4b7ab1e48109f23c9522734256e143f172b9489f714e0e9ae20e1399a548289",
+    "packages/agentloop/src/storage/runtime-record-schema.ts": "fffcc50ab2fd80d99cd4acf768340773e9bcefc758bff72723ac5a4602a575a2",
+    "packages/agentloop/src/storage/runtime-record-backend.ts": "bb1318b7d788fc1aec1154a754648ea52090102be20ea01bf61f4d0a918bdac3",
+    "packages/agentloop/src/storage/runtime-record-maintenance.ts": "9ed39415388af2902091673c10d2410888cb32316eaab7990c7df8c3e687d1c8",
+    "packages/agentloop/src/storage/runtime-record-transfer.ts": "e111397c733096e4a95d5d6d998a5437f36cd135fa88de6e5797a3dc23ec21e5",
+    "packages/agentloop/src/runtime/run-service.ts": "127dab8afc30d015fc2e582c2721a775e05464f09f225843dd164d10de76d88c",
+    "packages/agentloop/scripts/transfer-runtime-state.mjs": "ea3d7d2530e51ab525c6922ff00613965a8f39d2b47b7b1faea2fbe62422fb90",
+    "packages/agentloop-local-runtime/src/service/local-runtime-factory.ts": "469f5410dbd6c7e652d8cf21e93e0dc8dc9596b07694b498da03ca93b839c492",
+    "packages/agentloop-local-runtime/src/service/local-run-admission.ts": "533840aa381682991ed1a7008cbfe0aca674e4cbb346d775a198dfedfe193edc"
+  },
+  "preservation": {
+    "committed": false,
+    "pushed": false,
+    "wholeRepositoryStaging": false,
+    "unrelatedDirtyWorkPreserved": true,
+    "realDatabaseTablesDeleted": false,
+    "existingRedisNamespaceCleared": false
+  }
+}

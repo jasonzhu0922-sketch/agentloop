@@ -2550,6 +2550,19 @@ test("file-producing command records omitted and unknown output bindings without
     assert.deepEqual(result.outputBindings, [{ targetId: "report-1001", path: "reports/report.md" }]);
     assert.equal(result.deliveryBinding?.status, "explicit");
     assert.deepEqual(result.fileChanges.map((change) => change.path), ["reports/report.md"]);
+
+    const bundlePaths = ["reports/report.md", "reports/missing.md", "reports/unknown.md"];
+    const selectExisting = allowed.prepare({ id: "select-existing-bundle", name: "computer_run_command", arguments: {
+      command: "trusted-node", args: ["-e", "process.stdout.write('done')"], cwd: ".", timeoutMs: 2_000,
+      outputBindings: bundlePaths.map(path => ({ targetId: "report-1001", path })),
+    } });
+    const selected = await selectExisting.tool.execute(artifactGrantContext(["computer_run_command"], { artifactTargetIds: ["report-1001"] }), selectExisting.input) as {
+      fileChanges: unknown[]; outputArtifacts: { path: string; sha256: string; bytes: number }[]; deliveryBinding: { status: string };
+    };
+    assert.deepEqual(selected.fileChanges, []);
+    assert.equal(selected.deliveryBinding.status, "explicit");
+    assert.deepEqual(selected.outputArtifacts.map(file => file.path), bundlePaths);
+    assert.ok(selected.outputArtifacts.every(file => file.bytes === 2 && file.sha256 === createHash("sha256").update("ok").digest("hex")));
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

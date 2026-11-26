@@ -1,0 +1,67 @@
+{
+  "recordedAt": "2026-11-25T01:38:57.567Z",
+  "node": "v26.0.0",
+  "platform": "darwin-arm64",
+  "scope": "Full RunService, deterministic mocked model, single-step Plan, Action, Result/Outcome, durable event commits. Two service instances in one process; no HTTP, external model/tools, archive or TiDB projection. A concurrency sweep, not a sustained production capacity claim.",
+  "redis": {
+    "appendonly": true,
+    "appendfsync": "always",
+    "maxmemoryPolicy": "noeviction",
+    "topology": "one temporary local Redis server"
+  },
+  "metrics": [
+    {
+      "backend": "sqlite-disk",
+      "concurrency": 16,
+      "serviceInstances": 2,
+      "completedRuns": 256,
+      "elapsedMs": 1473.1032500000001,
+      "runsPerSecond": 173.78279492628909,
+      "runLatencyMs": {
+        "p50": 86.61416699999995,
+        "p95": 111.71466700000019,
+        "max": 137.58408400000002
+      },
+      "redisCommands": 0,
+      "redisCommandsPerRun": 0
+    },
+    {
+      "backend": "redis-native-records",
+      "concurrency": 16,
+      "serviceInstances": 2,
+      "completedRuns": 256,
+      "elapsedMs": 34308.865708000005,
+      "runsPerSecond": 7.461628203590156,
+      "runLatencyMs": {
+        "p50": 2182.7652080000007,
+        "p95": 2349.767,
+        "max": 2421.8255420000005
+      },
+      "redisCommands": 115968,
+      "redisCommandsPerRun": 453,
+      "redisCommandLatencyMs": {
+        "p50": 4.38116699999955,
+        "p95": 10.041000000001077
+      }
+    },
+    {
+      "backend": "redis-legacy-changeset",
+      "concurrency": 16,
+      "serviceInstances": 2,
+      "completedRuns": 256,
+      "elapsedMs": 63343.501625,
+      "runsPerSecond": 4.041456399356419,
+      "runLatencyMs": {
+        "p50": 3925.736208000002,
+        "p95": 4870.9755000000005,
+        "max": 4939.810874999996
+      },
+      "redisCommands": 12032,
+      "redisCommandsPerRun": 47,
+      "redisCommandLatencyMs": {
+        "p50": 4.169999999998254,
+        "p95": 6.200375000000349
+      }
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+> 部署版本边界：本文 PostgreSQL Runtime 的运维命令仅适用于历史版本。当前 Runtime Host 默认原生 Redis，Router/身份 SQL 独立；升级前先执行 `docs/RUNTIME-NATIVE-RECORDS-STATUS.md` 的离线迁移并备份共享文件，不能直接用旧脚本把新镜像覆盖到旧 SQL 历史上。当前 Compose/Kubernetes 模板使用原生后端。原生 Redis 的自动发布备份/回滚编排尚未实现；现有 PostgreSQL 专用脚本会拒绝该路径。
+
 # 生产配置、容量与发布手册
 
 适用对象：`deploy/centos7/compose.yaml` 定义的单机云端部署，以及本目录的生产操作脚本。文档按 2026-10-22 工作区实现核对；默认目标是 `root@47.101.178.145`、`/opt/agentloop`。实际地址、协议、挂载路径和运行版本以服务器配置为准，示例不代表已执行生产变更。
